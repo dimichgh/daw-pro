@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "daw-pro": {
+      "command": "node",
+      "args": ["mcp-server/dist/index.js"],
+      "env": {
+        "DAW_CONTROL_PORT": "17600"
+      }
+    }
+  }
+}

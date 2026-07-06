@@ -1,0 +1,61 @@
+import SwiftUI
+import DAWCore
+import DAWAppKit
+
+/// Vertical piano-keyboard gutter down the left of the piano roll: one row per
+/// MIDI pitch, white/black keys shaded, octave C's labeled (C-1..C9). Shares the
+/// model's pitch↔y mapping so it lines up row-for-row with the grid. Canvas —
+/// no per-frame allocation beyond Paths (docs/DESIGN-LANGUAGE.md "Meters").
+struct KeyboardSidebar: View {
+    var model: PianoRollModel
+    var width: CGFloat = 54
+
+    /// Pitch classes that are black keys (C#, D#, F#, G#, A#).
+    static func isBlackKey(_ pitch: Int) -> Bool {
+        [1, 3, 6, 8, 10].contains(((pitch % 12) + 12) % 12)
+    }
+
+    /// "C4"-style label for a C pitch (middle C = 60 = C4).
+    private func octaveLabel(_ pitch: Int) -> String { "C\(pitch / 12 - 1)" }
+
+    var body: some View {
+        Canvas { context, size in
+            for pitch in 0..<PianoRollModel.pitchCount {
+                let y = model.y(forPitch: pitch)
+                let rect = CGRect(x: 0, y: y, width: size.width, height: model.rowHeight)
+                let black = Self.isBlackKey(pitch)
+                context.fill(
+                    Path(rect),
+                    with: .color(black ? Color(hex: 0x11141C) : Color(hex: 0x2C3242))
+                )
+                // Row separator.
+                context.fill(
+                    Path(CGRect(x: 0, y: y, width: size.width, height: 0.5)),
+                    with: .color(DAWTheme.hairline)
+                )
+                // Octave marker + label at every C; brighter cyan tick at middle C.
+                if pitch % 12 == 0 {
+                    let isMiddleC = pitch == 60
+                    context.fill(
+                        Path(CGRect(x: 0, y: y, width: size.width, height: 1)),
+                        with: .color(isMiddleC ? DAWTheme.playback.opacity(0.7) : Color.white.opacity(0.12))
+                    )
+                    let label = Text(octaveLabel(pitch))
+                        .font(.system(size: 8, weight: .medium, design: .monospaced))
+                        .foregroundColor(isMiddleC ? DAWTheme.playback : DAWTheme.textDim)
+                    context.draw(
+                        label,
+                        at: CGPoint(x: size.width - 4, y: y + model.rowHeight / 2),
+                        anchor: .trailing
+                    )
+                }
+            }
+            // Right edge hairline.
+            context.fill(
+                Path(CGRect(x: size.width - 0.5, y: 0, width: 0.5, height: size.height)),
+                with: .color(DAWTheme.hairline)
+            )
+        }
+        .frame(width: width, height: model.contentHeight)
+    }
+}

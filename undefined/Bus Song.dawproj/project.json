@@ -1,0 +1,104 @@
+{
+  "masterVolume" : 1,
+  "name" : "Bus Song",
+  "savedAt" : "2026-07-06T12:40:37Z",
+  "schemaVersion" : 1,
+  "tracks" : [
+    {
+      "clips" : [
+        {
+          "id" : "640CDDE0-DBC7-4FB6-8DA1-5ED9B1FB3D48",
+          "isAIGenerated" : false,
+          "lengthBeats" : 8,
+          "media" : null,
+          "name" : "MIDI Clip 1",
+          "notes" : [
+            {
+              "id" : "3BEA76BF-D01D-4CAC-A908-610A28FAA5D0",
+              "lengthBeats" : 7.5,
+              "pitch" : 48,
+              "startBeat" : 0,
+              "velocity" : 100
+            },
+            {
+              "id" : "E9EE2419-851D-46FC-B2A5-CED1F9DC9800",
+              "lengthBeats" : 7.5,
+              "pitch" : 55,
+              "startBeat" : 0,
+              "velocity" : 100
+            },
+            {
+              "id" : "E7583B12-8F94-43F4-A678-DD09E33AFC2B",
+              "lengthBeats" : 7.5,
+              "pitch" : 60,
+              "startBeat" : 0,
+              "velocity" : 100
+            }
+          ],
+          "startBeat" : 0
+        }
+      ],
+      "id" : "26F5DA3C-19FF-4F0E-9945-10D2FFB9180A",
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Keys",
+      "outputBusId" : "983A14E5-4786-4534-99AA-9366A7A4CC04",
+      "pan" : 0,
+      "sends" : [
+        {
+          "busId" : "6C3A831F-40E6-483B-9252-9A6FFCA9A042",
+          "id" : "B6258D17-D3A9-4FEB-BF0C-E3EF231DA658",
+          "level" : 1.5
+        }
+      ],
+      "volume" : 1
+    },
+    {
+      "clips" : [
+
+      ],
+      "id" : "983A14E5-4786-4534-99AA-9366A7A4CC04",
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "bus",
+      "name" : "Mix Bus",
+      "pan" : 0,
+      "volume" : 1
+    },
+    {
+      "clips" : [
+
+      ],
+      "id" : "6C3A831F-40E6-483B-9252-9A6FFCA9A042",
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "bus",
+      "name" : "FX Bus",
+      "pan" : 0,
+      "volume" : 1
+    }
+  ],
+  "transport" : {
+    "countInBars" : 0,
+    "isLoopEnabled" : false,
+    "isMetronomeEnabled" : false,
+    "isPunchEnabled" : false,
+    "loopEndBeat" : 8,
+    "loopStartBeat" : 0,
+    "positionBeats" : 6.344,
+    "punchInBeat" : 0,
+    "punchOutBeat" : 4,
+    "tempoBPM" : 120,
+    "timeSignature" : {
+      "beatUnit" : 4,
+      "beatsPerBar" : 4
+    }
+  }
+}

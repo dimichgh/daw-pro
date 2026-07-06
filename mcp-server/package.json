@@ -1,0 +1,26 @@
+{
+  "name": "daw-pro-mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing DAW Pro to AI agents: bridges to the app's control WebSocket and calls Anthropic/OpenAI/Suno directly for generation tasks.",
+  "type": "module",
+  "private": true,
+  "main": "dist/index.js",
+  "bin": {
+    "daw-pro-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "@types/node": "^22.10.5"
+  }
+}

@@ -1,0 +1,6 @@
+# Everything install.sh creates/downloads — never checked in (tens of GB of
+# model weights + a full Python venv). Only install.sh/run.sh/.gitignore
+# are tracked.
+runtime/
+.install-state.json
+*.pid

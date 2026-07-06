@@ -1,0 +1,12 @@
+.DS_Store
+.build/
+build/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+.swiftpm/
+.env
+node_modules/
+mcp-server/dist/
+*.log
+assets/generated/
