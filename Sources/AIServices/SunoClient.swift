@@ -56,4 +56,25 @@ public struct SunoClient: SongGenerating {
                 "ACE-Step sidecar (ai.generateSong / ai.generationStatus) instead."
         )
     }
+
+    // MARK: M6 (iii-c) — stems / Lego
+    //
+    // Minimal adaptation only: there is no verified Suno stem-separation or
+    // multi-track-generation API (ACE-Step's local sidecar is the only
+    // implementation of these task types today). Both throw rather than
+    // guessing at a shape, per house rule (never a silent/fabricated result).
+
+    public func extractStems(_ request: StemExtractionRequest) async throws -> StemGenerationSubmission {
+        throw AIServiceError.notImplemented(
+            "Suno stem extraction is not implemented — this provider is a dormant fallback " +
+                "(see docs/AI-INTEGRATIONS.md). Use the local ACE-Step sidecar (ai.extractStems) instead."
+        )
+    }
+
+    public func generateLegoTracks(_ request: LegoGenerationRequest) async throws -> StemGenerationSubmission {
+        throw AIServiceError.notImplemented(
+            "Suno per-track (Lego) generation is not implemented — this provider is a dormant " +
+                "fallback (see docs/AI-INTEGRATIONS.md). Use the local ACE-Step sidecar (ai.legoGenerate) instead."
+        )
+    }
 }

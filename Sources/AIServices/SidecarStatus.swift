@@ -30,6 +30,18 @@ public struct SidecarStatus: Codable, Sendable, Equatable {
     /// Process id of the spawned sidecar, when known (set by `start()`/
     /// tracked via the pidfile; nil when not running or unknown).
     public var pid: Int32?
+    /// Only populated when `state == .starting` (M10-b): a human phase hint
+    /// classified from the tail of the sidecar's own log (`preparing
+    /// environment…` / `starting server…` / `loading models…`), or nil when
+    /// the log tail matches none of the known markers — see
+    /// `SidecarStartPhase.classify(logTail:)`.
+    public var phase: String?
+    /// Only populated when `state == .starting`: whole seconds since this
+    /// boot attempt began, tracked across the WHOLE boot (not just the
+    /// blocking window of one `ai.sidecarStart` call) so a client polling
+    /// `ai.sidecarStatus` after `ai.sidecarStart` times out still sees an
+    /// honestly-increasing counter instead of the boot appearing to vanish.
+    public var startingForSeconds: Int?
 
     public init(
         state: SidecarState,
@@ -37,7 +49,9 @@ public struct SidecarStatus: Codable, Sendable, Equatable {
         version: String? = nil,
         ditModel: String? = nil,
         lmModel: String? = nil,
-        pid: Int32? = nil
+        pid: Int32? = nil,
+        phase: String? = nil,
+        startingForSeconds: Int? = nil
     ) {
         self.state = state
         self.message = message
@@ -45,6 +59,8 @@ public struct SidecarStatus: Codable, Sendable, Equatable {
         self.ditModel = ditModel
         self.lmModel = lmModel
         self.pid = pid
+        self.phase = phase
+        self.startingForSeconds = startingForSeconds
     }
 }
 

@@ -31,6 +31,13 @@ final class InstrumentRenderer: @unchecked Sendable {
     /// Host-tick → seconds factor, precomputed in init so the render path
     /// never calls mach_timebase_info (no syscalls on the render thread).
     private let ticksToSeconds: Double
+    /// Render-load telemetry sink (M9 perf-b): every `renderQuantum` exit
+    /// stamps elapsed time + frames into this preallocated context. Strong
+    /// reference = the context outlives every possible callback.
+    private let performance: EnginePerformanceContext
+    /// Integer graph rate for the telemetry budget math, precomputed in init
+    /// (guarded ≥ 1 — the render side must never see a trapping divisor).
+    private let performanceRateHz: UInt64
 
     private let scheduleSlot: UnsafeMutablePointer<daw_atomic_ptr>
     private let flushFlag: UnsafeMutablePointer<daw_atomic_u32>
@@ -87,10 +94,16 @@ final class InstrumentRenderer: @unchecked Sendable {
 
     /// `mergedCapacity` is an internal test seam (LiveThruRenderTests pins the
     /// overflow-leaves-live-queued rule without building 4600+ events).
+    /// `performance` is the shared telemetry context (default: a private
+    /// throwaway so standalone/test renderers stay isolated; PlaybackGraph
+    /// passes its graph-wide context).
     init(instrument: any InstrumentRendering, sampleRate: Double,
-         mergedCapacity: Int = InstrumentRenderer.defaultMergedCapacity) {
+         mergedCapacity: Int = InstrumentRenderer.defaultMergedCapacity,
+         performance: EnginePerformanceContext = EnginePerformanceContext()) {
         self.instrument = instrument
         self.sampleRate = sampleRate
+        self.performance = performance
+        performanceRateHz = sampleRate >= 1 ? UInt64(sampleRate.rounded()) : 1
         var timebase = mach_timebase_info_data_t()
         mach_timebase_info(&timebase)
         ticksToSeconds = timebase.denom == 0
@@ -179,6 +192,10 @@ final class InstrumentRenderer: @unchecked Sendable {
                        frameCount: AVAudioFrameCount,
                        audioBufferList: UnsafeMutablePointer<AudioBufferList>,
                        isSilence: UnsafeMutablePointer<ObjCBool>) -> OSStatus {
+        // Telemetry entry stamp (M9 perf-b) — a commpage read, not a syscall.
+        // Every return path below stamps the exit via recordPerformance; the
+        // instrumentation observes and never alters the render work.
+        let perfEntryTicks = mach_absolute_time()
         let output = UnsafeMutableAudioBufferListPointer(audioBufferList)
 
         // 1. Flush flag → all-notes-off before anything else this quantum.
@@ -217,6 +234,7 @@ final class InstrumentRenderer: @unchecked Sendable {
                 guard timestamp.pointee.mFlags.contains(.hostTimeValid) else {
                     zeroFill(output, frameCount: Int(frameCount))
                     isSilence.pointee = true
+                    recordPerformance(entryTicks: perfEntryTicks, frameCount: frameCount)
                     return noErr
                 }
                 // Signed host delta in pure arithmetic — negative during the
@@ -315,6 +333,7 @@ final class InstrumentRenderer: @unchecked Sendable {
                     isSilence.pointee = false
                 }
             }
+            recordPerformance(entryTicks: perfEntryTicks, frameCount: frameCount)
             return noErr
         }
 
@@ -365,7 +384,16 @@ final class InstrumentRenderer: @unchecked Sendable {
         automation.apply(bufferList: audioBufferList, frameCount: Int(frameCount),
                          timestamp: timestamp)
         isSilence.pointee = false
+        recordPerformance(entryTicks: perfEntryTicks, frameCount: frameCount)
         return noErr
+    }
+
+    /// RENDER THREAD: exit stamp for the telemetry context — integer math
+    /// only inside (see EnginePerformanceContext.record).
+    @inline(__always)
+    private func recordPerformance(entryTicks: UInt64, frameCount: AVAudioFrameCount) {
+        performance.record(entryTicks: entryTicks, exitTicks: mach_absolute_time(),
+                           frames: Int(frameCount), sampleRateHz: performanceRateHz)
     }
 
     private func zeroFill(_ output: UnsafeMutableAudioBufferListPointer, frameCount: Int) {

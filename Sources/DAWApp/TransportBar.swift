@@ -1,14 +1,39 @@
 import SwiftUI
 import DAWCore
 import DAWEngine
+import DAWAppKit
 
 struct TransportBar: View {
     @Environment(ProjectStore.self) private var store
+    /// The app model, for the vibe meter's seed override (`debug.vibeSeed`). The
+    /// meter reads `appModel.vibeSeed ?? store.masterAnalysis()` — the seeded snapshot
+    /// preferred over the live engine poll for captures/E2E.
+    @Environment(AppModel.self) private var appModel
     var engine: AudioEngine
+    /// The transport bar's shared density store (docs/DESIGN-LANGUAGE.md
+    /// "Panels"). The whole bar is ONE panel (`TransportBar.panelID`): Simple
+    /// shows transport + LOOP/CLICK + Position/Time + tempo + master; Pro
+    /// additionally reveals PUNCH (the advanced record window) and the test-tone
+    /// verify affordance. A plain value input — a preview can pass a
+    /// `PanelDensityStore()` with an in-memory backing.
+    var densityStore: PanelDensityStore
+
+    /// Stable density key for the transport bar — one panel, so the chip and the
+    /// gated PUNCH/test-tone controls share this ID.
+    static let panelID = "transport"
+
+    /// Pro density reveals PUNCH + the test-tone verify button; every other
+    /// control stays in both modes. Read per-bar (`Self.panelID`).
+    private var isPro: Bool { densityStore.density(forPanel: Self.panelID) == .pro }
 
     var body: some View {
         HStack(spacing: 20) {
+            // Fixed leading width so PUNCH hiding closes the chip row up (LOOP +
+            // CLICK go adjacent) WITHOUT moving the Position/Time readouts — the
+            // bar's visual anchor. The freed room reads as breathing room before
+            // the section Divider, never a PUNCH-shaped hole in the row.
             transportButtons
+                .frame(width: 340, alignment: .leading)
 
             Divider().frame(height: 36).overlay(DAWTheme.hairline)
 
@@ -19,6 +44,7 @@ struct TransportBar: View {
                 valueSize: 24
             )
             .frame(minWidth: 76, alignment: .leading)
+            .explainable(.transportPosition)
 
             DigitalReadout(
                 label: "Time",
@@ -26,14 +52,45 @@ struct TransportBar: View {
                 color: DAWTheme.playback
             )
             .frame(minWidth: 104, alignment: .leading)
+            .explainable(.transportTime)
 
             tempoCluster
+                .explainable(.transportTempo)
 
             Spacer()
 
-            testToneButton
+            // EXPORT: bounce the whole mix to a file. A core beginner action, so it
+            // shows in BOTH densities. Right-region, past the Spacer — it never
+            // touches the 340 pt readout anchor on the left (Position/Time stay put).
+            exportButton
+                .explainable(.transportExport)
+
+            // Pro-only diagnostic. Right-packed, so hiding it only grows the
+            // Spacer — the master cluster and the mode chip stay put.
+            if isPro {
+                testToneButton
+                    .explainable(.transportTestTone)
+            }
+
+            // The session vibe meter — the signature glowing instrument (vm-b). It's
+            // read-only STATUS chrome, so it shows in BOTH Simple and Pro, sitting just
+            // left of the master cluster. Reads the seed override, else the live poll.
+            VibeMeterView(snapshot: { appModel.vibeSeed ?? store.masterAnalysis() })
+                .frame(width: 74, height: 44)
+                .explainable(.vibeMeter)
 
             masterCluster
+                .explainable(.transportMasterFader)
+
+            // The bar's mode chip, pinned far-right (past the master cluster) so
+            // it never reads as part of the record cluster and its presence never
+            // reflows Position/Time.
+            SimpleProToggle(
+                store: densityStore,
+                panelID: Self.panelID,
+                help: "Simple: play, loop, click, tempo. Pro: punch recording, test tone."
+            )
+            .explainable(.panelDensity)   // shared density id (ex-b) — same card on all four panels
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -51,6 +108,7 @@ struct TransportBar: View {
             }
             .disabled(store.transport.isRecording)  // seeking is refused mid-take
             .help("Return to start")
+            .explainable(.transportReturnToZero)
 
             TransportButton(
                 systemName: store.transport.isPlaying ? "pause.fill" : "play.fill",
@@ -60,6 +118,7 @@ struct TransportBar: View {
                 store.transport.isPlaying ? store.stop() : store.play()
             }
             .help(store.transport.isPlaying ? "Pause" : "Play")
+            .explainable(.transportPlay)
 
             TransportButton(
                 systemName: "record.circle",
@@ -75,12 +134,20 @@ struct TransportBar: View {
             .disabled(!store.transport.isRecording
                       && !store.hasArmedAudioTracks && !store.hasArmedInstrumentTracks)
             .help(recordHelp)
+            .explainable(.transportRecord)
 
             loopChip
+                .explainable(.transportLoop)
 
-            punchChip
+            // Pro-only: PUNCH is an advanced record window. In Simple the chip
+            // row closes up naturally (LOOP + CLICK go adjacent) — no placeholder.
+            if isPro {
+                punchChip
+                    .explainable(.transportPunch)
+            }
 
             clickChip
+                .explainable(.transportClick)
         }
     }
 
@@ -204,6 +271,33 @@ struct TransportBar: View {
             SegmentMeter(meter: store.masterMeter)
                 .frame(width: 10, height: 44)
         }
+    }
+
+    /// Compact EXPORT affordance — neutral action chrome (Rule 3: an action earns no
+    /// accent), textDim on a raised chip with a hairline. Click → NSSavePanel →
+    /// `store.renderBounce` (via `appModel.exportSong`); completion flows through the
+    /// store's `renderCompletedCount`, so the onboarding tour's export step advances
+    /// on the same one path.
+    private var exportButton: some View {
+        Button { appModel.exportSong() } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("EXPORT")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
+            }
+            .foregroundStyle(DAWTheme.textDim)
+            .padding(.horizontal, 9)
+            .frame(height: 26)
+            .background(DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Export your song to an audio file")
     }
 
     private var testToneButton: some View {

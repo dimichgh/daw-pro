@@ -64,9 +64,13 @@ struct VerticalFader: View {
                 )
             }
             .contentShape(Rectangle())
+            // Vertical value drag → resizeUpDown (docs/DESIGN-LANGUAGE.md "Pointer
+            // affordances"): a fader keeps its resize cursor, it never "grabs".
+            .hoverCursor(.resizeUpDown)
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        DragCursor.set(.resizeUpDown)
                         let start = dragStart ?? fraction
                         if dragStart == nil { dragStart = start }
                         let fine = NSEvent.modifierFlags.contains(.option) ? 0.25 : 1.0
@@ -75,7 +79,7 @@ struct VerticalFader: View {
                             start: start, dragPoints: moved, throwPoints: Double(height - 12))
                         onChange(MixerMath.gain(forFraction: newFraction, in: range))
                     }
-                    .onEnded { _ in dragStart = nil }
+                    .onEnded { _ in dragStart = nil; DragCursor.clear() }
             )
             .simultaneousGesture(TapGesture(count: 2).onEnded { onChange(1.0) })
             .glow(accent, radius: 5, intensity: 0.15 + 0.4 * fraction)
@@ -137,9 +141,13 @@ struct PanKnob: View {
                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
         }
         .contentShape(Circle())
+        // A rotary knob is a vertical value drag → resizeUpDown (docs/DESIGN-
+        // LANGUAGE.md "Pointer affordances"), same family as the faders.
+        .hoverCursor(.resizeUpDown)
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { value in
+                    DragCursor.set(.resizeUpDown)
                     let start = dragStart ?? fraction
                     if dragStart == nil { dragStart = start }
                     let fine = NSEvent.modifierFlags.contains(.option) ? 0.25 : 1.0
@@ -148,7 +156,7 @@ struct PanKnob: View {
                         start: start, dragPoints: moved, throwPoints: 120)
                     onChange((newFraction * 2 - 1).clamped(to: Track.panRange))
                 }
-                .onEnded { _ in dragStart = nil }
+                .onEnded { _ in dragStart = nil; DragCursor.clear() }
         )
         .simultaneousGesture(TapGesture(count: 2).onEnded { onChange(0) })
         .accessibilityLabel("Pan")
@@ -179,12 +187,17 @@ struct SendMiniFader: View {
                 ctx.stroke(groove, with: .color(DAWTheme.hairline), lineWidth: 1)
             }
             .contentShape(Rectangle())
+            // Horizontal value drag → resizeLeftRight (docs/DESIGN-LANGUAGE.md
+            // "Pointer affordances"): the send mini-fader is dragged left/right.
+            .hoverCursor(.resizeLeftRight)
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        DragCursor.set(.resizeLeftRight)
                         let f = (Double(value.location.x) / Double(width)).clamped(to: 0...1)
                         onChange(MixerMath.gain(forFraction: f, in: Send.levelRange))
                     }
+                    .onEnded { _ in DragCursor.clear() }
             )
             .simultaneousGesture(TapGesture(count: 2).onEnded { onChange(1.0) })
         }
@@ -241,6 +254,8 @@ struct InsertRow: View {
     var effect: EffectDescriptor
     var onToggleBypass: () -> Void
     var onRemove: () -> Void
+    /// Non-nil ONLY for Audio Unit inserts (M3 vi-b): opens the plugin window.
+    var onOpenWindow: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 6) {
@@ -259,6 +274,10 @@ struct InsertRow: View {
                 .lineLimit(1)
                 .strikethrough(effect.isBypassed, color: DAWTheme.textDim)
             Spacer(minLength: 0)
+            if let onOpenWindow {
+                PluginWindowButton(action: onOpenWindow)
+                    .help("Open the effect plugin window")
+            }
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 4)
@@ -266,8 +285,32 @@ struct InsertRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 5))
         .contextMenu {
             Button(effect.isBypassed ? "Enable" : "Bypass", action: onToggleBypass)
+            if let onOpenWindow {
+                Button("Open Plugin Window", action: onOpenWindow)
+            }
             Button("Remove Insert", role: .destructive, action: onRemove)
         }
+    }
+}
+
+/// The small window glyph that opens an AU plugin window (M3 vi-b) — one shared
+/// affordance for the mixer's AU effect rows and AU instrument header. Neutral
+/// cyan hover accent (never violet — that is AI meaning).
+struct PluginWindowButton: View {
+    var action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "macwindow")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(hovering ? DAWTheme.playback : DAWTheme.textDim)
+                .frame(width: 16, height: 16)
+                .background(DAWTheme.panelRaised)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }
 

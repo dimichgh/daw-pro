@@ -98,6 +98,9 @@ extension ProjectStore {
 
         let url = Self.bounceDestination(from: path)
         let info = try engine.writeAudioFile(audio, to: url)
+        // A file landed on disk — tick the render counter for the onboarding
+        // signal adapter (ob-b), which fires `renderCompleted` on an increment.
+        renderCompletedCount += 1
         return BounceResult(
             path: url.path,
             durationSeconds: info.durationSeconds,

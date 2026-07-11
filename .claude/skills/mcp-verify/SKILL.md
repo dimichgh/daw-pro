@@ -6,7 +6,7 @@ description: Verify the MCP server and control protocol end-to-end — build the
 # MCP Verify
 
 1. **Build**: `cd mcp-server && npm install --no-audit --no-fund && npm run build` — must compile clean.
-2. **Parity audit**: extract the command list from `Sources/DAWControl/Commands.swift` and the tool list from `mcp-server/src/index.ts`. Every command needs a tool and vice versa (AI-provider tools like lyrics/suno/image are MCP-only — that's expected). Report any drift with exact names.
+2. **Parity audit**: `cd mcp-server && npm test` — the automated audit (`test/audit-tools.test.ts`) spins the real server on an in-memory transport and enforces command↔tool bijection against `Commands.swift` plus schema richness (titles, ≥40-char descriptions, every input property described). Tool registration lives in `mcp-server/src/server.ts` (`index.ts` is only the stdio entry). Exception tables (6 unprefixed generation tools, 3 direct-API tools) are documented in the test and in ARCHITECTURE.md. Any failure blocks roadmap checkboxes.
 3. **Live round-trip** (needs the app): if nothing is listening on the control port, start the app in the background: `swift run DAWApp &` and wait for the port (check with `nc -z 127.0.0.1 17600`). Then exercise via a short node script against `ws://127.0.0.1:17600`:
    - `project.snapshot` → valid JSON with tracks/transport
    - `track.add` → snapshot shows the new track

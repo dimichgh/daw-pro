@@ -220,6 +220,12 @@ public protocol AudioEngineControlling: AnyObject {
     /// the engine tracks no AU for that id.
     func audioUnitStatus(forTrack id: UUID) -> AudioUnitTrackStatus?
 
+    /// Effect mirror of `audioUnitStatus(forTrack:)` (M3 vi-b): lifecycle state
+    /// of one hosted insert-effect AU, so a plugin-window open-failure can name
+    /// pending/missing/failed(reason) readably. nil when the engine tracks no AU
+    /// for that effect id, or for engines without AU-effect support.
+    func audioUnitEffectStatus(forEffect id: UUID) -> AudioUnitTrackStatus?
+
     /// Current `fullStateForDocument` of the track's hosted Audio Unit as a
     /// binary plist, for save-time capture; nil when no prepared AU exists.
     func instrumentState(forTrack id: UUID) -> Data?
@@ -291,6 +297,34 @@ public protocol AudioEngineControlling: AnyObject {
     /// activity; the UI reads it as a cheap blinking-LED source.
     func midiEventCount() -> Int
 
+    /// Latest master-mix analysis snapshot (M8 vm-a, session vibe meter):
+    /// 24 log-spaced spectral bands (40 Hz → 16 kHz, dB, −80 floor),
+    /// short-term RMS level, held peak, spectral centroid, normalized
+    /// spectral flux — measured POST-master-fader (what you hear is what is
+    /// analyzed). Poll-based like meters: the engine refreshes its cache at
+    /// UI rate (~30–60 Hz) while running; when stopped or silent the values
+    /// decay to `.floor` — never an error, never NaN/Inf. `.floor` for
+    /// engines without analysis support.
+    func masterAnalysis() -> MasterAnalysisSnapshot
+
+    /// Render-load / overrun telemetry (M9 perf-b), accumulated per render
+    /// callback by the engine's instrumented render blocks — live playback
+    /// and the engine's own offline renders both count. Poll-based and
+    /// window-scoped: `reset: false` reads the current window; `reset: true`
+    /// returns the closing window's stats AND starts a fresh one (windowed
+    /// profiling). Every field finite by contract; a stopped engine freezes
+    /// the counters but the snapshot stays readable. `.idle` for engines
+    /// without telemetry support.
+    func performanceStats(reset: Bool) -> EnginePerformanceStats
+
+    /// Engine watchdog state (M9 crash-c): the stall-detector reading the
+    /// perf-b telemetry heartbeat — a frozen heartbeat while the engine
+    /// claims to be running means the render side is dead, and the watchdog
+    /// drives the same auto-restart the configuration-change path uses.
+    /// Poll-based and headless-safe: never throws, `.idle` for engines
+    /// without watchdog support.
+    func watchdogStatus() -> EngineWatchdogStatus
+
     /// Output metering, delivered on the main actor at ~30-60 Hz while running.
     var meteringHandler: ((MeterFrame) -> Void)? { get set }
 
@@ -327,6 +361,7 @@ extension AudioEngineControlling {
 
     public func availableAudioUnits() -> [AudioUnitComponentInfo] { [] }
     public func audioUnitStatus(forTrack id: UUID) -> AudioUnitTrackStatus? { nil }
+    public func audioUnitEffectStatus(forEffect id: UUID) -> AudioUnitTrackStatus? { nil }
     public func instrumentState(forTrack id: UUID) -> Data? { nil }
     public func availableAudioUnitEffects() -> [AudioUnitComponentInfo] { [] }
     public func effectState(forEffect id: UUID) -> Data? { nil }
@@ -345,6 +380,18 @@ extension AudioEngineControlling {
 
     public func availableMIDIInputs() -> [MIDIInputDevice] { [] }
     public func midiEventCount() -> Int { 0 }
+
+    /// Master-mix analysis is optional capability: engines without it
+    /// (fakes, headless) sit on the floor snapshot.
+    public func masterAnalysis() -> MasterAnalysisSnapshot { .floor }
+
+    /// Performance telemetry is optional capability: engines without it
+    /// (fakes, headless) report the all-zero window.
+    public func performanceStats(reset: Bool) -> EnginePerformanceStats { .idle }
+
+    /// The engine watchdog is optional capability: engines without one
+    /// (fakes, headless) report the zero/idle status.
+    public func watchdogStatus() -> EngineWatchdogStatus { .idle }
 
     /// Buffer-out offline rendering is optional capability (M5 iv-b):
     /// engines without it (fakes, headless) refuse readably instead of

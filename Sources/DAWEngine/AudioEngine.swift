@@ -1,4 +1,5 @@
 import AVFAudio
+import AudioToolbox
 import DAWCore
 import Foundation
 
@@ -6,10 +7,22 @@ import Foundation
 /// per-clip node graph, plus master metering and the M0 test tone. All engine
 /// capability is exposed through `AudioEngineControlling`; AVFoundation types
 /// must not leak out of this module.
+///
+/// DELIBERATE BOUNDARY EXCEPTION (M3 vi-b): the two
+/// `hostedInstrumentAudioUnit(forTrack:)` / `hostedEffectAudioUnit(forEffect:)`
+/// accessors return `AUAudioUnit` — the one sanctioned AudioToolbox type on this
+/// module's public surface. Plugin-view hosting is definitionally
+/// `AUAudioUnit`-shaped, so the app layer needs the live instance to attach a
+/// window; the exception is concrete-class-only (NOT on `AudioEngineControlling`)
+/// and control-plane-only. DAWApp already links the audio frameworks, so no
+/// packaging change follows. Recorded in docs/ARCHITECTURE.md.
 @MainActor
 public final class AudioEngine: AudioEngineControlling {
     private let engine = AVAudioEngine()
-    private let graph: PlaybackGraph
+    /// Internal (not private) so engine-level tests can pin graph facts the
+    /// recovery paths guarantee (retire-bin drained, strips present) — the
+    /// `auRegistry` seam precedent. Never reached from outside the module.
+    let graph: PlaybackGraph
     /// Hosted Audio Unit lifecycle for the LIVE graph (offline renders build
     /// their own registry — fresh AU instances per render).
     let auRegistry = AUHostRegistry()
@@ -38,7 +51,56 @@ public final class AudioEngine: AudioEngineControlling {
     private let tonePlayer = AVAudioPlayerNode()
     private var toneBuffer: AVAudioPCMBuffer?
     private var meterTapInstalled = false
+    /// Master-mix analyzer (M8 vm-a) — created once alongside the meter tap
+    /// (AVFoundation allows ONE tap per bus, so analysis rides inside the
+    /// same closure). Its DSP state is touched ONLY on the tap queue; the
+    /// produced snapshot VALUE hops to the main actor exactly like
+    /// `MeterFrame`s do. `reset()` happens only in `shutdown()`, after the
+    /// tap is removed (per its threading contract).
+    private var masterAnalyzer: MasterMixAnalyzer?
+    /// Main-actor cache of the latest analysis snapshot, refreshed at tap
+    /// rate while the engine runs and polled by `masterAnalysis()`.
+    private var latestMasterAnalysis: MasterAnalysisSnapshot = .floor
     private var configObserver: (any NSObjectProtocol)?
+    /// Render-load telemetry (M9 perf-b): ONE context per engine, wired into
+    /// the live graph's nodes at creation and handed to every
+    /// `renderOffline` pass (offline bounces count — that is the headless
+    /// test seam). Read/reset only here, on the main actor, via
+    /// `performanceStats(reset:)`.
+    private let performance = EnginePerformanceContext()
+
+    // MARK: Engine watchdog (M9 crash-c)
+
+    /// Stall detector over the telemetry heartbeat. All three readers are
+    /// control-plane only: the heartbeat is one load-acquire on the perf
+    /// context's lifetime callback cell (the `performanceStats` reader
+    /// discipline — never touches render-thread code), the running check is
+    /// main-actor bookkeeping AND the graph's instrumented-strip census
+    /// (zero strips = no heartbeat producer exists, so a running-but-empty
+    /// session is "no signal expected", never a stall), and restart is the
+    /// shared config-change recovery. Known accepted imprecision: a
+    /// concurrent offline render bumps the same shared context, which can
+    /// only DELAY detection — never false-positive.
+    private lazy var watchdog = EngineWatchdog(
+        heartbeat: { [weak self] in
+            self.map { Int(clamping: $0.performance.lifetimeCallbackCount()) } ?? 0
+        },
+        isEngineRunning: { [weak self] in
+            guard let self else { return false }
+            return self.isRunning && self.graph.hasInstrumentedStrips
+        },
+        restart: { [weak self] in try self?.watchdogRestart() }
+    )
+
+    /// The watchdog check loop (the `ProjectStore.startCrashAutosave` task
+    /// idiom): started idempotently by `prepare()`, cancelled in
+    /// `shutdown()`. Nil until the engine first starts.
+    private var watchdogTask: Task<Void, Never>?
+
+    /// Check interval — 2 s default ≈ 4 s worst-case stall detection at the
+    /// 2-check threshold. Internal so tests could tune it before `prepare()`;
+    /// the state machine itself is interval-independent (pure tick logic).
+    var watchdogInterval: Duration = .seconds(2)
 
     // MARK: Transport state machine (idle ⇄ playing)
 
@@ -156,6 +218,8 @@ public final class AudioEngine: AudioEngineControlling {
 
     public init() {
         graph = PlaybackGraph(engine: engine)
+        // Telemetry context first — node creation (reconcile) captures it.
+        graph.performance = performance
         // Hosted-AU tracks pull their prepared instrument from the registry;
         // nil (pending/missing/failed) falls back to the silent placeholder.
         graph.audioUnitProvider = { [auRegistry] track in
@@ -245,13 +309,27 @@ public final class AudioEngine: AudioEngineControlling {
         engine.prepare()
         try engine.start()
         isRunning = true
+        // M9 crash-a: from here on, node detaches against a STOPPED engine
+        // are unsafe (once-rendered nodes leave stale entries in
+        // AVFoundation's graph bookkeeping — docs/research/
+        // fix-teardown-crash.md); the graph defers them to its bin, drained
+        // against the running engine after every start.
+        graph.engineHasRun = true
+        graph.flushRetiredNodes()
         // Mixer parameters land AFTER start(): values set while the engine was
         // stopped (master volume, track pan/volume/mute/solo) must stick.
         mixer.outputVolume = Float(masterVolume)
         graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+        // M9 crash-c: a successful start re-arms a given-up watchdog (the
+        // only exit from `.failed`) and starts the check loop (idempotent).
+        watchdog.reset()
+        startWatchdog()
     }
 
     public func shutdown() {
+        // Watchdog first: teardown is an INTENTIONAL stop, never a stall.
+        watchdogTask?.cancel()
+        watchdogTask = nil
         stopTestTone()
         if activeTake != nil {
             stopRecording()  // finalizes the take (and stops playback) first
@@ -273,6 +351,11 @@ public final class AudioEngine: AudioEngineControlling {
         engine.stop()
         isRunning = false
         meteringHandler?(.silence)
+        // Tap removed + engine stopped: safe to reset the analyzer (its
+        // threading contract), and the published snapshot floors like the
+        // meter silence push above.
+        masterAnalyzer?.reset()
+        latestMasterAnalysis = .floor
     }
 
     // MARK: - Transport intents
@@ -375,6 +458,10 @@ public final class AudioEngine: AudioEngineControlling {
             engine.reset()
             do {
                 try engine.start()
+                // Nodes torn down while the engine sat stopped mid-pass
+                // retire NOW, against the running engine (M9 crash-a — see
+                // prepare()).
+                graph.flushRetiredNodes()
             } catch {
                 isRunning = false
                 FileHandle.standardError.write(Data(
@@ -710,6 +797,9 @@ public final class AudioEngine: AudioEngineControlling {
         // graph (hardware clock, players, meter taps, live AU instruments) is
         // never touched, so bouncing is safe whether or not playback is running.
         let renderer = OfflineRenderer()
+        // Offline pulls stamp THIS engine's telemetry context (M9 perf-b):
+        // a headless bounce is render work and counts in performanceStats.
+        renderer.performance = performance
         // Pure cache lookup — every render either committed above or failed
         // (nil → the clip bounces silent; never wrong-speed audio).
         renderer.stretchedFileProvider = { [stretchCache] clip in
@@ -752,8 +842,48 @@ public final class AudioEngine: AudioEngineControlling {
         auRegistry.status[id]
     }
 
+    /// Effect mirror of `audioUnitStatus(forTrack:)` — feeds the plugin-window
+    /// open-failure error (pending/missing/failed reason). Additive on
+    /// `AudioEngineControlling` with a nil default.
+    public func audioUnitEffectStatus(forEffect id: UUID) -> AudioUnitTrackStatus? {
+        auRegistry.effectStatus[id]
+    }
+
     public func instrumentState(forTrack id: UUID) -> Data? {
         auRegistry.instrumentState(forTrack: id)
+    }
+
+    // MARK: - Plugin-view hosting surface (M3 vi-b, CONTROL-PLANE ONLY)
+
+    /// The live, sounding `AUAudioUnit` for a track's hosted instrument — the
+    /// same object whose captured `renderBlock` the graph pulls — or nil unless
+    /// the registry reports `.ready`. This accessor (and its effect twin) is the
+    /// ONE sanctioned AudioToolbox type on DAWEngine's public surface: plugin-
+    /// view hosting is definitionally `AUAudioUnit`-shaped. It is concrete-class-
+    /// only (deliberately NOT on `AudioEngineControlling`), a documented
+    /// exception to the module-leak rule (see the module doc). Callers MUST stay
+    /// on the main actor and MUST NEVER reach the render-thread contract members.
+    public func hostedInstrumentAudioUnit(forTrack id: UUID) -> AUAudioUnit? {
+        auRegistry.preparedInstrument(forTrack: id)?.auAudioUnit
+    }
+
+    /// The effect twin of `hostedInstrumentAudioUnit(forTrack:)` — the live
+    /// hosted insert-effect AU, nil unless `.ready`. Same control-plane-only,
+    /// main-actor-only contract.
+    public func hostedEffectAudioUnit(forEffect id: UUID) -> AUAudioUnit? {
+        auRegistry.preparedEffect(forEffect: id)?.auAudioUnit
+    }
+
+    /// The registry's `onRelease`, re-exposed for the app (M3 vi-b): fires on the
+    /// main actor when a live instance is torn down (effect/track removal,
+    /// instrument switch, project open/new, config/sample-rate re-prepare),
+    /// BEFORE `deallocateRenderResources`, never for no-op releases. Engine
+    /// recovery (`recoverEngine`/`watchdogRestart`) does NOT touch the registry,
+    /// so plugin windows survive it. Forwarded straight through so the registry
+    /// stays the single invalidation authority.
+    public var hostedAUReleased: ((HostedAUEndpoint) -> Void)? {
+        get { auRegistry.onRelease }
+        set { auRegistry.onRelease = newValue }
     }
 
     public func availableAudioUnitEffects() -> [AudioUnitComponentInfo] {
@@ -1207,13 +1337,26 @@ public final class AudioEngine: AudioEngineControlling {
         }
     }
 
-    /// Best-effort recovery when the device or its format changes under us:
-    /// derive beats via the host clock (the sample timeline just broke),
-    /// restart the engine, and resume from there. Deliberately unchanged for
+    /// Best-effort recovery when the device or its format changes under us —
+    /// now a plain alias for the shared `recoverEngine()` (M9 crash-c
+    /// extraction; behavior byte-identical). Deliberately unchanged for
     /// recording: this is the OUTPUT engine's notification — capture runs on
     /// InputCapture's own engine, and the take stays aligned to the original
     /// player-start anchor (the writer's target host time never moves).
     private func handleConfigurationChange() {
+        recoverEngine()
+    }
+
+    /// THE engine recovery routine (M9 crash-c: extracted verbatim from
+    /// `handleConfigurationChange` so the watchdog drives the SAME code the
+    /// config-change path has always used, not a copy): derive beats via the
+    /// host clock (the sample timeline just broke), restart the engine, and
+    /// resume from there. Not playing (no anchor) → syncs `isRunning` and
+    /// returns without touching the engine — the notification path's
+    /// original early-out, preserved exactly; the watchdog's restart wrapper
+    /// layers the stopped-transport bounce on top (`watchdogRestart`).
+    /// Internal (not private) so tests can drive it directly.
+    func recoverEngine() {
         isRunning = engine.isRunning
         guard let anchor = currentAnchor else { return }
 
@@ -1232,6 +1375,9 @@ public final class AudioEngine: AudioEngineControlling {
                 try engine.start()
             }
             isRunning = true
+            // Retire any teardown nodes parked while the device was down
+            // (M9 crash-a — see prepare()).
+            graph.flushRetiredNodes()
             // A fresh start re-initializes mixer parameters — restore the mix.
             engine.mainMixerNode.outputVolume = Float(masterVolume)
             graph.applyParameters(tracks: lastTracks)
@@ -1244,6 +1390,56 @@ public final class AudioEngine: AudioEngineControlling {
                 Data("AudioEngine: configuration-change recovery failed: \(error)\n".utf8)
             )
         }
+    }
+
+    // MARK: - Engine watchdog (M9 crash-c)
+
+    /// Starts the periodic watchdog check loop (idempotent — `prepare()`
+    /// calls this on every start). Mirrors `ProjectStore.startCrashAutosave`:
+    /// a plain sleep-tick task on the engine's actor; the interval is read
+    /// once at start (`watchdogInterval`).
+    private func startWatchdog() {
+        guard watchdogTask == nil else { return }
+        let interval = watchdogInterval
+        watchdogTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                guard let self else { return }
+                self.watchdogTick()
+            }
+        }
+    }
+
+    /// One watchdog check — the loop body, split out so tests can drive
+    /// checks directly without the timer.
+    func watchdogTick() {
+        watchdog.tick()
+    }
+
+    /// The watchdog's restart closure: bounce the engine through the SHARED
+    /// recovery. A stalled engine may still CLAIM to be running — a silent
+    /// HAL stall fires no configuration-change notification, which is
+    /// exactly the detection gap the watchdog covers — so stop it first;
+    /// `recoverEngine()`'s prepare+start leg then genuinely bounces the
+    /// hardware. `recoverEngine()` only restarts mid-playback (its
+    /// config-change contract, kept byte-identical), so the
+    /// stopped-transport live-thru stall falls through to `prepare()` — the
+    /// cold-start primitive (start + retire-bin flush + mixer/parameter
+    /// restore). Throwing (a dead device refusing to start) is the
+    /// watchdog's failure signal.
+    func watchdogRestart() throws {
+        engine.stop()
+        isRunning = false
+        recoverEngine()
+        if !isRunning {
+            try prepare()
+        }
+    }
+
+    /// Watchdog state for the wire (`engine.watchdogStatus`). Poll-based,
+    /// never throws; `engineRunning` is this engine's own `isRunning` claim.
+    public func watchdogStatus() -> EngineWatchdogStatus {
+        watchdog.status(engineRunning: isRunning)
     }
 
     // MARK: - Test tone (verifies the output path is real)
@@ -1297,6 +1493,11 @@ public final class AudioEngine: AudioEngineControlling {
     private func installMeterTap(on mixer: AVAudioMixerNode) {
         guard !meterTapInstalled else { return }
         let format = mixer.outputFormat(forBus: 0)
+        // Master-mix analysis (M8 vm-a) shares this tap — one tap per bus is
+        // an AVFoundation limit. The analyzer preallocates everything here
+        // (main actor, init time); the tap closure only feeds it.
+        let analyzer = masterAnalyzer ?? MasterMixAnalyzer(sampleRate: format.sampleRate)
+        masterAnalyzer = analyzer
         // @Sendable is load-bearing: without it this closure (formed in a
         // @MainActor context) inherits main-actor isolation and the Swift
         // runtime traps when AVFAudio invokes it on its tap queue.
@@ -1318,10 +1519,38 @@ public final class AudioEngine: AudioEngineControlling {
             }
             let denominator = Float(frames * Int(buffer.format.channelCount))
             let frame = MeterFrame(peak: peak, rms: (sumSquares / denominator).squareRoot())
+            // Post-master-fader analysis: this tap reads mainMixerNode's
+            // output, i.e. after `outputVolume` (the master fader) — what
+            // you hear is what's analyzed. AVFAudio serializes tap
+            // deliveries, so the analyzer is single-threaded by contract;
+            // the snapshot VALUE (Sendable) rides the same main-actor hop
+            // as the MeterFrame.
+            analyzer.processMix(
+                channels: channels,
+                channelCount: Int(buffer.format.channelCount),
+                frameCount: frames)
+            let analysis = analyzer.snapshot()
             Task { @MainActor [weak self] in
                 self?.meteringHandler?(frame)
+                self?.latestMasterAnalysis = analysis
             }
         }
         meterTapInstalled = true
+    }
+
+    /// Latest master-mix analysis snapshot (M8 vm-a) — poll-based like
+    /// meters. `.floor` until the tap has run (and again after `shutdown`).
+    public func masterAnalysis() -> MasterAnalysisSnapshot {
+        latestMasterAnalysis
+    }
+
+    /// Render-load / overrun telemetry (M9 perf-b): counters stamped by
+    /// `InstrumentRenderer.renderQuantum` and `ChainHostAU`'s render block —
+    /// live playback AND this engine's offline renders both count. Stopped
+    /// engine = frozen counters, snapshot still readable. `reset: true`
+    /// returns the closing window and starts a new one (see the context's
+    /// read-then-reset ordering notes) — the perf-c windowed-profiling seam.
+    public func performanceStats(reset: Bool) -> EnginePerformanceStats {
+        reset ? performance.snapshotAndReset() : performance.snapshot()
     }
 }

@@ -3,6 +3,16 @@ import AudioToolbox
 import DAWCore
 import Foundation
 
+/// Identity of one hosted-AU endpoint addressable by the app layer (M3 vi-b):
+/// the release callback reports which live instance just went away so a plugin
+/// window (or any vendor view observing the parameter tree) tears down against
+/// the still-allocated AU. Foundation-only (bare UUIDs) so it crosses the module
+/// boundary without dragging AudioToolbox with it.
+public enum HostedAUEndpoint: Hashable, Sendable {
+    case instrument(trackID: UUID)
+    case effect(effectID: UUID)
+}
+
 /// Owns hosted Audio Unit instrument lifecycle for a set of tracks: discovery,
 /// async instantiation, format/state/resource setup, and save-time state
 /// capture. All AU property access happens here, on the main actor; the
@@ -16,6 +26,14 @@ import Foundation
 public final class AUHostRegistry {
     /// Per-track hosting status, published for snapshots.
     public private(set) var status: [UUID: AudioUnitTrackStatus] = [:]
+
+    /// Invalidation seam for the plugin-window layer (M3 vi-b). Fired AFTER an
+    /// instance is actually removed from the table and BEFORE its
+    /// `deallocateRenderResources`, only when a release removed a real instance
+    /// (never for bookkeeping-only no-op releases). Main actor, synchronous —
+    /// the window closes in the SAME turn as the model change, against a still-
+    /// allocated AU. The engine re-exposes this as `hostedAUReleased`.
+    var onRelease: ((HostedAUEndpoint) -> Void)?
 
     private var instruments: [UUID: HostedAUInstrument] = [:]
 
@@ -134,6 +152,9 @@ public final class AUHostRegistry {
         attempted[id] = nil
         status[id] = nil
         guard let instrument = instruments.removeValue(forKey: id) else { return }
+        // Invalidate any plugin window BEFORE the AU's render resources go — the
+        // window (and any observing vendor view) detaches against a live AU.
+        onRelease?(.instrument(trackID: id))
         instrument.auAudioUnit.deallocateRenderResources()
         instrument.auAudioUnit.reset()
     }
@@ -208,6 +229,9 @@ public final class AUHostRegistry {
         effectAttempted[id] = nil
         effectStatus[id] = nil
         guard let effect = effects.removeValue(forKey: id) else { return }
+        // Invalidate any plugin window BEFORE the AU's render resources go (the
+        // instrument-path ordering — §2.2).
+        onRelease?(.effect(effectID: id))
         effect.auAudioUnit.deallocateRenderResources()
         effect.auAudioUnit.reset()
     }

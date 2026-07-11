@@ -14,23 +14,51 @@ private let addableEffectKinds: [EffectDescriptor.Kind] =
 /// handled store-side.
 struct MixerChannelStrip: View {
     @Environment(ProjectStore.self) private var store
+    @Environment(AppModel.self) private var model
     var track: Track
+    /// The mixer console's shared density store (docs/DESIGN-LANGUAGE.md
+    /// "Panels"). The whole console is ONE panel (`MixerView.panelID`): Simple
+    /// shows the name/kind badge, pan, the fader/meter/dB, and Mute/Solo/Arm; Pro
+    /// additionally reveals the inserts, sends, and output-routing sections. A
+    /// plain value input — a preview can pass a `PanelDensityStore()` with an
+    /// in-memory backing.
+    var densityStore: PanelDensityStore
 
     private var isBus: Bool { track.kind == .bus }
+    /// True when this track hosts an Audio Unit instrument — the only instrument
+    /// kind with a plugin window (built-ins have first-class in-app panels).
+    private var hostsAUInstrument: Bool {
+        track.kind == .instrument && (track.instrument ?? .default).kind == .audioUnit
+    }
     private var meter: MeterFrame { store.trackMeters[track.id] ?? .silence }
     private var accent: Color { track.isAIGenerated ? DAWTheme.ai : DAWTheme.hairline }
+    /// Pro density reveals the signal-flow sections (inserts / sends / output).
+    /// Density is read per-console (`MixerView.panelID`), never per-strip.
+    private var isPro: Bool { densityStore.density(forPanel: MixerView.panelID) == .pro }
 
     var body: some View {
         VStack(spacing: 8) {
             header
-            insertsSection
-            if !isBus {
-                sendsSection
-                outputSection
+            // Pro-only signal-flow sections. In Simple they hide WHOLE and the
+            // freed vertical space flows into `faderAndMeter` (maxHeight: .infinity),
+            // giving beginners a longer fader throw / finer level control.
+            if isPro {
+                insertsSection
+                    .explainable(.mixerInserts)
+                if !isBus {
+                    sendsSection
+                        .explainable(.mixerSends)
+                    outputSection
+                        .explainable(.mixerOutput)
+                }
             }
+            // Header/controls separator — present in both modes so the strip reads
+            // as designed (not amputated) when the Pro sections are hidden.
             Divider().overlay(DAWTheme.hairline)
             panSection
+                .explainable(.mixerPan)
             faderAndMeter
+                .explainable(.mixerFader)
             controlButtons
         }
         .padding(10)
@@ -63,8 +91,17 @@ struct MixerChannelStrip: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            KindBadge(kind: track.kind)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 4) {
+                KindBadge(kind: track.kind)
+                    .explainable(.mixerKindBadge)
+                Spacer(minLength: 0)
+                // The AU-instrument plugin window (M3 vi-b) — one button.
+                if hostsAUInstrument {
+                    PluginWindowButton { model.openPluginWindow(trackID: track.id) }
+                        .help("Open the instrument plugin window")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -79,7 +116,7 @@ struct MixerChannelStrip: View {
             if track.effects.isEmpty {
                 Text("No inserts")
                     .font(.system(size: 9))
-                    .foregroundStyle(DAWTheme.textDim.opacity(0.7))
+                    .foregroundStyle(DAWTheme.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 2)
             } else {
@@ -90,7 +127,12 @@ struct MixerChannelStrip: View {
                             try? store.setEffectBypassed(trackID: track.id, effectID: effect.id,
                                                          bypassed: !effect.isBypassed)
                         },
-                        onRemove: { try? store.removeEffect(trackID: track.id, effectID: effect.id) }
+                        onRemove: { try? store.removeEffect(trackID: track.id, effectID: effect.id) },
+                        // AU inserts get one open-window button (M3 vi-b); built-in
+                        // effects (nil) have first-class in-app editors instead.
+                        onOpenWindow: effect.kind == .audioUnit
+                            ? { model.openPluginWindow(trackID: track.id, effectID: effect.id) }
+                            : nil
                     )
                 }
             }
@@ -107,7 +149,7 @@ struct MixerChannelStrip: View {
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(DAWTheme.playback)
+                .foregroundStyle(DAWTheme.textPrimary)
                 .frame(width: 16, height: 16)
                 .background(DAWTheme.panelRaised)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -130,7 +172,7 @@ struct MixerChannelStrip: View {
             if track.sends.isEmpty {
                 Text("No sends")
                     .font(.system(size: 9))
-                    .foregroundStyle(DAWTheme.textDim.opacity(0.7))
+                    .foregroundStyle(DAWTheme.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 2)
             } else {
@@ -175,7 +217,7 @@ struct MixerChannelStrip: View {
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(buses.isEmpty ? DAWTheme.textDim : DAWTheme.playback)
+                .foregroundStyle(buses.isEmpty ? DAWTheme.textDim : DAWTheme.textPrimary)
                 .frame(width: 16, height: 16)
                 .background(DAWTheme.panelRaised)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -275,13 +317,16 @@ struct MixerChannelStrip: View {
             MixerStateButton(label: "Mute", isOn: track.isMuted, color: DAWTheme.clip) {
                 store.setTrackMute(id: track.id, muted: !track.isMuted)
             }
+            .explainable(.mixerMute)
             MixerStateButton(label: "Solo", isOn: track.isSoloed, color: DAWTheme.playback) {
                 store.setTrackSolo(id: track.id, soloed: !track.isSoloed)
             }
+            .explainable(.mixerSolo)
             if !isBus {
                 MixerStateButton(label: "Arm", isOn: track.isArmed, color: DAWTheme.record, pulse: true) {
                     _ = try? store.setTrackArm(id: track.id, armed: !track.isArmed)
                 }
+                .explainable(.mixerArm)
             }
         }
     }
@@ -321,6 +366,7 @@ struct MixerMasterStrip: View {
             }
             .frame(maxHeight: .infinity)
             .frame(minHeight: 180)
+            .explainable(.mixerMaster)
             DbReadout(gain: store.masterVolume)
         }
         .padding(12)

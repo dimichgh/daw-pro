@@ -46,6 +46,17 @@ public enum ClipSnap: String, CaseIterable, Sendable, Equatable {
         guard let grid = gridBeats(beatsPerBar: beatsPerBar), grid > 0 else { return max(0, beat) }
         return max(0, (beat / grid).rounded() * grid)
     }
+
+    /// The snap the arrange clip lane actually uses for a given panel density
+    /// (docs/DESIGN-LANGUAGE.md "Panels", sp-c). **Simple locks the grid to `.bar`**
+    /// — a beginner moves clips a whole bar at a time and the snap picker is hidden
+    /// — mirroring the piano roll locking Simple to whole beats. Pro honors the
+    /// `picked` resolution. This never mutates `picked`, so flipping back to Pro
+    /// restores the user's choice. Pure, so the view layer is a thin conditional
+    /// over a tested contract.
+    public static func effective(density: PanelDensity, picked: ClipSnap) -> ClipSnap {
+        density == .pro ? picked : .bar
+    }
 }
 
 /// Which part of a clip block a point landed on — routes a press to the right

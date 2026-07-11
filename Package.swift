@@ -49,7 +49,7 @@ let package = Package(
         // Pure, testable view-model / UI-geometry logic (piano roll etc.). No
         // SwiftUI, so it can live in a library the executable DAWApp target
         // can't be tested through. Views stay in DAWApp and read this.
-        .target(name: "DAWAppKit", dependencies: ["DAWCore"]),
+        .target(name: "DAWAppKit", dependencies: ["DAWCore", "AIServices"]),
         .executableTarget(
             name: "DAWApp",
             dependencies: ["DAWCore", "DAWEngine", "DAWControl", "AIServices", "DAWAppKit"]
@@ -60,7 +60,7 @@ let package = Package(
         // availableAudioUnits to the real component enumeration.
         .testTarget(name: "DAWControlTests", dependencies: ["DAWControl", "DAWCore", "DAWEngine", "AIServices"]),
         .testTarget(name: "DAWEngineTests", dependencies: ["DAWEngine", "DAWCore"]),
-        .testTarget(name: "DAWAppKitTests", dependencies: ["DAWAppKit", "DAWCore"]),
+        .testTarget(name: "DAWAppKitTests", dependencies: ["DAWAppKit", "DAWCore", "AIServices"]),
         .testTarget(name: "AIServicesTests", dependencies: ["AIServices"]),
     ],
     // For the CSignalsmithStretch C++ TU; package-wide, but inert for the C

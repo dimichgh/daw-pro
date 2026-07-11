@@ -26,7 +26,7 @@ struct KeyboardSidebar: View {
                 let black = Self.isBlackKey(pitch)
                 context.fill(
                     Path(rect),
-                    with: .color(black ? Color(hex: 0x11141C) : Color(hex: 0x2C3242))
+                    with: .color(black ? DAWTheme.keyBlack : DAWTheme.keyWhite)
                 )
                 // Row separator.
                 context.fill(
@@ -38,7 +38,7 @@ struct KeyboardSidebar: View {
                     let isMiddleC = pitch == 60
                     context.fill(
                         Path(CGRect(x: 0, y: y, width: size.width, height: 1)),
-                        with: .color(isMiddleC ? DAWTheme.playback.opacity(0.7) : Color.white.opacity(0.12))
+                        with: .color(isMiddleC ? DAWTheme.playback.opacity(0.7) : DAWTheme.gridEmphasis)
                     )
                     let label = Text(octaveLabel(pitch))
                         .font(.system(size: 8, weight: .medium, design: .monospaced))

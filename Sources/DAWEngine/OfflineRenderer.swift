@@ -67,6 +67,13 @@ public final class OfflineRenderer {
     /// tests can read per-track status via @testable.
     let auRegistry = AUHostRegistry()
 
+    /// Render-load telemetry sink (M9 perf-b), handed to the graph before
+    /// reconcile so offline pulls stamp the same counters live rendering
+    /// does. `AudioEngine.renderOffline` assigns its OWN context here — that
+    /// is what makes a headless bounce visible to `engine.performanceStats`.
+    /// Default: a private throwaway (direct construction stays isolated).
+    var performance = EnginePerformanceContext()
+
     public init(sampleRate: Double = 48_000, channelCount: Int = 2,
                 maximumFrameCount: Int = 4_096) {
         self.sampleRate = sampleRate
@@ -107,6 +114,9 @@ public final class OfflineRenderer {
         let engine = AVAudioEngine()
         let graph = PlaybackGraph(engine: engine)
         graph.meterSink = meterSink
+        // Telemetry lands before reconcile — node creation is where the
+        // context is captured (renderers at init, chain hosts via setter).
+        graph.performance = performance
 
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: sampleRate,

@@ -298,6 +298,15 @@ final class PlaybackGraph {
     /// track mixer; drives both the live engine's handler and offline tests.
     var meterSink: ((UUID, MeterFrame) -> Void)?
 
+    /// Render-load telemetry context (M9 perf-b) wired into every strip's
+    /// chain host and every instrument renderer AT NODE CREATION — so it
+    /// must be assigned right after init, before the first `reconcile`
+    /// (AudioEngine passes its own; OfflineRenderer passes the one
+    /// `AudioEngine.renderOffline` hands it, which is how offline bounces
+    /// count into `engine.performanceStats`). Default: a private throwaway
+    /// so direct-graph tests stay isolated.
+    var performance = EnginePerformanceContext()
+
     /// Fired at most ONCE per reconcile pass (and by
     /// `invalidateInstrumentNode`), synchronously, immediately BEFORE the
     /// first routing-topology mutation: a fan-out rewire, send-gain teardown,
@@ -321,8 +330,67 @@ final class PlaybackGraph {
         Array(trackNodes.keys) + Array(instrumentNodes.keys) + Array(busNodes.keys)
     }
 
+    /// True when at least one strip carrying an instrumented render block
+    /// exists — the crash-c watchdog's arming condition. EVERY strip kind
+    /// qualifies: audio and bus strips render through their permanent
+    /// `ChainHostAU` sandwich, instrument strips through their
+    /// `InstrumentRenderer` source node, and both stamp the telemetry
+    /// heartbeat once per pulled quantum. With ZERO strips the heartbeat has
+    /// no producer by construction, so a running-but-empty session must read
+    /// as "no signal expected", never as a stall.
+    var hasInstrumentedStrips: Bool {
+        !trackNodes.isEmpty || !instrumentNodes.isEmpty || !busNodes.isEmpty
+    }
+
     init(engine: AVAudioEngine) {
         self.engine = engine
+    }
+
+    // MARK: - Node retirement (M9 crash-a)
+
+    /// True once the LIVE engine has completed a `start()` — set by
+    /// AudioEngine. Offline renderers and headless test graphs never set it,
+    /// so their stopped-state detaches (the proven-safe cold build order)
+    /// stay immediate.
+    var engineHasRun = false
+
+    /// Teardown detaches that arrived while the engine was STOPPED after
+    /// having run — the root cause of the M9 teardown crash
+    /// (docs/research/fix-teardown-crash.md): AVFoundation completes a
+    /// detach's internal graph bookkeeping only when it can synchronize with
+    /// a running engine. Detaching a once-rendered node while stopped leaves
+    /// a stale raw node pointer in `AVAudioEngineGraph`'s internal list (it
+    /// survives `reset()` + `start()`; explicit disconnects don't purge it
+    /// either — both measured), and the next `connect` against the running
+    /// engine walks it: use-after-free. Nodes parked here stay attached AND
+    /// strongly held — no freed-memory window can exist — until
+    /// `flushRetiredNodes()` detaches them against a running engine. FIFO,
+    /// so the reconcile edge order (feeders before buses) survives deferral.
+    private(set) var pendingDetachNodes: [AVAudioNode] = []
+
+    /// The ONLY sanctioned detach for teardown paths. Engine running →
+    /// detach now (AVFoundation's dynamic-reconfig path, live-proven at
+    /// 28-strip scale). Stopped after having run → park in the bin. Never
+    /// ran → detach now (offline/test build order, behavior unchanged).
+    private func retireNode(_ node: AVAudioNode) {
+        if engine.isRunning || !engineHasRun {
+            engine.detach(node)
+        } else {
+            pendingDetachNodes.append(node)
+        }
+    }
+
+    /// Drains the pending-detach bin against a RUNNING engine. AudioEngine
+    /// calls this after every successful `engine.start()` (prepare, the
+    /// routing-rewire bounce, configuration-change recovery); `reconcile`
+    /// also flushes defensively on entry. No-op while stopped — the bin
+    /// keeps holding the nodes until the engine is next up.
+    func flushRetiredNodes() {
+        guard !pendingDetachNodes.isEmpty, engine.isRunning else { return }
+        for node in pendingDetachNodes {
+            engine.detach(node)
+        }
+        pendingDetachNodes.removeAll()
     }
 
     // MARK: - Reconcile
@@ -332,6 +400,11 @@ final class PlaybackGraph {
     /// signature changed (caller decides whether to stop-reschedule-resume).
     @discardableResult
     func reconcile(tracks: [Track]) -> Bool {
+        // Nodes parked across a stopped window retire before new wiring
+        // lands (no-op unless the engine is running and the bin is
+        // non-empty; the primary flush points live in AudioEngine's
+        // post-start seams).
+        flushRetiredNodes()
         // 0. Bus + routing signatures up front — the step ORDER below is
         // load-bearing: bus nodes are added before any source track wires
         // into them, and removed only after every ex-feeder is rewired.
@@ -405,14 +478,14 @@ final class PlaybackGraph {
             }
             for clip in node.clips.values {
                 clip.player.stop()
-                engine.detach(clip.player)
+                retireNode(clip.player)
             }
             node.mixer.removeTap(onBus: 0)
-            engine.detach(node.mixer)
-            engine.detach(node.chainHost)
-            engine.detach(node.sumMixer)
+            retireNode(node.mixer)
+            retireNode(node.chainHost)
+            retireNode(node.sumMixer)
             for gain in node.sendGainNodes.values {
-                engine.detach(gain)
+                retireNode(gain)
             }
             trackNodes.removeValue(forKey: trackID)
         }
@@ -442,7 +515,7 @@ final class PlaybackGraph {
                     continue
                 }
                 clipNode.player.stop()
-                engine.detach(clipNode.player)
+                retireNode(clipNode.player)
                 node.clips.removeValue(forKey: clipID)
             }
 
@@ -516,10 +589,10 @@ final class PlaybackGraph {
             node.renderer.publish(nil)
             node.renderer.requestFlush()
             node.mixer.removeTap(onBus: 0)
-            engine.detach(node.source)
-            engine.detach(node.mixer)
+            retireNode(node.source)
+            retireNode(node.mixer)
             for gain in node.sendGainNodes.values {
-                engine.detach(gain)
+                retireNode(gain)
             }
             instrumentNodes.removeValue(forKey: trackID)
         }
@@ -608,9 +681,9 @@ final class PlaybackGraph {
         for busID in removedBuses {
             guard let node = busNodes.removeValue(forKey: busID) else { continue }
             node.mixer.removeTap(onBus: 0)
-            engine.detach(node.mixer)
-            engine.detach(node.chainHost)
-            engine.detach(node.sumMixer)
+            retireNode(node.mixer)
+            retireNode(node.chainHost)
+            retireNode(node.sumMixer)
         }
 
         let changed = newSignature != signature
@@ -633,13 +706,13 @@ final class PlaybackGraph {
     private func detachSendGainNodes(forTrack id: UUID) {
         if let node = trackNodes[id] {
             for gain in node.sendGainNodes.values {
-                engine.detach(gain)
+                retireNode(gain)
             }
             trackNodes[id]?.sendGainNodes = [:]
         }
         if let node = instrumentNodes[id] {
             for gain in node.sendGainNodes.values {
-                engine.detach(gain)
+                retireNode(gain)
             }
             node.sendGainNodes = [:]
         }
@@ -1062,6 +1135,9 @@ final class PlaybackGraph {
         let sumMixer = AVAudioMixerNode()
         engine.attach(sumMixer)
         let chainHost = ChainHostAU.makeChainHostNode()
+        // Telemetry wiring happens HERE, at node creation before the engine
+        // ever renders (the setPerformanceContext boundary contract).
+        ChainHostAU.setPerformanceContext(performance, of: chainHost)
         engine.attach(chainHost)
         let format = graphFormat()
         engine.connect(sumMixer, to: chainHost, format: format)
@@ -1098,7 +1174,8 @@ final class PlaybackGraph {
         let graphRate = format.sampleRate
         let instrument = instrumentFactory(track)
         instrument.prepare(sampleRate: graphRate, maxFramesPerQuantum: 8_192, channelCount: 2)
-        let renderer = InstrumentRenderer(instrument: instrument, sampleRate: graphRate)
+        let renderer = InstrumentRenderer(instrument: instrument, sampleRate: graphRate,
+                                          performance: performance)
         let source = renderer.makeSourceNode(format: format)
         engine.attach(source)
         engine.connect(source, to: mixer, format: format)
@@ -1138,7 +1215,7 @@ final class PlaybackGraph {
             signature[trackID]?.remove(at: index)
             if let clipNode = trackNodes[trackID]?.clips[clipID] {
                 clipNode.player.stop()
-                engine.detach(clipNode.player)
+                retireNode(clipNode.player)
                 trackNodes[trackID]?.clips.removeValue(forKey: clipID)
             }
         }
@@ -1161,10 +1238,10 @@ final class PlaybackGraph {
         node.renderer.publish(nil)
         node.renderer.requestFlush()
         node.mixer.removeTap(onBus: 0)
-        engine.detach(node.source)
-        engine.detach(node.mixer)
+        retireNode(node.source)
+        retireNode(node.mixer)
         for gain in node.sendGainNodes.values {
-            engine.detach(gain)
+            retireNode(gain)
         }
     }
 
@@ -1490,18 +1567,24 @@ final class PlaybackGraph {
         }
     }
 
+    /// Dead code (zero callers — perf-a WATCH item stands): unlike
+    /// `reconcile` it tears down bus-facing wiring WITHOUT announcing
+    /// `willMutateRoutingTopology`. Any future caller must add the announce
+    /// discipline first. Detaches route through `retireNode` (M9 crash-a) so
+    /// even this path cannot detach once-rendered nodes against a stopped
+    /// engine.
     func detachAll() {
         for node in trackNodes.values {
             for clip in node.clips.values {
                 clip.player.stop()
-                engine.detach(clip.player)
+                retireNode(clip.player)
             }
             node.mixer.removeTap(onBus: 0)
-            engine.detach(node.mixer)
-            engine.detach(node.chainHost)
-            engine.detach(node.sumMixer)
+            retireNode(node.mixer)
+            retireNode(node.chainHost)
+            retireNode(node.sumMixer)
             for gain in node.sendGainNodes.values {
-                engine.detach(gain)
+                retireNode(gain)
             }
         }
         trackNodes.removeAll()
@@ -1510,10 +1593,10 @@ final class PlaybackGraph {
             node.renderer.publish(nil)
             node.renderer.requestFlush()
             node.mixer.removeTap(onBus: 0)
-            engine.detach(node.source)
-            engine.detach(node.mixer)
+            retireNode(node.source)
+            retireNode(node.mixer)
             for gain in node.sendGainNodes.values {
-                engine.detach(gain)
+                retireNode(gain)
             }
         }
         instrumentNodes.removeAll()
@@ -1521,9 +1604,9 @@ final class PlaybackGraph {
         routingSignature.removeAll()
         for node in busNodes.values {
             node.mixer.removeTap(onBus: 0)
-            engine.detach(node.mixer)
-            engine.detach(node.chainHost)
-            engine.detach(node.sumMixer)
+            retireNode(node.mixer)
+            retireNode(node.chainHost)
+            retireNode(node.sumMixer)
         }
         busNodes.removeAll()
         busSignature.removeAll()

@@ -33,6 +33,21 @@ struct TimelineLanesView: View {
     var secondsPerBeat: Double = 0.5
     /// Peak cache for audio-clip waveforms (off-main read, cached by URL).
     var waveformStore: WaveformStore
+    /// The shared per-panel density store (docs/DESIGN-LANGUAGE.md "Panels"). The
+    /// whole arrange workspace is ONE panel (`Self.panelID`): Simple locks the clip
+    /// grid to Bar and suppresses the trim/fade/split/gain/stretch chrome AND their
+    /// gesture entry points (an edge drag MOVES the clip, no dead hit-zone); Pro is
+    /// today's full clip-edit layer. Threaded from ContentView like MixerView's, so
+    /// `debug.panelDensity` reflects live.
+    var densityStore: PanelDensityStore
+    /// Global track-row height (beta m10-d), threaded from `PanelLayoutStore` so the
+    /// timeline clip lanes and the sidebar track headers scale TOGETHER (both read
+    /// the one store value). Defaults to the historical `Self.laneHeight` for
+    /// previews / headless callers. Only the base clip lane scales — the automation
+    /// row (`automationLaneHeight`) and take sub-rows (`takeLaneRowHeight`,
+    /// `takeGroupHeaderHeight`) keep their own constants, so those sections compose
+    /// on top of a taller/shorter clip lane without themselves resizing.
+    var rowHeight: CGFloat = Self.laneHeight
     /// Clip edits — each wired to one of the five `ProjectStore` clip methods.
     var onMoveClip: (_ trackID: UUID, _ clip: Clip, _ toStartBeat: Double) -> Void = { _, _, _ in }
     var onTrimClip: (_ trackID: UUID, _ clip: Clip, _ newStart: Double, _ newLength: Double) -> Void = { _, _, _, _ in }
@@ -68,13 +83,16 @@ struct TimelineLanesView: View {
     /// block moving under the cursor never feeds its own translation back.
     static let contentSpace = "arrangeContent"
 
-    /// Shared clip hit/geometry model at the timeline scale.
+    /// Shared clip hit/geometry model at the timeline scale. Reads the live
+    /// `rowHeight` so trim/fade/gain hit-testing tracks the adjustable lane height.
     private var clipGeometry: ClipEditGeometry {
-        ClipEditGeometry(pixelsPerBeat: Self.pixelsPerBeat, laneHeight: Self.laneHeight)
+        ClipEditGeometry(pixelsPerBeat: Self.pixelsPerBeat, laneHeight: rowHeight)
     }
 
     // Fixed scale + row metrics tuned to line up with the sidebar track rows
-    // (TrackListView: 42 pt header, 34 pt rows, 6 pt gaps).
+    // (TrackListView: 42 pt header, 6 pt gaps). The clip-lane height is the DEFAULT
+    // for the adjustable `rowHeight` input (beta m10-d) — the sidebar rows read the
+    // same store value, so both columns scale in lockstep.
     static let pixelsPerBeat: CGFloat = 16
     static let rulerHeight: CGFloat = 42
     static let laneHeight: CGFloat = 34
@@ -139,7 +157,7 @@ struct TimelineLanesView: View {
     private var contentHeight: CGFloat {
         var y = Self.rulerHeight
         for track in tracks {
-            y += Self.laneHeight + extraHeight(track) + Self.laneSpacing
+            y += rowHeight + extraHeight(track) + Self.laneSpacing
         }
         return y
     }
@@ -148,19 +166,19 @@ struct TimelineLanesView: View {
     private func laneTop(_ index: Int) -> CGFloat {
         var y = Self.rulerHeight
         for i in 0..<index {
-            y += Self.laneHeight + extraHeight(tracks[i]) + Self.laneSpacing
+            y += rowHeight + extraHeight(tracks[i]) + Self.laneSpacing
         }
         return y
     }
 
     /// Top y of track `index`'s takes section (directly below its clips).
     private func takesTop(_ index: Int) -> CGFloat {
-        laneTop(index) + Self.laneHeight
+        laneTop(index) + rowHeight
     }
 
     /// Top y of track `index`'s automation editor row (below clips + takes).
     private func automationTop(_ index: Int) -> CGFloat {
-        laneTop(index) + Self.laneHeight + takesHeight(tracks[index])
+        laneTop(index) + rowHeight + takesHeight(tracks[index])
     }
 
     /// Green audio / cyan MIDI, violet whenever the clip is AI-touched
@@ -168,6 +186,24 @@ struct TimelineLanesView: View {
     private func tint(_ clip: Clip) -> Color {
         if clip.isAIGenerated { return DAWTheme.ai }
         return clip.isMIDI ? DAWTheme.playback : DAWTheme.signal
+    }
+
+    // MARK: - Density (Simple locks the grid to Bar; Pro is the full edit layer)
+
+    /// Stable density key for the whole arrange workspace — one mode for the
+    /// timeline + clip chrome + snap picker (docs/DESIGN-LANGUAGE.md "Panels").
+    static let panelID = "arrange"
+
+    /// True when the arrange workspace is in Pro (the full clip-edit layer). Simple
+    /// hides the trim/fade/split/gain/stretch chrome + their gestures and locks snap.
+    private var isPro: Bool { densityStore.density(forPanel: Self.panelID) == .pro }
+
+    /// The snap the CLIP lane actually uses: the picked resolution in Pro, locked
+    /// to Bar in Simple (mirroring the piano roll locking Simple to Beat). The
+    /// picker value is never mutated, so flipping back to Pro restores it. Take
+    /// lanes deliberately keep the raw picked `snap` (density leaves them untouched).
+    private var effectiveSnap: ClipSnap {
+        ClipSnap.effective(density: densityStore.density(forPanel: Self.panelID), picked: snap)
     }
 
     var body: some View {
@@ -192,7 +228,7 @@ struct TimelineLanesView: View {
         Canvas { context, size in
             // Lane backgrounds.
             for index in tracks.indices {
-                let rect = CGRect(x: 0, y: laneTop(index), width: size.width, height: Self.laneHeight)
+                let rect = CGRect(x: 0, y: laneTop(index), width: size.width, height: rowHeight)
                 context.fill(Path(rect), with: .color(DAWTheme.panelRaised.opacity(0.4)))
             }
 
@@ -209,7 +245,7 @@ struct TimelineLanesView: View {
                 }
             }
             context.fill(beatLines, with: .color(DAWTheme.hairline))
-            context.fill(barLines, with: .color(Color.white.opacity(0.14)))
+            context.fill(barLines, with: .color(DAWTheme.gridEmphasis))
 
             // Ruler baseline + bar numbers (SF Mono digital readout).
             context.fill(
@@ -247,10 +283,11 @@ struct TimelineLanesView: View {
                     tint: tint(clip),
                     isSelected: clip.id == selectedClipID,
                     width: width,
-                    height: Self.laneHeight,
+                    height: rowHeight,
                     laneOriginY: laneTop(index),
                     geometry: clipGeometry,
-                    snap: snap,
+                    snap: effectiveSnap,
+                    pro: isPro,
                     beatsPerBar: beatsPerBar,
                     secondsPerBeat: secondsPerBeat,
                     playheadBeat: positionBeats,
@@ -275,6 +312,11 @@ struct TimelineLanesView: View {
                     }
                 )
                 .offset(x: CGFloat(clip.startBeat) * Self.pixelsPerBeat, y: laneTop(index))
+                // One card summarizes the clip's edit affordances — the honest scope
+                // for Canvas/gesture chrome (fade grips, trim edges, ⌥-stretch are
+                // gesture-internal, not tag-able views). Per-instance frames anchor it
+                // on whichever clip is hovered (ex-b).
+                .explainable(.clipBlock)
             }
         }
     }
@@ -382,6 +424,10 @@ private struct ClipBlock: View {
     var laneOriginY: CGFloat
     var geometry: ClipEditGeometry
     var snap: ClipSnap
+    /// Arrange density (docs/DESIGN-LANGUAGE.md "Panels"): Pro is the full clip-edit
+    /// layer; Simple drops the trim/fade/split/gain/stretch chrome and gestures so
+    /// the block is a move-only body on the (Bar-locked) grid.
+    var pro: Bool
     var beatsPerBar: Int
     var secondsPerBeat: Double
     var playheadBeat: Double
@@ -439,7 +485,8 @@ private struct ClipBlock: View {
 
     private var ppb: CGFloat { geometry.pixelsPerBeat }
     private var clipOriginX: CGFloat { CGFloat(clip.startBeat) * ppb }
-    private var showGain: Bool { width > 40 && (clip.gainDb != 0 || hovering || isSelected) }
+    /// Pro-only (sp-c): the gain dB chip and its drag are a clip-edit affordance.
+    private var showGain: Bool { pro && width > 40 && (clip.gainDb != 0 || hovering || isSelected) }
 
     /// Amber hint: this clip is stretched OUTSIDE the 0.75–1.5× transparent band
     /// (docs/DESIGN-LANGUAGE.md amber = warning; never a hard block).
@@ -470,9 +517,17 @@ private struct ClipBlock: View {
     }
     /// Tooltip: base edit hint, plus the out-of-band ratio note when amber-tinted.
     private var helpText: String {
-        let base = clip.isMIDI
-            ? "MIDI clip — click to edit notes, drag to move, double-click to split"
-            : "\(clip.name) — drag to move, edges to trim, corners to fade, ⌥-drag the right edge to time-stretch"
+        // Simple (sp-c): the block is move-only, so the hint drops the Pro verbs.
+        let base: String
+        if !pro {
+            base = clip.isMIDI
+                ? "MIDI clip — click to edit notes, drag to move"
+                : "\(clip.name) — drag to move"
+        } else {
+            base = clip.isMIDI
+                ? "MIDI clip — click to edit notes, drag to move, double-click to split"
+                : "\(clip.name) — drag to move, edges to trim, corners to fade, ⌥-drag the right edge to time-stretch"
+        }
         return outOfBand ? base + "\n" + ClipStretch.outOfBandHelp(ratio: clip.stretchRatio) : base
     }
 
@@ -480,6 +535,7 @@ private struct ClipBlock: View {
         RoundedRectangle(cornerRadius: 5)
             .fill(tint.opacity(isSelected ? 0.34 : 0.22))
             .overlay { waveform }
+            .overlay { noteMap }
             .overlay { shimmer }
             .overlay { decorations }
             .overlay(alignment: .leading) { label }
@@ -497,14 +553,25 @@ private struct ClipBlock: View {
             .glow(borderColor, radius: 5, intensity: glowIntensity)
             .frame(width: width, height: height)
             .contentShape(Rectangle())
-            .highPriorityGesture(stretchDrag)
+            // Pointer affordances (docs/DESIGN-LANGUAGE.md): trim edges / fade grips
+            // resize, the gain chip drags up/down, the body grabs — mirrors
+            // `beginDrag`'s zone routing so the hover cue matches the press.
+            .hoverCursor(resolve: clipCursor)
+            // Pro-only gesture entry points (sp-c): the ⌥ time-stretch handle, the
+            // double-click split, and the ⌥-click fade-curve toggle. In Simple the
+            // gesture mask drops them (`.subviews` = this gesture disabled) so they
+            // don't recognize — leaving `clipDrag` (which force-moves the body, see
+            // `beginDrag`) and the select tap as the only Simple interactions.
+            .highPriorityGesture(stretchDrag, including: pro ? .all : .subviews)
             .gesture(clipDrag)
-            .simultaneousGesture(doubleClickSplit)
-            .simultaneousGesture(optionClickFadeToggle)
+            .simultaneousGesture(doubleClickSplit, including: pro ? .all : .subviews)
+            .simultaneousGesture(optionClickFadeToggle, including: pro ? .all : .subviews)
             .onTapGesture { onSelect() }
             .onHover { h in
                 hovering = h
-                if h { startFlagsMonitor() } else { stopFlagsMonitor() }
+                // The ⌥ flags monitor only drives the Pro stretch-grip cue — never
+                // install it in Simple (no monitor when there's nothing to cue).
+                if h && pro { startFlagsMonitor() } else { stopFlagsMonitor() }
             }
             .onDisappear { stopFlagsMonitor() }
             .contextMenu { contextMenu }
@@ -544,7 +611,7 @@ private struct ClipBlock: View {
     /// hover, cyan-lit + glowing while ⌥ is held (drag now stretches, not trims).
     @ViewBuilder
     private var stretchGrip: some View {
-        if !clip.isMIDI, width > 24, hovering || optionHeld {
+        if pro, !clip.isMIDI, width > 24, hovering || optionHeld {
             Text("≈")
                 .font(.system(size: 12, weight: .bold, design: .monospaced))
                 .foregroundStyle(optionHeld ? DAWTheme.playback : DAWTheme.textDim)
@@ -630,6 +697,32 @@ private struct ClipBlock: View {
                 tint: tint
             )
             .clipShape(RoundedRectangle(cornerRadius: 5))
+        } else if !clip.isMIDI {
+            // Audio honesty (beta m10-f): while the peaks load off-main (or the file
+            // is unreadable → computePeaks nil), show a dim flat center line so an
+            // audio clip never reads as blank. Minimal on purpose — no shimmer (that
+            // idiom means "stretch working"), no redesign.
+            Rectangle()
+                .fill(tint.opacity(0.3))
+                .frame(height: 1)
+                .frame(maxHeight: .infinity, alignment: .center)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// Mini note map for a MIDI clip (beta m10-f): pitch-mapped tint pills so a
+    /// MIDI clip shows its content, the sibling of the audio waveform. Sits in the
+    /// same overlay slot (under decorations), value-in only, redraws on data change.
+    @ViewBuilder
+    private var noteMap: some View {
+        if clip.isMIDI, let notes = clip.notes, !notes.isEmpty {
+            ClipMIDIMap(
+                notes: notes,
+                lengthBeats: clip.lengthBeats,
+                pixelsPerBeat: ppb,
+                tint: tint
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 5))
         }
     }
 
@@ -650,7 +743,11 @@ private struct ClipBlock: View {
     }
 
     /// Translucent fade shading (over the waveform) + the top-corner fade grips.
+    /// Pro-only (sp-c): fades are a clip-edit affordance, so Simple draws no fade
+    /// chrome at all (no grips, no shading) — the block reads as a plain clip.
+    @ViewBuilder
     private var decorations: some View {
+        if pro {
         Canvas { context, size in
             let gripBright = (hovering || isSelected) ? 0.9 : 0.4
             if clip.fadeInBeats > 0 {
@@ -668,6 +765,7 @@ private struct ClipBlock: View {
             context.fill(gripTriangle(atX: foX), with: .color(tint.opacity(gripBright)))
         }
         .allowsHitTesting(false)
+        }
     }
 
     /// Rising fade factor 0→1 for progress `t` (linear = t, equal-power = sine).
@@ -738,6 +836,9 @@ private struct ClipBlock: View {
                 .clipShape(RoundedRectangle(cornerRadius: 3))
                 .glow(DAWTheme.playback, radius: 2, intensity: clip.gainDb != 0 ? 0.35 : 0)
                 .padding(3)
+                // Cursor for the gain chip is handled by the clip-level resolver's
+                // bottom-right region (`clipCursor`) so its tracking area doesn't
+                // overlap/race the block's — see `hoverCursor(resolve:)` above.
                 .highPriorityGesture(gainDrag)
                 .help("Clip gain — drag up/down to adjust")
         }
@@ -746,11 +847,12 @@ private struct ClipBlock: View {
     private var gainDrag: some Gesture {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
+                DragCursor.set(.resizeUpDown)
                 if gainDragOrigin == nil { gainDragOrigin = clip.gainDb }
                 let deltaDb = -Double(value.translation.height) * 0.15
                 onSetGain(ClipEdit.adjustedGainDb(gainDragOrigin ?? clip.gainDb, deltaDb: deltaDb))
             }
-            .onEnded { _ in gainDragOrigin = nil }
+            .onEnded { _ in gainDragOrigin = nil; DragCursor.clear() }
     }
 
     // MARK: - Cursor readout
@@ -775,21 +877,42 @@ private struct ClipBlock: View {
 
     // MARK: - Gestures
 
+    /// Rest cursor over the clip block (docs/DESIGN-LANGUAGE.md "Pointer
+    /// affordances"). Simple: the whole body MOVES → grab (no trim/fade zones).
+    /// Pro: mirror `beginDrag`'s zone routing — trim edges and fade grips resize,
+    /// the gain chip (bottom-right value control) drags up/down, the body grabs.
+    private func clipCursor(at p: CGPoint) -> CursorKind? {
+        guard pro else { return .grab }
+        if showGain, p.x >= width - 34, p.y >= height - 16 { return .resizeUpDown }
+        let zone = geometry.classifyZone(
+            localPoint: p, clipWidth: width,
+            fadeInBeats: clip.fadeInBeats, fadeOutBeats: clip.fadeOutBeats)
+        return CursorAffordance.forClipZone(zone)
+    }
+
     private var clipDrag: some Gesture {
         DragGesture(minimumDistance: 2, coordinateSpace: .named(TimelineLanesView.contentSpace))
             .onChanged { value in
                 let active = drag ?? beginDrag(at: value.startLocation)
+                // Hold the zone's drag cursor even if the pointer leaves the block
+                // (a body closes the hand; an edge/fade keeps its resize).
+                DragCursor.set(CursorAffordance.forClipZone(active.zone, dragging: true))
                 applyDrag(active, translationBeats: Double(value.translation.width / ppb))
             }
-            .onEnded { _ in drag = nil; readout = nil }
+            .onEnded { _ in drag = nil; readout = nil; DragCursor.clear() }
     }
 
     private func beginDrag(at start: CGPoint) -> ActiveDrag {
         let localX = start.x - clipOriginX
         let localY = start.y - laneOriginY
-        let zone = geometry.classifyZone(
-            localPoint: CGPoint(x: localX, y: localY), clipWidth: width,
-            fadeInBeats: clip.fadeInBeats, fadeOutBeats: clip.fadeOutBeats)
+        // Simple (sp-c): collapse every zone to `.body` so an edge/corner press
+        // MOVES the clip instead of trimming/fading — no dead hit-zone under the
+        // now-hidden trim strips and fade grips.
+        let zone: ClipZone = pro
+            ? geometry.classifyZone(
+                localPoint: CGPoint(x: localX, y: localY), clipWidth: width,
+                fadeInBeats: clip.fadeInBeats, fadeOutBeats: clip.fadeOutBeats)
+            : .body
         let active = ActiveDrag(zone: zone, originStart: clip.startBeat,
                                 originLength: clip.lengthBeats, originRatio: clip.stretchRatio,
                                 startLocalX: localX)
@@ -811,6 +934,8 @@ private struct ClipBlock: View {
                 let active = drag ?? beginDrag(at: value.startLocation)
                 let dxBeats = Double(value.translation.width / ppb)
                 if ClipStretch.isStretchDrag(zone: active.zone, optionHeld: true, isAudio: !clip.isMIDI) {
+                    // ⌥-stretch retargets the right edge — a horizontal resize.
+                    DragCursor.set(.resizeLeftRight)
                     let target = ClipStretch.targetLength(
                         originalStart: active.originStart, originalLength: active.originLength,
                         dragDeltaBeats: dxBeats, snap: snap, beatsPerBar: beatsPerBar)
@@ -819,10 +944,11 @@ private struct ClipBlock: View {
                     onStretch(target)
                     readout = ClipStretch.stretchReadout(length: preview.length, ratio: preview.ratio)
                 } else {
+                    DragCursor.set(CursorAffordance.forClipZone(active.zone, dragging: true))
                     applyDrag(active, translationBeats: dxBeats)
                 }
             }
-            .onEnded { _ in drag = nil; readout = nil }
+            .onEnded { _ in drag = nil; readout = nil; DragCursor.clear() }
     }
 
     private func applyDrag(_ active: ActiveDrag, translationBeats dxBeats: Double) {
@@ -902,31 +1028,36 @@ private struct ClipBlock: View {
     private var contextMenu: some View {
         // Take-group members: comp is edited via the take lanes, so the member's
         // menu offers take swaps + the flatten escape hatch instead of clip edits.
+        // These stay in BOTH modes — take lanes are density-unaffected (sp-c).
         if !takeMenuLanes.isEmpty {
             ForEach(takeMenuLanes) { lane in
                 Button("Select \(lane.name)") { onSelectTakeLane(lane.id) }
             }
             Divider()
             Button("Flatten Group") { onFlattenTakeGroup() }
-            Divider()
+            if pro { Divider() }
         }
-        Button("Split at Playhead") {
-            if let beat = ClipEdit.snappedSplit(
-                timelineBeatRaw: playheadBeat, clipStart: clip.startBeat,
-                clipLength: clip.lengthBeats, snap: snap, beatsPerBar: beatsPerBar) {
-                onSplit(beat)
+        // Clip-edit entries are Pro-only (sp-c): split / gain / fade curves. In
+        // Simple a non-take clip has no context menu (empty builder → no menu).
+        if pro {
+            Button("Split at Playhead") {
+                if let beat = ClipEdit.snappedSplit(
+                    timelineBeatRaw: playheadBeat, clipStart: clip.startBeat,
+                    clipLength: clip.lengthBeats, snap: snap, beatsPerBar: beatsPerBar) {
+                    onSplit(beat)
+                }
             }
-        }
-        Button("Reset Gain") { onSetGain(0) }
-            .disabled(clip.gainDb == 0)
-        Divider()
-        Button(clip.fadeInCurve == .linear ? "Fade In: Equal Power" : "Fade In: Linear") {
-            onSetFades(clip.fadeInBeats, clip.fadeOutBeats,
-                       ClipEdit.toggledCurve(clip.fadeInCurve), clip.fadeOutCurve)
-        }
-        Button(clip.fadeOutCurve == .linear ? "Fade Out: Equal Power" : "Fade Out: Linear") {
-            onSetFades(clip.fadeInBeats, clip.fadeOutBeats,
-                       clip.fadeInCurve, ClipEdit.toggledCurve(clip.fadeOutCurve))
+            Button("Reset Gain") { onSetGain(0) }
+                .disabled(clip.gainDb == 0)
+            Divider()
+            Button(clip.fadeInCurve == .linear ? "Fade In: Equal Power" : "Fade In: Linear") {
+                onSetFades(clip.fadeInBeats, clip.fadeOutBeats,
+                           ClipEdit.toggledCurve(clip.fadeInCurve), clip.fadeOutCurve)
+            }
+            Button(clip.fadeOutCurve == .linear ? "Fade Out: Equal Power" : "Fade Out: Linear") {
+                onSetFades(clip.fadeInBeats, clip.fadeOutBeats,
+                           clip.fadeInCurve, ClipEdit.toggledCurve(clip.fadeOutCurve))
+            }
         }
     }
 

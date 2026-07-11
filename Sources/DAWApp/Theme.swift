@@ -7,6 +7,13 @@ enum DAWTheme {
     static let panel = Color(hex: 0x12151D)
     static let panelRaised = Color(hex: 0x181C27)
     static let hairline = Color.white.opacity(0.06)
+    /// Brighter-than-hairline grid line (bar lines, octave markers). One token so
+    /// timeline / piano-roll / keyboard grids emphasize at the same strength.
+    static let gridEmphasis = Color.white.opacity(0.14)
+
+    // Piano-roll keyboard-gutter key rows (no raw hex in views — Theme owns color).
+    static let keyBlack = Color(hex: 0x11141C)   // black-key row
+    static let keyWhite = Color(hex: 0x2C3242)   // white-key row
 
     // Semantic accents — one meaning each, never decorative.
     static let playback = Color(hex: 0x3EE6FF)   // cyan: playback/position/active
@@ -15,8 +22,11 @@ enum DAWTheme {
     static let signal = Color(hex: 0x5DFF9F)     // green: healthy signal/success
     static let ai = Color(hex: 0xB48CFF)         // violet: AI-generated/AI-touched
 
-    static let textPrimary = Color(hex: 0xE8ECF4)
-    static let textDim = Color(hex: 0x8A93A6)
+    // Text hierarchy — measured against base #0B0D12 / raised #12151D / chip #181C27.
+    static let textPrimary = Color(hex: 0xE8ECF4)     // primary content (14.4–16.4:1)
+    static let textSecondary = Color(hex: 0x9FA9BC)   // legible secondary labels (7.2–8.2:1, ≥4.5)
+    static let textDim = Color(hex: 0x8A93A6)         // muted micro-labels/captions (5.5–6.3:1, ≥4.5)
+    static let textFaint = Color(hex: 0x767E90)       // placeholder/decorative floor (4.2–4.8:1, ≥3.0)
 }
 
 extension Color {

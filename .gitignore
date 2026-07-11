@@ -1,6 +1,7 @@
 .DS_Store
 .build/
 build/
+dist/
 DerivedData/
 *.xcodeproj
 *.xcworkspace
@@ -8,5 +9,6 @@ DerivedData/
 .env
 node_modules/
 mcp-server/dist/
+mcp-server/dist-test/
 *.log
 assets/generated/

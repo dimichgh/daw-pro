@@ -312,3 +312,254 @@ struct SidecarManagerStopTests {
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".ace-step.pid").path))
     }
 }
+
+// MARK: - M10-b: honest `.starting` (the beta "loaded-but-not-started" bug)
+
+/// Real excerpts lifted verbatim from `~/Library/Logs/DAWPro/ace-step.log`
+/// (the 2026-07-06 08:07 cold-boot and 2026-07-10 01:26 warm-boot sessions),
+/// never invented — see `SidecarStartPhase`'s own doc comment.
+private enum SampleLogExcerpts {
+    static let preparingEnvironment = """
+        W0706 08:07:38.376000 83985 torch/distributed/elastic/multiprocessing/redirects.py:29] \
+        NOTE: Redirects are currently not supported in Windows or MacOs.
+        2026-07-06 08:07:49.862 | WARNING  | acestep.training.trainer:<module>:40 - bitsandbytes \
+        not installed. Using standard AdamW.
+        [API Server] Using LM model: acestep-5Hz-lm-4B
+        INFO:     Started server process [83985]
+        """
+
+    static let startingServer = """
+        \(preparingEnvironment)
+        INFO:     Waiting for application startup.
+        2026-07-06 08:07:54.564 | INFO     | acestep.gpu_config:get_gpu_config:846 - macOS MPS \
+        detected (107.5 GB unified memory, tier=unlimited).
+        INFO:     Application startup complete.
+        INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
+        [API Server] Server is ready to accept requests (models not loaded yet)
+        """
+
+    static let loadingModels = """
+        [API Server] First request received — lazy-loading models...
+        [API Server] Initializing models...
+        [API Server] CPU offload disabled by default (GPU >= 16GB)
+        [Model Download] Model acestep-v15-xl-turbo already exists at /checkpoints/acestep-v15-xl-turbo
+        [API Server] Loading primary DiT model: acestep-v15-xl-turbo
+        Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?steps/s]Loading checkpoint shards: \
+        100%|##########| 4/4 [00:00<00:00, 50.80steps/s]
+        2026-07-06 08:13:14.492 | INFO     | acestep.core.generation.handler.mlx_dit_init:_init_mlx_dit:34 \
+        - [MLX-DiT] Native MLX DiT decoder initialized successfully (mx.compile=False).
+        2026-07-06 08:13:15.362 | INFO     | acestep.llm_inference:initialize:609 - loading 5Hz LM \
+        tokenizer... it may take 80~90s
+        """
+
+    /// The log is APPENDED across restarts, never truncated — this excerpt
+    /// simulates a tail read early in a NEW boot that still holds the tail
+    /// end of the PREVIOUS session (ending in its own "Uvicorn running" /
+    /// "Finished server process" lines) followed by the new session's first
+    /// few (pre-server) lines. The rightmost/most-recent marker (this
+    /// session's "[API Server] Using LM model:") must win, not the stale
+    /// "Uvicorn running" left over from the session that just exited.
+    static let staleSessionTailFollowedByFreshPreparingEnvironment = """
+        INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
+        INFO:     Shutting down
+        INFO:     Finished server process [62566]
+        W0710 01:26:58.705000 63500 torch/distributed/elastic/multiprocessing/redirects.py:29] \
+        NOTE: Redirects are currently not supported in Windows or MacOs.
+        2026-07-10 01:26:59.679 | WARNING  | acestep.training.trainer:<module>:40 - bitsandbytes \
+        not installed. Using standard AdamW.
+        [API Server] Using LM model: acestep-5Hz-lm-4B
+        INFO:     Started server process [63500]
+        """
+}
+
+@Suite("SidecarStartPhase — log-tail classification (M10-b, pure/headless)")
+struct SidecarStartPhaseTests {
+    @Test("early boot output (pre-uvicorn) -> preparing environment")
+    func preparingEnvironmentClassifies() {
+        #expect(SidecarStartPhase.classify(logTail: SampleLogExcerpts.preparingEnvironment)
+                == "preparing environment…")
+    }
+
+    @Test("uvicorn/startup-complete lines -> starting server")
+    func startingServerClassifies() {
+        #expect(SidecarStartPhase.classify(logTail: SampleLogExcerpts.startingServer)
+                == "starting server…")
+    }
+
+    @Test("DiT/checkpoint/MLX load lines -> loading models")
+    func loadingModelsClassifies() {
+        #expect(SidecarStartPhase.classify(logTail: SampleLogExcerpts.loadingModels)
+                == "loading models…")
+    }
+
+    @Test("unrecognizable text -> nil (banner falls back to a generic line)")
+    func unknownTailClassifiesNil() {
+        #expect(SidecarStartPhase.classify(logTail: "some unrelated line\nanother one\n") == nil)
+    }
+
+    @Test("empty tail -> nil")
+    func emptyTailClassifiesNil() {
+        #expect(SidecarStartPhase.classify(logTail: "") == nil)
+    }
+
+    @Test("a fresh session's early lines outrank a PREVIOUS session's stale tail (log is append-only)")
+    func mostRecentMarkerWinsAcrossSessionBoundary() {
+        #expect(SidecarStartPhase.classify(
+            logTail: SampleLogExcerpts.staleSessionTailFollowedByFreshPreparingEnvironment)
+            == "preparing environment…")
+    }
+}
+
+@Suite("SidecarManager.classifyFallbackBoot — pidfile-relaunch decision (M10-b, pure/headless)")
+struct SidecarManagerClassifyFallbackBootTests {
+    @Test("alive pid -> inProgress, started at the pidfile's own modification date")
+    func aliveMapsToInProgress() {
+        let modifiedAt = Date(timeIntervalSince1970: 1_752_000_000)
+        let result = SidecarManager.classifyFallbackBoot(pid: 4242, modifiedAt: modifiedAt, isAlive: true)
+        #expect(result == .inProgress(startedAt: modifiedAt, pid: 4242))
+    }
+
+    @Test("dead pid -> failedBoot (a lingering pidfile from a boot that already died)")
+    func deadMapsToFailedBoot() {
+        let result = SidecarManager.classifyFallbackBoot(
+            pid: 4242, modifiedAt: Date(), isAlive: false)
+        #expect(result == .failedBoot)
+    }
+}
+
+@Suite("SidecarManager — status() honesty across the boot window (M10-b, real process/pidfile)")
+struct SidecarManagerBootProgressTests {
+    private func makeTempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ace-step-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    // MARK: Fresh-actor pidfile fallback (simulates an app relaunch mid-boot)
+
+    @Test("""
+        fresh manager instance + pidfile pointing at an ALIVE pid (this test process itself) \
+        -> status() reports .starting from the pidfile's mtime, NEVER installedNotRunning
+        """)
+    func pidfileFallbackAliveReportsStarting() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logURL = dir.appendingPathComponent("ace-step.log")
+        try Data(SampleLogExcerpts.loadingModels.utf8).write(to: logURL)
+        // This TEST process is certainly alive for the test's duration — a
+        // real pid liveness check with no process to spawn/reap.
+        let ownPid = ProcessInfo.processInfo.processIdentifier
+        try Data("\(ownPid)".utf8).write(to: dir.appendingPathComponent(".ace-step.pid"))
+        let unusedPort = try StubHealthServer.unusedLoopbackPort()
+
+        // A FRESH manager — no in-memory `startedAt` — exercising the pidfile
+        // fallback exclusively (requirement 1's relaunch-mid-boot case).
+        let manager = SidecarManager(configuration: .init(
+            baseURL: URL(string: "http://127.0.0.1:\(unusedPort)")!,
+            acestepDir: dir, logFileURL: logURL))
+        let status = await manager.status()
+
+        #expect(status.state == .starting)
+        #expect(status.pid == ownPid)
+        #expect(status.phase == "loading models…")
+        #expect(status.startingForSeconds != nil)
+        #expect((status.startingForSeconds ?? -1) >= 0)
+        #expect(status.message.localizedCaseInsensitiveContains("starting"))
+    }
+
+    @Test("""
+        fresh manager instance + pidfile pointing at a DEAD pid \
+        -> installedNotRunning, message names the boot as failed and points at the log
+        """)
+    func pidfileFallbackDeadReportsFailedBoot() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logURL = dir.appendingPathComponent("ace-step.log")
+        // Pid 99999 is exceedingly unlikely to be a live process in a test
+        // sandbox (the `stalePidfileIsCleanedUp` precedent above).
+        try Data("99999".utf8).write(to: dir.appendingPathComponent(".ace-step.pid"))
+        let unusedPort = try StubHealthServer.unusedLoopbackPort()
+
+        let manager = SidecarManager(configuration: .init(
+            baseURL: URL(string: "http://127.0.0.1:\(unusedPort)")!,
+            acestepDir: dir, logFileURL: logURL))
+        let status = await manager.status()
+
+        #expect(status.state == .installedNotRunning)
+        #expect(status.message.localizedCaseInsensitiveContains("boot"))
+        #expect(status.message.contains(logURL.path))
+        #expect(status.phase == nil)
+        #expect(status.startingForSeconds == nil)
+    }
+
+    // MARK: Real start()/status()/stop() round-trip
+
+    /// A `run.sh` that spawns a REAL, harmless, longer-lived child (a plain
+    /// `sleep`) so `start()`'s process-liveness check and `stop()`'s SIGTERM
+    /// path exercise an actual pid — never a stub. It never listens on a
+    /// health port, so `start()` reliably times out without a real ACE-Step
+    /// server, exactly reproducing the beta report's shape (process up,
+    /// health not yet reachable).
+    private func writeSleepingRunScript(in dir: URL, seconds: Int = 20) throws {
+        try Data("#!/bin/bash\nsleep \(seconds)\n".utf8)
+            .write(to: dir.appendingPathComponent("run.sh"))
+    }
+
+    @Test("""
+        start() timing out leaves the boot tracked — a LATER status() poll still reports \
+        .starting (with a phase + increasing elapsed seconds), never installedNotRunning; \
+        stop() then cleanly ends it
+        """)
+    func startTimeoutThenLaterStatusStillReportsStarting() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try writeSleepingRunScript(in: dir)
+        let logURL = dir.appendingPathComponent("ace-step.log")
+        // Pre-seed the log with a recognizable phase marker: `start()` opens
+        // the log for WRITING but seeks to the END first (never truncates),
+        // so this content survives and is what the timeout read sees (the
+        // spawned `sleep` never writes anything of its own).
+        try Data(SampleLogExcerpts.loadingModels.utf8).write(to: logURL)
+        let unusedPort = try StubHealthServer.unusedLoopbackPort()
+
+        let manager = SidecarManager(configuration: .init(
+            baseURL: URL(string: "http://127.0.0.1:\(unusedPort)")!,
+            acestepDir: dir,
+            logFileURL: logURL,
+            startupTimeoutSeconds: 0.4,
+            healthPollIntervalSeconds: 0.1))
+
+        let started = try await manager.start()
+        #expect(started.state == .starting)
+        #expect(started.pid != nil)
+        #expect(started.phase == "loading models…")
+        #expect(started.startingForSeconds != nil)
+        // Health-aware timeout message: names the log path, doesn't read as
+        // a hard failure ("did not report healthy" + "still loading", not
+        // "call ai.sidecarStart").
+        #expect(started.message.contains(logURL.path))
+        #expect(started.message.localizedCaseInsensitiveContains("loading"))
+
+        // THE bug this fixes: a poll made AFTER start() has already returned
+        // (the beta user re-checking the panel) must still see .starting —
+        // never installedNotRunning telling them to call ai.sidecarStart
+        // again, since the process is already up and still booting.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let polled = await manager.status()
+        #expect(polled.state == .starting)
+        #expect(polled.pid == started.pid)
+        #expect(polled.startingForSeconds != nil)
+        if let first = started.startingForSeconds, let second = polled.startingForSeconds {
+            #expect(second >= first)
+        }
+
+        // stop() ends the tracked boot cleanly (clearing rule c) and reaps
+        // the real spawned process — verified by a subsequent status() no
+        // longer reporting .starting.
+        let stopped = try await manager.stop()
+        #expect(stopped.state != .starting)
+        let afterStop = await manager.status()
+        #expect(afterStop.state != .starting)
+    }
+}

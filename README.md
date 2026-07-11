@@ -2,7 +2,7 @@
 
 A professional, AI-native digital audio workstation for macOS. Logic-class ambitions, a glass-cockpit interface a beginner can read, and **full AI control via MCP** — agents can compose, arrange, and mix through the same command surface the UI uses.
 
-> Project vision: [docs/VISION.md](docs/VISION.md) · Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md)
+> Project vision: [docs/VISION.md](docs/VISION.md) · Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md) · User Guide: [docs/USER-GUIDE.md](docs/USER-GUIDE.md) · Features: [docs/FEATURES.md](docs/FEATURES.md)
 
 ## Status
 

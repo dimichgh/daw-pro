@@ -1,6 +1,29 @@
 import Foundation
 import Observation
 
+/// A single journaled edit, surfaced by `ProjectStore.lastEditEvent` (M8 ob-b).
+/// Carries just enough for an app-side observer to classify the edit and emit the
+/// right onboarding tour signal (`editPerformed` vs `mixerAdjusted`) WITHOUT the
+/// tour model ever reading `ProjectStore` (design decision 2 of the onboarding
+/// doc). `seq` strictly increases per journaled edit — so coalesced same-key edits
+/// still tick and a debounced subscriber never misses one; `label` is the undo
+/// label and `key` the coalescing key (nil when the edit doesn't coalesce). Value
+/// type, `Equatable`/`Sendable`.
+public struct EditEvent: Equatable, Sendable {
+    /// Strictly-increasing sequence number (1-based), one per journaled edit.
+    public let seq: Int
+    /// The edit's undo label (e.g. "Set 'Bass' Volume").
+    public let label: String
+    /// The edit's coalescing key (e.g. "track.volume:<uuid>"), or nil.
+    public let key: String?
+
+    public init(seq: Int, label: String, key: String?) {
+        self.seq = seq
+        self.label = label
+        self.key = key
+    }
+}
+
 /// The single command surface for session state. UI actions and control-protocol
 /// commands both land here; if a capability isn't reachable through ProjectStore,
 /// it doesn't exist as far as agents are concerned.
@@ -55,8 +78,31 @@ public final class ProjectStore {
     public var undoLabel: String? { journal.undoLabel }
     public var redoLabel: String? { journal.redoLabel }
 
+    /// The most recently journaled edit — set inside `performEdit` EXACTLY when a
+    /// journal entry actually records (a genuine state change; a no-op edit leaves
+    /// it untouched, the humanize zero-jitter precedent). `seq` strictly increases
+    /// so coalesced same-key edits still tick. Public/observable so an app-side
+    /// observer (the M8 onboarding signal adapter, ob-b) can classify the edit and
+    /// emit the matching tour signal WITHOUT the tour model reading `ProjectStore`.
+    /// A live session fact, never persisted into the project file.
+    public private(set) var lastEditEvent: EditEvent?
+    /// Monotonic edit sequence counter behind `lastEditEvent.seq`. Not observed —
+    /// only `lastEditEvent` drives the app's observation.
+    @ObservationIgnored private var editEventSeq = 0
+
+    /// How many bounces/mixdowns have finished writing a file this session —
+    /// incremented on every successful `renderBounce` / `renderMixdown` return
+    /// (M8 ob-b). Public/observable so the onboarding signal adapter fires
+    /// `renderCompleted` on an increment; `internal(set)` because `renderBounce`
+    /// lives in the `ProjectStore+Render` extension file. A monotonic session
+    /// counter, never persisted.
+    public internal(set) var renderCompletedCount = 0
+
     /// Background 30-s autosave loop; nil when not running. Not observed.
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?
+    /// Background 30-s crash-recovery autosave loop (M9 crash-b); nil when not
+    /// running. Not observed. Separate from `autosaveTask` — the app runs this one.
+    @ObservationIgnored private var crashAutosaveTask: Task<Void, Never>?
     /// Stable slug for THIS store's untitled-recovery bundle so repeated
     /// autosaves overwrite one slot rather than littering. Not observed.
     @ObservationIgnored private let recoverySlug = String(UUID().uuidString.prefix(8))
@@ -64,6 +110,23 @@ public final class ProjectStore {
     /// real Application Support location; a test seam points it at a temp dir so
     /// autosave never writes into the user's real profile.
     @ObservationIgnored var autosaveRecoveryDirectory = ProjectStore.defaultAutosaveDirectory()
+
+    /// Crash-recovery autosave engine (M9 crash-b) — the rolling `autosave.dawproject`
+    /// snapshot + `manifest.json` + `session.lock` in the Autosave dir, SEPARATE
+    /// from `startAutosave`/`autosaveIfNeeded` (which save the user's file in place
+    /// or write a per-slug recovery bundle). Never touches the user's project file;
+    /// its snapshot is offered back only after a crash. Injected in tests
+    /// (`store.crashRecovery.directory` / `.clock`) — the OnboardingStateBacking /
+    /// PanelDensity injection idiom.
+    @ObservationIgnored public var crashRecovery = AutosaveManager()
+
+    /// Diagnostics-bundle writer (M9 beta) — the headless engine behind
+    /// `writeFeedbackBundle`/`app.feedbackBundle`. Injected in tests
+    /// (`store.diagnostics.outputDir` / `.crashReportsDir` / `.clock`) so a bundle
+    /// never lands in the real profile and never scans the real crash-report store
+    /// — the `crashRecovery` idiom. Makes NO network calls and reads NO key
+    /// material.
+    @ObservationIgnored public var diagnostics = DiagnosticsReporter()
 
     /// Injected engine; nil in headless tests.
     public weak var engine: (any AudioEngineControlling)? {
@@ -86,6 +149,28 @@ public final class ProjectStore {
     /// Injected media service that reads audio-file facts at import time;
     /// nil in headless tests unless a fake is provided.
     public var media: (any MediaImporting)?
+
+    /// Injected AI song-generation source (M6 iii-a): resolves a generation
+    /// jobId to its finished local audio + metas for `importGeneration`. The
+    /// app wires the real `SongGenerating`-backed adapter here (DAWControl);
+    /// nil in headless tests unless a fake is provided.
+    public var generationSource: (any GenerationImporting)?
+
+    /// Base directory for imported generated audio (M6 iii-a). The sidecar
+    /// client downloads finished audio into a VOLATILE temp cache that can be
+    /// swept; `importGeneration` copies the WAV here — a stable, project-
+    /// adjacent home (sibling of the recordings scratch) that survives until a
+    /// save folds it into the `.dawproj` `media/` (planMedia). Defaults to the
+    /// real Application Support location; a public seam so tests (and a future
+    /// relocation preference) can point it elsewhere.
+    @ObservationIgnored public var generationImportsDirectory =
+        ProjectStore.defaultGenerationImportsDirectory()
+
+    /// In-flight AI clip fixes, jobId-keyed (M6 v-b). In-memory only: cleared by
+    /// project.open/new, not persisted (a pending fix does not survive relaunch
+    /// — re-run ai.fixClipRegion). Observed so the future UI can badge it; the
+    /// `ProjectStore+ClipFix` extension mutates it inside the module.
+    public internal(set) var pendingClipFixes: [String: PendingClipFix] = [:]
 
     /// Save-time Audio Unit state capture: returns the CURRENT
     /// `fullStateForDocument` (binary plist) for the given track's hosted AU,
@@ -159,6 +244,7 @@ public final class ProjectStore {
         // Task is Sendable and cancel() is nonisolated — safe from a nonisolated
         // deinit even though the store is @MainActor.
         autosaveTask?.cancel()
+        crashAutosaveTask?.cancel()
     }
 
     // MARK: - Transport
@@ -216,17 +302,40 @@ public final class ProjectStore {
             throw ProjectError.transportBusy("cannot change tempo while recording — stop first")
         }
         performEdit("Set Tempo", key: "transport.tempo") {
-            transport.tempoBPM = bpm.clamped(to: TransportState.tempoRange)
-            engine?.setTempo(transport)
-            // Members were windowed at the previous tempo (their source offsets
-            // are tempo-derived), so re-flatten every take group INSIDE this same
-            // edit — one undo step, cheap pure math (M5 iii-a, §2).
-            for t in tracks.indices {
-                for g in tracks[t].takeGroups.indices {
-                    rebuildCompMembers(trackIndex: t, groupIndex: g)
-                }
+            applyTempoChange(bpm)
+        }
+    }
+
+    /// Sets the transport tempo (clamped), pushes it to the engine, and
+    /// re-flattens every take group — members were windowed at the previous
+    /// tempo (their source offsets are tempo-derived), so this keeps them
+    /// coherent. Does NOT open its own `performEdit`: `setTempo` wraps it in
+    /// one, and `importGeneration` (M6 iii-a) folds it into the SAME "Import
+    /// Generation" edit so a single undo restores the tempo with the track.
+    /// Kept here (not an extension) because `transport` has a private setter.
+    func applyTempoChange(_ bpm: Double) {
+        transport.tempoBPM = bpm.clamped(to: TransportState.tempoRange)
+        engine?.setTempo(transport)
+        for t in tracks.indices {
+            for g in tracks[t].takeGroups.indices {
+                rebuildCompMembers(trackIndex: t, groupIndex: g)
             }
         }
+    }
+
+    /// Sets the loop region fields and notifies the engine WITHOUT opening its
+    /// own `performEdit` — the mirror of `applyTempoChange` for the loop. The
+    /// song-skeleton macro (M7 macro-c) folds this into its single "Song
+    /// Skeleton" edit so ONE undo restores the whole scaffold (tempo, tracks,
+    /// clips, loop). Kept here (not an extension) because `transport` has a
+    /// private setter. Callers own range validity: `end` must sit at least
+    /// `TransportState.minLoopLengthBeats` past `start` (the skeleton's total
+    /// arrangement length is always >= 4 beats, so this holds).
+    func applyLoopRegion(enabled: Bool, startBeat: Double, endBeat: Double) {
+        transport.isLoopEnabled = enabled
+        transport.loopStartBeat = max(0, startBeat)
+        transport.loopEndBeat = endBeat
+        engine?.loopChanged(transport)
     }
 
     // MARK: - Recording
@@ -425,6 +534,33 @@ public final class ProjectStore {
             lastRecordingError = (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
         }
+    }
+
+    // MARK: - Master-mix analysis (M8 vm-a)
+
+    /// Latest master-mix analysis snapshot as the engine reports it —
+    /// poll-based like the meters, `.floor` when running headless (no
+    /// engine injected) or when the session is stopped/silent.
+    public func masterAnalysis() -> MasterAnalysisSnapshot {
+        engine?.masterAnalysis() ?? .floor
+    }
+
+    // MARK: - Engine performance telemetry (M9 perf-b)
+
+    /// Render-load / overrun counters as the engine reports them —
+    /// poll-based like the meters, `.idle` when running headless (no engine
+    /// injected). `reset: true` returns the closing profiling window and
+    /// starts a fresh one (the windowed-measurement idiom perf-c uses).
+    public func performanceStats(reset: Bool = false) -> EnginePerformanceStats {
+        engine?.performanceStats(reset: reset) ?? .idle
+    }
+
+    // MARK: - Engine watchdog (M9 crash-c)
+
+    /// Engine watchdog state as the engine reports it — poll-based like the
+    /// telemetry above, `.idle` when running headless (no engine injected).
+    public func watchdogStatus() -> EngineWatchdogStatus {
+        engine?.watchdogStatus() ?? .idle
     }
 
     // MARK: - Input devices
@@ -1801,6 +1937,9 @@ public final class ProjectStore {
             durationSeconds: duration,
             to: url
         )
+        // A file landed on disk — tick the render counter for the onboarding
+        // signal adapter (ob-b), which fires `renderCompleted` on an increment.
+        renderCompletedCount += 1
         return MixdownResult(
             path: url.path,
             durationSeconds: info.durationSeconds,
@@ -1893,6 +2032,11 @@ public final class ProjectStore {
         let result = try body()
         if captureEditState() != before {
             journal.recordEdit(label: label, key: key, before: before)
+            // Publish the journaled edit for the onboarding signal adapter (ob-b).
+            // Only fires when a journal entry actually records (real change), so a
+            // no-op edit stays silent; seq ticks even for coalesced same-key edits.
+            editEventSeq += 1
+            lastEditEvent = EditEvent(seq: editEventSeq, label: label, key: key)
         }
         markDirty()
         return result
@@ -2044,6 +2188,9 @@ public final class ProjectStore {
         isDirty = false
         // A titled save supersedes any untitled-recovery bundle.
         deleteRecoveryBundle()
+        // A manual save also supersedes the crash-recovery snapshot (crash-b): the
+        // work is now on disk where the user put it — never resurrect it as "unsaved".
+        crashRecovery.invalidate()
 
         return ProjectSaveResult(
             path: bundleURL.path,
@@ -2125,6 +2272,8 @@ public final class ProjectStore {
         masterMeter = .silence
         trackMeters = [:]
         lastRecordingError = nil
+        // Stale pending fixes point into the old project (M6 v-b).
+        pendingClipFixes = [:]
         resetRecordingScratch()
         // A new session starts with empty history; prior edits no longer apply.
         journal.clear()
@@ -2135,6 +2284,8 @@ public final class ProjectStore {
 
         projectPath = nil
         isDirty = false
+        // A deliberate new session supersedes any crash-recovery snapshot (crash-b).
+        crashRecovery.invalidate()
     }
 
     /// The single state-swap primitive shared by open. Rebuilds runtime state
@@ -2156,6 +2307,8 @@ public final class ProjectStore {
         masterMeter = .silence
         trackMeters = [:]
         lastRecordingError = nil
+        // Stale pending fixes point into the previous project (M6 v-b).
+        pendingClipFixes = [:]
         resetRecordingScratch()
         // History belongs to the previous session — the newly loaded one starts
         // fresh (undo must never reach across a load boundary).
@@ -2167,6 +2320,8 @@ public final class ProjectStore {
 
         projectPath = bundleURL.path
         isDirty = false
+        // Opening another project supersedes any crash-recovery snapshot (crash-b).
+        crashRecovery.invalidate()
         return runtime.warnings
     }
 
@@ -2230,7 +2385,20 @@ public final class ProjectStore {
     /// copies, no URL rewrite. `projectPath`/`isDirty` are left untouched — this
     /// is a crash-safety snapshot, not a real save.
     private func writeRecoveryBundle() throws {
-        // Same save-time AU state capture as a titled save (local copy only).
+        try ProjectBundle.write(
+            document: buildAutosaveDocument(),
+            plan: ProjectBundle.MediaPlan(copies: [], refs: [:], warnings: []),
+            to: recoveryBundleURL
+        )
+    }
+
+    /// Builds a self-contained-but-uncopied snapshot document: the SAME save-time
+    /// Audio Unit state capture as a titled save (local copy only, no model
+    /// mutation), with every clip / sampler-zone media reference recorded as an
+    /// ABSOLUTE path so re-opening resolves media from the originals. Shared by the
+    /// legacy untitled-recovery bundle and the crash-recovery autosave (crash-b) —
+    /// one serialization path, verbatim to the existing on-disk format.
+    func buildAutosaveDocument() -> ProjectDocument {
         let persistedTracks = tracksWithCapturedAudioUnitState()
         var refs: [UUID: String?] = [:]
         for track in persistedTracks {
@@ -2238,12 +2406,12 @@ public final class ProjectStore {
                 refs[clip.id] = clip.audioFileURL.map { $0.standardizedFileURL.path } ?? String?.none
             }
             // Sampler zones record ABSOLUTE source paths too, so a recovered
-            // untitled session still resolves its zones from the originals.
+            // session still resolves its zones from the originals.
             for zone in track.instrument?.sampler?.zones ?? [] {
                 refs[zone.id] = zone.audioFileURL.standardizedFileURL.path
             }
         }
-        let document = ProjectDocument(
+        return ProjectDocument(
             name: projectName,
             transport: transport,
             tracks: persistedTracks,
@@ -2251,12 +2419,169 @@ public final class ProjectStore {
             mediaRefs: refs,
             grooveTemplates: grooveTemplates
         )
-        try ProjectBundle.write(
-            document: document,
-            plan: ProjectBundle.MediaPlan(copies: [], refs: refs, warnings: []),
-            to: recoveryBundleURL
+    }
+
+    // MARK: - Crash-recovery autosave (M9 crash-b)
+
+    /// The single crash-recovery autosave tick — the app drives it on a 30-s timer;
+    /// tests call it directly. No-op unless the session is DIRTY, not recording, and
+    /// a NEW journaled edit has landed since the last snapshot (so a quiet tick
+    /// rewrites nothing — "2 ticks = 1 file"). Snapshots the CURRENT project to the
+    /// rolling `autosave.dawproject` + `manifest.json`, preserving `projectPath` as
+    /// the manifest `sourcePath`. Never clears `isDirty` and never touches the
+    /// user's file — this is a crash snapshot, not a save. The file write runs off
+    /// the main actor inside the manager, so this adds no edit-path latency.
+    public func autosaveTick() async {
+        guard isDirty, !transport.isRecording else { return }
+        // An unresolved crash-recovery offer parks the writer: the rolling
+        // snapshot is the crashed session's ONLY copy, and wire edits bypass the
+        // launch sheet — overwriting it before the offer is accepted/declined
+        // would silently destroy that work. Resolving the offer (recover,
+        // discard, or a manual save/new/open) clears it and ticks resume.
+        guard !crashRecovery.recoveryStatus().available else { return }
+        let seq = lastEditEvent?.seq ?? 0
+        guard seq != crashRecovery.lastAutosavedEditSeq else { return }
+        await crashRecovery.recordAutosave(
+            document: buildAutosaveDocument(), sourcePath: projectPath, editSeq: seq)
+    }
+
+    /// Background 30-s crash-recovery autosave loop (idempotent). The app calls
+    /// this at launch; tests drive `autosaveTick()` directly instead. Mirrors
+    /// `startAutosave`, but drives the rolling `autosave.dawproject` snapshot.
+    public func startCrashAutosave(interval: Duration = .seconds(30)) {
+        guard crashAutosaveTask == nil else { return }
+        crashAutosaveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                guard let self else { return }
+                await self.autosaveTick()
+            }
+        }
+    }
+
+    /// Stops the crash-recovery autosave loop.
+    public func stopCrashAutosave() {
+        crashAutosaveTask?.cancel()
+        crashAutosaveTask = nil
+    }
+
+    /// The current crash-recovery offer (`project.recoveryStatus`). Headless-safe:
+    /// a store that never began a session — or one with no Autosave dir — reports
+    /// `.unavailable`, so no false offer ever surfaces.
+    public func recoveryStatus() -> AutosaveRecoveryStatus {
+        crashRecovery.recoveryStatus()
+    }
+
+    // MARK: - Diagnostics / beta feedback bundle (M9 beta)
+
+    /// Writes ONE local diagnostics bundle (`app.feedbackBundle`) and returns its
+    /// summary. Gathers the pieces a beta bug report needs and hands them to the
+    /// engine-free `DiagnosticsReporter`: host facts (`DiagnosticsHostInfo.current`
+    /// — app/OS/build, NO key material), the CURRENT engine watchdog + performance
+    /// snapshots (the M9 telemetry payoff — `.idle` when headless), and the
+    /// counts-only `overview()` projection (the privacy-lean default). The full
+    /// project snapshot is included ONLY when `includeProject` is true, via the
+    /// SAME `buildAutosaveDocument()` serialization the crash-recovery autosave
+    /// uses (absolute media refs, zero copies, no model mutation). Everything is
+    /// LOCAL — nothing phones home. Throws `DiagnosticsError.writeFailed` on a real
+    /// filesystem failure.
+    public func writeFeedbackBundle(includeProject: Bool) throws -> FeedbackBundleSummary {
+        try diagnostics.writeBundle(
+            host: .current(),
+            engine: EngineDiagnostics(watchdog: watchdogStatus(), performance: performanceStats()),
+            overview: overview(),
+            projectDocument: includeProject ? buildAutosaveDocument() : nil
         )
     }
+
+    /// The outcome of a `recoverFromAutosave` call — `.recovered` carries the load
+    /// warnings (media resolution), `.discarded` means the offer was dropped.
+    public enum RecoveryOutcome: Sendable, Equatable {
+        case recovered(warnings: [String])
+        case discarded
+    }
+
+    /// Acts on the crash-recovery offer (`project.recover`).
+    ///  - `accept: false` → drop the autosave + manifest, clear the offer, return
+    ///    `.discarded`. The live session is untouched (falls through to whatever
+    ///    the launch would otherwise show).
+    ///  - `accept: true` → load the autosave INTO this store: the project becomes
+    ///    the recovered content, kept DIRTY (it is unsaved work), with `projectPath`
+    ///    restored from the manifest so a later save lands on the right file. Then
+    ///    the autosave is invalidated. Throws `.noRecoveryAvailable` when nothing is
+    ///    on offer.
+    @discardableResult
+    public func recoverFromAutosave(accept: Bool) throws -> RecoveryOutcome {
+        guard accept else {
+            crashRecovery.invalidate()
+            return .discarded
+        }
+        guard crashRecovery.recoveryStatus().available else {
+            throw ProjectError.noRecoveryAvailable
+        }
+        guard !transport.isRecording else {
+            throw ProjectError.transportBusy("cannot recover a project while recording — stop first")
+        }
+        let (document, sourcePath) = try crashRecovery.readRecoveredDocument()
+        if transport.isPlaying { stop() }
+        let warnings = applyRecoveredState(document, sourcePath: sourcePath)
+        crashRecovery.invalidate()
+        return .recovered(warnings: warnings)
+    }
+
+    /// Swaps the recovered snapshot in as the live session. Mirrors
+    /// `applyOpenedState`, but (1) keeps the document's OWN `name` (the autosave
+    /// bundle is literally named "autosave" — its basename must not leak in), (2)
+    /// restores `projectPath` from the manifest's `sourcePath` (nil ⇒ untitled),
+    /// and (3) leaves the session DIRTY — recovered content is unsaved by
+    /// definition, so the next autosave/tick keeps protecting it.
+    @discardableResult
+    private func applyRecoveredState(_ document: ProjectDocument, sourcePath: String?) -> [String] {
+        // Absolute media refs resolve without a bundle root, but pass the autosave
+        // bundle URL so any stray relative ref still resolves (belt-and-suspenders).
+        let runtime = document.runtimeState(bundleURL: crashRecovery.autosaveBundleURL)
+        projectName = document.name
+        tracks = runtime.tracks
+        transport = runtime.transport
+        masterVolume = runtime.masterVolume
+        grooveTemplates = document.grooveTemplates ?? []
+
+        masterMeter = .silence
+        trackMeters = [:]
+        lastRecordingError = nil
+        pendingClipFixes = [:]
+        resetRecordingScratch()
+        journal.clear()
+
+        engine?.tracksDidChange(tracks)
+        engine?.masterVolumeChanged(masterVolume)
+        engine?.loopChanged(transport)
+
+        projectPath = sourcePath
+        isDirty = true
+        return runtime.warnings
+    }
+
+    /// Launch-time crash detection: latches whether the prior session left its lock
+    /// (a crash / SIGKILL) and writes this session's lock. Returns whether a crash
+    /// was detected. The app calls this at startup; the recovery offer then gates on
+    /// `recoveryStatus().available`.
+    @discardableResult
+    public func beginCrashDetection() -> Bool {
+        crashRecovery.beginSession()
+    }
+
+    /// Clean-exit path: removes this session's lock so the next launch sees no
+    /// crash. The app calls this from `applicationWillTerminate`.
+    public func endCrashDetection() {
+        crashRecovery.endSession()
+    }
+
+    /// The crash-detection lock file URL. Exposed as a `Sendable` `URL` so the
+    /// app's `willTerminate` observer can delete the lock on a clean exit without
+    /// capturing the (non-Sendable, main-actor) store across the notification's
+    /// `@Sendable` boundary.
+    public var crashLockURL: URL { crashRecovery.lockURL }
 
     /// This store's untitled-recovery bundle location:
     /// `<autosaveRecoveryDirectory>/Untitled-<slug8>.dawproj`.
@@ -2270,6 +2595,45 @@ public final class ProjectStore {
         try? FileManager.default.removeItem(at: recoveryBundleURL)
     }
 
+    /// Launch-time hygiene for untitled-recovery bundles. `flushForTransition()`
+    /// writes one `Untitled-<slug>.dawproj` per dirty untitled session abandoned
+    /// via new/open, and `deleteRecoveryBundle()` only ever removes THIS store's
+    /// slug — so orphans from past sessions accumulate without bound. Keeps the
+    /// `keep` newest (by modification date) as a manual-recovery grace window and
+    /// removes the rest, never touching this session's own bundle or any
+    /// non-matching file. Returns the number removed.
+    @discardableResult
+    public func pruneUntitledRecoveryBundles(keep: Int = 5) -> Int {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: autosaveRecoveryDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return 0 }
+        let bundles = entries
+            .filter {
+                $0.lastPathComponent.hasPrefix("Untitled-")
+                    && $0.pathExtension == "dawproj"
+            }
+            .sorted { a, b in
+                let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey])
+                    .contentModificationDate) ?? .distantPast
+                let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey])
+                    .contentModificationDate) ?? .distantPast
+                return da > db
+            }
+        var removed = 0
+        for url in bundles.dropFirst(max(0, keep))
+        where url.lastPathComponent != recoveryBundleURL.lastPathComponent {
+            do {
+                try fm.removeItem(at: url)
+                removed += 1
+            } catch {
+                // Best-effort: a bundle held open elsewhere just survives this pass.
+            }
+        }
+        return removed
+    }
+
     /// Default autosave/recovery directory:
     /// `~/Library/Application Support/DAWPro/Autosave/`.
     static func defaultAutosaveDirectory() -> URL {
@@ -2280,6 +2644,19 @@ public final class ProjectStore {
         return base
             .appendingPathComponent("DAWPro", isDirectory: true)
             .appendingPathComponent("Autosave", isDirectory: true)
+    }
+
+    /// Default home for imported generated audio (M6 iii-a). Sibling of the
+    /// recordings scratch under Application Support so it persists across the
+    /// volatile sidecar temp cache and undo/redo resurrection.
+    static func defaultGenerationImportsDirectory() -> URL {
+        let base = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return base
+            .appendingPathComponent("DAWPro", isDirectory: true)
+            .appendingPathComponent("Generations", isDirectory: true)
     }
 
     /// Readable reason from any error (LocalizedError message when present).

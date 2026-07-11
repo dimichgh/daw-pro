@@ -21,12 +21,23 @@ public struct AnthropicClient: LyricsGenerating {
         )
     }
 
+    /// M6 lyrics workshop: teaches the bracketed ACE-Step format + singability and
+    /// weaves in the project context via `LyricsPromptBuilder`; REFINE mode sends
+    /// the existing lyrics + instruction. Reports itself as the provider.
+    public func writeLyrics(_ request: LyricsWriteRequest) async throws -> LyricsWriteResult {
+        let text = try await complete(
+            system: LyricsPromptBuilder.systemPrompt(request),
+            user: LyricsPromptBuilder.userPrompt(request)
+        )
+        return LyricsWriteResult(lyrics: text, provider: AIProviderID.anthropic.rawValue)
+    }
+
     public func complete(system: String, user: String, maxTokens: Int = 2048) async throws -> String {
         guard let key = config.anthropicKey else {
             throw AIServiceError.notConfigured("ANTHROPIC_API_KEY")
         }
-        let (data, _) = try await HTTP.postJSON(
-            to: URL(string: "https://api.anthropic.com/v1/messages")!,
+        let (data, status) = try await HTTP.postJSON(
+            to: config.anthropicBaseURL.appendingPathComponent("v1/messages"),
             headers: [
                 "x-api-key": key,
                 "anthropic-version": "2023-06-01",
@@ -39,10 +50,38 @@ public struct AnthropicClient: LyricsGenerating {
             ]
         )
         let object = try HTTP.json(data)
-        guard let content = object["content"] as? [[String: Any]],
-              let text = content.first?["text"] as? String else {
-            throw AIServiceError.malformedResponse("missing content[0].text")
+
+        // Defensive: surface the API's own error type/message (e.g.
+        // "overloaded_error: Overloaded") rather than falling through to the
+        // "no text content" guard below — covers an error envelope that
+        // somehow arrives on a 2xx status (`postJSON` already handles the
+        // ordinary non-2xx case with identical formatting).
+        if let message = HTTP.errorEnvelopeMessage(object) {
+            throw AIServiceError.requestFailed(status: status, body: message)
         }
-        return text
+
+        guard let content = object["content"] as? [[String: Any]] else {
+            throw AIServiceError.malformedResponse("missing 'content' array in Anthropic response")
+        }
+
+        // Modern Claude models can lead with "thinking"/"redacted_thinking"
+        // blocks (extended thinking) before any text, and can emit
+        // "tool_use" blocks too — content[0] is NOT guaranteed to be text.
+        // Collect text from EVERY "text" block (in order) and join them,
+        // silently skipping every other block type.
+        let texts = content.compactMap { block -> String? in
+            guard block["type"] as? String == "text" else { return nil }
+            return block["text"] as? String
+        }
+        guard !texts.isEmpty else {
+            let blockTypes = content.compactMap { $0["type"] as? String }
+            let stopReason = object["stop_reason"] as? String ?? "unknown"
+            throw AIServiceError.malformedResponse(
+                "no text content block in Anthropic response (block types present: "
+                    + "\(blockTypes.isEmpty ? "none" : blockTypes.joined(separator: ", "))"
+                    + ", stop_reason: \(stopReason))"
+            )
+        }
+        return texts.joined(separator: "\n")
     }
 }

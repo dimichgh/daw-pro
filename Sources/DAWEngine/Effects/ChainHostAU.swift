@@ -85,6 +85,21 @@ final class ChainHostAU: AUAudioUnit {
         }
     }
 
+    /// Render-load telemetry wiring (M9 perf-b). The render block captures
+    /// this box (never self); the box holds the context STRONGLY (lifetime:
+    /// no callback can outlive it) plus the integer rate for the budget
+    /// math. Both fields are written only on the control plane while the
+    /// host guarantees no concurrent render — `setPerformanceContext` at
+    /// node creation (before the engine ever renders) and
+    /// `allocateRenderResources` — the exact `Scratch` write-window
+    /// discipline. nil context = telemetry off (directly instantiated test
+    /// units), a pure no-op.
+    private final class PerformanceBox: @unchecked Sendable {
+        var context: EnginePerformanceContext?
+        var sampleRateHz: UInt64 = 48_000
+    }
+
+    private let performanceBox = PerformanceBox()
     private let scratch = Scratch()
     private let inputBus: AUAudioUnitBus
     private let outputBus: AUAudioUnitBus
@@ -113,6 +128,10 @@ final class ChainHostAU: AUAudioUnit {
         scratch.allocate(channelCount: Int(outputBus.format.channelCount),
                          capacity: Int(maximumFramesToRender))
         compensation.allocate(channelCount: Int(outputBus.format.channelCount))
+        // Telemetry budget rate: the negotiated bus rate, guarded ≥ 1 so the
+        // render-side divisor can never trap.
+        let rate = outputBus.format.sampleRate
+        performanceBox.sampleRateHz = rate >= 1 ? UInt64(rate.rounded()) : 1
     }
 
     override func deallocateRenderResources() {
@@ -122,12 +141,13 @@ final class ChainHostAU: AUAudioUnit {
     }
 
     override var internalRenderBlock: AUInternalRenderBlock {
-        // Capture the walker + automation head + scratch box, never self (RT
-        // rule: the block must not touch the ObjC property surface).
+        // Capture the walker + automation head + scratch/perf boxes, never
+        // self (RT rule: the block must not touch the ObjC property surface).
         let processor = processor
         let automation = automation
         let compensation = compensation
         let scratch = scratch
+        let performanceBox = performanceBox
         return { _, timestamp, frameCount, _, outputData, _, pullInputBlock in
             guard let pullInputBlock else { return kAudioUnitErr_NoConnection }
             let frames = Int(frameCount)
@@ -155,6 +175,13 @@ final class ChainHostAU: AUAudioUnit {
             let status = pullInputBlock(&pullFlags, timestamp, frameCount, 0, outputData)
             guard status == noErr else { return status }
 
+            // Telemetry entry stamp (M9 perf-b) — AFTER the pull, so nested
+            // upstream renders (other strips' chain hosts, instrument source
+            // nodes) are never double-counted: this block's own DSP work
+            // (automation stores, chain walk, PDC ring, fader stage) is what
+            // gets measured. Commpage read, not a syscall.
+            let perfEntryTicks = mach_absolute_time()
+
             // Effect-param automation FIRST (M4 vii-c): quantum-start values
             // stored into the live units so the walk below renders with them.
             // No-op while no effect-param track is published.
@@ -170,6 +197,14 @@ final class ChainHostAU: AUAudioUnit {
             // position (M4 vii-b). No-op while nothing is published.
             automation.apply(bufferList: outputData, frameCount: frames,
                              timestamp: timestamp)
+            // Telemetry exit stamp: only completed DSP walks count (error
+            // returns above did no strip work). nil context = no-op.
+            if let performance = performanceBox.context {
+                performance.record(entryTicks: perfEntryTicks,
+                                   exitTicks: mach_absolute_time(),
+                                   frames: frames,
+                                   sampleRateHz: performanceBox.sampleRateHz)
+            }
             return noErr
         }
     }
@@ -205,5 +240,17 @@ final class ChainHostAU: AUAudioUnit {
     @MainActor
     static func compensationState(of node: AVAudioUnitEffect) -> CompensationDelayState? {
         (node.auAudioUnit as? ChainHostAU)?.compensation
+    }
+
+    /// Wires the render-load telemetry context (M9 perf-b) into a node made
+    /// by `makeChainHostNode`. MUST be called at node creation, before the
+    /// engine ever renders (the boundary discipline the PerformanceBox
+    /// documents) — PlaybackGraph does this inside `makeStripSandwich`.
+    /// Foreign-AU nodes (never expected) no-op, same nil rule as
+    /// `chainProcessor(of:)`.
+    @MainActor
+    static func setPerformanceContext(_ context: EnginePerformanceContext,
+                                      of node: AVAudioUnitEffect) {
+        (node.auAudioUnit as? ChainHostAU)?.performanceBox.context = context
     }
 }

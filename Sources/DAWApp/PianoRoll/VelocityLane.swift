@@ -66,9 +66,13 @@ struct VelocityLane: View {
         }
         .frame(height: Self.height)
         .contentShape(Rectangle())
+        // A velocity stem is a vertical value drag → resizeUpDown (docs/DESIGN-
+        // LANGUAGE.md "Pointer affordances"), the fader family.
+        .hoverCursor(.resizeUpDown)
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { value in
+                    DragCursor.set(.resizeUpDown)
                     if activeNote == nil {
                         activeNote = note(nearX: value.startLocation.x)?.id
                     }
@@ -79,6 +83,7 @@ struct VelocityLane: View {
                 .onEnded { _ in
                     if activeNote != nil { onCommit() }
                     activeNote = nil
+                    DragCursor.clear()
                 }
         )
         .accessibilityLabel("Velocity lane")

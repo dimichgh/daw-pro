@@ -50,6 +50,24 @@ public final class CommandRouter {
     /// sidecar process.
     private let songGenerator: SongGenerating
 
+    /// Read-only API-key store for `ai.providerStatus` (M6). Defaults to the
+    /// real Keychain; tests inject an in-memory store. This is STATUS-ONLY —
+    /// there is deliberately NO command to SET a key (see `ai.providerStatus`):
+    /// key values would otherwise transit the agent-logged control plane, which
+    /// the house directive forbids. Keys enter the app only via env vars or the
+    /// Settings UI → Keychain.
+    private let keyStore: APIKeyStoring
+    /// The environment consulted for env-provided keys when reporting status
+    /// (env wins over Keychain). Injectable for tests/captures.
+    private let keyEnvironment: [String: String]
+
+    /// Yields a configured lyrics writer for `ai.writeLyrics`, or THROWS the
+    /// actionable no-provider error. Defaults to `resolveLyricsWriter` over the
+    /// SAME key chain `ai.providerStatus` reports (Anthropic preferred, OpenAI
+    /// fallback); tests inject a fake writer instead. Resolved per call so a key
+    /// added mid-session takes effect without a restart. Never logs key material.
+    private let lyricsWriterProvider: @MainActor () throws -> any LyricsGenerating
+
     /// App-layer command extension hook. DAWApp installs this to serve `debug.*`
     /// commands (e.g. `debug.captureUI`) that render the live SwiftUI hierarchy —
     /// inherently main-actor, UI-runtime work with no headless equivalent.
@@ -64,6 +82,21 @@ public final class CommandRouter {
     public var appCommandHandler: (
         @MainActor (_ command: String, _ params: [String: JSONValue]) throws -> JSONValue?
     )?
+
+    /// The in-app AI Copilot (M6 rail-c) — weak because the app retains the
+    /// engine and hands the router only a dispatch closure (`{ await
+    /// router.handle($0) }`), the SAME two-phase, no-retain-cycle pattern as
+    /// `appCommandHandler`. `ai.copilot*` commands route through this and
+    /// throw an actionable "not wired" error when nil (app startup
+    /// incomplete — every other command path is unaffected).
+    public weak var copilotEngine: CopilotEngine?
+
+    /// Plugin-UI-window seam (M3 vi-b) — the typed, async app-layer surface the
+    /// `plugin.*` commands route through, installed by DAWApp
+    /// (`PluginWindowManager`). Weak: AppModel owns the manager (the
+    /// `copilotEngine` precedent). Nil in a headless control session — open/close
+    /// then fail with a readable error, `listOpenUIs` answers `{available:false}`.
+    public weak var pluginUI: (any PluginUIControlling)?
 
     public static let allCommands: [String] = [
         "transport.play",
@@ -94,6 +127,11 @@ public final class CommandRouter {
         "fx.listAudioUnits",
         "instrument.listAudioUnits",
         "mixer.setMasterVolume",
+        "mixer.applyPreset",
+        "mixer.masterAnalysis",
+        "engine.performanceStats",
+        "engine.watchdogStatus",
+        "macro.songSkeleton",
         "automation.addLane",
         "automation.removeLane",
         "automation.setPoints",
@@ -110,6 +148,7 @@ public final class CommandRouter {
         "clip.setStretch",
         "clip.stretchToLength",
         "clip.quantize",
+        "clip.humanize",
         "clip.detectTransients",
         "clip.quantizeAudio",
         "take.group",
@@ -119,6 +158,7 @@ public final class CommandRouter {
         "take.flatten",
         "take.move",
         "take.setCrossfade",
+        "take.autoAlign",
         "groove.extract",
         "groove.list",
         "groove.remove",
@@ -131,7 +171,17 @@ public final class CommandRouter {
         "ai.sidecarStop",
         "ai.generateSong",
         "ai.generationStatus",
+        "ai.importGeneration",
+        "ai.extractStems",
+        "ai.legoGenerate",
+        "ai.importGeneratedStems",
+        "ai.repaintAudio",
+        "ai.fixClipRegion",
+        "ai.importClipFix",
+        "ai.providerStatus",
+        "ai.writeLyrics",
         "project.snapshot",
+        "project.overview",
         "input.listDevices",
         "input.setDevice",
         "midi.listInputs",
@@ -140,18 +190,44 @@ public final class CommandRouter {
         "project.save",
         "project.open",
         "project.new",
+        "project.recoveryStatus",
+        "project.recover",
         "edit.undo",
         "edit.redo",
+        "ai.copilotSend",
+        "ai.copilotState",
+        "ai.copilotReset",
+        "app.feedbackBundle",
+        "plugin.openUI",
+        "plugin.closeUI",
+        "plugin.listOpenUIs",
     ]
 
     public init(
         store: ProjectStore,
         sidecarManager: SidecarManaging = SidecarManager(),
-        songGenerator: SongGenerating = ACEStepClient()
+        songGenerator: SongGenerating = ACEStepClient(),
+        keyStore: APIKeyStoring = KeychainKeyStore(),
+        keyEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        lyricsWriter: (@MainActor () throws -> any LyricsGenerating)? = nil
     ) {
         self.store = store
         self.sidecarManager = sidecarManager
         self.songGenerator = songGenerator
+        self.keyStore = keyStore
+        self.keyEnvironment = keyEnvironment
+        // Default: resolve a writer from the shared key chain on each call.
+        // `ai.writeLyrics` uses the APP's keys + live project context — the MCP
+        // server's own legacy `generate_lyrics` calls a provider directly with its
+        // OWN process env instead.
+        self.lyricsWriterProvider = lyricsWriter ?? {
+            try resolveLyricsWriter(environment: keyEnvironment, store: keyStore)
+        }
+        // Wire the store's generation-import seam over the SAME song generator
+        // (M6 iii-a) so `ai.importGeneration` reaches finished audio + metas by
+        // jobId. One source of truth: tests injecting a fake generator get the
+        // adapter for free; the app wires the real ACEStepClient once.
+        store.generationSource = SongGenerationImportSource(generator: songGenerator)
     }
 
     /// Async because `render.mixdown` awaits offline Audio Unit preparation;
@@ -551,6 +627,92 @@ public final class CommandRouter {
             store.setMasterVolume(volume)
             return .success(request.id, .object(["masterVolume": .number(store.masterVolume)]))
 
+        case "mixer.applyPreset":
+            // params: trackId (required), preset (required string — one of the
+            // curated MixerPresetCatalog names). The preset's insert chain
+            // REPLACES the strip's current chain as ONE undoable edit
+            // ("Apply Preset '<DisplayName>'"); volume/pan/sends are untouched.
+            // Works on audio, instrument, and bus tracks. An unknown preset
+            // errors with a message listing every valid name; trackNotFound
+            // surfaces via the LocalizedError mapping. Returns the resulting
+            // chain in the shared fx-mutation result shape ({trackId, effects})
+            // so the agent sees the effects the preset laid down, in order.
+            let presetTrackID = try params.requireTrackID()
+            let presetName = try params.require("preset", \.stringValue)
+            _ = try store.applyMixerPreset(trackID: presetTrackID, presetName: presetName)
+            return .success(request.id, fxResult(trackID: presetTrackID))
+
+        case "mixer.masterAnalysis":
+            // No params. Latest master-mix analysis snapshot (M8 vm-a, the
+            // session vibe meter's data source), measured POST-master-fader:
+            // {bands: [24 dB values, 40 Hz → 16 kHz log-spaced, floor −80],
+            // levelDB (short-term RMS — NOT LUFS; use render.measureLoudness
+            // for that), peakDB, centroidHz ("brightness"), flux (0–1
+            // "energy movement")}. Poll-based (refreshed ~30–60 Hz while the
+            // engine runs); every field is finite by contract — stopped or
+            // silent sessions decay to the floors, never an error. Headless
+            // (no engine) reads the floor snapshot.
+            return .success(request.id, try JSONValue(encoding: store.masterAnalysis()))
+
+        case "engine.performanceStats":
+            // params: reset? (bool, default false). Render-load / overrun
+            // telemetry (M9 perf-b) stamped per render callback by the
+            // engine's two instrumented Tier-1 blocks (instrument source
+            // nodes + per-strip chain hosts); live playback AND offline
+            // renders both count. Response = EnginePerformanceStats verbatim:
+            // {callbackCount, renderedFrames, renderTimeNs, peakCallbackNs,
+            // overrunCount (budget-overrun proxy — NOT a CoreAudio xrun
+            // count), averageLoad (0…, fraction of the per-callback RT
+            // budget consumed), recentLoad (~1 s EMA), sampleRate,
+            // quantumFrames, sinceResetSeconds}. All fields finite by
+            // contract; a stopped engine freezes the counters but stays
+            // readable; headless (no engine) reads the all-zero window.
+            // reset=true returns the CLOSING window and starts a fresh one
+            // (read-then-reset — the windowed-profiling idiom: call with
+            // reset=true, do the work, call again to read exactly that
+            // window).
+            let statsReset = params["reset"]?.boolValue ?? false
+            return .success(request.id,
+                            try JSONValue(encoding: store.performanceStats(reset: statsReset)))
+
+        case "engine.watchdogStatus":
+            // No params. Engine watchdog state (M9 crash-c): the stall
+            // detector that watches the perf-b telemetry heartbeat — while
+            // the engine claims to run, the lifetime render-callback count
+            // must advance every ~2 s check; frozen across 2 checks = the
+            // render side is dead (silent HAL stall, device death without a
+            // config-change notification), and the watchdog drives the SAME
+            // auto-restart recovery the config-change path uses. Response =
+            // EngineWatchdogStatus verbatim: {state ("idle" = engine
+            // intentionally stopped or no signal expected — never a stall;
+            // "ok" = heartbeat advancing; "recovering" = stall declared,
+            // restart in flight/retrying; "failed" = 3 consecutive restart
+            // failures, watchdog stood down until the next successful engine
+            // start — manual intervention), restartCount (lifetime
+            // successful self-heals — nonzero means the engine died and
+            // recovered), consecutiveFailures, lastHeartbeat, engineRunning}.
+            // Read-only, never throws, headless-safe: no engine reads the
+            // zero/idle status.
+            return .success(request.id, try JSONValue(encoding: store.watchdogStatus()))
+
+        case "macro.songSkeleton":
+            // params: genre (required — a SongSkeletonCatalog kebab name),
+            // tempoBPM? (20-400; default = genre's), sections? (array of
+            // {name, bars} — default = genre's layout). Scaffolds the whole
+            // session (tempo, a genre track roster with mixer presets applied,
+            // an "Arrangement" guide track of named empty MIDI clips, and the
+            // loop region) as ONE undoable edit — ADDITIVE, never wiping the
+            // project. Unknown genre → an error listing every valid name;
+            // bad tempo/sections → field-named errors. Both surface via the
+            // LocalizedError mapping. Response carries the full scaffold with
+            // real, actionable ids (see `songSkeletonResult`).
+            let genre = try params.require("genre", \.stringValue)
+            let skeletonTempo = params["tempoBPM"]?.doubleValue
+            let skeletonSections = try parseSkeletonSections(params["sections"])
+            let skeleton = try store.applySongSkeleton(
+                genre: genre, tempoBPM: skeletonTempo, sections: skeletonSections)
+            return .success(request.id, songSkeletonResult(skeleton))
+
         case "automation.addLane":
             // params: trackId (required), target (required) — the SAME
             // {type: "volume"|"pan"|"sendLevel"|"effectParam", sendId?,
@@ -813,6 +975,48 @@ public final class CommandRouter {
                 clipId: quantizeClipID, settings: quantizeSettings)
             return .success(request.id, try JSONValue(encoding: quantizedClip))
 
+        case "clip.humanize":
+            // params: clipId (required), timingBeats? (0...0.25, default 0.02 —
+            // max independent onset jitter in beats, ±this), velocityRange?
+            // (0...64 integer, default 8 — max independent velocity jitter, ±this),
+            // seed? (non-negative integer < 2^53 — omit to draw one). Seeded,
+            // DETERMINISTIC "human feel": each note's onset shifts by a uniform
+            // amount in [−timingBeats, +timingBeats] (clamped inside the clip) and
+            // its velocity by a uniform integer in [−velocityRange, +velocityRange]
+            // (clamped 1...127); lengths, ids, and array order are preserved. ONE
+            // undoable step ("Humanize"). MIDI clips ONLY — an audio clip surfaces
+            // notAMIDIClip verbatim; clipNotFound via the LocalizedError mapping.
+            // Response: the updated clip fields PLUS `seedUsed` (the seed actually
+            // used — replay it, or a nil `seed`, to reproduce/re-roll the take).
+            let humanizeClipID = try params.requireClipID()
+            let humanizeTiming = params["timingBeats"]?.doubleValue ?? 0.02
+            guard (0...0.25).contains(humanizeTiming) else {
+                throw ControlError("'timingBeats' must be between 0 and 0.25 (default 0.02 — max ± onset jitter in beats)")
+            }
+            let humanizeVelRaw = params["velocityRange"]?.doubleValue ?? 8
+            guard (0...64).contains(humanizeVelRaw), humanizeVelRaw == humanizeVelRaw.rounded() else {
+                throw ControlError("'velocityRange' must be an integer between 0 and 64 (default 8 — max ± velocity jitter)")
+            }
+            let humanizeSeed: UInt64?
+            if let seedValue = params["seed"] {
+                guard let seedDouble = seedValue.doubleValue,
+                      seedDouble >= 0, seedDouble < 9_007_199_254_740_992,
+                      seedDouble == seedDouble.rounded() else {
+                    throw ControlError("'seed' must be a non-negative integer below 2^53 (omit to draw a random seed)")
+                }
+                humanizeSeed = UInt64(seedDouble)
+            } else {
+                humanizeSeed = nil
+            }
+            let humanized = try store.humanizeClipNotes(
+                clipID: humanizeClipID,
+                timingBeats: humanizeTiming,
+                velocityRange: Int(humanizeVelRaw),
+                seed: humanizeSeed)
+            var humanizeObj = try JSONValue(encoding: humanized.clip).objectValue ?? [:]
+            humanizeObj["seedUsed"] = .number(Double(humanized.seedUsed))
+            return .success(request.id, .object(humanizeObj))
+
         case "clip.detectTransients":
             // params: clipId (required), sensitivity? (0...1, default 0.5 —
             // higher finds more onsets). Offline spectral-flux transient
@@ -980,6 +1184,44 @@ public final class CommandRouter {
                 "group": try JSONValue(encoding: xfGroup),
                 "clips": try memberClipsJSON(trackID: xfTrackID, groupID: xfGroupID),
             ]))
+
+        case "take.autoAlign":
+            // params: trackId (required), groupId (required), laneId (required),
+            // searchWindowMs? (10...500, default 150 — field-named error out of
+            // range), apply? (bool, default true). Onset-based micro-alignment
+            // (M6 v-d): detects onsets in the group's FIRST lane (the reference
+            // — the original material; AI Fix groups are built that way) and in
+            // the target take on the SHARED engine detector (content-key
+            // cached, the clip.detectTransients/clip.quantizeAudio detector),
+            // over the OVERLAP of the two lanes' spans, then grid-searches
+            // ±searchWindowMs at 1 ms steps and median-refines the winning
+            // offset (sub-millisecond). apply → the take moves by −offset (its
+            // onsets land ON the reference) in ONE undo step ("Align Take", the
+            // take.move lane machinery); apply:false previews without mutating.
+            // Aligning lane 0 against itself or a MIDI lane surfaces
+            // invalidComp; fewer than 2 matched onsets (or no overlap) surfaces
+            // alignmentInconclusive (counts + what to try next) — the aligner
+            // never guesses; an apply whose earlier-move exceeds the lane's
+            // headroom before beat 0 surfaces alignmentWouldCrossTimelineStart
+            // (required move + headroom + take.move advice) — NEVER a silent
+            // clamp, applied:true always means the take now sits aligned;
+            // laneNotFound/takeGroupNotFound/trackNotFound/engineUnavailable
+            // via the LocalizedError mapping. Response: the report —
+            // {offsetMs, offsetBeats, matchedOnsets, referenceOnsets,
+            // candidateOnsets, confidence, applied}.
+            let alignTrackID = try params.requireTrackID()
+            let alignGroupID = try params.requireGroupID()
+            let alignLaneID = try params.requireLaneID()
+            let alignWindowMs = params["searchWindowMs"]?.doubleValue ?? 150
+            guard (10...500).contains(alignWindowMs) else {
+                throw ControlError(
+                    "'searchWindowMs' must be between 10 and 500 (milliseconds of ± search around the take's current position)")
+            }
+            let alignApply = params["apply"]?.boolValue ?? true
+            let alignReport = try await store.autoAlignTake(
+                trackID: alignTrackID, groupID: alignGroupID, laneID: alignLaneID,
+                searchWindowMs: alignWindowMs, apply: alignApply)
+            return .success(request.id, try JSONValue(encoding: alignReport))
 
         case "groove.extract":
             // params: clipId (required), name (required), gridBeats? (> 0,
@@ -1159,23 +1401,40 @@ public final class CommandRouter {
             // "run scripts/ace-step/install.sh" apart from "call
             // ai.sidecarStart" without guessing. `message` is always a
             // human-actionable string; `version`/`ditModel`/`lmModel` are
-            // populated only when healthy. Response: the model's own
+            // populated only when healthy. (M10-b) `phase`/`startingForSeconds`
+            // are populated only when `state == "starting"`: `phase` is a
+            // human hint classified from the sidecar log's tail ("preparing
+            // environment…"/"starting server…"/"loading models…", or nil when
+            // unrecognizable — see `SidecarStartPhase`), and
+            // `startingForSeconds` is whole seconds since the boot began,
+            // TRACKED ACROSS THE WHOLE BOOT (not just one blocking
+            // `ai.sidecarStart` call) — including across an app relaunch
+            // mid-boot, via a pidfile-liveness fallback — so a poll made long
+            // after `ai.sidecarStart` timed out still honestly reports
+            // "starting", never misreporting `installedNotRunning` (the beta
+            // "loaded-but-not-started" bug). Response: the model's own
             // SidecarStatus Codable (AIServices) — {state, message, version?,
-            // ditModel?, lmModel?, pid?}. This is process-lifecycle
-            // management only — the generation client/tools arrive in a
-            // later roadmap item.
+            // ditModel?, lmModel?, pid?, phase?, startingForSeconds?}. This is
+            // process-lifecycle management only — the generation client/tools
+            // arrive in a later roadmap item.
             let sidecarStatus = await sidecarManager.status()
             return .success(request.id, try JSONValue(encoding: sidecarStatus))
 
         case "ai.sidecarStart":
             // No params. Spawns scripts/ace-step/run.sh (loopback-only
             // FastAPI server) if not already healthy, then polls /health up
-            // to a startup timeout. Throws notInstalled (verbatim, points at
-            // install.sh) if the sidecar was never installed, or a launch
-            // error if the process exits during startup. A timeout without
-            // reaching healthy is NOT an error — it returns state "starting"
-            // (model loading can legitimately take a while); poll
-            // ai.sidecarStatus again. Response: SidecarStatus.
+            // to a startup timeout (still ~30s, blocking — UNCHANGED by
+            // M10-b). Throws notInstalled (verbatim, points at install.sh) if
+            // the sidecar was never installed, or a launch error if the
+            // process exits during startup. A timeout without reaching
+            // healthy is NOT an error — it returns state "starting" with a
+            // health-aware message (names elapsed time, the current log
+            // phase when recognizable, and the log path — "it's likely still
+            // booting… the panel will update as it boots"), and — the M10-b
+            // fix — every LATER ai.sidecarStatus poll keeps reporting
+            // "starting" with a truthfully increasing startingForSeconds
+            // instead of losing track of the boot. Response: SidecarStatus
+            // (see ai.sidecarStatus for the phase/startingForSeconds fields).
             let startedStatus = try await sidecarManager.start()
             return .success(request.id, try JSONValue(encoding: startedStatus))
 
@@ -1186,6 +1445,61 @@ public final class CommandRouter {
             // SidecarStatus (state settles to installedNotRunning/notInstalled).
             let stoppedStatus = try await sidecarManager.stop()
             return .success(request.id, try JSONValue(encoding: stoppedStatus))
+
+        case "ai.providerStatus":
+            // No params. Reports, per key-backed provider (anthropic/openai/
+            // suno — ACE-Step is the LOCAL, KEYLESS sidecar and is intentionally
+            // absent), whether a key is available and from where:
+            // {providers: [{provider, configured, source}]} where source is
+            // "env" | "keychain" | "none". env wins over keychain.
+            //
+            // STATUS-ONLY BY DESIGN: this surface carries booleans + the source
+            // enum, NEVER a key value and NEVER a length. There is deliberately
+            // NO companion "set key" command anywhere in the control protocol or
+            // MCP — key values must not transit the control plane, whose traffic
+            // is logged in agents' conversations (house directive: never log key
+            // values). Keys are entered only via environment variables or the
+            // app's Settings panel (→ system Keychain).
+            let statuses = providerStatuses(environment: keyEnvironment, store: keyStore)
+            return .success(request.id, try JSONValue(encoding: ["providers": statuses]))
+
+        case "ai.writeLyrics":
+            // Writes (or REFINES) bracketed-structure lyrics for ACE-Step using
+            // the APP's configured provider (Anthropic preferred, OpenAI
+            // fallback — the ai.providerStatus chain) and the LIVE project
+            // context. params: prompt (required — the theme/what the song is
+            // about). style (optional — genre/feel). structure (optional — a
+            // non-empty array of section tags, default
+            // ["verse","chorus","verse","chorus","bridge","chorus"]). context
+            // (optional object {keyScale?, tempoBPM?, timeSignature?, genre?});
+            // ANY field omitted defaults from the current project (tempoBPM /
+            // timeSignature from the transport), so a bare call still weaves in
+            // the session's tempo/meter. existingLyrics + instruction (optional
+            // — providing existingLyrics switches to REFINE mode: revise those
+            // lyrics per `instruction`). Response: {lyrics, provider} where
+            // provider is "anthropic"|"openai". When NEITHER provider has a key
+            // this fails with an actionable message naming the Settings panel
+            // (⌘,) and ai.providerStatus — never a key value (keys never cross
+            // this plane; see ai.providerStatus).
+            let lyricsTheme = try params.require("prompt", \.stringValue)
+            var writeRequest = LyricsWriteRequest(prompt: lyricsTheme)
+            if let style = params["style"]?.stringValue { writeRequest.style = style }
+            if let structureValue = params["structure"] {
+                writeRequest.structure = try parseLyricsStructure(structureValue)
+            }
+            writeRequest.context = try parseLyricsContext(params["context"])
+            if let existing = params["existingLyrics"]?.stringValue {
+                writeRequest.existingLyrics = existing
+            }
+            if let instruction = params["instruction"]?.stringValue {
+                writeRequest.instruction = instruction
+            }
+            let writer = try lyricsWriterProvider()
+            let writeResult = try await writer.writeLyrics(writeRequest)
+            return .success(request.id, .object([
+                "lyrics": .string(writeResult.lyrics),
+                "provider": .string(writeResult.provider),
+            ]))
 
         case "ai.generateSong":
             // Submits an async song-generation job to the local ACE-Step
@@ -1246,6 +1560,321 @@ public final class CommandRouter {
                 throw await translateSongGeneratorError(error)
             }
 
+        case "ai.importGeneration":
+            // Turns a FINISHED generation job into project material (M6 iii-a):
+            // a new AI-flagged audio track + clip (violet in the UI) at the
+            // target beat, plus optional project-tempo adoption from the
+            // generation's metas.bpm — all as ONE undoable "Import Generation"
+            // edit. params: jobId (required — from ai.generateSong; the job
+            // must have reached state "succeeded", i.e. ai.generationStatus
+            // reports an audioPath). trackName (optional — defaults to "AI:
+            // <first words of the prompt>"). atBeat (optional, default 0).
+            // setProjectTempo (optional bool — omit to auto-adopt ONLY when the
+            // project has no other clips; true forces adoption, false forbids
+            // it; adoption also needs metas.bpm present). Response: {trackId,
+            // clipId, adoptedTempoBPM?} (adoptedTempoBPM omitted when tempo was
+            // left unchanged). A still-running job / unknown (expired) jobId
+            // surface as actionable errors pointing back at ai.generationStatus.
+            let importJobID = try params.require("jobId", \.stringValue)
+            let importTrackName = params["trackName"]?.stringValue
+            let importAtBeat = params["atBeat"]?.doubleValue
+            let importSetTempo = params["setProjectTempo"]?.boolValue
+            do {
+                let (trackID, clipID, adoptedBPM) = try await store.importGeneration(
+                    jobID: importJobID,
+                    trackName: importTrackName,
+                    atBeat: importAtBeat,
+                    setProjectTempo: importSetTempo)
+                var result: [String: JSONValue] = [
+                    "trackId": .string(trackID.uuidString),
+                    "clipId": .string(clipID.uuidString),
+                ]
+                if let adoptedBPM {
+                    result["adoptedTempoBPM"] = .number(adoptedBPM)
+                }
+                return .success(request.id, .object(result))
+            } catch {
+                throw await translateSongGeneratorError(error)
+            }
+
+        case "ai.extractStems":
+            // Separates an EXISTING audio file into named stems (M6 iii-c,
+            // ACE-Step task_type "extract"). params: sourceAudioPath
+            // (required — local filesystem path to the existing mixed-down
+            // audio to separate; the client stages a COPY of it inside the
+            // sidecar's own temp-dir allowlist, so any readable local path
+            // works). trackNames (required — non-empty array of stem names,
+            // e.g. ["vocals", "drums", "bass"]; ACE-Step's fixed vocabulary
+            // is woodwinds/brass/fx/synth/strings/percussion/keyboard/
+            // guitar/bass/drums/backing_vocals/vocals, not re-validated
+            // here — the sidecar rejects an unknown name with its own
+            // error). model (optional — DiT model name; extract/lego are
+            // BASE-model-only capabilities, and the sidecar's default
+            // ai.sidecarStart load is the turbo tier, which does NOT serve
+            // them). LEAVE THIS OMITTED for the normal case (M6
+            // iii-c-real): omitting it does NOT hit turbo — the client
+            // defaults to its own stems model (currently
+            // "acestep-v15-xl-sft") and, before submitting, checks the
+            // sidecar's model inventory and auto-loads that model into
+            // handler slot 2 if it isn't already resident (this can take
+            // MINUTES the first time, a multi-GB checkpoint load — the
+            // submission call blocks until it's done or fails). Pass an
+            // explicit `model` only to request a different DiT model than
+            // that default. If the sidecar was started before
+            // scripts/ace-step/run.sh began exporting ACESTEP_CONFIG_PATH2,
+            // slot 2 doesn't exist and the auto-load fails with an
+            // actionable error naming ai.sidecarStop/ai.sidecarStart to
+            // restart it. Submits ONE upstream job per track name against
+            // the SAME source audio and returns a single COMPOSITE jobId
+            // grouping them — poll it with ai.generationStatus exactly like
+            // ai.generateSong (one status surface, not a parallel one); a
+            // succeeded poll's `stems` array carries every named result.
+            // Response: {jobId, state, trackNames}.
+            let extractSourceAudioPath = try params.require("sourceAudioPath", \.stringValue)
+            let extractTrackNames = try parseTrackNames(params["trackNames"])
+            let extractModel = params["model"]?.stringValue
+            do {
+                let submission = try await songGenerator.extractStems(StemExtractionRequest(
+                    sourceAudioPath: extractSourceAudioPath, trackNames: extractTrackNames, model: extractModel))
+                return .success(request.id, try JSONValue(encoding: submission))
+            } catch {
+                throw await translateSongGeneratorError(error)
+            }
+
+        case "ai.legoGenerate":
+            // Generates NEW tracks that fit an existing source audio's
+            // musical context (M6 iii-c, ACE-Step task_type "lego" — build a
+            // song up one instrument layer at a time). params:
+            // sourceAudioPath (required — same staging semantics as
+            // ai.extractStems). globalCaption (required — shared song-level
+            // description, e.g. "warm lofi hip-hop, 90 bpm"). tracks
+            // (required — non-empty array of {trackName (required), prompt
+            // (optional — that track's OWN local description, e.g. "round
+            // sub bass, laid back")}). model (optional, same default-model +
+            // auto-load-into-slot-2 behavior as ai.extractStems — see its
+            // doc). Same one-upstream-job-per-track / composite-jobId /
+            // shared-status-surface shape as ai.extractStems. Response:
+            // {jobId, state, trackNames}.
+            let legoSourceAudioPath = try params.require("sourceAudioPath", \.stringValue)
+            let legoGlobalCaption = try params.require("globalCaption", \.stringValue)
+            let legoTracks = try parseLegoTracks(params["tracks"])
+            let legoModel = params["model"]?.stringValue
+            do {
+                let submission = try await songGenerator.generateLegoTracks(LegoGenerationRequest(
+                    sourceAudioPath: legoSourceAudioPath, globalCaption: legoGlobalCaption,
+                    tracks: legoTracks, model: legoModel))
+                return .success(request.id, try JSONValue(encoding: submission))
+            } catch {
+                throw await translateSongGeneratorError(error)
+            }
+
+        case "ai.importGeneratedStems":
+            // Turns a FINISHED stems/Lego composite job into project
+            // material (M6 iii-c): N new AI-flagged audio tracks + clips
+            // (violet in the UI), one per named result, all at the SAME
+            // target beat, plus optional project-tempo adoption from the
+            // first track (in submission order) that reports a bpm — all as
+            // ONE undoable "Import Generated Stems" edit (a single undo
+            // removes EVERY imported track, together with any tempo change).
+            // params: jobId (required — from ai.extractStems/
+            // ai.legoGenerate; every underlying track must have reached
+            // "succeeded", i.e. ai.generationStatus reports a non-empty
+            // `stems` array). atBeat (optional, default 0). setProjectTempo
+            // (optional bool — same semantics as ai.importGeneration).
+            // Response: {tracks: [{trackId, clipId, trackName}, ...],
+            // adoptedTempoBPM?}. A still-running job / unknown (expired)
+            // jobId / any missing stem file surface as actionable errors —
+            // reuses ai.importGeneration's exact rejection wording
+            // (generationNotReady points back at ai.generationStatus).
+            let importStemsJobID = try params.require("jobId", \.stringValue)
+            let importStemsAtBeat = params["atBeat"]?.doubleValue
+            let importStemsSetTempo = params["setProjectTempo"]?.boolValue
+            do {
+                let (imported, adoptedBPM) = try await store.importGeneratedStems(
+                    jobID: importStemsJobID, atBeat: importStemsAtBeat, setProjectTempo: importStemsSetTempo)
+                var result: [String: JSONValue] = [
+                    "tracks": .array(imported.map {
+                        .object([
+                            "trackId": .string($0.trackID.uuidString),
+                            "clipId": .string($0.clipID.uuidString),
+                            "trackName": .string($0.trackName),
+                        ])
+                    }),
+                ]
+                if let adoptedBPM {
+                    result["adoptedTempoBPM"] = .number(adoptedBPM)
+                }
+                return .success(request.id, .object(result))
+            } catch {
+                throw await translateSongGeneratorError(error)
+            }
+
+        case "ai.repaintAudio":
+            // Re-renders a WINDOW of an EXISTING audio file in place (M6
+            // v-a, ACE-Step task_type "repaint" — a "part swap"/inpainting
+            // job; works on BOTH the sidecar's turbo (primary, the default
+            // load) and sft tiers, unlike ai.extractStems/ai.legoGenerate,
+            // which are base-model-only). params: sourcePath (required —
+            // local filesystem path to the existing audio file on THIS
+            // machine; checked to exist before submitting, then the client
+            // stages a COPY of it inside the sidecar's own temp-dir
+            // allowlist, same staging as ai.extractStems). start (required
+            // — seconds from the top of the file where the repainted
+            // window begins, >= 0). end (optional — seconds where the
+            // window ends, must be > start; omit to repaint from start to
+            // the end of the file). prompt/lyrics (optional — style/
+            // caption and section-labeled lyrics guiding the repainted
+            // window; omit to keep the source's own musical context). mode
+            // (optional — "conservative"|"balanced"|"aggressive", default
+            // "balanced"). strength (optional, 0-1 — only consulted
+            // upstream in "balanced" mode). wavCrossfadeSec (optional,
+            // >= 0 — crossfade at the window edges in the rendered WAV;
+            // omit for upstream's own 0.0 default). seed (optional integer
+            // — a fresh random seed each call when omitted; call again
+            // WITHOUT seed on the SAME window for a RETAKE — there is no
+            // separate retake command). model (optional — DiT model
+            // override; omit for the sidecar's primary handler, unlike
+            // ai.extractStems/ai.legoGenerate's stems-default
+            // substitution/auto-load). Response: SongGenerationSubmission
+            // {jobId, state, queuePosition?} — a SINGLE (not composite) job
+            // id, polled via ai.generationStatus exactly like
+            // ai.generateSong.
+            let repaintSourcePath = try parseRepaintSourcePath(params["sourcePath"])
+            let repaintStart = try params.require("start", \.doubleValue)
+            guard repaintStart >= 0 else {
+                throw ControlError("'start' must be >= 0 (seconds)")
+            }
+            var repaintRequest = RepaintRequest(srcAudioPath: repaintSourcePath, startSeconds: repaintStart)
+            if let endValue = params["end"] {
+                guard let end = endValue.doubleValue else {
+                    throw ControlError("'end' must be a number (seconds)")
+                }
+                guard end > repaintStart else {
+                    throw ControlError("'end' must be greater than 'start'")
+                }
+                repaintRequest.endSeconds = end
+            }
+            repaintRequest.prompt = params["prompt"]?.stringValue
+            repaintRequest.lyrics = params["lyrics"]?.stringValue
+            if let modeValue = params["mode"] {
+                repaintRequest.mode = try parseRepaintMode(modeValue)
+            }
+            if let strengthValue = params["strength"] {
+                guard let strength = strengthValue.doubleValue, (0...1).contains(strength) else {
+                    throw ControlError("'strength' must be a number between 0 and 1")
+                }
+                repaintRequest.strength = strength
+            }
+            if let crossfadeValue = params["wavCrossfadeSec"] {
+                guard let crossfade = crossfadeValue.doubleValue, crossfade >= 0 else {
+                    throw ControlError("'wavCrossfadeSec' must be a number >= 0")
+                }
+                repaintRequest.wavCrossfadeSec = crossfade
+            }
+            if let seedValue = params["seed"]?.doubleValue { repaintRequest.seed = Int(seedValue) }
+            repaintRequest.model = params["model"]?.stringValue
+            do {
+                let submission = try await songGenerator.repaintAudio(repaintRequest)
+                return .success(request.id, try JSONValue(encoding: submission))
+            } catch {
+                throw await translateSongGeneratorError(error)
+            }
+
+        case "ai.fixClipRegion":
+            // Submits an AI repaint of a REGION of an existing timeline clip
+            // (M6 v-b) — the "fix this phrase with AI" flow. SUBMIT-ONLY: this
+            // bounces a dry, as-heard window of the target material (region +/-
+            // context, clamped), submits it to the LOCAL ACE-Step sidecar, and
+            // returns immediately — it does NOT mutate the project. Poll
+            // ai.generationStatus with the returned jobId, THEN ai.importClipFix
+            // to land the result as a violet take LANE comped in over exactly
+            // the region. params: trackId (required), clipId (required — an
+            // AUDIO clip on that track; a MIDI clip is rejected). startBeat/
+            // endBeat (required numbers — ABSOLUTE timeline beats, endBeat >
+            // startBeat, the region must lie inside the target's span). prompt/
+            // lyrics (optional — guide the repainted window; omit to keep the
+            // source's own context). mode (optional —
+            // "conservative"|"balanced"|"aggressive", default "balanced").
+            // strength (optional, 0-1 — only consulted upstream in "balanced"
+            // mode). seed (optional integer — omit for a fresh random seed; a
+            // RETAKE is this command again with the SAME region and no seed).
+            // contextSeconds (optional, 1-60, default 10 — padding rendered each
+            // side of the region for boundary continuity). model (optional — DiT
+            // override; omit for the sidecar's primary handler). Response: the
+            // placement echo {jobId, state, queuePosition?, windowStartBeat,
+            // windowEndBeat, regionStartBeat, regionEndBeat, repaintStartSeconds,
+            // repaintEndSeconds, bouncePath}. A pending fix does NOT survive an
+            // app restart or a project switch.
+            let fixTrackID = try params.requireTrackID()
+            let fixClipID = try params.requireClipID()
+            let fixStartBeat = try params.require("startBeat", \.doubleValue)
+            let fixEndBeat = try params.require("endBeat", \.doubleValue)
+            guard fixEndBeat > fixStartBeat else {
+                throw ControlError("'endBeat' must be greater than 'startBeat'")
+            }
+            let fixMode = try params["mode"].map { try parseClipFixMode($0) } ?? .balanced
+            var fixStrength: Double?
+            if let strengthValue = params["strength"] {
+                guard let strength = strengthValue.doubleValue, (0...1).contains(strength) else {
+                    throw ControlError("'strength' must be a number between 0 and 1")
+                }
+                fixStrength = strength
+            }
+            var fixContextSeconds = 10.0
+            if let contextValue = params["contextSeconds"] {
+                guard let context = contextValue.doubleValue, (1...60).contains(context) else {
+                    throw ControlError("'contextSeconds' must be a number between 1 and 60")
+                }
+                fixContextSeconds = context
+            }
+            let fixSeed = params["seed"]?.doubleValue.map { Int($0) }
+            do {
+                let submission = try await store.fixClipRegion(
+                    trackId: fixTrackID, clipId: fixClipID,
+                    startBeat: fixStartBeat, endBeat: fixEndBeat,
+                    prompt: params["prompt"]?.stringValue,
+                    lyrics: params["lyrics"]?.stringValue,
+                    mode: fixMode, strength: fixStrength, seed: fixSeed,
+                    contextSeconds: fixContextSeconds,
+                    model: params["model"]?.stringValue)
+                return .success(request.id, try JSONValue(encoding: submission))
+            } catch {
+                throw await translateSongGeneratorError(error)
+            }
+
+        case "ai.importClipFix":
+            // Lands a FINISHED clip fix (M6 v-b) as a violet take LANE comped in
+            // over exactly the region requested by ai.fixClipRegion — the
+            // original audio is NEVER replaced, and the comp elsewhere is
+            // untouched. One undoable "AI Fix Take" edit (edit.undo restores the
+            // plain clip / previous comp). params: jobId (required — the id from
+            // ai.fixClipRegion; the job must have reached state "succeeded", i.e.
+            // ai.generationStatus reports an audioPath). Comp between the takes
+            // afterwards with the take.* commands. Response: {trackId, groupId,
+            // laneId, laneName ("AI Fix N"), group: <TakeGroup>}. A
+            // still-running/unknown job surfaces an actionable error
+            // (clipFixJobNotFound points back at ai.fixClipRegion; a target that
+            // drifted beyond a pure move surfaces clipFixStale).
+            let importFixJobID = try params.require("jobId", \.stringValue)
+            do {
+                let result = try await store.importClipFix(jobID: importFixJobID)
+                var payload: [String: JSONValue] = [
+                    "trackId": .string(result.trackID.uuidString),
+                    "groupId": .string(result.groupID.uuidString),
+                    "laneId": .string(result.laneID.uuidString),
+                    "laneName": .string(result.laneName),
+                ]
+                // Return the group (the take.group response precedent) so agents
+                // see lanes + comp without a snapshot round-trip.
+                if let group = store.tracks.first(where: { $0.id == result.trackID })?
+                    .takeGroups.first(where: { $0.id == result.groupID }) {
+                    payload["group"] = try JSONValue(encoding: group)
+                }
+                return .success(request.id, .object(payload))
+            } catch {
+                throw await translateSongGeneratorError(error)
+            }
+
         case "input.listDevices":
             return .success(request.id, try inputDeviceList())
 
@@ -1275,6 +1904,16 @@ public final class CommandRouter {
 
         case "project.snapshot":
             return .success(request.id, try snapshotJSON())
+
+        case "project.overview":
+            // No params. Agent-facing summary projection (M7): the same
+            // session `project.snapshot` reports at full fidelity, but
+            // counts-not-lists everywhere a list can grow unbounded (note
+            // counts instead of notes, point counts instead of points) and
+            // no file paths — a few KB an agent can afford to re-read on
+            // every turn to re-orient. Wire shape mirrors `ProjectOverview`
+            // directly (no wrapping key): {transport, master, tracks: [...]}.
+            return .success(request.id, try JSONValue(encoding: store.overview()))
 
         // in mcp-server/src/index.ts (see /mcp-verify) — matching these routes.
         case "project.save":
@@ -1307,6 +1946,100 @@ public final class CommandRouter {
             try store.newProject(discardChanges: discardNew)
             return .success(request.id, try snapshotJSON())
 
+        case "project.recoveryStatus":
+            // No params. Crash-recovery offer (M9 crash-b): whether the LAST
+            // session ended unexpectedly (a crash / SIGKILL left its lock) AND a
+            // rolling autosave snapshot is on disk to restore. Response =
+            // AutosaveRecoveryStatus verbatim: {available, savedAt?, sourcePath?,
+            // editCount?}. Readable anytime; headless-safe — a session that never
+            // ran crash detection, or no Autosave dir, reads {available:false}.
+            return .success(request.id, try JSONValue(encoding: store.recoveryStatus()))
+
+        case "project.recover":
+            // params: accept (required bool). accept:true loads the autosave INTO
+            // the store (the project becomes the recovered content, kept DIRTY,
+            // sourcePath restored so a later save lands on the original file), then
+            // drops the snapshot → {recovered:true, warnings:[...], snapshot}.
+            // accept:false drops the snapshot + clears the offer → {discarded:true}.
+            // No offer available + accept:true → noRecoveryAvailable via the
+            // LocalizedError mapping.
+            let accept = try params.require("accept", \.boolValue)
+            switch try store.recoverFromAutosave(accept: accept) {
+            case .recovered(let warnings):
+                return .success(request.id, .object([
+                    "recovered": .bool(true),
+                    "warnings": .array(warnings.map(JSONValue.string)),
+                    "snapshot": try snapshotJSON(),
+                ]))
+            case .discarded:
+                return .success(request.id, .object(["discarded": .bool(true)]))
+            }
+
+        case "app.feedbackBundle":
+            // params: includeProject? (bool, default false). Writes ONE local
+            // diagnostics FOLDER (M9 beta) — `feedback-<timestamp>/` under
+            // ~/Library/Application Support/DAWPro/Feedback/ — that makes a bug
+            // report actionable: a manifest (app/OS/build/hardware, NO key
+            // material), engine.json (the M9 watchdog + performance snapshots),
+            // overview.json (the counts-only project projection — no note content,
+            // no media paths), a crashes/ copy of recent DAWApp*.ips reports, and,
+            // ONLY when includeProject:true, the full project.dawproject snapshot.
+            // Everything LOCAL — nothing phones home. Response =
+            // FeedbackBundleSummary verbatim: {path, fileCount, byteCount,
+            // crashReportCount, includesProject}. Never throws except a real
+            // filesystem failure (DiagnosticsError.writeFailed via the
+            // LocalizedError mapping); headless-safe (engine snapshots read idle).
+            let includeProject = params["includeProject"]?.boolValue ?? false
+            return .success(request.id,
+                            try JSONValue(encoding: store.writeFeedbackBundle(includeProject: includeProject)))
+
+        case "ai.copilotSend":
+            // Starts a new in-app Copilot turn (M6 rail-c) — the copilot drives
+            // the SAME command surface as this router, in-process, through its
+            // own curated tool catalog (CopilotToolCatalog; excludes ai.copilot*
+            // itself, so recursion is impossible by construction). params:
+            // message (required, non-empty — the user's instruction). Returns
+            // immediately: {turnId, status: "running"}; the turn runs
+            // asynchronously — poll ai.copilotState with the returned turnId.
+            // Throws if a turn is already running (poll/reset first), if no AI
+            // provider is configured (actionable Settings ⌘, message — never a
+            // key value), or if the engine isn't wired yet.
+            guard let copilotEngine else {
+                throw ControlError("copilot engine not wired — app startup incomplete")
+            }
+            let copilotMessage = try params.require("message", \.stringValue)
+            guard !copilotMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ControlError("'message' must not be empty")
+            }
+            let copilotTurnID = try copilotEngine.send(copilotMessage)
+            return .success(request.id, .object([
+                "turnId": .string(copilotTurnID),
+                "status": .string("running"),
+            ]))
+
+        case "ai.copilotState":
+            // Polls the Copilot's session state (the ai.generateSong/
+            // ai.generationStatus poll precedent). params: turnId (optional —
+            // filters the transcript to one turn; omit for the whole session).
+            // Response: {status, currentTurnId?, transcript: [{id, turnId, kind,
+            // text?, command?, ok?, summary?}]}. An UNKNOWN turnId is not an
+            // error: it returns the engine's current status with an empty
+            // filtered transcript (poller-friendly).
+            guard let copilotEngine else {
+                throw ControlError("copilot engine not wired — app startup incomplete")
+            }
+            let stateTurnID = params["turnId"]?.stringValue
+            return .success(request.id, copilotEngine.stateJSON(turnID: stateTurnID))
+
+        case "ai.copilotReset":
+            // Cancels any in-flight turn and clears the transcript/history back
+            // to idle. No params.
+            guard let copilotEngine else {
+                throw ControlError("copilot engine not wired — app startup incomplete")
+            }
+            copilotEngine.reset()
+            return .success(request.id)
+
         case "edit.undo":
             // Reverses the last edit. nothingToUndo/transportBusy surface via the
             // LocalizedError mapping. Result carries the reversed label plus the
@@ -1323,6 +2056,60 @@ public final class CommandRouter {
             return .success(request.id, .object([
                 "redone": .string(label),
                 "snapshot": try snapshotJSON(),
+            ]))
+
+        case "plugin.openUI":
+            // Opens (or focuses) the floating window of the LIVE hosted Audio
+            // Unit for a track's instrument or one insert effect (M3 vi-b) —
+            // edits in the window affect the sounding audio immediately. params:
+            // trackId (required), effectId? (UUID — omit for the instrument
+            // window), x?/y? (top-left-origin screen points; omit for a
+            // deterministic cascade). Plugin windows apply ONLY to Audio Unit
+            // instruments/effects — built-in kinds have first-class in-app
+            // panels and are rejected readably. A headless control session (no
+            // app UI) errors with an actionable message. Response mirrors one
+            // listOpenUIs entry: {trackId, effectId?, title, component:{name,
+            // manufacturerName, isV3}, body ("generic"|"custom"), alreadyOpen,
+            // frame:{x,y,width,height}, warning?}.
+            let target = try requirePluginTarget(params)
+            guard let pluginUI else {
+                throw ControlError(
+                    "plugin UI unavailable — this control session has no app UI (headless). Launch DAWApp/DAWPro.app and retry.")
+            }
+            let opened = try await pluginUI.openUI(target, x: params["x"]?.doubleValue,
+                                                   y: params["y"]?.doubleValue)
+            return .success(request.id,
+                            pluginUIWindowJSON(opened.info, alreadyOpen: opened.alreadyOpen))
+
+        case "plugin.closeUI":
+            // Closes the plugin window for a target (M3 vi-b). Validates UUID
+            // SYNTAX only — no store lookup, because the target may have just
+            // been removed and idempotent close is the agent-friendly contract.
+            // params: trackId (required), effectId? (UUID — omit for the
+            // instrument window). Headless (no app UI) errors like plugin.openUI.
+            // Response: {closed: true|false} (false = honest no-op, the window
+            // was not open).
+            let closeTarget = try pluginCloseTarget(params)
+            guard let pluginUI else {
+                throw ControlError(
+                    "plugin UI unavailable — this control session has no app UI (headless). Launch DAWApp/DAWPro.app and retry.")
+            }
+            return .success(request.id, .object(["closed": .bool(pluginUI.closeUI(closeTarget))]))
+
+        case "plugin.listOpenUIs":
+            // Lists every open plugin window (M3 vi-b). No params, never errors.
+            // Response: {available: bool, windows: [...openUI result objects...]}.
+            // `available:false, windows:[]` is the honest answer for a headless
+            // control session (the app has no UI to open windows in).
+            guard let pluginUI else {
+                return .success(request.id, .object([
+                    "available": .bool(false),
+                    "windows": .array([]),
+                ]))
+            }
+            return .success(request.id, .object([
+                "available": .bool(true),
+                "windows": .array(pluginUI.listOpenUIs().map { pluginUIWindowJSON($0) }),
             ]))
 
         default:
@@ -1416,6 +2203,105 @@ public final class CommandRouter {
         ]
         if let effectID { obj["effectId"] = .string(effectID.uuidString) }
         return .object(obj)
+    }
+
+    // MARK: - plugin.* helpers (M3 vi-b)
+
+    /// Full validation for `plugin.openUI` (§5.3), performed BEFORE the seam
+    /// (`pluginUI`) check so the taxonomy is headless-testable: track exists,
+    /// and either the named effect is an Audio Unit insert, or the track hosts
+    /// an Audio Unit instrument. A built-in kind is rejected readably — plugin
+    /// windows apply only to Audio Units (built-ins have in-app panels).
+    private func requirePluginTarget(_ params: [String: JSONValue]) throws -> PluginUITarget {
+        let trackID = try params.requireTrackID()
+        guard let track = store.tracks.first(where: { $0.id == trackID }) else {
+            throw ControlError.noTrack(trackID)
+        }
+        if params["effectId"] != nil {
+            let effectID = try params.requireEffectID()
+            guard let effect = track.effects.first(where: { $0.id == effectID }) else {
+                throw ControlError("no effect with id \(effectID.uuidString) on track \(trackID.uuidString)")
+            }
+            guard effect.kind == .audioUnit else {
+                throw ControlError(
+                    "effect '\(effectID.uuidString)' is a built-in \(effect.kind.rawValue) — plugin windows apply only to Audio Unit effects")
+            }
+            return .effect(trackID: trackID, effectID: effectID)
+        }
+        guard track.kind == .instrument else {
+            throw ControlError(
+                "track '\(trackID.uuidString)' is a \(track.kind.rawValue) track — plugin windows apply only to Audio Unit instruments")
+        }
+        let instrumentKind = (track.instrument ?? .default).kind
+        guard instrumentKind == .audioUnit else {
+            throw ControlError(
+                "track '\(trackID.uuidString)' uses the built-in \(instrumentKind.rawValue) instrument — plugin windows apply only to Audio Unit instruments")
+        }
+        return .instrument(trackID: trackID)
+    }
+
+    /// Syntax-only target for `plugin.closeUI`: trackId (required) + optional
+    /// effectId, both validated for UUID SHAPE only. No store lookup — the
+    /// target may have just been removed, and idempotent close is the agent-
+    /// friendly contract.
+    private func pluginCloseTarget(_ params: [String: JSONValue]) throws -> PluginUITarget {
+        let trackID = try params.requireTrackID()
+        if params["effectId"] != nil {
+            return .effect(trackID: trackID, effectID: try params.requireEffectID())
+        }
+        return .instrument(trackID: trackID)
+    }
+
+    /// Wire shape for one plugin window (shared by `plugin.openUI` and each
+    /// `plugin.listOpenUIs` entry). `alreadyOpen` is emitted only for the
+    /// open-result flavor.
+    private func pluginUIWindowJSON(_ info: PluginUIWindowInfo,
+                                    alreadyOpen: Bool? = nil) -> JSONValue {
+        var obj: [String: JSONValue] = [
+            "trackId": .string(info.trackID.uuidString),
+            "title": .string(info.title),
+            "component": .object([
+                "name": .string(info.componentName),
+                "manufacturerName": .string(info.manufacturerName),
+                "isV3": .bool(info.isV3),
+            ]),
+            "body": .string(info.body.rawValue),
+            "frame": .object([
+                "x": .number(info.frame.x),
+                "y": .number(info.frame.y),
+                "width": .number(info.frame.width),
+                "height": .number(info.frame.height),
+            ]),
+        ]
+        if let effectID = info.effectID { obj["effectId"] = .string(effectID.uuidString) }
+        if let alreadyOpen { obj["alreadyOpen"] = .bool(alreadyOpen) }
+        if let warning = info.warning { obj["warning"] = .string(warning) }
+        return .object(obj)
+    }
+
+    /// Wire shape for `macro.songSkeleton`'s result: the whole scaffold with
+    /// real, actionable ids — `{genre, tempoBPM, tracks: [{id, name}],
+    /// sectionClips: [{name, startBeat, lengthBeats}], loopStart, loopEnd,
+    /// arrangementTrackId}`. `tracks` lists EVERY created track (the genre
+    /// roster then the Arrangement guide track LAST, whose id is also surfaced
+    /// as `arrangementTrackId`).
+    private func songSkeletonResult(_ result: SongSkeletonResult) -> JSONValue {
+        .object([
+            "genre": .string(result.genre),
+            "tempoBPM": .number(result.tempoBPM),
+            "tracks": .array(result.tracks.map { .object([
+                "id": .string($0.id.uuidString),
+                "name": .string($0.name),
+            ]) }),
+            "sectionClips": .array(result.sectionClips.map { .object([
+                "name": .string($0.name),
+                "startBeat": .number($0.startBeat),
+                "lengthBeats": .number($0.lengthBeats),
+            ]) }),
+            "loopStart": .number(result.loopStart),
+            "loopEnd": .number(result.loopEnd),
+            "arrangementTrackId": .string(result.arrangementTrackID.uuidString),
+        ])
     }
 
     /// Resolved wire JSON for one track's insert chain: `[{id, kind,
@@ -1666,6 +2552,32 @@ public final class CommandRouter {
         return ids
     }
 
+    /// Parses the optional `sections` param for `macro.songSkeleton` into
+    /// `[SkeletonSection]?` — nil (omitted) tells the store to use the genre's
+    /// default layout. Present-but-malformed is a per-index error naming the
+    /// offending element (the `parseNotes` precedent). Only SHAPE is checked
+    /// here (name is a string, bars is an integer); the store owns the range
+    /// validation (count 1-16, name length, bars 1-64) as the single source of
+    /// truth, surfacing field-named `invalidSongSkeleton` errors.
+    private func parseSkeletonSections(_ value: JSONValue?) throws -> [SkeletonSection]? {
+        guard let value else { return nil }
+        guard let array = value.arrayValue else {
+            throw ControlError("'sections' must be an array of {name: string, bars: integer}")
+        }
+        var sections: [SkeletonSection] = []
+        sections.reserveCapacity(array.count)
+        for (i, element) in array.enumerated() {
+            guard let name = element["name"]?.stringValue else {
+                throw ControlError("sections[\(i)].name must be a string")
+            }
+            guard let barsValue = element["bars"]?.doubleValue, Self.isInteger(barsValue) else {
+                throw ControlError("sections[\(i)].bars must be an integer (number of bars)")
+            }
+            sections.append(SkeletonSection(name: name, bars: Int(barsValue)))
+        }
+        return sections
+    }
+
     /// Parses the optional `trackIds` param (`render.stems`) into `[UUID]?` —
     /// absent → nil ("every master input"); present validates each element
     /// with a per-index error naming the offending element (the `parseClipIDs`
@@ -1687,6 +2599,162 @@ public final class CommandRouter {
             ids.append(id)
         }
         return ids
+    }
+
+    /// Parses the required `trackNames` param (`ai.extractStems`) into
+    /// `[String]` — a per-index error naming the offending element (the
+    /// `parseClipIDs` precedent). Upstream's own fixed vocabulary
+    /// (`TRACK_NAMES` in `acestep/constants.py`) is NOT re-validated here —
+    /// the sidecar is authoritative and rejects an unknown name with its
+    /// own error, which surfaces verbatim.
+    /// Parses the optional `structure` param (`ai.writeLyrics`) into a non-empty
+    /// list of section tags — a non-empty array of non-empty strings, with a
+    /// per-index error naming the offending element (the `parseTrackNames`
+    /// precedent).
+    private func parseLyricsStructure(_ value: JSONValue) throws -> [String] {
+        guard let array = value.arrayValue, !array.isEmpty else {
+            throw ControlError(
+                "'structure' must be a non-empty array of section tags, e.g. [\"verse\", \"chorus\"]")
+        }
+        var tags: [String] = []
+        tags.reserveCapacity(array.count)
+        for (i, element) in array.enumerated() {
+            guard let tag = element.stringValue, !tag.isEmpty else {
+                throw ControlError("structure[\(i)] must be a non-empty string")
+            }
+            tags.append(tag)
+        }
+        return tags
+    }
+
+    /// Parses the optional `context` param (`ai.writeLyrics`) into a
+    /// `LyricsWriteContext`, DEFAULTING each unset field from the current project:
+    /// `tempoBPM` / `timeSignature` come from the transport when the caller omits
+    /// them, so a bare call still fits the session. An explicitly provided value
+    /// always wins; a wrong TYPE is a field-named error. `keyScale`/`genre` have
+    /// no project source, so they stay nil unless provided.
+    private func parseLyricsContext(_ value: JSONValue?) throws -> LyricsWriteContext {
+        // A present `context` must be an object.
+        if let value, value.objectValue == nil, value != .null {
+            throw ControlError("'context' must be an object {keyScale?, tempoBPM?, timeSignature?, genre?}")
+        }
+        let object = value?.objectValue
+        var context = LyricsWriteContext()
+
+        if let keyScaleValue = object?["keyScale"] {
+            guard let keyScale = keyScaleValue.stringValue else {
+                throw ControlError("'context.keyScale' must be a string")
+            }
+            context.keyScale = keyScale
+        }
+        if let genreValue = object?["genre"] {
+            guard let genre = genreValue.stringValue else {
+                throw ControlError("'context.genre' must be a string")
+            }
+            context.genre = genre
+        }
+        if let tempoValue = object?["tempoBPM"] {
+            guard let tempo = tempoValue.doubleValue else {
+                throw ControlError("'context.tempoBPM' must be a number")
+            }
+            context.tempoBPM = tempo
+        } else {
+            context.tempoBPM = store.transport.tempoBPM
+        }
+        if let sigValue = object?["timeSignature"] {
+            guard let sig = sigValue.stringValue else {
+                throw ControlError("'context.timeSignature' must be a string")
+            }
+            context.timeSignature = sig
+        } else {
+            let sig = store.transport.timeSignature
+            context.timeSignature = "\(sig.beatsPerBar)/\(sig.beatUnit)"
+        }
+        return context
+    }
+
+    /// Resolves the required `sourcePath` param (`ai.repaintAudio`) with a
+    /// field-named error, and — unlike `ai.extractStems`/`ai.legoGenerate`'s
+    /// `sourceAudioPath` (whose existence is only proven when the REAL
+    /// client stages it) — checks the file actually exists ON THIS MACHINE
+    /// before submitting: repaint is a single job with no per-track fallback,
+    /// so failing fast here beats a round trip to the sidecar for a typo'd path.
+    private func parseRepaintSourcePath(_ value: JSONValue?) throws -> String {
+        guard let path = value?.stringValue, !path.isEmpty else {
+            throw ControlError("missing or invalid required param 'sourcePath'")
+        }
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw ControlError("'sourcePath' does not exist: \(path)")
+        }
+        return path
+    }
+
+    /// Resolves the optional `mode` param (`ai.repaintAudio`) to a
+    /// `RepaintMode`; a present-but-invalid string names the valid values
+    /// verbatim (the `parseEffectKind` precedent).
+    private func parseRepaintMode(_ value: JSONValue) throws -> RepaintMode {
+        guard let raw = value.stringValue else {
+            throw ControlError("'mode' must be a string")
+        }
+        guard let mode = RepaintMode(rawValue: raw) else {
+            let valid = RepaintMode.allCases.map(\.rawValue).joined(separator: "|")
+            throw ControlError("unknown repaint mode '\(raw)' — use \(valid)")
+        }
+        return mode
+    }
+
+    /// Resolves the optional `mode` param (`ai.fixClipRegion`) to a DAWCore
+    /// `ClipFixMode`; a present-but-invalid string names the valid values
+    /// verbatim (the `parseRepaintMode` precedent). Distinct from
+    /// `parseRepaintMode` — that one produces the AIServices `RepaintMode`; the
+    /// clip-fix flow speaks the DAWCore type (the store owns the AI hop).
+    private func parseClipFixMode(_ value: JSONValue) throws -> ClipFixMode {
+        guard let raw = value.stringValue else {
+            throw ControlError("'mode' must be a string")
+        }
+        guard let mode = ClipFixMode(rawValue: raw) else {
+            let valid = ClipFixMode.allCases.map(\.rawValue).joined(separator: "|")
+            throw ControlError("unknown clip-fix mode '\(raw)' — use \(valid)")
+        }
+        return mode
+    }
+
+    private func parseTrackNames(_ value: JSONValue?) throws -> [String] {
+        guard let array = value?.arrayValue, !array.isEmpty else {
+            throw ControlError(
+                "'trackNames' must be a non-empty array of stem names, e.g. [\"vocals\", \"drums\"]")
+        }
+        var names: [String] = []
+        names.reserveCapacity(array.count)
+        for (i, element) in array.enumerated() {
+            guard let name = element.stringValue, !name.isEmpty else {
+                throw ControlError("trackNames[\(i)] must be a non-empty string")
+            }
+            names.append(name)
+        }
+        return names
+    }
+
+    /// Parses the required `tracks` param (`ai.legoGenerate`) into
+    /// `[StemTrackRequest]` — each element `{trackName (required), prompt
+    /// (optional — that track's own local description)}`, with a per-index
+    /// error naming the offending element (the `parseClipIDs` precedent).
+    private func parseLegoTracks(_ value: JSONValue?) throws -> [StemTrackRequest] {
+        guard let array = value?.arrayValue, !array.isEmpty else {
+            throw ControlError(
+                "'tracks' must be a non-empty array of {trackName, prompt?}, e.g. [{\"trackName\": \"bass\"}]")
+        }
+        var tracks: [StemTrackRequest] = []
+        tracks.reserveCapacity(array.count)
+        for (i, element) in array.enumerated() {
+            guard let object = element.objectValue,
+                  let name = object["trackName"]?.stringValue, !name.isEmpty
+            else {
+                throw ControlError("tracks[\(i)].trackName must be a non-empty string")
+            }
+            tracks.append(StemTrackRequest(trackName: name, localPrompt: object["prompt"]?.stringValue))
+        }
+        return tracks
     }
 
     /// Parses a `segments` param into `[CompSegment]`, decoding each element

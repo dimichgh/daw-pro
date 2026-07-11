@@ -15,6 +15,10 @@ final class FakeTransientEngine: AudioEngineControlling {
     var recordPermission: RecordPermission = .granted
 
     var stubMarkers: [TransientMarker] = []
+    /// Per-call stub queue (M6 v-d): when non-empty, each call dequeues the
+    /// next marker set — take-alignment tests feed the reference and
+    /// candidate lanes DIFFERENT onsets. Empty → `stubMarkers` as before.
+    var stubMarkersQueue: [[TransientMarker]] = []
     var detectCalls = 0
     var lastURL: URL?
     var lastSensitivity: Double?
@@ -23,6 +27,7 @@ final class FakeTransientEngine: AudioEngineControlling {
         detectCalls += 1
         lastURL = url
         lastSensitivity = sensitivity
+        if !stubMarkersQueue.isEmpty { return stubMarkersQueue.removeFirst() }
         return stubMarkers
     }
 

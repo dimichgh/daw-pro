@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist TEMPLATE for scripts/bundle.sh (M9 pkg-a).
+  __SHORT_VERSION__ and __BUNDLE_VERSION__ are substituted at bundle time from
+  the version constants in scripts/bundle.sh. Do not hand-edit the copy that
+  lands in dist/DAWPro.app/Contents/Info.plist — re-run scripts/bundle.sh.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleExecutable</key>
+    <string>DAWApp</string>
+    <key>CFBundleName</key>
+    <string>DAW Pro</string>
+    <key>CFBundleDisplayName</key>
+    <string>DAW Pro</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.dawpro.app</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__SHORT_VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__BUNDLE_VERSION__</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.music</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>DAW Pro needs the microphone to record audio from your selected input when you arm a track and hit record.</string>
+</dict>
+</plist>

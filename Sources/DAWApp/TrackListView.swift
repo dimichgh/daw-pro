@@ -18,13 +18,14 @@ struct TrackListView: View {
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(DAWTheme.playback)
+                        .foregroundStyle(DAWTheme.textPrimary)
                         .frame(width: 22, height: 22)
                         .background(DAWTheme.panelRaised)
                         .clipShape(RoundedRectangle(cornerRadius: 5))
                 }
                 .buttonStyle(.plain)
                 .help("Add track")
+                .explainable(.arrangeAddTrack)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -36,7 +37,7 @@ struct TrackListView: View {
                         .foregroundStyle(DAWTheme.textDim)
                     Text("Add one, or let an agent do it over MCP")
                         .font(.system(size: 10))
-                        .foregroundStyle(DAWTheme.textDim.opacity(0.7))
+                        .foregroundStyle(DAWTheme.textFaint)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -60,6 +61,15 @@ struct TrackRow: View {
     @Environment(ProjectStore.self) private var store
     @Environment(AppModel.self) private var model
     var track: Track
+
+    /// Drag origin for the row-height grabber (beta m10-d), captured on the first
+    /// tick and cleared on end — only one row is dragged at a time. Adjusts the
+    /// GLOBAL `panelLayout.rowHeight`, not this track.
+    @State private var rowDragOrigin: CGFloat?
+
+    /// The live global row height — the SAME value the timeline lanes read, so the
+    /// sidebar header and its lane stay pixel-aligned at every size (beta m10-d).
+    private var rowHeight: CGFloat { model.panelLayout.rowHeight }
 
     private var kindIcon: String {
         switch track.kind {
@@ -103,15 +113,19 @@ struct TrackRow: View {
 
     private var row: some View {
         HStack(spacing: 8) {
-            Image(systemName: kindIcon)
-                .font(.system(size: 11))
-                .foregroundStyle(track.isAIGenerated ? DAWTheme.ai : DAWTheme.textDim)
-                .frame(width: 16)
+            // Kind icon + name = the track's identity (one shared "Track" card).
+            HStack(spacing: 8) {
+                Image(systemName: kindIcon)
+                    .font(.system(size: 11))
+                    .foregroundStyle(track.isAIGenerated ? DAWTheme.ai : DAWTheme.textDim)
+                    .frame(width: 16)
 
-            Text(track.name)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(DAWTheme.textPrimary)
-                .lineLimit(1)
+                Text(track.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(DAWTheme.textPrimary)
+                    .lineLimit(1)
+            }
+            .explainable(.trackRowIdentity)
 
             Spacer()
 
@@ -127,22 +141,46 @@ struct TrackRow: View {
 
             automationDisclosure
 
-            ToggleChip(label: "M", isOn: track.isMuted, onColor: DAWTheme.record) {
+            // M/S/A reuse the mixer strip's ExplainIDs — the copy reads
+            // context-neutral, so one entry serves both surfaces (ex-b shared-id rule).
+            ToggleChip(label: "M", isOn: track.isMuted, onColor: DAWTheme.clip) {
                 store.setTrackMute(id: track.id, muted: !track.isMuted)
             }
+            .explainable(.mixerMute)
             ToggleChip(label: "S", isOn: track.isSoloed, onColor: DAWTheme.playback) {
                 store.setTrackSolo(id: track.id, soloed: !track.isSoloed)
             }
+            .explainable(.mixerSolo)
             if track.kind == .audio || track.kind == .instrument {
                 // Record arm (audio capture / MIDI capture + live thru) —
                 // throws only for bus tracks, which never show the chip.
                 ToggleChip(label: "R", isOn: track.isArmed, onColor: DAWTheme.record) {
                     _ = try? store.setTrackArm(id: track.id, armed: !track.isArmed)
                 }
+                .explainable(.mixerArm)
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        // The header IS the timeline lane's height (beta m10-d): a fixed frame on
+        // the store value (not intrinsic padding) so it matches `rowHeight` exactly,
+        // keeping the sidebar and timeline pixel-aligned. Content centers within it.
+        .frame(height: rowHeight)
+        // Drag the header's bottom edge to resize ALL rows (resizeUpDown, not grab —
+        // the macOS glyph for a height adjustment; see DESIGN-LANGUAGE "Panel
+        // splitters"). Idle-invisible so N rows don't grow N rest lines.
+        .overlay(alignment: .bottom) { rowHeightHandle }
+    }
+
+    /// The bottom-edge grabber that adjusts the global track-row height (beta m10-d).
+    /// Drag DOWN grows every row; the store clamps to 24–64 pt.
+    private var rowHeightHandle: some View {
+        PanelSplitter(axis: .horizontal, idleVisible: false) { translation in
+            if rowDragOrigin == nil { rowDragOrigin = model.panelLayout.rowHeight }
+            let origin = rowDragOrigin ?? PanelLayoutStore.defaultRowHeight
+            model.panelLayout.setRowHeight(origin + translation.height)
+        } onEnded: {
+            rowDragOrigin = nil
+        }
     }
 
     /// Automation disclosure: an axis-chart glyph that opens the track's

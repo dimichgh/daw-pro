@@ -24,6 +24,11 @@ public enum ProjectError: Error, LocalizedError {
     case chainFull(Int)
     case unknownEffectParam(String)
     case audioUnitEffectRequiresComponent
+    // Mixer presets (M7 macro-b): message built at throw time (lists valid names).
+    case mixerPresetNotFound(String)
+    // Song skeleton macro (M7 macro-c): messages built at throw time.
+    case songSkeletonGenreNotFound(String)  // lists every valid genre name
+    case invalidSongSkeleton(String)         // field-named validation (tempo/sections)
     case automationTargetNotSupported(String)
     case automationTargetUnresolvable(String)
     case automationLaneNotFound(UUID)
@@ -48,6 +53,8 @@ public enum ProjectError: Error, LocalizedError {
     case malformedProject(String)
     case newerProjectVersion(found: Int, supported: Int)
     case unsavedChanges(String)
+    // Crash-recovery autosave (M9 crash-b).
+    case noRecoveryAvailable
     case nothingToUndo
     case nothingToRedo
     // Takes / comping (M5 iii-a).
@@ -73,6 +80,17 @@ public enum ProjectError: Error, LocalizedError {
     // — its signal lives in the destination bus's stem. The message is built
     // at throw time (it names both the track and its bus).
     case stemNotMasterInput(String)
+    // Generation import (M6 iii-a).
+    case generationSourceUnavailable
+    case generationNotReady(jobID: String, state: String)
+    case generationAudioMissing(String)
+    // Clip vocal-fix flow (M6 v-b).
+    case clipFixRequiresAudioClip(UUID)
+    case clipFixJobNotFound(String)
+    case clipFixStale(String)          // message built at throw time (what changed)
+    // Take micro-alignment (M6 v-d).
+    case alignmentInconclusive(String) // message built at throw time (onset counts)
+    case alignmentWouldCrossTimelineStart(String) // built at throw time (offset + headroom)
 
     public var errorDescription: String? {
         switch self {
@@ -115,6 +133,19 @@ public enum ProjectError: Error, LocalizedError {
         case .audioUnitEffectRequiresComponent:
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "an audioUnit effect requires a component selection — pass audioUnit {type?, subType, manufacturer} (see fx.listAudioUnits)"
+        case .mixerPresetNotFound(let message):
+            // The store builds the full message at throw time (it lists every
+            // valid preset name); surfaced verbatim — the unknownEffectParam
+            // precedent for a case carrying a ready-to-show string.
+            return message
+        case .songSkeletonGenreNotFound(let message):
+            // Built at throw time (lists every valid genre name) — the
+            // mixerPresetNotFound precedent. Surfaced verbatim.
+            return message
+        case .invalidSongSkeleton(let message):
+            // Field-named validation for tempo/sections, built at throw time —
+            // the invalidClipEdit precedent. Surfaced verbatim.
+            return message
         case .automationTargetNotSupported(let message):
             // The store builds the message at throw time (which target is
             // v0-deferred); surfaced verbatim (the unknownEffectParam precedent).
@@ -175,6 +206,9 @@ public enum ProjectError: Error, LocalizedError {
             return "this project was saved by a newer version of DAW Pro (schema v\(found); this build reads up to v\(supported)) — update the app to open it"
         case .unsavedChanges(let reason):
             return "unsaved changes could not be saved first (\(reason)) — fix that, or pass discardChanges: true to abandon them"
+        case .noRecoveryAvailable:
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "no recovered work to restore — check project.recoveryStatus first (available is false when the last session exited cleanly or the autosave was already used)"
         case .nothingToUndo:
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "nothing to undo"
@@ -232,6 +266,35 @@ public enum ProjectError: Error, LocalizedError {
         case .stemNotMasterInput(let message):
             // The store/plan builds the message at throw time (which track,
             // which bus); surfaced verbatim — the invalidClipEdit precedent.
+            return message
+        case .generationSourceUnavailable:
+            return "No AI generation source is available to import from. Wire up ProjectStore.generationSource (the app does this automatically)."
+        case .generationNotReady(let jobID, let state):
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "generation job '\(jobID)' is not finished yet (state '\(state)') — poll ai.generationStatus with that jobId until state is 'succeeded', then import again"
+        case .generationAudioMissing(let path):
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "the generated audio for this job is no longer on disk (\(path)) — re-poll ai.generationStatus (it re-fetches the audio), or generate again"
+        case .clipFixRequiresAudioClip(let id):
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "clip \(id.uuidString) is a MIDI clip — ai.fixClipRegion applies only to audio clips"
+        case .clipFixJobNotFound(let id):
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "no pending clip fix with jobId '\(id)' — pending fixes do not survive app restart or project switches; submit again with ai.fixClipRegion"
+        case .clipFixStale(let message):
+            // The store builds the message at throw time (what changed since
+            // submit); surfaced verbatim — the invalidClipEdit precedent.
+            return message
+        case .alignmentInconclusive(let message):
+            // The store builds the message at throw time (how many onsets
+            // matched, what to try next); surfaced verbatim — the
+            // invalidClipEdit precedent.
+            return message
+        case .alignmentWouldCrossTimelineStart(let message):
+            // The store builds the message at throw time (required move,
+            // available headroom, take.move advice); surfaced verbatim — the
+            // invalidClipEdit precedent. Thrown instead of silently clamping
+            // an apply at beat 0: `applied` must never lie.
             return message
         }
     }

@@ -554,6 +554,35 @@ struct CommandRouterTests {
         #expect(CommandRouter.allCommands.contains("track.setInstrument"))
     }
 
+    // M7 (agent-facing project snapshot).
+    @Test("project.overview round-trips the summarized projection with top-level keys and track identity")
+    func overviewWireShape() async throws {
+        let (router, store) = makeRouter()
+        let track = store.addTrack(name: "Gtr", kind: .audio)
+
+        let response = await router.handle(ControlRequest(id: "1", command: "project.overview"))
+        #expect(response.ok)
+        // Top-level keys: transport, master, tracks — no wrapping envelope.
+        #expect(response.result?["transport"]?["tempoBPM"]?.doubleValue == 120)
+        #expect(response.result?["master"]?["volume"]?.doubleValue == 1)
+        guard case .array(let tracks)? = response.result?["tracks"] else {
+            Issue.record("overview has no tracks array"); return
+        }
+        #expect(tracks.count == 1)
+        #expect(tracks[0]["id"]?.stringValue == track.id.uuidString)
+        #expect(tracks[0]["name"]?.stringValue == "Gtr")
+        #expect(tracks[0]["kind"]?.stringValue == "audio")
+        // Counts, not lists: an empty track carries no clips/automation arrays
+        // longer than reality, but the keys themselves stay arrays (empty).
+        #expect(tracks[0]["clips"]?.arrayValue?.isEmpty == true)
+    }
+
+    // M7.
+    @Test("allCommands advertises project.overview")
+    func overviewAdvertised() async {
+        #expect(CommandRouter.allCommands.contains("project.overview"))
+    }
+
     // M3 (v) — sampler. Real system sound files exist on every macOS install.
     private static let pingPath = "/System/Library/Sounds/Ping.aiff"
 
@@ -1328,6 +1357,14 @@ struct CommandRouterTests {
             // below and proven by FXCommandTests. fx.describe needs no params.
             "fx.add": ["trackId": .string(trackID), "kind": .string("gain")],
             "mixer.setMasterVolume": ["volume": .number(1)],
+            // Replaces the shared track's chain with a curated preset; not
+            // effect-id-dependent, so it routes inline here (clean-boost is the
+            // simplest — one gain effect). Full coverage in MixerPresetCommandTests.
+            "mixer.applyPreset": ["trackId": .string(trackID), "preset": .string("clean-boost")],
+            // Scaffolds a genre skeleton (ADDITIVE — appends tracks/clips to the
+            // shared project, never wipes it), so it routes inline here with just
+            // a genre. Full coverage in MacroSkeletonCommandTests.
+            "macro.songSkeleton": ["genre": .string("pop")],
             // automation.addLane targets "pan" — idempotent against the
             // pre-made removableLaneID, so it succeeds regardless of when it
             // runs relative to automation.removeLane below.
@@ -1358,7 +1395,7 @@ struct CommandRouterTests {
             // real filesystem setup (or a stopped transport — this loop is mid-
             // record by now); edit.undo/edit.redo are refused mid-take and need
             // real history; clip.setNotes/clip.remove/clip.split/clip.trim/
-            // clip.move/clip.setGain/clip.setFades/clip.quantize/
+            // clip.move/clip.setGain/clip.setFades/clip.quantize/clip.humanize/
             // clip.detectTransients/clip.quantizeAudio need a clip id that only
             // exists after clip.addMIDI runs; take.* need a group id that only
             // exists after take.group runs on >= 2 overlapping clips;
@@ -1375,17 +1412,66 @@ struct CommandRouterTests {
             // by SongGenerationCommandTests (FakeSongGenerator) and
             // AIServicesTests/ACEStepClientTests (stub HTTP server). All are
             // proven by dedicated tests.
+            // project.recover (M9 crash-b) needs a live crash-recovery offer AND an
+            // `accept` param — a bare router has no offer, so accept:true
+            // legitimately returns noRecoveryAvailable. Proven by
+            // RecoveryCommandTests (staged offer). project.recoveryStatus takes no
+            // params and never throws (reads {available:false} here), so it stays
+            // IN the loop.
             if ["track.remove", "project.save", "project.open", "project.new",
+                "project.recover",
                 "edit.undo", "edit.redo", "clip.setNotes", "clip.remove",
                 "clip.split", "clip.trim", "clip.move", "clip.setGain", "clip.setFades",
                 "clip.setStretch", "clip.stretchToLength", "clip.quantize",
-                "clip.detectTransients", "clip.quantizeAudio",
+                "clip.humanize", "clip.detectTransients", "clip.quantizeAudio",
                 "fx.remove", "fx.reorder", "fx.setBypass", "fx.setParam",
                 "take.group", "take.setComp", "take.select", "take.removeLane",
-                "take.flatten", "take.move", "take.setCrossfade",
+                "take.flatten", "take.move", "take.setCrossfade", "take.autoAlign",
                 "groove.extract", "groove.remove",
                 "ai.sidecarStart", "ai.sidecarStop",
-                "ai.generateSong", "ai.generationStatus"].contains(command) {
+                "ai.generateSong", "ai.generationStatus",
+                // ai.importGeneration (M6 iii-a) needs a succeeded jobId from a
+                // REAL generation — proven by SongGenerationCommandTests /
+                // GenerationImportTests, excluded here like the other ai.* routes.
+                "ai.importGeneration",
+                // ai.extractStems/ai.legoGenerate (M6 iii-c) likewise hit a REAL
+                // ACEStepClient; ai.importGeneratedStems needs a succeeded
+                // composite jobId from a real generation. All three proven by
+                // dedicated tests (SongGenerationCommandTests / GenerationImportTests).
+                "ai.extractStems", "ai.legoGenerate", "ai.importGeneratedStems",
+                // ai.repaintAudio (M6 v-a) likewise hits a REAL ACEStepClient
+                // (and requires an existing sourcePath file besides). Proven
+                // by RepaintCommandTests (FakeSongGenerator) and
+                // AIServicesTests/ACEStepRepaintClientTests (stub HTTP server).
+                "ai.repaintAudio",
+                // ai.fixClipRegion (M6 v-b) needs an offline-render engine AND
+                // a generation source (neither wired on this bare router) plus a
+                // real audio clip; ai.importClipFix needs a pending jobId from a
+                // real submit. Both proven by ClipFixCommandTests / ClipFixTests
+                // (fakes), excluded here like the other ai.* routes.
+                "ai.fixClipRegion", "ai.importClipFix",
+                // ai.writeLyrics resolves a REAL provider client from the key
+                // chain (this router's default KeychainKeyStore + process env);
+                // with no key present it legitimately returns the actionable
+                // no-provider error, so it's excluded here. Its routing, param
+                // validation, project-context defaulting, and no-key path are
+                // proven by WriteLyricsCommandTests (fake writer) and its wire
+                // shape by AIServicesTests/LyricsWriterTests (stub HTTP server).
+                "ai.writeLyrics",
+                // ai.copilot* (M6 rail-c) route through CommandRouter.copilotEngine,
+                // which is nil on this bare router (only DAWProApp wires it) — all
+                // three legitimately return the actionable "not wired" error here.
+                // Proven by CopilotCommandTests (a router with a real CopilotEngine
+                // + FakeCopilotProvider) and CopilotEngineTests (the turn loop itself).
+                "ai.copilotSend", "ai.copilotState", "ai.copilotReset",
+                // plugin.openUI / plugin.closeUI (M3 vi-b) route through
+                // CommandRouter.pluginUI, the app-layer window seam, which is nil
+                // on this bare router (only DAWProApp wires it) — both legitimately
+                // return the actionable headless error here. Proven by
+                // PluginUICommandTests (router + a fake PluginUIControlling).
+                // plugin.listOpenUIs is NOT excluded: it answers ok with
+                // {available:false} when the seam is nil.
+                "plugin.openUI", "plugin.closeUI"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

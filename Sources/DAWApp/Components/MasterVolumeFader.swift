@@ -43,12 +43,17 @@ struct MasterVolumeFader: View {
                 context.stroke(trackPath, with: .color(DAWTheme.hairline), lineWidth: 1)
             }
             .contentShape(Rectangle())
+            // Vertical value drag → resizeUpDown (docs/DESIGN-LANGUAGE.md "Pointer
+            // affordances"; faders keep the resize cursor, they never "grab").
+            .hoverCursor(.resizeUpDown)
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        DragCursor.set(.resizeUpDown)
                         let fraction = 1 - Double(value.location.y) / Double(height)
                         onChange((fraction * Self.range.upperBound).clamped(to: Self.range))
                     }
+                    .onEnded { _ in DragCursor.clear() }
             )
             .simultaneousGesture(
                 TapGesture(count: 2).onEnded { onChange(1.0) }

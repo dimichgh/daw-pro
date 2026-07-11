@@ -70,6 +70,9 @@ struct AutomationLaneEditor: View {
         canvas
             .frame(width: contentWidth, height: geometry.laneHeight)
             .contentShape(Rectangle())
+            // Pointer affordances (docs/DESIGN-LANGUAGE.md): a breakpoint grabs;
+            // empty space is a crosshair (click to place a point there).
+            .hoverCursor(resolve: pointCursor)
             .gesture(pointDrag)
             .simultaneousGesture(doubleClickDelete)
             .overlay(alignment: .topLeading) { readoutBubble }
@@ -200,13 +203,25 @@ struct AutomationLaneEditor: View {
 
     // MARK: - Gestures
 
+    /// Rest cursor: grab over an existing breakpoint (it's movable), crosshair over
+    /// empty space (a click there ADDS a point — the place/paint family).
+    private func pointCursor(at location: CGPoint) -> CursorKind? {
+        geometry.hitTest(location, points: draft) != nil
+            ? CursorAffordance.automationPoint.restCursor
+            : CursorAffordance.automationField.restCursor
+    }
+
     private var pointDrag: some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                if drag == .idle { beginDrag(at: value.startLocation) }
+                if drag == .idle {
+                    beginDrag(at: value.startLocation)
+                    // Either grabbed a point or added one — both MOVE a point now.
+                    DragCursor.set(.grabbing)
+                }
                 applyDrag(to: value.location)
             }
-            .onEnded { _ in endDrag() }
+            .onEnded { _ in endDrag(); DragCursor.clear() }
     }
 
     /// Double-click a breakpoint to delete it (the drag gesture treats the same

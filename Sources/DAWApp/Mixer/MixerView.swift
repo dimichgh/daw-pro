@@ -9,6 +9,15 @@ import DAWAppKit
 /// no local mixing state of its own.
 struct MixerView: View {
     @Environment(ProjectStore.self) private var store
+    /// The console's shared density store (docs/DESIGN-LANGUAGE.md "Panels").
+    /// Threaded to every channel/bus strip; the master strip never reads it
+    /// (its modes coincide). The SIMPLE/PRO chip in the Mix toolbar binds the
+    /// same store under `panelID`.
+    var densityStore: PanelDensityStore
+
+    /// Stable density key for the whole mixer console — the console is ONE panel,
+    /// so every strip and the toolbar chip share this one ID.
+    static let panelID = "mixer"
 
     var body: some View {
         let channels = MixerLayout.channelTracks(store.tracks)
@@ -20,10 +29,15 @@ struct MixerView: View {
                     if channels.isEmpty && buses.isEmpty {
                         emptyState
                     } else {
-                        ForEach(channels) { MixerChannelStrip(track: $0) }
+                        // Every strip is explainable (ex-b): per-instance frame
+                        // anchoring (ExplainCoordinator) lands each shared ExplainID
+                        // on whichever strip is hovered, so a full console tags cleanly.
+                        ForEach(channels) { track in
+                            MixerChannelStrip(track: track, densityStore: densityStore)
+                        }
                         if !buses.isEmpty {
                             busDivider
-                            ForEach(buses) { MixerChannelStrip(track: $0) }
+                            ForEach(buses) { MixerChannelStrip(track: $0, densityStore: densityStore) }
                         }
                     }
                 }
@@ -62,13 +76,13 @@ struct MixerView: View {
         VStack(spacing: 8) {
             Image(systemName: "slider.vertical.3")
                 .font(.system(size: 26))
-                .foregroundStyle(DAWTheme.textDim.opacity(0.6))
+                .foregroundStyle(DAWTheme.textFaint)
             Text("No tracks to mix yet")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(DAWTheme.textDim)
             Text("Add a track in Arrange, or let an agent do it over MCP")
                 .font(.system(size: 11))
-                .foregroundStyle(DAWTheme.textDim.opacity(0.7))
+                .foregroundStyle(DAWTheme.textFaint)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)

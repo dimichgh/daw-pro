@@ -13,6 +13,10 @@
 #   ACESTEP_CHECKPOINTS_DIR default: <runtime dir>/checkpoints
 #   ACESTEP_CONFIG_PATH     default: acestep-v15-xl-turbo (fast default; use
 #                           acestep-v15-xl-sft for a "polish" pass)
+#   ACESTEP_CONFIG_PATH2    default: acestep-v15-xl-sft (slot 2 — constructs a
+#                           second handler so ACEStepClient can load the
+#                           BASE/SFT model on demand for extract/lego jobs,
+#                           which turbo does not officially support)
 #   ACESTEP_LM_MODEL_PATH   default: acestep-5Hz-lm-4B (top quality tier)
 #   ACESTEP_API_PORT        default: 8001
 #
@@ -47,6 +51,13 @@ fi
 # section 8a). Override to acestep-v15-xl-sft for a slower/higher-fidelity pass.
 export ACESTEP_CHECKPOINTS_DIR="${ACESTEP_CHECKPOINTS_DIR:-$RUNTIME_DIR/checkpoints}"
 export ACESTEP_CONFIG_PATH="${ACESTEP_CONFIG_PATH:-acestep-v15-xl-turbo}"
+# Slot 2: the BASE/SFT tier, so extract/lego jobs (which turbo's
+# TASK_TYPES_TURBO excludes) have a real handler to load into on demand via
+# POST /v1/init rather than upstream silently substituting the primary/turbo
+# handler (M6 iii-c-real — see ACEStepClient.swift). Setting this env var only
+# constructs the slot 2 handler at startup; the SFT weights themselves (already
+# downloaded by install.sh) still load lazily on the first /v1/init call.
+export ACESTEP_CONFIG_PATH2="${ACESTEP_CONFIG_PATH2:-acestep-v15-xl-sft}"
 export ACESTEP_LM_MODEL_PATH="${ACESTEP_LM_MODEL_PATH:-acestep-5Hz-lm-4B}"
 # Upstream inconsistency (verified in acestep_v15_pipeline.py): the serve-time
 # generation path builds `os.path.join(project_root, "checkpoints")` and passes
@@ -69,4 +80,14 @@ export ACESTEP_API_HOST="127.0.0.1"
 export ACESTEP_API_PORT="${ACESTEP_API_PORT:-8001}"
 
 cd "$SRC_DIR"
-exec uv run acestep-api
+# Start must never re-resolve dependencies: a bare `uv run` re-syncs the
+# environment, which needs the network (observed failure: metadata fetch for
+# a direct-URL flash-attn wheel died on an intercepting proxy's TLS cert and
+# the sidecar never booted). The env was fully built by install.sh — when its
+# .venv exists, run against it as-is; a missing .venv falls back to a full
+# sync so a fresh checkout still self-heals.
+if [[ -d "$SRC_DIR/.venv" ]]; then
+  exec uv run --no-sync acestep-api
+else
+  exec uv run acestep-api
+fi

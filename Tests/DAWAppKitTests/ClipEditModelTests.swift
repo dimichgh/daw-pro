@@ -46,6 +46,19 @@ struct ClipEditModelTests {
         #expect(ClipSnap.off.snap(beat: -3, beatsPerBar: 4) == 0)
     }
 
+    @Test("effective snap locks to Bar in Simple, honors the picker in Pro (sp-c)")
+    func effectiveSnapDensityLock() {
+        // Pro passes the picked resolution straight through.
+        for picked in ClipSnap.allCases {
+            #expect(ClipSnap.effective(density: .pro, picked: picked) == picked)
+        }
+        // Simple locks to Bar regardless of what the picker holds — and the picker
+        // value is untouched (this is pure), so flipping back to Pro restores it.
+        for picked in ClipSnap.allCases {
+            #expect(ClipSnap.effective(density: .simple, picked: picked) == .bar)
+        }
+    }
+
     // MARK: - Geometry
 
     @Test("beat<->x round-trips at the fixed scale and floors at 0")

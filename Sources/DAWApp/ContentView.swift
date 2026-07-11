@@ -2,6 +2,7 @@ import SwiftUI
 import DAWCore
 import DAWEngine
 import DAWAppKit
+import DAWControl
 
 struct ContentView: View {
     @Environment(ProjectStore.self) private var store
@@ -10,6 +11,20 @@ struct ContentView: View {
     @Environment(AppModel.self) private var model
     var engine: AudioEngine
     var controlPort: UInt16
+
+    /// The "Explain this" overlay's presentation coordinator (M8 ex-a): tracks tagged
+    /// control frames + hover timing. View-local (`@State`) — it's pure view geometry;
+    /// the mode on/off flag lives on `AppModel.explain` so `debug.explainMode` can
+    /// drive it (and `debug.captureUI` renders the same state).
+    @State private var explainCoordinator = ExplainCoordinator()
+
+    /// Drag origins for the adjustable-layout splitters (beta m10-d): each is
+    /// captured on the drag's first tick (the gesture reports translation from the
+    /// start, so the origin + delta reconstructs the target value), and cleared on
+    /// end. nil = no drag in flight. Kept view-local — pure gesture bookkeeping; the
+    /// clamped values themselves live on `model.panelLayout`.
+    @State private var sidebarDragOrigin: CGFloat?
+    @State private var editorDragOrigin: CGFloat?
 
     /// The clip whose piano roll is open (nil = closed). Only MIDI clips open it.
     /// Hoisted onto AppModel — see `model` above.
@@ -31,25 +46,106 @@ struct ContentView: View {
             VStack(spacing: 10) {
                 header
 
-                switch model.workspaceMode {
-                case .arrange:
-                    arrangeWorkspace(geo)
-                case .mix:
-                    MixerView()
-                        .frame(maxHeight: .infinity)
+                // The Copilot rail docks OUTERMOST-right, spanning the full
+                // workspace height in BOTH Arrange and Mix — it's app-level, not
+                // selection-gated (unlike the Sketchpad/ClipFix panels, which
+                // live inside the Arrange workspace beside the timeline).
+                HStack(spacing: 10) {
+                    VStack(spacing: 10) {
+                        switch model.workspaceMode {
+                        case .arrange:
+                            arrangeWorkspace(geo)
+                        case .mix:
+                            mixToolbar
+                            MixerView(densityStore: model.panelDensity)
+                                .frame(maxHeight: .infinity)
+                        }
+                    }
+                    if model.showCopilot {
+                        CopilotRailView(
+                            engine: model.copilotEngine,
+                            draftPrefill: model.copilotDraft,
+                            onConsumeDraftPrefill: { model.copilotDraft = nil }
+                        ) {
+                            withAnimation(.easeOut(duration: 0.18)) { model.showCopilot = false }
+                        }
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
                 }
+                .frame(maxHeight: .infinity)
 
-                TransportBar(engine: engine)
+                TransportBar(engine: engine, densityStore: model.panelDensity)
             }
             .padding(12)
             .frame(width: geo.size.width, height: geo.size.height)
         }
         .background(DAWTheme.background)
+        .overlay {
+            if model.showSettings {
+                SettingsOverlay(
+                    model: model.settings,
+                    store: store,
+                    revealBeta: model.settingsRevealBeta,
+                    onReplayTour: { withAnimation(.easeOut(duration: 0.2)) { model.replayTour() } },
+                    onClose: { withAnimation(.easeOut(duration: 0.15)) { model.showSettings = false } }
+                )
+            }
+        }
+        // "Explain this" overlay (M8 ex-a/ex-b): inject the mode + coordinator around
+        // BOTH the workspace AND the Settings modal, so any `.explainable` control —
+        // including a Settings key row — reports into this coordinate space. Collect
+        // their frames and float the card OUTERMOST (above the Settings panel); the
+        // empty area stays click-through, so controls still work in explain mode.
+        .environment(model.explain)
+        // The onboarding tour model (M8 ob-b): injected around the same tree as
+        // explain so `.explainable` controls report their frames while a tour step
+        // is active (the tour card anchors on them), and the tour overlay reads it.
+        .environment(model.onboarding)
+        .environment(explainCoordinator)
+        .coordinateSpace(.named(ExplainCoordinateSpace.name))
+        .onPreferenceChange(ExplainFramePreferenceKey.self) { frames in
+            explainCoordinator.setFrames(frames)
+        }
+        .overlay {
+            ExplainOverlay(explain: model.explain, coordinator: explainCoordinator,
+                           onAskCopilot: askCopilotAboutControl)
+        }
+        // The guided tour card, OUTERMOST so it floats above every panel + the
+        // Settings modal; its empty area is click-through, so the user can operate
+        // the very controls it points at (the completion signal advances the step).
+        .overlay {
+            OnboardingTourOverlay(
+                model: model.onboarding,
+                coordinator: explainCoordinator,
+                onPrimary: performTourPrimary,
+                onSkipStep: { model.onboarding.skipStep() },
+                onSkipTour: { withAnimation(.easeOut(duration: 0.18)) { model.onboarding.dismissTour() } }
+            )
+        }
+        // Crash-recovery offer (M9 crash-b), OUTERMOST so it blocks the workspace
+        // at launch until the user restores or discards. Same store path as the
+        // project.recover command; staged for captures via debug.recoveryOffer.
+        .overlay {
+            if let offer = model.recoveryOffer {
+                RecoveryOfferView(
+                    status: offer,
+                    onRestore: { model.restoreFromRecovery() },
+                    onDiscard: { model.discardRecovery() }
+                )
+            }
+        }
+        .background { explainEscHandler }
+        .onChange(of: model.explain.isActive) { _, active in
+            if !active { explainCoordinator.reset() }
+        }
         .preferredColorScheme(.dark)
         .frame(minWidth: 1080, minHeight: 640)
         // Window title tracks the session; " — Edited" marks unsaved changes.
         .navigationTitle(store.projectName + (store.isDirty ? " — Edited" : ""))
         .onAppear(perform: maybeAutoOpen)
+        // First-launch offer: the welcome card IS the offer (Skip tour dismisses
+        // forever). Idempotent — no-ops once active or terminal.
+        .onAppear { model.offerTourIfEligible() }
         .onChange(of: firstMIDIClipID) { _, _ in maybeAutoOpen() }
         // Any clip stretch/pitch/formant change (from a drag OR the control port)
         // kicks the engine-status poll, so the timeline shimmers a clip while its
@@ -80,7 +176,11 @@ struct ContentView: View {
         arrangeToolbar
         HStack(spacing: 10) {
             TrackListView()
-                .frame(width: 260)
+                .frame(width: model.panelLayout.sidebarWidth)
+            // Draggable sidebar↔timeline splitter (beta m10-d). Drag right widens
+            // the track list; the store clamps to 250–420 pt (250 = the header row's
+            // measured intrinsic floor — narrower needs m10-j priority-shrink).
+            sidebarSplitter
             TimelineLanesView(
                 tracks: store.tracks,
                 positionBeats: store.transport.positionBeats,
@@ -95,6 +195,10 @@ struct ContentView: View {
                 snap: model.clipSnap,
                 secondsPerBeat: 60.0 / store.transport.tempoBPM,
                 waveformStore: model.waveformStore,
+                densityStore: model.panelDensity,
+                // Global track-row height (beta m10-d) — the SAME store value the
+                // sidebar rows use, so lanes and headers stay pixel-aligned.
+                rowHeight: model.panelLayout.rowHeight,
                 onMoveClip: { trackID, clip, toStart in
                     _ = try? store.moveClip(trackId: trackID, clipId: clip.id, toStartBeat: toStart)
                 },
@@ -131,18 +235,73 @@ struct ContentView: View {
                     _ = try? store.removeTakeLane(trackId: trackID, groupId: groupID, laneId: laneID)
                 }
             )
+
+            if model.showSketchpad {
+                SketchpadView(model: model.sketchpad)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+
+            if model.showClipFix {
+                ClipFixPanel(model: model.clipFix)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
         .frame(maxHeight: .infinity)
+        // Keep the fix panel's composer pointed at the live audio selection. The
+        // panel is thin over the model, so the view (not the model) reads the
+        // selection and seeds the composer target; deselecting an audio clip
+        // collapses the composer to its hint (the jobs strip keeps running).
+        .onChange(of: selectedAudioClipKey) { _, _ in syncClipFixTarget() }
+        .onChange(of: model.showClipFix) { _, _ in syncClipFixTarget() }
 
         if let clip = selectedMIDIClip {
+            // Draggable editor-height splitter (beta m10-d) on the editor's top edge.
+            // Drag UP grows the piano roll; the store clamps the fraction to 0.30–0.55
+            // (0.55 keeps the app chrome visible at the height the app runs at; a
+            // smaller window can still overflow at the max → m10-j).
+            editorSplitter(geoHeight: geo.size.height)
             PianoRollView(
                 clip: clip,
                 beatsPerBar: store.transport.timeSignature.beatsPerBar,
+                // The SAME transport source the arrange timeline consumes (no second
+                // ticker) — the piano roll playhead is a rendering of this state.
+                positionBeats: store.transport.positionBeats,
+                densityStore: model.panelDensity,
                 onCommit: { notes in _ = try? store.setClipNotes(clipID: clip.id, notes: notes) },
+                // Scrub seeks through the app's store seek (the existing transport.seek
+                // path), NOT the WebSocket. Refused mid-record → try? swallows it.
+                onSeek: { beats in _ = try? store.seek(toBeats: beats) },
                 onClose: { selectedClipID = nil }
             )
             .id(clip.id)
-            .frame(height: geo.size.height * 0.45)
+            .frame(height: geo.size.height * model.panelLayout.editorFraction)
+        }
+    }
+
+    /// The vertical hairline between the track sidebar and the timeline (beta
+    /// m10-d). A body drag adjusts `panelLayout.sidebarWidth` live; the store clamps.
+    private var sidebarSplitter: some View {
+        PanelSplitter(axis: .vertical) { translation in
+            if sidebarDragOrigin == nil { sidebarDragOrigin = model.panelLayout.sidebarWidth }
+            let origin = sidebarDragOrigin ?? PanelLayoutStore.defaultSidebarWidth
+            model.panelLayout.setSidebarWidth(origin + translation.width)
+        } onEnded: {
+            sidebarDragOrigin = nil
+        }
+    }
+
+    /// The horizontal hairline on the bottom editor's top edge (beta m10-d). A drag
+    /// UP grows the editor (negative height delta → larger fraction); converting
+    /// points→fraction against the live window height keeps the drag 1:1 with the
+    /// pointer. The store clamps the fraction.
+    private func editorSplitter(geoHeight: CGFloat) -> some View {
+        PanelSplitter(axis: .horizontal) { translation in
+            if editorDragOrigin == nil { editorDragOrigin = model.panelLayout.editorFraction }
+            let origin = editorDragOrigin ?? PanelLayoutStore.defaultEditorFraction
+            let deltaFraction = -translation.height / max(1, geoHeight)
+            model.panelLayout.setEditorFraction(origin + deltaFraction)
+        } onEnded: {
+            editorDragOrigin = nil
         }
     }
 
@@ -153,8 +312,13 @@ struct ContentView: View {
         selectedClipID = clip.id
     }
 
-    /// Arrange-header strip: label + the grid-snap picker (right-aligned), styled
-    /// like the input-device / piano-roll snap chips (docs/DESIGN-LANGUAGE.md).
+    /// Arrange-header strip: label + (in Pro) the grid-snap picker, then the
+    /// workspace's SIMPLE/PRO density chip pinned top-right — the same slot the
+    /// snap picker used to own alone. This mirrors the piano-roll header exactly
+    /// (the shared `SimpleProToggle`, with the snap picker rendered BESIDE it in Pro
+    /// only): the whole arrange surface is ONE panel (`TimelineLanesView.panelID`),
+    /// so the chip gates every clip's trim/fade/split/gain/stretch at once and locks
+    /// the grid to Bar in Simple (docs/DESIGN-LANGUAGE.md "Clip editing").
     private var arrangeToolbar: some View {
         HStack(spacing: 8) {
             Text("ARRANGE")
@@ -162,9 +326,79 @@ struct ContentView: View {
                 .tracking(1.4)
                 .foregroundStyle(DAWTheme.textDim)
             Spacer()
-            snapPicker
+            if selectedAudioClip != nil {
+                clipFixToggle
+                    .explainable(.aiFix)
+            }
+            if arrangeIsPro {
+                snapPicker
+                    .explainable(.arrangeSnap)
+            }
+            SimpleProToggle(
+                store: model.panelDensity,
+                panelID: TimelineLanesView.panelID,
+                help: "Simple: move clips on a bar grid. Pro: trim, fade, split, gain, stretch, snap."
+            )
+            .explainable(.panelDensity)   // shared density id (ex-b)
         }
         .padding(.horizontal, 4)
+    }
+
+    /// The arrange workspace's live density — drives the Pro-only snap picker.
+    private var arrangeIsPro: Bool {
+        model.panelDensity.density(forPanel: TimelineLanesView.panelID) == .pro
+    }
+
+    /// Mix-header strip: label + the console's SIMPLE/PRO density chip, placed
+    /// top-right in the exact slot the Arrange snap picker occupies — the whole
+    /// console is ONE panel (`MixerView.panelID`), so the shared `SimpleProToggle`
+    /// gates every strip's inserts/sends/routing at once (docs/DESIGN-LANGUAGE.md).
+    private var mixToolbar: some View {
+        HStack(spacing: 8) {
+            Text("MIX")
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(1.4)
+                .foregroundStyle(DAWTheme.textDim)
+            Spacer()
+            SimpleProToggle(
+                store: model.panelDensity,
+                panelID: MixerView.panelID,
+                help: "Simple: level, pan, mute/solo. Pro: inserts, sends, routing."
+            )
+            .explainable(.panelDensity)   // shared density id (ex-b)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    /// Violet FIX WITH AI affordance: appears when an audio clip is selected and
+    /// opens the clip vocal-fix panel seeded from that clip's span. Violet because
+    /// everything behind it is AI-generated (docs/DESIGN-LANGUAGE.md); lit +
+    /// glowing while the panel is open.
+    private var clipFixToggle: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.18)) { model.showClipFix = true }
+            syncClipFixTarget()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 9, weight: .bold))
+                Text("FIX WITH AI")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+            }
+            .foregroundStyle(model.showClipFix ? DAWTheme.ai : DAWTheme.textDim)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(model.showClipFix ? DAWTheme.ai.opacity(0.14) : DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(model.showClipFix ? DAWTheme.ai.opacity(0.6) : DAWTheme.hairline, lineWidth: 1)
+            )
+            .glow(model.showClipFix ? DAWTheme.ai : .clear, radius: 5, intensity: 0.6)
+        }
+        .buttonStyle(.plain)
+        .help("Fix a region of this audio clip with AI — lands as a violet take lane")
     }
 
     /// Themed grid-snap menu: Off / Bar / Beat / 1/2 / 1/4. Bar follows the meter.
@@ -213,6 +447,35 @@ struct ContentView: View {
         return nil
     }
 
+    /// The selected clip when it's a plain AUDIO clip, paired with its track id —
+    /// the fixable target for FIX WITH AI (MIDI clips open the piano roll instead).
+    private var selectedAudioClip: (trackID: UUID, clip: Clip)? {
+        guard let id = selectedClipID else { return nil }
+        for track in store.tracks {
+            if let clip = track.clips.first(where: { $0.id == id }), !clip.isMIDI {
+                return (track.id, clip)
+            }
+        }
+        return nil
+    }
+
+    /// A key that changes exactly when the selected audio clip's identity or span
+    /// changes — drives the fix-panel composer re-seed.
+    private var selectedAudioClipKey: String {
+        guard let sel = selectedAudioClip else { return "" }
+        return "\(sel.clip.id.uuidString):\(sel.clip.startBeat):\(sel.clip.lengthBeats)"
+    }
+
+    /// Points the fix panel's composer at the live audio selection (a no-op when
+    /// the panel is closed or nothing fixable is selected — the last target is
+    /// kept, so deselecting doesn't wipe an in-progress region edit).
+    private func syncClipFixTarget() {
+        guard model.showClipFix, let sel = selectedAudioClip else { return }
+        model.clipFix.prepare(trackID: sel.trackID, clipID: sel.clip.id, name: sel.clip.name,
+                              startBeat: sel.clip.startBeat,
+                              endBeat: sel.clip.startBeat + sel.clip.lengthBeats)
+    }
+
     /// First MIDI clip in track/clip order, for the debug auto-open.
     private var firstMIDIClipID: UUID? {
         for track in store.tracks {
@@ -242,7 +505,14 @@ struct ContentView: View {
 
             Spacer()
 
+            explainChip
+            copilotToggle
+                .explainable(.aiCopilot)
+            sketchpadToggle
+                .explainable(.aiSketchpad)
             inputDevicePicker
+            settingsToggle
+                .explainable(.settingsGear)
 
             HStack(spacing: 5) {
                 Circle()
@@ -256,6 +526,138 @@ struct ContentView: View {
             .help("AI control surface listening on ws://127.0.0.1:\(String(controlPort))")
         }
         .padding(.horizontal, 4)
+    }
+
+    /// Violet EXPLAIN chip: toggles the "Explain this" overlay (M8 ex-a). Violet
+    /// because it's an AI-identified affordance (docs/DESIGN-LANGUAGE.md Rule 3 —
+    /// violet = AI only); the shared `ExplainChip` lights + glows while explain mode
+    /// is active. Esc also exits (see `explainEscHandler`).
+    private var explainChip: some View {
+        ExplainChip(isActive: model.explain.isActive) {
+            withAnimation(.easeOut(duration: 0.18)) { model.explain.toggle() }
+        }
+    }
+
+    /// Esc exits explain mode (sticky-until-toggled, per the settled interaction
+    /// model). Present ONLY while explain mode is on, so Esc keeps its normal meaning
+    /// everywhere else — a hidden zero-size button carrying the cancel shortcut.
+    @ViewBuilder
+    private var explainEscHandler: some View {
+        if model.explain.isActive {
+            Button("") { withAnimation(.easeOut(duration: 0.18)) { model.explain.setActive(false) } }
+                .keyboardShortcut(.cancelAction)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// The explain card's "Ask the Copilot" hand-off (M8 ex-a): close explain mode,
+    /// prefill a plain-language question about this control, and open the copilot
+    /// rail — which loads the draft but NEVER auto-sends (so it works with or without
+    /// an API key). Routes through the rail's existing draft path (no engine change).
+    private func askCopilotAboutControl(_ id: ExplainID, _ entry: ExplainEntry) {
+        model.explain.setActive(false)
+        model.copilotDraft = "Explain \(entry.title) — what should I do with it here?"
+        withAnimation(.easeOut(duration: 0.18)) { model.showCopilot = true }
+    }
+
+    /// The tour card's primary CTA per step (M8 ob-b). Welcome/done advance the
+    /// model directly (no signal); each task step performs its NATURAL helpful action
+    /// — the real operation then fires the completion signal (via the observing
+    /// adapter) that advances the step. A step the user reaches another way (pressing
+    /// the real Play button, dragging a fader) advances just the same.
+    private func performTourPrimary(_ step: OnboardingStep) {
+        switch step {
+        case .welcome, .done:
+            withAnimation(.easeOut(duration: 0.18)) { model.onboarding.advance() }
+        case .generate:
+            withAnimation(.easeOut(duration: 0.18)) { model.workspaceMode = .arrange }
+            if !model.showSketchpad { model.toggleSketchpad() }
+        case .listen:
+            if !store.transport.isPlaying { store.play() }
+        case .shape:
+            withAnimation(.easeOut(duration: 0.18)) { model.workspaceMode = .arrange }
+        case .mix:
+            withAnimation(.easeOut(duration: 0.18)) { model.workspaceMode = .mix }
+        case .export:
+            model.exportSong()
+        }
+    }
+
+    /// Violet COPILOT toggle chip: opens the AI chat rail. Always visible — the
+    /// copilot is app-level, not gated on a selection (unlike FIX WITH AI). Violet
+    /// because the copilot IS the AI (docs/DESIGN-LANGUAGE.md); lit + glowing when
+    /// the rail is open.
+    private var copilotToggle: some View {
+        Button { withAnimation(.easeOut(duration: 0.18)) { model.toggleCopilot() } } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "bubble.left.and.text.bubble.right.fill")
+                    .font(.system(size: 9, weight: .bold))
+                Text("COPILOT")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+            }
+            .foregroundStyle(model.showCopilot ? DAWTheme.ai : DAWTheme.textDim)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(model.showCopilot ? DAWTheme.ai.opacity(0.14) : DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(model.showCopilot ? DAWTheme.ai.opacity(0.6) : DAWTheme.hairline, lineWidth: 1)
+            )
+            .glow(model.showCopilot ? DAWTheme.ai : .clear, radius: 5, intensity: 0.6)
+        }
+        .buttonStyle(.plain)
+        .help("Open the AI Copilot — ask it to work the project for you")
+    }
+
+    /// Violet AI-Sketchpad toggle chip: opens the generation panel. Violet
+    /// because everything behind it is AI-generated (docs/DESIGN-LANGUAGE.md).
+    /// Lit + glowing when the panel is open.
+    private var sketchpadToggle: some View {
+        Button { withAnimation(.easeOut(duration: 0.18)) { model.toggleSketchpad() } } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 9, weight: .bold))
+                Text("SKETCHPAD")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+            }
+            .foregroundStyle(model.showSketchpad ? DAWTheme.ai : DAWTheme.textDim)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(model.showSketchpad ? DAWTheme.ai.opacity(0.14) : DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(model.showSketchpad ? DAWTheme.ai.opacity(0.6) : DAWTheme.hairline, lineWidth: 1)
+            )
+            .glow(model.showSketchpad ? DAWTheme.ai : .clear, radius: 5, intensity: 0.6)
+        }
+        .buttonStyle(.plain)
+        .help("Open the AI Sketchpad — generate a song from a prompt")
+    }
+
+    /// Settings gear chip: opens the glass Settings overlay (API keys). Neutral
+    /// chrome (not violet — this isn't AI content); lit when the panel is open.
+    private var settingsToggle: some View {
+        Button { withAnimation(.easeOut(duration: 0.15)) { model.toggleSettings() } } label: {
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(model.showSettings ? DAWTheme.textPrimary : DAWTheme.textDim)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(model.showSettings ? DAWTheme.panelRaised : DAWTheme.panelRaised.opacity(0.6))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(model.showSettings ? DAWTheme.textDim.opacity(0.4) : DAWTheme.hairline, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help("Settings — API keys")
     }
 
     /// Compact recording-input selector chip: shows the pinned device (or

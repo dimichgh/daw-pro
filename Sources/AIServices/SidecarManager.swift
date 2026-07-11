@@ -14,13 +14,24 @@ import Foundation
 public actor SidecarManager: SidecarManaging {
     public let config: Configuration
 
-    /// Set for the duration of an in-flight `start()` call (before any
-    /// `await`) so a concurrent `status()` can honestly report `.starting`
-    /// instead of guessing from a bare connection failure.
-    private var startingSince: Date?
-    /// Kept only so this process's own `start()` can see the child is alive
-    /// without re-reading the pidfile; the pidfile remains the source of
-    /// truth across process/app relaunches (see `stop()`).
+    /// Wall-clock time THIS actor's own `start()` spawned a boot that hasn't
+    /// yet reached healthy (M10-b). Set once, right after `process.run()`
+    /// succeeds, and — unlike the old `startingSince`, which was scoped to
+    /// the duration of one blocking `start()` call via `defer` — cleared ONLY
+    /// when (a) a `status()` probe observes healthy, (b) the tracked
+    /// `runningProcess` is found dead, or (c) `stop()` runs. That's the fix
+    /// for the beta report ("did not report healthy within 30s" then every
+    /// later poll misreported `installedNotRunning`): model loads can
+    /// legitimately take ~1 min cold, well past the 30s window `start()`
+    /// itself blocks for, so a `status()` call made AFTER `start()` times out
+    /// must still see this and report `.starting` honestly.
+    private var startedAt: Date?
+    /// The `Process` this actor itself spawned — nil for a fresh actor
+    /// instance that never called `start()` (e.g. a fresh app launch that
+    /// finds a boot already in flight from a previous run; see
+    /// `bootProgress()`'s pidfile fallback). `.isRunning` is the liveness
+    /// check backing `startedAt`'s clearing rule (b) above; also how `stop()`
+    /// avoids re-reading the pidfile for a process this actor spawned.
     private var runningProcess: Process?
 
     public init(configuration: Configuration = .resolved()) {
@@ -32,6 +43,10 @@ public actor SidecarManager: SidecarManaging {
     public func status() async -> SidecarStatus {
         switch await probeHealth() {
         case .healthy(let info):
+            // Clearing rule (a): a healthy probe always ends a tracked boot,
+            // whether it was this actor's own `start()` or a fallback picked
+            // up from a pidfile after a relaunch.
+            startedAt = nil
             return SidecarStatus(
                 state: .healthy,
                 message: "ACE-Step sidecar is running and healthy.",
@@ -47,27 +62,113 @@ public actor SidecarManager: SidecarManaging {
                     + "parsed as ACE-Step's JSON envelope — check \(config.logFileURL.path)."
             )
         case .unreachable:
-            if startingSince != nil {
+            switch bootProgress() {
+            case .inProgress(let startedAt, let pid):
+                let elapsed = Self.elapsedSeconds(since: startedAt)
+                let phase = readLogTail().flatMap(SidecarStartPhase.classify(logTail:))
                 return SidecarStatus(
                     state: .starting,
-                    message: "ACE-Step sidecar is starting — poll ai.sidecarStatus again shortly."
+                    message: Self.startingStatusMessage(elapsedSeconds: elapsed, phase: phase),
+                    pid: pid,
+                    phase: phase,
+                    startingForSeconds: elapsed
                 )
-            }
-            if isInstalled() {
+            case .failedBoot:
                 return SidecarStatus(
                     state: .installedNotRunning,
-                    message: "ACE-Step is installed but not running — call ai.sidecarStart."
+                    message: "ACE-Step sidecar isn't responding and its process appears to have "
+                        + "exited while starting — the boot likely failed; check "
+                        + "\(config.logFileURL.path), then call ai.sidecarStart to retry."
+                )
+            case .notStarting:
+                if isInstalled() {
+                    return SidecarStatus(
+                        state: .installedNotRunning,
+                        message: "ACE-Step is installed but not running — call ai.sidecarStart."
+                    )
+                }
+                return SidecarStatus(
+                    state: .notInstalled,
+                    message: "ACE-Step sidecar is not installed — run scripts/ace-step/install.sh "
+                        + "first (downloads the XL-turbo/XL-sft DiT + 4B LM tier, ~55-70 GB; see "
+                        + "docs/research/2026-07-05-ace-step-local-song-generation.md). Generation "
+                        + "tools (generate_song et al.) arrive once ACEStepClient lands — this is "
+                        + "process lifecycle management only."
                 )
             }
-            return SidecarStatus(
-                state: .notInstalled,
-                message: "ACE-Step sidecar is not installed — run scripts/ace-step/install.sh "
-                    + "first (downloads the XL-turbo/XL-sft DiT + 4B LM tier, ~55-70 GB; see "
-                    + "docs/research/2026-07-05-ace-step-local-song-generation.md). Generation "
-                    + "tools (generate_song et al.) arrive once ACEStepClient lands — this is "
-                    + "process lifecycle management only."
-            )
         }
+    }
+
+    // MARK: - Boot progress (M10-b)
+
+    /// The three ways an unreachable health probe can be explained, beyond a
+    /// bare "not running": a boot genuinely in flight (never `.installedNot-
+    /// Running`, per the M10-b fix), a boot that started but whose process
+    /// has since died (a lingering pidfile — reported distinctly so the
+    /// message can say the boot failed, not just "not running yet"), or
+    /// nothing tracked at all (the pre-existing notInstalled/installedNot-
+    /// Running split via `isInstalled()`).
+    // Not `private`: `classifyFallbackBoot(...)` below returns this type and
+    // is (default `internal`) access so headless tests (`@testable import
+    // AIServices`) can call it directly without spawning a process.
+    enum BootProgress: Sendable, Equatable {
+        case inProgress(startedAt: Date, pid: Int32?)
+        case failedBoot
+        case notStarting
+    }
+
+    /// Resolves which of the three `BootProgress` cases applies, preferring
+    /// this actor's own in-memory `startedAt` (set by `start()`) and falling
+    /// back to the pidfile (requirement 1's relaunch-mid-boot case: a fresh
+    /// `SidecarManager` — e.g. after an app relaunch — has no in-memory
+    /// record even though a previously-spawned process may still be booting).
+    /// The pid-liveness CHECK itself (real I/O, `kill(pid, 0)`/`Process.
+    /// isRunning`) happens here; the actual verdict from that check is a pure,
+    /// separately-testable decision (`Self.classifyFallbackBoot`).
+    private func bootProgress() -> BootProgress {
+        if let startedAt {
+            if let runningProcess, !runningProcess.isRunning {
+                // Clearing rule (b): our own child died without ever going
+                // healthy.
+                self.startedAt = nil
+                self.runningProcess = nil
+                return .failedBoot
+            }
+            return .inProgress(startedAt: startedAt, pid: runningProcess?.processIdentifier)
+        }
+        guard let pidfileURL = config.pidfileURL,
+              let pid = readPidfile(),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: pidfileURL.path),
+              let modifiedAt = attributes[.modificationDate] as? Date
+        else {
+            return .notStarting
+        }
+        return Self.classifyFallbackBoot(pid: pid, modifiedAt: modifiedAt, isAlive: processAlive(pid))
+    }
+
+    /// Pure — no I/O — decision for the pidfile-fallback case: given a
+    /// pidfile's pid, its file-modification date (used as an approximation of
+    /// "when this boot started", since `start()` writes the pidfile
+    /// immediately after spawning — see `writePidfile`), and a liveness check
+    /// the caller already performed, decides whether that pidfile represents
+    /// a boot still in progress or one that has died. Kept `static` + pure so
+    /// it's directly headless-testable, matching the `resolveLaunchPlan()`/
+    /// `resolveAcestepDir()` testability convention in this file.
+    static func classifyFallbackBoot(pid: Int32, modifiedAt: Date, isAlive: Bool) -> BootProgress {
+        isAlive ? .inProgress(startedAt: modifiedAt, pid: pid) : .failedBoot
+    }
+
+    private static func elapsedSeconds(since startedAt: Date) -> Int {
+        max(0, Int(Date().timeIntervalSince(startedAt).rounded()))
+    }
+
+    private static func startingStatusMessage(elapsedSeconds: Int, phase: String?) -> String {
+        if let phase {
+            return "ACE-Step sidecar is starting — \(phase) (\(elapsedSeconds)s so far). Poll "
+                + "ai.sidecarStatus again shortly."
+        }
+        return "ACE-Step sidecar is starting (\(elapsedSeconds)s so far) — poll ai.sidecarStatus "
+            + "again shortly."
     }
 
     // MARK: - Start
@@ -104,9 +205,6 @@ public actor SidecarManager: SidecarManaging {
         process.standardOutput = logHandle
         process.standardError = logHandle
 
-        startingSince = Date()
-        defer { startingSince = nil }
-
         do {
             try process.run()
         } catch {
@@ -114,12 +212,23 @@ public actor SidecarManager: SidecarManaging {
             throw SidecarError.launchFailed(
                 "failed to launch \(plan.commandLine): \(error.localizedDescription)")
         }
+        // Tracked from here across the WHOLE boot (M10-b) — NOT cleared when
+        // this call returns; only by the three rules on `startedAt`'s own doc
+        // comment. This is what lets a `status()` poll made after the loop
+        // below times out still honestly report `.starting`.
+        let bootStartedAt = Date()
+        startedAt = bootStartedAt
         runningProcess = process
         writePidfile(process.processIdentifier)
 
-        let deadline = Date().addingTimeInterval(config.startupTimeoutSeconds)
+        let deadline = bootStartedAt.addingTimeInterval(config.startupTimeoutSeconds)
         while Date() < deadline {
             if !process.isRunning {
+                // Clearing rule (b), inline: the boot has already failed, so
+                // don't leave a dead `startedAt` around for the next poll to
+                // trip over.
+                startedAt = nil
+                runningProcess = nil
                 throw SidecarError.launchFailed(
                     "ACE-Step sidecar process exited during startup — check "
                         + "\(config.logFileURL.path).")
@@ -130,13 +239,34 @@ public actor SidecarManager: SidecarManaging {
             }
             try? await Task.sleep(nanoseconds: UInt64(config.healthPollIntervalSeconds * 1_000_000_000))
         }
+        // Still not healthy after the blocking window — this is NOT an error
+        // (`ai.sidecarStart`'s own 30s blocking wait is unchanged), but the
+        // message is now health-aware: it names the elapsed time (not just
+        // the timeout), the current log phase when recognizable, and the log
+        // path — and, critically, every LATER `ai.sidecarStatus` poll will
+        // keep reporting `.starting` with a truthfully increasing counter
+        // instead of misreporting `installedNotRunning` (the M10-b bug).
+        let elapsed = Self.elapsedSeconds(since: bootStartedAt)
+        let phase = readLogTail().flatMap(SidecarStartPhase.classify(logTail:))
         return SidecarStatus(
             state: .starting,
-            message: "ACE-Step sidecar did not report healthy within "
-                + "\(Int(config.startupTimeoutSeconds))s — it may still be loading models; poll "
-                + "ai.sidecarStatus again, or check \(config.logFileURL.path).",
-            pid: process.processIdentifier
+            message: Self.startupTimeoutMessage(
+                timeoutSeconds: Int(config.startupTimeoutSeconds), elapsedSeconds: elapsed,
+                phase: phase, logPath: config.logFileURL.path),
+            pid: process.processIdentifier,
+            phase: phase,
+            startingForSeconds: elapsed
         )
+    }
+
+    private static func startupTimeoutMessage(
+        timeoutSeconds: Int, elapsedSeconds: Int, phase: String?, logPath: String
+    ) -> String {
+        let phaseClause = phase.map { " (\($0))" } ?? ""
+        return "ACE-Step sidecar did not report healthy within \(timeoutSeconds)s\(phaseClause) — "
+            + "it's likely still booting (\(elapsedSeconds)s so far — models can take a while to "
+            + "load on a cold start); the panel will update as it boots, so poll ai.sidecarStatus "
+            + "again, or check \(logPath)."
     }
 
     // MARK: - Stop
@@ -150,6 +280,7 @@ public actor SidecarManager: SidecarManaging {
             )
         }
         guard let pid = readPidfile() else {
+            startedAt = nil   // clearing rule (c), even on this early "nothing to stop" path
             return SidecarStatus(
                 state: isInstalled() ? .installedNotRunning : .notInstalled,
                 message: "ACE-Step sidecar is not running (no pidfile found)."
@@ -162,6 +293,7 @@ public actor SidecarManager: SidecarManaging {
         guard processAlive(pid) else {
             removePidfile()
             runningProcess = nil
+            startedAt = nil   // clearing rule (c)
             return SidecarStatus(
                 state: .installedNotRunning,
                 message: "ACE-Step sidecar was not running (stale pidfile removed)."
@@ -179,6 +311,7 @@ public actor SidecarManager: SidecarManaging {
         }
         removePidfile()
         runningProcess = nil
+        startedAt = nil   // clearing rule (c): stop() always ends a tracked boot
 
         let after = await status()
         if after.state == .healthy {
@@ -262,6 +395,32 @@ public actor SidecarManager: SidecarManaging {
 
     private func processAlive(_ pid: Int32) -> Bool {
         kill(pid, 0) == 0
+    }
+
+    // MARK: - Log tail (M10-b progress phase)
+
+    /// Bytes of `config.logFileURL` read from the end for `SidecarStartPhase`
+    /// classification — enough to span the marker lines a real boot writes
+    /// per phase without reading the whole (potentially many-MB, appended-
+    /// forever-across-restarts) file on every `.starting` poll.
+    private static let logTailByteLimit = 4096
+
+    /// Reads the last ~4 KB of the sidecar log as text, or nil when the file
+    /// doesn't exist yet / can't be decoded as UTF-8 (a fresh boot before any
+    /// output has been flushed) — `status()`/`start()` treat that as "no
+    /// phase classifiable", never an error.
+    private func readLogTail() -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: config.logFileURL) else { return nil }
+        defer { try? handle.close() }
+        do {
+            let size = try handle.seekToEnd()
+            let tailStart = size > UInt64(Self.logTailByteLimit) ? size - UInt64(Self.logTailByteLimit) : 0
+            try handle.seek(toOffset: tailStart)
+            guard let data = try handle.readToEnd() else { return nil }
+            return String(data: data, encoding: .utf8)
+        } catch {
+            return nil
+        }
     }
 }
 

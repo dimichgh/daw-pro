@@ -1,9 +1,11 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import DAWCore
 import DAWEngine
 import DAWControl
 import DAWAppKit
+import AIServices
 
 @main
 struct DAWProApp: App {
@@ -22,6 +24,12 @@ struct DAWProApp: App {
                 }
         }
         .commands {
+            // Native ⌘, wired to the in-window glass Settings overlay (not a
+            // stock preferences window — glass-cockpit chrome, docs/DESIGN-LANGUAGE).
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { model.showSettings = true }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
             FileCommands(store: model.store)
             EditCommands(store: model.store)
         }
@@ -44,6 +52,77 @@ final class AppModel {
     let engine: AudioEngine
     let controlServer: ControlServer
     let transportBroadcaster: TransportBroadcaster
+
+    /// The local ACE-Step song generator + its sidecar manager, SHARED with the
+    /// control router (so the Sketchpad panel and the `ai.*` wire path talk to
+    /// the same job state) and used directly by the Sketchpad model.
+    let songGenerator: ACEStepClient
+    let sidecarManager: SidecarManager
+
+    /// The AI Sketchpad panel's headless model (M6 iii-b). Owned here so the
+    /// `debug.sketchpad*` capture commands can drive it and `debug.captureUI`
+    /// renders the same instance the live panel shows.
+    let sketchpad: SketchpadModel
+
+    /// Whether the Sketchpad side panel is open in the Arrange workspace. Driven
+    /// by the header toggle and the `ui.showSketchpad` debug command.
+    var showSketchpad = false
+
+    /// The Lyrics Workshop's headless model (M6): the Anthropic/OpenAI-powered
+    /// write/refine surface that feeds bracketed lyrics into the Sketchpad. Owned
+    /// here so `debug.lyricsWorkshop*` capture commands can drive it and
+    /// `debug.captureUI` renders the same instance the panel shows.
+    let lyricsWorkshop: LyricsWorkshopModel
+
+    /// Whether the WRITE-WITH-AI workshop is expanded inside the Sketchpad panel.
+    /// Driven by the panel's disclosure and the `ui.showLyricsWorkshop` command.
+    var showLyricsWorkshop = false
+
+    /// The clip vocal-fix panel's headless model (M6 v-b-2): the region + prompt
+    /// composer and the submit → poll → import lifecycle of every in-flight AI
+    /// fix. Owned here (like `sketchpad`) so the `debug.clipFix*` capture commands
+    /// can drive it and `debug.captureUI` renders the same instance the panel
+    /// shows. Submits through `ProjectStore.fixClipRegion`, imports through
+    /// `importClipFix` — the same one-command surface the control plane calls.
+    let clipFix: ClipFixModel
+
+    /// Whether the FIX-WITH-AI panel is open in the Arrange workspace. Driven by
+    /// the clip-selection affordance and the `ui.showClipFix` debug command.
+    var showClipFix = false
+
+    /// The in-app AI Copilot (M6 rail-c): a chat rail that drives the project
+    /// through the SAME control-command surface as the WebSocket, in-process.
+    /// Owned here (retained) so `router.copilotEngine`'s weak reference stays
+    /// alive; constructed with a dispatch closure straight to `router.handle`
+    /// (no loopback self-connection). Key-less to construct — the AI provider
+    /// is resolved fresh on each `send()`.
+    let copilotEngine: CopilotEngine
+
+    /// The floating AU plugin windows (M3 vi-b). Owned here (strong) so
+    /// `router.pluginUI`'s weak reference stays alive; drives `plugin.*` over the
+    /// wire AND the mixer/instrument open-window buttons through the SAME manager.
+    let pluginWindows: PluginWindowManager
+
+    /// Whether the Copilot chat rail is open (M6 rail-d). App-level, not
+    /// selection-gated — driven by the always-visible header COPILOT chip and the
+    /// `ui.showCopilot` debug command; the rail coexists with the ClipFix panel.
+    var showCopilot = false
+
+    /// The Settings → API Keys panel's headless model (M6). Backed by the real
+    /// Keychain in normal use; the `debug.settings*` capture commands swap in a
+    /// seeded model (in-memory store + fake environment) so a capture can show
+    /// env-locked / keychain-configured rows without touching real secrets.
+    private(set) var settings: SettingsModel
+
+    /// Whether the Settings overlay is open. Driven by the header gear chip, the
+    /// ⌘, menu command, and the `ui.showSettings` debug command.
+    var showSettings = false
+
+    /// Deep-link the Settings modal to its below-the-fold "Beta" utility row
+    /// (M9 beta) — the panel's `ScrollViewReader` scrolls to it when true. Set by
+    /// `ui.showSettings {reveal:"beta"}` so a headless capture can frame the row;
+    /// false in normal use (the panel opens at the top, on the API keys).
+    var settingsRevealBeta = false
 
     /// UI selection: the clip whose piano roll is open (nil = closed). Hoisted
     /// out of ContentView's @State so `debug.captureUI` renders with the same
@@ -75,6 +154,68 @@ final class AppModel {
     /// Peak cache for audio-clip waveforms, shared across the window so a file is
     /// read off-main once and reused by every clip that windows it.
     let waveformStore = WaveformStore()
+
+    /// Per-panel Simple/Pro density (M8 sp-a). App-side sticky PREFERENCE (never
+    /// project data): the UserDefaults backing persists each panel's mode under
+    /// `panelDensity.<panelID>`, so it survives close/reopen and relaunch. Driven
+    /// by each panel's `SimpleProToggle` and by the `debug.panelDensity` staging
+    /// command (which writes straight to this store, so the live chip reflects it).
+    let panelDensity = PanelDensityStore(backing: UserDefaultsPanelDensityBacking())
+
+    /// Adjustable window layout (beta m10-d): the arrange sidebar width, the bottom
+    /// editor's height fraction, and the GLOBAL track-row height. Like `panelDensity`
+    /// it's an app-side sticky PREFERENCE (never project data) — the UserDefaults
+    /// backing persists each dimension under `panelLayout.<dimension>`, so a resized
+    /// layout survives relaunch. Driven by the draggable `PanelSplitter`s and by the
+    /// `debug.panelLayout` staging command (which writes straight to this store, so
+    /// the live layout reflects it). Deliberately NOT a wire command / MCP tool —
+    /// a window-layout preference, not an invokable capability (the panelDensity
+    /// precedent).
+    let panelLayout = PanelLayoutStore(backing: UserDefaultsPanelLayoutBacking())
+
+    /// Explain-mode state (M8 ex-a): the transient violet "?" EXPLAIN overlay's
+    /// on/off flag + an optional capture focus. Owned here (like `panelDensity`) so
+    /// the `debug.explainMode` staging command can drive it. NOT persisted — unlike
+    /// density, explain mode is a per-session aid, off by default.
+    let explain = ExplainModel()
+
+    /// The "first song in ten minutes" guided-tour state machine (M8 ob-b). Owned
+    /// here with the UserDefaults backing (key `onboarding.state`) so mid-tour
+    /// progress + the two terminals survive relaunch; offered once on first launch
+    /// (`offerTourIfEligible`), replayable from Settings (`replayTour`), and staged
+    /// for captures/E2E by `debug.onboardingState`. The tour model NEVER reads the
+    /// store — `onboardingAdapter` is the only bridge.
+    let onboarding = OnboardingModel(backing: UserDefaultsOnboardingStateBacking())
+
+    /// Observes `ProjectStore` and fires the tour's completion signals (ob-b). Held
+    /// so it stays alive for the app's lifetime; started in `init`.
+    private let onboardingAdapter: OnboardingSignalAdapter
+
+    /// Launch-time crash-recovery offer (M9 crash-b): non-nil when the last session
+    /// ended unexpectedly AND a restorable autosave snapshot is present, so
+    /// `RecoveryOfferView` floats over the workspace. Set in `init` from
+    /// `store.recoveryStatus()`; cleared once the user restores or discards (and
+    /// stageable for captures via `debug.recoveryOffer`). The sheet drives the SAME
+    /// `ProjectStore.recoverFromAutosave` path the `project.recover` command uses.
+    var recoveryOffer: AutosaveRecoveryStatus?
+
+    /// Retains the `NSApplication.willTerminateNotification` observer so the
+    /// clean-exit lock removal (crash-b) stays live for the app's lifetime.
+    @ObservationIgnored private var terminationObserver: (any NSObjectProtocol)?
+
+    /// A synthetic master-analysis snapshot the session vibe meter prefers over the
+    /// live engine poll (M8 vm-b). nil in normal use (the meter reads
+    /// `store.masterAnalysis()`); the debug-tier `debug.vibeSeed` command sets it so a
+    /// capture / E2E can stage a specific mix feel (dim ember, bass-heavy, bright)
+    /// without real audio. The ENGINE is never touched by seeding — this is a
+    /// view-side override, the `debug.explainMode focus` precedent.
+    var vibeSeed: MasterAnalysisSnapshot?
+
+    /// A pending copilot draft (M8 ex-a hand-off). The explain card's "Ask the
+    /// Copilot" button sets this to a prefilled question and opens the rail; the rail
+    /// loads it into its input on appear and clears it (never auto-sends — the user
+    /// presses send, so it works with or without an API key).
+    var copilotDraft: String?
 
     /// Live offline-stretch render state per clip id (M5 ii-e), polled from the
     /// engine's pull-based `clipStretchStatus` so the timeline can shimmer a clip
@@ -149,15 +290,135 @@ final class AppModel {
             engine?.effectState(forEffect: effectID)
         }
         store.media = AudioFileImporter()
-        store.startAutosave()
+        // Crash-recovery autosave (M9 crash-b): detect a prior crash (a surviving
+        // session.lock) BEFORE writing this session's lock, then run the rolling
+        // 30-s snapshot loop. This supersedes the legacy `startAutosave` in-place
+        // loop — the crash-recovery snapshot never touches the user's file and is
+        // offered back only after a crash.
+        let crashDetected = store.beginCrashDetection()
+        store.startCrashAutosave()
+        // Untitled-recovery bundles accumulate one per abandoned untitled session
+        // (flushForTransition) with no other cleanup path — prune to the newest
+        // few at launch.
+        store.pruneUntitledRecoveryBundles()
         self.store = store
         self.engine = engine
+        // If a crash left restorable unsaved work, stage the launch offer (the
+        // sheet reads this; nil = no offer). `recoveryStatus()` also confirms the
+        // snapshot files are actually present, so a bare lock never over-offers.
+        if crashDetected {
+            let status = store.recoveryStatus()
+            if status.available { self.recoveryOffer = status }
+        }
+        // Clean-exit lock removal: fires on in-app quit (Cmd-Q / the quit Apple
+        // event). SIGTERM/pkill does NOT reach AppKit termination for this
+        // process (verified live) — it dies like a crash, and since nothing
+        // saves on the way down, the next launch correctly offers recovery.
+        // The lock URL is a Sendable value, so the observer needs no actor hop.
+        let lockURL = store.crashLockURL
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in
+            try? FileManager.default.removeItem(at: lockURL)
+        }
+
+        // One song generator + sidecar manager, shared with the router so the
+        // panel's own generate/import and the `ai.*` wire path never diverge on
+        // job state or audio caching.
+        let songGenerator = ACEStepClient()
+        let sidecarManager = SidecarManager()
+        self.songGenerator = songGenerator
+        self.sidecarManager = sidecarManager
+
+        // The Sketchpad model: generate over the shared client, import through
+        // the store's one-undo generation-import pipeline (the created track's
+        // name is read back for the imported badge).
+        let sketchpad = SketchpadModel(
+            generator: songGenerator,
+            importer: { [weak store] jobID in
+                guard let store else { throw DebugError("project store unavailable") }
+                let (trackID, _, _) = try await store.importGeneration(jobID: jobID)
+                let name = store.tracks.first { $0.id == trackID }?.name ?? "AI Track"
+                return SketchpadImportResult(trackID: trackID, trackName: name)
+            }
+        )
+        self.sketchpad = sketchpad
+
+        // The clip vocal-fix model (M6 v-b-2): submit bounces+repaints through the
+        // store's fixClipRegion, poll rides the SAME shared generation-status
+        // surface the Sketchpad uses, import lands the fix as a violet take lane
+        // through importClipFix. All three hops are closures so DAWAppKit stays off
+        // the engine bridge; the store's generationSource is wired by the router
+        // below (one source of truth with the ai.* wire path).
+        self.clipFix = ClipFixModel(
+            submitter: { [weak store] request in
+                guard let store else { throw DebugError("project store unavailable") }
+                return try await store.fixClipRegion(
+                    trackId: request.trackId, clipId: request.clipId,
+                    startBeat: request.startBeat, endBeat: request.endBeat,
+                    prompt: request.prompt, lyrics: request.lyrics,
+                    mode: request.mode, strength: request.strength,
+                    seed: request.seed, contextSeconds: request.contextSeconds)
+            },
+            statusProvider: { [songGenerator] jobID in
+                try await songGenerator.generationStatus(jobID: jobID)
+            },
+            importer: { [weak store] jobID in
+                guard let store else { throw DebugError("project store unavailable") }
+                return try await store.importClipFix(jobID: jobID)
+            })
+
+        // API-key management over the system Keychain (M6). Env vars still win
+        // (highest precedence); the Keychain is the in-app fallback. Key VALUES
+        // never leave this Mac and never cross the control plane — the wire gets
+        // status only (see `ai.providerStatus`). One store instance is shared
+        // with the router so `ai.providerStatus` reflects what the UI manages.
+        let keyStore = KeychainKeyStore()
+        self.settings = SettingsModel(store: keyStore)
+
+        // The Lyrics Workshop: resolves a lyrics writer from the SAME key chain
+        // the Settings panel manages (Anthropic preferred, OpenAI fallback, else
+        // an actionable no-key error surfaced in the panel), reads the live
+        // project key/tempo/time-signature as context, and applies its finished
+        // draft straight into the Sketchpad's lyrics editor. Key VALUES never
+        // leave this Mac — the workshop reads presence only, via resolveLyricsWriter.
+        self.lyricsWorkshop = LyricsWorkshopModel(
+            makeWriter: {
+                try resolveLyricsWriter(
+                    environment: ProcessInfo.processInfo.environment, store: keyStore)
+            },
+            contextProvider: { [weak store] in
+                guard let store else { return LyricsWriteContext() }
+                let t = store.transport
+                return LyricsWriteContext(
+                    tempoBPM: t.tempoBPM,
+                    timeSignature: "\(t.timeSignature.beatsPerBar)/\(t.timeSignature.beatUnit)")
+            },
+            applier: { [weak sketchpad] lyrics in
+                sketchpad?.lyrics = lyrics
+            })
 
         let port = ProcessInfo.processInfo.environment["DAW_CONTROL_PORT"]
             .flatMap(UInt16.init) ?? 17600
-        let router = CommandRouter(store: store)
+        let router = CommandRouter(store: store, sidecarManager: sidecarManager,
+                                   songGenerator: songGenerator, keyStore: keyStore)
         let server = ControlServer(router: router, port: port)
         self.router = router
+        // Two-phase, no-retain-cycle wiring (the appCommandHandler precedent):
+        // the engine strongly captures `router` via the dispatch closure; the
+        // router only holds the engine back weakly (`copilotEngine`).
+        let copilotEngine = CopilotEngine(store: store, dispatch: { await router.handle($0) })
+        self.copilotEngine = copilotEngine
+        router.copilotEngine = copilotEngine
+        // Plugin windows (M3 vi-b): the app owns the manager; the router holds it
+        // weakly (the copilotEngine precedent), and the engine's registry-release
+        // callback drives every auto-close (the single invalidation authority).
+        let pluginWindows = PluginWindowManager(engine: engine, store: store)
+        self.pluginWindows = pluginWindows
+        router.pluginUI = pluginWindows
+        engine.hostedAUReleased = { [weak pluginWindows] endpoint in
+            pluginWindows?.hostedAUReleased(endpoint)
+        }
         controlServer = server
         let broadcaster = TransportBroadcaster(store: store, server: server)
         transportBroadcaster = broadcaster
@@ -172,7 +433,88 @@ final class AppModel {
                 Data("control server failed to start on port \(port): \(error)\n".utf8)
             )
         }
+        // The onboarding signal adapter observes the store and fires the tour's
+        // completion signals (ob-b) — for UI AND wire-driven actions alike.
+        onboardingAdapter = OnboardingSignalAdapter(store: store, model: onboarding)
+        onboardingAdapter.start()
         installDebugCommands()
+    }
+
+    /// Offers the tour on first launch: begins it when eligible (fresh / reset).
+    /// Idempotent — `begin()` no-ops once active, and the two terminals never
+    /// re-offer, so calling this on every ContentView appear is safe.
+    func offerTourIfEligible() {
+        if onboarding.shouldOfferTour { onboarding.begin() }
+    }
+
+    /// The Settings "Replay tour" seam: return the tour to eligible, then start it
+    /// from the welcome card.
+    func replayTour() {
+        onboarding.reset()
+        onboarding.begin()
+    }
+
+    /// RESTORE on the crash-recovery sheet (crash-b): load the autosaved snapshot
+    /// as the live session (kept dirty, source path preserved), then dismiss. Same
+    /// store path as `project.recover accept:true`; a failure just drops the offer
+    /// (nothing to restore into — the session is untouched).
+    func restoreFromRecovery() {
+        defer { withAnimation(.easeOut(duration: 0.18)) { recoveryOffer = nil } }
+        do {
+            _ = try store.recoverFromAutosave(accept: true)
+        } catch {
+            FileHandle.standardError.write(
+                Data("recovery restore failed: \(error.localizedDescription)\n".utf8))
+        }
+    }
+
+    /// DISCARD on the crash-recovery sheet (crash-b): drop the snapshot and fall
+    /// through to the normal fresh-launch session. Same store path as
+    /// `project.recover accept:false`.
+    func discardRecovery() {
+        _ = try? store.recoverFromAutosave(accept: false)
+        withAnimation(.easeOut(duration: 0.18)) { recoveryOffer = nil }
+    }
+
+    /// Runs the bounce-to-file flow behind the transport EXPORT button and the
+    /// onboarding `export` step (ob-b): an NSSavePanel, then
+    /// `store.renderBounce(toPath:)`. Completion flows through the store's
+    /// `renderCompletedCount` — the onboarding adapter fires `renderCompleted` on
+    /// the increment, so there is ONE path and no direct tour-signal emission here.
+    func exportSong() {
+        let panel = NSSavePanel()
+        panel.title = "Export Song"
+        panel.prompt = "Export"
+        panel.nameFieldStringValue = "\(store.projectName).wav"
+        panel.allowedContentTypes = [.wav]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do {
+                _ = try await store.renderBounce(toPath: url.path)
+            } catch {
+                FileHandle.standardError.write(
+                    Data("export failed: \(error.localizedDescription)\n".utf8))
+            }
+        }
+    }
+
+    /// Opens (or focuses) the floating plugin window for a track's AU instrument
+    /// or one AU insert effect (M3 vi-b) — the mixer/instrument open-window
+    /// buttons and the wire's `plugin.openUI` converge on the SAME manager.
+    /// Fire-and-forget: a not-ready/headless failure logs and is otherwise a
+    /// no-op (the button never blocks the UI).
+    func openPluginWindow(trackID: UUID, effectID: UUID? = nil) {
+        let target: PluginUITarget = effectID.map { .effect(trackID: trackID, effectID: $0) }
+            ?? .instrument(trackID: trackID)
+        Task { @MainActor in
+            do {
+                _ = try await pluginWindows.openUI(target, x: nil, y: nil)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "plugin window open failed: \(error.localizedDescription)\n".utf8))
+            }
+        }
     }
 
     /// Installs the app-layer `debug.*` command surface on the router. These are
@@ -187,10 +529,67 @@ final class AppModel {
                 return try self.captureUI(params)
             case "ui.showMixer":
                 return self.showMixer(params)
+            case "debug.panelDensity":
+                return try self.setPanelDensity(params)
+            case "debug.panelLayout":
+                return self.setPanelLayout(params)
+            case "debug.explainMode":
+                return try self.setExplainMode(params)
+            case "debug.vibeSeed":
+                return try self.setVibeSeed(params)
+            case "debug.onboardingState":
+                return try self.setOnboardingState(params)
+            case "debug.recoveryOffer":
+                return self.setRecoveryOffer(params)
             case "ui.showAutomation":
                 return try self.showAutomation(params)
             case "ui.showTakes":
                 return try self.showTakes(params)
+            case "ui.showSketchpad":
+                return self.showSketchpadCommand(params)
+            case "debug.sketchpadDemo":
+                return self.sketchpadDemo(params)
+            case "debug.sidecarSeed":
+                return try self.setSidecarSeed(params)
+            case "debug.sketchpadGenerate":
+                return try self.sketchpadGenerate(params)
+            case "debug.sketchpadRefresh":
+                return self.sketchpadRefresh(params)
+            case "debug.sketchpadImport":
+                return try self.sketchpadImport(params)
+            case "debug.sketchpadState":
+                return self.sketchpadStateResponse()
+            case "ui.showClipFix":
+                return self.showClipFixCommand(params)
+            case "debug.clipFixSeed":
+                return self.clipFixSeed(params)
+            case "debug.clipFixState":
+                return self.clipFixStateResponse()
+            case "ui.showCopilot":
+                return self.showCopilotCommand(params)
+            case "debug.copilotSeed":
+                return self.copilotSeed(params)
+            case "debug.copilotState":
+                return self.copilotStateResponse()
+            case "ui.showLyricsWorkshop":
+                return self.showLyricsWorkshopCommand(params)
+            case "debug.lyricsWorkshopSeed":
+                return self.lyricsWorkshopSeed(params)
+            case "debug.lyricsWorkshopState":
+                return self.lyricsWorkshopStateResponse()
+            case "debug.sketchpadReset":
+                self.sketchpad.setCandidatesForCapture([])
+                self.sketchpad.prompt = ""
+                self.sketchpad.lyrics = ""
+                return self.sketchpadStateResponse()
+            case "ui.showSettings":
+                return self.showSettingsCommand(params)
+            case "debug.settingsSeed":
+                return self.settingsSeed(params)
+            case "debug.settingsReset":
+                return self.settingsReset()
+            case "debug.settingsState":
+                return self.settingsStateResponse()
             default:
                 return nil   // fall through to the router's unknown-command error
             }
@@ -205,6 +604,205 @@ final class AppModel {
         let show = params["show"]?.boolValue ?? true
         workspaceMode = show ? .mix : .arrange
         return .object(["mode": .string(workspaceMode.rawValue)])
+    }
+
+    /// `debug.panelDensity {panel, mode}` — stages a panel's Simple/Pro density so
+    /// a headless capture / E2E can drive a panel into Pro before `debug.captureUI`
+    /// (the `debug.sketchpadDemo` seed-then-capture precedent). Writes straight to
+    /// the shared `panelDensity` store, so the panel's live `SimpleProToggle`
+    /// reflects it. Debug tier ONLY — off `allCommands`/MCP (density is UI chrome;
+    /// agents drive the protocol directly, not the chrome). Params: `panel`
+    /// (required, e.g. `"pianoRoll"`), `mode` (`"simple"` | `"pro"`). Unknown mode
+    /// → error; happy path returns the resulting `{panel, mode}`.
+    private func setPanelDensity(_ params: [String: JSONValue]) throws -> JSONValue {
+        guard let panel = params["panel"]?.stringValue, !panel.isEmpty else {
+            throw DebugError("debug.panelDensity requires a panel")
+        }
+        guard let modeRaw = params["mode"]?.stringValue else {
+            throw DebugError("debug.panelDensity requires a mode (\"simple\" or \"pro\")")
+        }
+        guard let density = PanelDensity(rawValue: modeRaw) else {
+            throw DebugError("unknown mode \"\(modeRaw)\" — expected \"simple\" or \"pro\"")
+        }
+        panelDensity.setDensity(density, forPanel: panel)
+        return .object([
+            "panel": .string(panel),
+            "mode": .string(density.rawValue),
+        ])
+    }
+
+    /// `debug.panelLayout {sidebarWidth?, editorFraction?, rowHeight?, reset?}` —
+    /// stages the adjustable window layout (beta m10-d) so a headless capture / E2E
+    /// can drive the arrange sidebar width, the bottom editor's height fraction, and
+    /// the global track-row height before `debug.captureUI` (the `debug.panelDensity`
+    /// precedent: writes straight to the shared `panelLayout` store so the live
+    /// splitters reflect it). Debug tier ONLY — off `allCommands`/MCP (window layout
+    /// is a UI preference, not an invokable capability; agents drive the protocol,
+    /// not the chrome). Every field is optional; `reset:true` restores the defaults
+    /// FIRST (so `{reset:true, rowHeight:48}` resets then applies 48). Values are
+    /// clamped by the store, and the result echoes the APPLIED (post-clamp) values.
+    private func setPanelLayout(_ params: [String: JSONValue]) -> JSONValue {
+        if params["reset"]?.boolValue == true { panelLayout.reset() }
+        if let w = params["sidebarWidth"]?.doubleValue { panelLayout.setSidebarWidth(CGFloat(w)) }
+        if let f = params["editorFraction"]?.doubleValue { panelLayout.setEditorFraction(CGFloat(f)) }
+        if let h = params["rowHeight"]?.doubleValue { panelLayout.setRowHeight(CGFloat(h)) }
+        return .object([
+            "sidebarWidth": .number(Double(panelLayout.sidebarWidth)),
+            "editorFraction": .number(Double(panelLayout.editorFraction)),
+            "rowHeight": .number(Double(panelLayout.rowHeight)),
+        ])
+    }
+
+    /// `debug.explainMode {on, focus?, instance?}` — stages the violet "?" EXPLAIN
+    /// overlay for a capture / E2E (the `debug.panelDensity` precedent: app-level
+    /// handler, debug tier ONLY — off `allCommands`/MCP, since explain is UI chrome
+    /// and agents drive the protocol directly). `on` toggles the mode (default true).
+    /// Because the wire can't synthesize a pointer hover, the optional `focus` param
+    /// names an `ExplainID` to programmatically present that control's card, and the
+    /// optional `instance` (0-based, tree order; default 0) picks WHICH copy of a
+    /// repeated control (e.g. the 3rd mixer strip) to anchor on — CAPTURE STAGING
+    /// ONLY (normal use presents on hover, per-instance). Unknown focus → error;
+    /// happy path returns the resulting `{on, focus, instance}`.
+    private func setExplainMode(_ params: [String: JSONValue]) throws -> JSONValue {
+        let on = params["on"]?.boolValue ?? true
+        explain.setActive(on)
+        if on, let raw = params["focus"]?.stringValue {
+            guard let id = ExplainID(rawValue: raw) else {
+                throw DebugError("unknown explain focus \"\(raw)\" — expected an ExplainID (e.g. \"transportPlay\")")
+            }
+            explain.focusedForCapture = id
+            explain.focusedInstance = params["instance"]?.doubleValue.map { Int($0) }
+        } else {
+            explain.focusedForCapture = nil
+            explain.focusedInstance = nil
+        }
+        return .object([
+            "on": .bool(explain.isActive),
+            "focus": explain.focusedForCapture.map { JSONValue.string($0.rawValue) } ?? .null,
+            "instance": explain.focusedInstance.map { JSONValue.number(Double($0)) } ?? .null,
+        ])
+    }
+
+    /// `debug.vibeSeed {bands?, levelDB?, peakDB?, centroidHz?, flux?}` — stages a
+    /// synthetic master-analysis snapshot the session vibe meter prefers over the live
+    /// engine poll, so a capture / E2E can show a specific mix feel without real audio
+    /// (the `debug.explainMode focus` staging precedent). App-level, debug tier ONLY —
+    /// off `allCommands`/MCP (it's UI chrome; agents drive the real audio path). The
+    /// ENGINE is never touched — this only sets `vibeSeed`. `{clear: true}` drops the
+    /// override back to the live poll. All fields optional with sensible mid-mix
+    /// defaults; `bands` (when given) must carry exactly 24 values. Returns the seeded
+    /// snapshot (or `{cleared: true}`).
+    private func setVibeSeed(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["clear"]?.boolValue == true {
+            vibeSeed = nil
+            return .object(["cleared": .bool(true)])
+        }
+        let bandCount = MasterAnalysisSnapshot.bandCount
+        var bands = [Float](repeating: -30, count: bandCount)
+        if let raw = params["bands"]?.arrayValue {
+            guard raw.count == bandCount else {
+                throw DebugError("debug.vibeSeed bands must have exactly \(bandCount) values (got \(raw.count))")
+            }
+            bands = raw.map { Float($0.doubleValue ?? Double(MasterAnalysisSnapshot.floorDB)) }
+        }
+        let levelDB = params["levelDB"]?.doubleValue.map(Float.init) ?? -10
+        let peakDB = params["peakDB"]?.doubleValue.map(Float.init) ?? (levelDB + 4)
+        let centroidHz = params["centroidHz"]?.doubleValue.map(Float.init) ?? 2000
+        let flux = params["flux"]?.doubleValue.map(Float.init) ?? 0.3
+        let snapshot = MasterAnalysisSnapshot(bands: bands, levelDB: levelDB, peakDB: peakDB,
+                                              centroidHz: centroidHz, flux: flux)
+        vibeSeed = snapshot
+        return .object([
+            "levelDB": .number(Double(levelDB)),
+            "peakDB": .number(Double(peakDB)),
+            "centroidHz": .number(Double(centroidHz)),
+            "flux": .number(Double(flux)),
+            "bands": .array(bands.map { .number(Double($0)) }),
+        ])
+    }
+
+    /// `debug.onboardingState {set?, signal?}` — stages the onboarding tour for a
+    /// capture / E2E (the `debug.vibeSeed` / `debug.explainMode` idiom: app-level,
+    /// debug tier ONLY — off `allCommands`/MCP, since the tour is UI chrome and
+    /// agents drive the protocol directly). `set` FORCES a state
+    /// (`"inactive"|"active:<i>"|"completed"|"dismissed"`, parsed via
+    /// `OnboardingState(persisted:)`) by driving the FROZEN model API to that state;
+    /// `signal` (an `OnboardingSignal` raw value) injects through the SAME
+    /// `model.signal(_:)` path the app uses (so its strict active-step matching still
+    /// governs). Both optional; `set` applies before `signal`. Unknown values →
+    /// error. The response echoes the resulting persisted state string.
+    private func setOnboardingState(_ params: [String: JSONValue]) throws -> JSONValue {
+        if let raw = params["set"]?.stringValue {
+            guard let target = OnboardingState(persisted: raw) else {
+                throw DebugError("unknown onboarding state \"\(raw)\" — expected \"inactive\", \"active:<i>\", \"completed\", or \"dismissed\"")
+            }
+            forceOnboardingState(target)
+        }
+        if let raw = params["signal"]?.stringValue {
+            guard let sig = OnboardingSignal(rawValue: raw) else {
+                let valid = OnboardingSignal.allCases.map(\.rawValue).joined(separator: ", ")
+                throw DebugError("unknown onboarding signal \"\(raw)\" — expected one of: \(valid)")
+            }
+            onboarding.signal(sig)
+        }
+        return .object(["state": .string(onboarding.state.persistedValue)])
+    }
+
+    /// Drives the FROZEN `OnboardingModel` public API to `target` (there is no state
+    /// setter — the model API is frozen). `reset()` establishes the `inactive`
+    /// baseline; `begin()` + bounded `advance()`s walk to an active index or to
+    /// `completed`; `dismissTour()` reaches `dismissed`.
+    private func forceOnboardingState(_ target: OnboardingState) {
+        onboarding.reset()   // → inactive
+        let stepCount = OnboardingStep.allCases.count
+        switch target {
+        case .inactive:
+            break
+        case .active(let i):
+            onboarding.begin()   // → active(0)
+            var guardCount = 0
+            while (onboarding.stepIndex ?? Int.max) < i, guardCount < stepCount {
+                onboarding.advance(); guardCount += 1
+            }
+        case .completed:
+            onboarding.begin()
+            var guardCount = 0
+            while onboarding.currentStep != nil, guardCount <= stepCount {
+                onboarding.advance(); guardCount += 1
+            }
+        case .dismissed:
+            onboarding.dismissTour()   // inactive → dismissed
+        }
+    }
+
+    /// `debug.recoveryOffer {show?, savedAt?, sourcePath?, editCount?}` — stages the
+    /// crash-recovery sheet (crash-b) for a capture / E2E without an actual crash
+    /// (the `debug.onboardingState` staging precedent: app-level, debug tier ONLY —
+    /// off `allCommands`/MCP, since the sheet is UI chrome and agents drive the real
+    /// `project.recover*` protocol). `show` (default true) floats a synthetic offer;
+    /// `false` clears it. Optional `savedAt` (epoch seconds; default a fixed 14:32
+    /// so the HH:MM readout is deterministic), `sourcePath` (default a sample so both
+    /// readouts show), and `editCount`. Never touches the real autosave on disk —
+    /// this ONLY sets `recoveryOffer`. Returns `{visible}`.
+    private func setRecoveryOffer(_ params: [String: JSONValue]) -> JSONValue {
+        let show = params["show"]?.boolValue ?? true
+        if show {
+            let savedAt = params["savedAt"]?.doubleValue.map { Date(timeIntervalSince1970: $0) }
+                // 2024-01-01 14:32 local-agnostic default → a stable HH:MM readout.
+                ?? Date(timeIntervalSince1970: 1_704_119_520)
+            let sourcePath = params["sourcePath"].flatMap { value -> String? in
+                if case .null = value { return nil }
+                return value.stringValue ?? "~/Music/DAW Pro/Midnight Drive.dawproj"
+            } ?? "~/Music/DAW Pro/Midnight Drive.dawproj"
+            recoveryOffer = AutosaveRecoveryStatus(
+                available: true,
+                savedAt: savedAt,
+                sourcePath: sourcePath,
+                editCount: params["editCount"]?.doubleValue.map { Int($0) } ?? 12)
+        } else {
+            recoveryOffer = nil
+        }
+        return .object(["visible": .bool(recoveryOffer != nil)])
     }
 
     /// Opens a track's arrange automation row (Arrange workspace, disclosure
@@ -262,6 +860,591 @@ final class AppModel {
         } else {
             expandedTakeTrackIDs.insert(trackID)
         }
+    }
+
+    // MARK: - Sketchpad actions (M6 iii-b)
+
+    /// Opens/closes the Sketchpad side panel (header toggle). Opening kicks a
+    /// sidecar-health refresh so the banner + Generate gate are current.
+    func toggleSketchpad() {
+        showSketchpad.toggle()
+        if showSketchpad { Task { await refreshSketchpadSidecar() } }
+    }
+
+    /// Probes the shared sidecar manager and feeds the result into the panel
+    /// model (drives its banner + `canGenerate`).
+    func refreshSketchpadSidecar() async {
+        let status = await sidecarManager.status()
+        sketchpad.updateSidecar(status)
+    }
+
+    /// Starts the local sidecar (the banner's Start button) and refreshes the
+    /// panel's status from the result — falling back to a plain re-probe if the
+    /// start attempt threw.
+    func startSketchpadSidecar() async {
+        if let started = try? await sidecarManager.start() {
+            sketchpad.updateSidecar(started)
+        } else {
+            await refreshSketchpadSidecar()
+        }
+    }
+
+    // MARK: - Sketchpad debug commands (capture support, not agent-facing)
+
+    /// `ui.showSketchpad` — opens/closes the panel so a headless capture can
+    /// drive it (the `ui.showTakes` pattern). Kicks a sidecar re-probe; the
+    /// caller sleeps briefly before capturing so the async status lands (the
+    /// natural ws round-trip cadence). Params: `show` (optional, default true).
+    private func showSketchpadCommand(_ params: [String: JSONValue]) -> JSONValue {
+        let show = params["show"]?.boolValue ?? true
+        workspaceMode = .arrange
+        showSketchpad = show
+        if show { Task { await self.refreshSketchpadSidecar() } }
+        return .object([
+            "visible": .bool(show),
+            "sidecar": .string(sketchpad.sidecarStatus?.state.rawValue ?? "unknown"),
+        ])
+    }
+
+    /// `debug.sketchpadDemo` — seeds the panel with one candidate in each
+    /// representative state (generating / succeeded / failed / imported) plus a
+    /// filled composer, for a capture that can't be reached from the wire alone
+    /// (the established seed-then-capture approach). Forces a healthy sidecar so
+    /// the composer reads as ready.
+    private func sketchpadDemo(_ params: [String: JSONValue]) -> JSONValue {
+        workspaceMode = .arrange
+        showSketchpad = true
+        sketchpad.updateSidecar(SidecarStatus(state: .healthy, message: "running",
+                                              version: "stub", ditModel: "XL-turbo"))
+        sketchpad.prompt = "warm 80s synth-pop, anthemic, driving bass"
+        sketchpad.lyrics = "[verse]\nCity lights below\n[chorus]\nWe rise tonight"
+        // Ordered so the view's newest-first reversal puts the two states not
+        // shown in the other captures — generating (shimmer + progress) and
+        // failed (red) — at the TOP of the demo capture, with succeeded +
+        // imported below. The generating row carries an EMPTY jobId so the
+        // view's real poll timer skips it (a fake id would poll → jobNotFound →
+        // a spurious "reconnecting"): the demo shows a clean generating cue.
+        sketchpad.setCandidatesForCapture([
+            SketchpadCandidate(jobID: "demo-4", promptSnippet: "ambient pads",
+                               state: .imported(trackID: UUID(), trackName: "AI: ambient pads")),
+            SketchpadCandidate(jobID: "demo-2", promptSnippet: "lofi chillhop, mellow keys",
+                               state: .succeeded(audioPath: "", bpm: 92, durationSeconds: 30)),
+            SketchpadCandidate(jobID: "demo-3", promptSnippet: "aggressive dnb, dark",
+                               state: .failed(message: "worker ran out of memory — try a shorter length")),
+            SketchpadCandidate(jobID: "", promptSnippet: "warm 80s synth-pop",
+                               state: .running(progress: 0.4, statusText: "step 3/8")),
+        ])
+        return sketchpadStateResponse()
+    }
+
+    /// `debug.sidecarSeed {state, message?, phase?, startingForSeconds?, clear?}`
+    /// — stages a synthesized `SidecarStatus` straight into the Sketchpad
+    /// panel's `updateSidecar` (the `debug.vibeSeed`/`debug.copilotSeed`
+    /// idiom: app-level handler, debug tier ONLY — off `allCommands`/MCP,
+    /// since this is an orchestrator capture affordance, not agent-facing)
+    /// so a capture / E2E can stage the M10-b `.starting` banner (spinner +
+    /// phase + elapsed) without waiting through a real, multi-minute cold
+    /// sidecar boot. `state` (required unless `clear`) is a `SidecarState`
+    /// raw value; `message` defaults to a plausible per-state sentence when
+    /// omitted; `phase`/`startingForSeconds` are additive and only applied
+    /// when `state == "starting"` (matching `SidecarStatus`'s own contract —
+    /// see `Sources/AIServices/SidecarStatus.swift`). `{clear: true}` drops
+    /// the seed and re-probes the real sidecar instead.
+    private func setSidecarSeed(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["clear"]?.boolValue == true {
+            Task { await self.refreshSketchpadSidecar() }
+            return .object(["cleared": .bool(true)])
+        }
+        guard let stateRaw = params["state"]?.stringValue, let state = SidecarState(rawValue: stateRaw) else {
+            throw DebugError(
+                "debug.sidecarSeed requires a state (notInstalled|installedNotRunning|starting|healthy|error)")
+        }
+        let phase = state == .starting ? params["phase"]?.stringValue : nil
+        let startingForSeconds = state == .starting
+            ? params["startingForSeconds"]?.doubleValue.map { Int($0) } : nil
+        let message = params["message"]?.stringValue
+            ?? Self.defaultSidecarSeedMessage(state: state, phase: phase, startingForSeconds: startingForSeconds)
+        sketchpad.updateSidecar(SidecarStatus(
+            state: state, message: message, phase: phase, startingForSeconds: startingForSeconds))
+
+        var response: [String: JSONValue] = ["state": .string(state.rawValue), "message": .string(message)]
+        if let phase { response["phase"] = .string(phase) }
+        if let startingForSeconds { response["startingForSeconds"] = .number(Double(startingForSeconds)) }
+        return .object(response)
+    }
+
+    private static func defaultSidecarSeedMessage(
+        state: SidecarState, phase: String?, startingForSeconds: Int?
+    ) -> String {
+        switch state {
+        case .notInstalled:
+            return "ACE-Step sidecar is not installed — run scripts/ace-step/install.sh first."
+        case .installedNotRunning:
+            return "ACE-Step is installed but not running — call ai.sidecarStart."
+        case .starting:
+            guard let startingForSeconds else { return "ACE-Step sidecar is starting." }
+            if let phase {
+                return "ACE-Step sidecar is starting — \(phase) (\(startingForSeconds)s so far)."
+            }
+            return "ACE-Step sidecar is starting (\(startingForSeconds)s so far)."
+        case .healthy:
+            return "ACE-Step sidecar is running and healthy."
+        case .error:
+            return "ACE-Step sidecar responded, but its /health response could not be parsed."
+        }
+    }
+
+    /// `debug.sketchpadGenerate {prompt, lyrics?, durationSeconds?}` — sets the
+    /// composer inputs and runs the REAL `model.generate()` against the app's
+    /// (stub) sidecar, blocking until the submission returns. Params: `prompt`
+    /// (required).
+    private func sketchpadGenerate(_ params: [String: JSONValue]) throws -> JSONValue {
+        guard let prompt = params["prompt"]?.stringValue, !prompt.isEmpty else {
+            throw DebugError("debug.sketchpadGenerate requires a non-empty prompt")
+        }
+        workspaceMode = .arrange
+        showSketchpad = true
+        sketchpad.prompt = prompt
+        if let lyrics = params["lyrics"]?.stringValue { sketchpad.lyrics = lyrics }
+        if let duration = params["durationSeconds"]?.doubleValue { sketchpad.setDurationSeconds(duration) }
+        // Fire-and-forget: the submission completes on the main actor during the
+        // caller's next sleep/round-trip. The caller polls `debug.sketchpadState`
+        // for the candidate to appear and progress (the view's real path too).
+        Task {
+            await self.refreshSketchpadSidecar()
+            await self.sketchpad.generate()
+        }
+        return sketchpadStateResponse()
+    }
+
+    /// `debug.sketchpadRefresh` — kicks ONE real poll cycle (the model's own
+    /// `refresh`), so a capture flow can advance queued → running → succeeded
+    /// deterministically without waiting on the view's timer. Poll
+    /// `debug.sketchpadState` after a short sleep to read the transition.
+    private func sketchpadRefresh(_ params: [String: JSONValue]) -> JSONValue {
+        Task { await self.sketchpad.refresh() }
+        return sketchpadStateResponse()
+    }
+
+    /// `debug.sketchpadImport {candidateId?}` — imports a succeeded candidate
+    /// (the given one, or the first succeeded) through the real store pipeline.
+    private func sketchpadImport(_ params: [String: JSONValue]) throws -> JSONValue {
+        let targetID: UUID?
+        if let raw = params["candidateId"]?.stringValue {
+            guard let id = UUID(uuidString: raw) else {
+                throw DebugError("candidateId is not a valid UUID: \(raw)")
+            }
+            targetID = id
+        } else {
+            targetID = sketchpad.candidates.first {
+                if case .succeeded = $0.state { return true }; return false
+            }?.id
+        }
+        guard let id = targetID else {
+            throw DebugError("no succeeded candidate to import")
+        }
+        Task { await self.sketchpad.importCandidate(id) }
+        return sketchpadStateResponse()
+    }
+
+    // MARK: - Clip fix (M6 v-b-2)
+
+    /// Opens/closes the FIX-WITH-AI panel (the clip-selection affordance).
+    func toggleClipFix() {
+        showClipFix.toggle()
+    }
+
+    /// `ui.showClipFix {show?}` — opens/closes the clip vocal-fix panel so a
+    /// headless capture can drive it (the `ui.showSketchpad` pattern). Off
+    /// `allCommands`/MCP. Returns the panel state.
+    private func showClipFixCommand(_ params: [String: JSONValue]) -> JSONValue {
+        let show = params["show"]?.boolValue ?? true
+        workspaceMode = .arrange
+        showClipFix = show
+        return clipFixStateResponse()
+    }
+
+    /// `debug.clipFixSeed {mode}` — stages the fix panel for a capture that can't
+    /// be reached from the wire alone (no real audio clip / sidecar on the capture
+    /// machine — the `debug.sketchpadDemo` precedent). Always fills the composer
+    /// (a target clip + region + prompt/lyrics); the jobs strip varies by `mode`:
+    ///   - `composer`: an empty jobs strip (the filled-composer shot).
+    ///   - `jobs` (default): a running (shimmer + 40 %) + a succeeded (IMPORT) + a
+    ///     failed card — the state-variety shot.
+    ///   - `imported`: a single imported card with its lane name.
+    /// The running card carries an EMPTY jobId so the panel's real poll timer
+    /// skips it (a fake id would poll → jobNotFound → a spurious RECONNECTING),
+    /// mirroring `debug.sketchpadDemo`.
+    private func clipFixSeed(_ params: [String: JSONValue]) -> JSONValue {
+        let mode = params["mode"]?.stringValue ?? "jobs"
+        workspaceMode = .arrange
+        showClipFix = true
+
+        let trackID = UUID()
+        func seedComposer() {
+            clipFix.setComposerForCapture(
+                trackID: trackID, clipID: UUID(), name: "Lead Vocal",
+                startBeat: 33, endBeat: 41,
+                prompt: "clean up the pitch on the chorus line",
+                lyrics: "[chorus]\nwe rise tonight", mode: .balanced)
+        }
+
+        // Ordered so the view's newest-first reversal puts running at the TOP.
+        let running = ClipFixCard(jobID: "", trackID: trackID,
+                                  regionStartBeat: 33, regionEndBeat: 41,
+                                  promptSnippet: "clean the chorus",
+                                  state: .running(progress: 0.4, statusText: "step 3/8"))
+        let succeeded = ClipFixCard(jobID: "fix-ok", trackID: trackID,
+                                    regionStartBeat: 16, regionEndBeat: 20,
+                                    promptSnippet: "fix the pitch",
+                                    state: .succeededAwaitingImport)
+        let failed = ClipFixCard(jobID: "fix-fail", trackID: trackID,
+                                 regionStartBeat: 24, regionEndBeat: 28,
+                                 promptSnippet: "de-ess the sibilance",
+                                 state: .failed(message: "worker ran out of memory — try a shorter region"))
+        let imported = ClipFixCard(jobID: "fix-imp", trackID: trackID,
+                                   regionStartBeat: 8, regionEndBeat: 12,
+                                   promptSnippet: "warm the low notes",
+                                   state: .imported(laneName: "AI Fix 1"))
+        switch mode {
+        case "composer":
+            seedComposer()
+            clipFix.setCardsForCapture([])
+        case "imported":
+            seedComposer()
+            clipFix.setCardsForCapture([imported])
+        default:   // "jobs": collapse the composer so all three cards fit in view
+            clipFix.clearTarget()
+            clipFix.setCardsForCapture([failed, succeeded, running])
+        }
+        return clipFixStateResponse()
+    }
+
+    /// `debug.clipFixState` — read-only snapshot of the panel (visibility +
+    /// composer target + the cards and their state tags), so a capture flow can
+    /// poll for the state it wants.
+    private func clipFixStateResponse() -> JSONValue {
+        .object([
+            "visible": .bool(showClipFix),
+            "targetClipId": clipFix.targetClipID.map { JSONValue.string($0.uuidString) } ?? .null,
+            "regionStartBeat": .number(clipFix.regionStartBeat),
+            "regionEndBeat": .number(clipFix.regionEndBeat),
+            "cards": .array(clipFix.cards.map(Self.clipFixCardSummary)),
+        ])
+    }
+
+    /// A compact JSON summary of one fix card for the debug commands.
+    private static func clipFixCardSummary(_ c: ClipFixCard) -> JSONValue {
+        var obj: [String: JSONValue] = [
+            "jobId": .string(c.jobID),
+            "regionStartBeat": .number(c.regionStartBeat),
+            "regionEndBeat": .number(c.regionEndBeat),
+            "stale": .bool(c.isStale),
+        ]
+        switch c.state {
+        case .pending:
+            obj["state"] = .string("pending")
+        case .running(let progress, let statusText):
+            obj["state"] = .string("running")
+            if let progress { obj["progress"] = .number(progress) }
+            if let statusText { obj["statusText"] = .string(statusText) }
+        case .succeededAwaitingImport:
+            obj["state"] = .string("succeededAwaitingImport")
+        case .imported(let laneName):
+            obj["state"] = .string("imported")
+            obj["laneName"] = .string(laneName)
+        case .failed(let message):
+            obj["state"] = .string("failed")
+            obj["message"] = .string(message)
+        case .stale(let message):
+            obj["state"] = .string("stale")
+            obj["message"] = .string(message)
+        }
+        return .object(obj)
+    }
+
+    // MARK: - Copilot rail (M6 rail-d)
+
+    /// Opens/closes the Copilot chat rail (the header COPILOT chip). App-level —
+    /// available in both the Arrange and Mix workspaces.
+    func toggleCopilot() {
+        showCopilot.toggle()
+    }
+
+    /// `ui.showCopilot {show?}` — opens/closes the copilot rail so a headless
+    /// capture can drive it (the `ui.showClipFix` pattern). App-level, so it does
+    /// NOT force a workspace. Off `allCommands`/MCP. Returns the rail state.
+    private func showCopilotCommand(_ params: [String: JSONValue]) -> JSONValue {
+        let show = params["show"]?.boolValue ?? true
+        showCopilot = show
+        return copilotStateResponse()
+    }
+
+    /// `debug.copilotSeed {mode}` — stages the copilot rail for a capture/E2E
+    /// that can't be reached from the wire alone (no AI provider key on the
+    /// capture machine — the `debug.clipFixSeed` precedent). Seeds a scripted
+    /// transcript straight into the engine via `seedForCapture` (never a provider
+    /// call). Opens the rail; `mode`:
+    ///   - `conversation` (default): a user turn, assistant prose, two toolCall
+    ///     chips (distinct commands), an ok toolResult + an error toolResult, a
+    ///     closing assistant line, with `status = running` so the working shimmer
+    ///     shows — the state-variety shot.
+    ///   - `failed`: a short turn that ends in a `failure` entry (`status =
+    ///     failed`) so the failure strip + reset affordance read.
+    ///   - `idle`/`empty`: resets the engine to an empty idle rail (the first-use
+    ///     hint shot).
+    /// Off `allCommands`/MCP. Returns the resulting rail state.
+    private func copilotSeed(_ params: [String: JSONValue]) -> JSONValue {
+        let mode = params["mode"]?.stringValue ?? "conversation"
+        showCopilot = true
+        typealias Kind = CopilotEngine.TranscriptEntry.Kind
+        let turnID = "seed-turn"
+        switch mode {
+        case "idle", "empty":
+            copilotEngine.reset()
+        case "failed":
+            copilotEngine.seedForCapture(turnID: turnID, status: .failed, entries: [
+                .user("add a punchy drum track and set the tempo to 120"),
+                .assistant("On it — adding a drum track, then setting the tempo."),
+                .toolCall(command: "track.add", argsSummary: #"{"name": "Drums", "kind": "audio"}"#),
+                .toolResult(command: "track.add", ok: true, summary: #"{"trackId": "a1b2c3d4", "name": "Drums"}"#),
+                .toolCall(command: "transport.setTempo", argsSummary: #"{"bpm": 120}"#),
+                .failure("the AI provider returned an error: rate limit exceeded — wait a moment, then send again"),
+            ])
+        default:   // "conversation"
+            copilotEngine.seedForCapture(turnID: turnID, status: .running, entries: [
+                .user("set the tempo to 120 and add a bass track"),
+                .assistant("Sure — I'll set the tempo to 120 BPM and add a bass track."),
+                .toolCall(command: "transport.setTempo", argsSummary: #"{"bpm": 120}"#),
+                .toolResult(command: "transport.setTempo", ok: true, summary: #"{"tempoBPM": 120}"#),
+                .toolCall(command: "track.add", argsSummary: #"{"name": "Bass", "kind": "instrument"}"#),
+                .toolResult(command: "track.add", ok: false,
+                            summary: #"unknown kind "instrument" — expected "audio" or "midi""#),
+                .assistant("That kind isn't valid — retrying the bass as a MIDI track."),
+            ])
+        }
+        return copilotStateResponse()
+    }
+
+    /// `debug.copilotState` — read-only echo of the rail (visibility + the
+    /// engine's own `ai.copilotState` wire shape: status, transcript, current
+    /// turn) so an E2E flow can assert on the seeded transcript. Off
+    /// `allCommands`/MCP.
+    private func copilotStateResponse() -> JSONValue {
+        .object([
+            "visible": .bool(showCopilot),
+            "state": copilotEngine.stateJSON(turnID: nil),
+        ])
+    }
+
+    // MARK: - Lyrics Workshop (M6)
+
+    /// Expands/collapses the WRITE-WITH-AI workshop inside the Sketchpad panel
+    /// (the disclosure header).
+    func toggleLyricsWorkshop() {
+        showLyricsWorkshop.toggle()
+    }
+
+    /// `ui.showLyricsWorkshop {show?}` — opens the Sketchpad panel and
+    /// expands/collapses the workshop so a headless capture can drive it (the
+    /// `ui.showSketchpad` pattern). Off `allCommands`/MCP. Returns panel state.
+    private func showLyricsWorkshopCommand(_ params: [String: JSONValue]) -> JSONValue {
+        let show = params["show"]?.boolValue ?? true
+        workspaceMode = .arrange
+        showSketchpad = true
+        showLyricsWorkshop = show
+        return lyricsWorkshopStateResponse()
+    }
+
+    /// `debug.lyricsWorkshopSeed {mode}` — stages the workshop for a capture that
+    /// can't be reached from the wire (no API key on the capture machine — the
+    /// `debug.sketchpadDemo` precedent). Opens the panel + workshop and fills the
+    /// composer, then per `mode`:
+    ///   - `filled` (default): theme/style + a custom structure, no draft yet.
+    ///   - `written`: also seeds a bracketed draft (with a provider credit) so the
+    ///     APPLY button is visible.
+    ///   - `applied`: as `written`, then applies the draft into the Sketchpad
+    ///     lyrics editor (proving the hand-off).
+    /// The seeded draft is a plain demo string, never a real provider call.
+    private func lyricsWorkshopSeed(_ params: [String: JSONValue]) -> JSONValue {
+        let mode = params["mode"]?.stringValue ?? "filled"
+        workspaceMode = .arrange
+        showSketchpad = true
+        showLyricsWorkshop = true
+        // A healthy sidecar so the surrounding Sketchpad reads as ready.
+        sketchpad.updateSidecar(SidecarStatus(state: .healthy, message: "running",
+                                              version: "stub", ditModel: "XL-turbo"))
+        lyricsWorkshop.theme = "driving home under city lights"
+        lyricsWorkshop.style = "80s synth-pop, wistful"
+        lyricsWorkshop.setStructureForCapture(["verse", "chorus", "verse", "chorus", "bridge", "outro"])
+        lyricsWorkshop.refineInstruction = ""
+
+        let draft = """
+        [verse]
+        Headlights paint the empty street
+        Radio and a steady beat
+        [chorus]
+        We're driving home, we're driving home
+        Neon rivers, we're not alone
+        [bridge]
+        Hold the wheel, let the night unfold
+        [outro]
+        Driving home
+        """
+        switch mode {
+        case "written":
+            lyricsWorkshop.setDraftForCapture(draft, provider: "anthropic")
+        case "applied":
+            lyricsWorkshop.setDraftForCapture(draft, provider: "anthropic")
+            lyricsWorkshop.apply()
+        default:
+            break   // "filled": composer only
+        }
+        return lyricsWorkshopStateResponse()
+    }
+
+    /// `debug.lyricsWorkshopState` — read-only snapshot of the workshop (never a
+    /// key value): visibility, composer inputs, draft presence, provider credit,
+    /// and the state tag.
+    private func lyricsWorkshopStateResponse() -> JSONValue {
+        let stateTag: String
+        switch lyricsWorkshop.state {
+        case .idle: stateTag = "idle"
+        case .writing: stateTag = "writing"
+        case .failed: stateTag = "failed"
+        }
+        return .object([
+            "sketchpadVisible": .bool(showSketchpad),
+            "workshopExpanded": .bool(showLyricsWorkshop),
+            "theme": .string(lyricsWorkshop.theme),
+            "style": .string(lyricsWorkshop.style),
+            "structure": .array(lyricsWorkshop.structure.map { .string($0) }),
+            "hasDraft": .bool(!lyricsWorkshop.draft.isEmpty),
+            "provider": lyricsWorkshop.lastProvider.map { JSONValue.string($0) } ?? .null,
+            "state": .string(stateTag),
+            "sketchpadLyrics": .string(sketchpad.lyrics),
+        ])
+    }
+
+    // MARK: - Settings panel (M6)
+
+    /// Opens/closes the Settings overlay (the header gear chip + the ⌘, menu).
+    func toggleSettings() {
+        showSettings.toggle()
+    }
+
+    /// `ui.showSettings {show?}` — opens/closes the Settings overlay so a
+    /// headless capture can drive it (the `ui.showSketchpad` pattern). Returns a
+    /// status-only snapshot (never a key value). Off `allCommands`/MCP.
+    private func showSettingsCommand(_ params: [String: JSONValue]) -> JSONValue {
+        let show = params["show"]?.boolValue ?? true
+        workspaceMode = .arrange
+        showSettings = show
+        // Optional `reveal:"beta"` deep-links the modal to its Beta utility row
+        // (a below-the-fold capture affordance); anything else opens at the top.
+        settingsRevealBeta = show && params["reveal"]?.stringValue == "beta"
+        return settingsStateResponse()
+    }
+
+    /// `debug.settingsSeed {mode}` — swaps in a SEEDED settings model for a
+    /// capture that can't be reached from the wire (the `debug.sketchpadDemo`
+    /// precedent). `mode`:
+    ///   - `empty`: nothing configured (all rows NOT SET).
+    ///   - `mixed` (default): anthropic env-LOCKED + openai KEYCHAIN-configured
+    ///     + suno dormant/not-set + ACE-Step keyless.
+    /// ASSUMPTION: the seed uses an in-memory store + a fake environment (not the
+    /// real Keychain) so a capture is deterministic and can never clobber a real
+    /// user key — the row badge reflects `source`, which the in-memory store
+    /// reports identically. The real Keychain round-trip is proven by
+    /// AIServicesTests/KeyStoreTests. Fake values are non-secret demo strings.
+    private func settingsSeed(_ params: [String: JSONValue]) -> JSONValue {
+        let mode = params["mode"]?.stringValue ?? "mixed"
+        let store: APIKeyStoring
+        let environment: [String: String]
+        switch mode {
+        case "empty":
+            store = InMemoryKeyStore()
+            environment = [:]
+        default:
+            store = InMemoryKeyStore([.openai: "sk-test-openai-DEMO1234"])
+            environment = ["ANTHROPIC_API_KEY": "sk-ant-env-DEMO5678"]
+        }
+        let seeded = SettingsModel(store: store, environment: environment)
+        if mode != "empty" {
+            // Show the session "just saved" mask on the keychain row too (last 4
+            // of the seeded demo key, matching SettingsModel.mask output).
+            seeded.setSavedMaskForCapture("•••• 1234", for: .openai)
+        }
+        settings = seeded
+        workspaceMode = .arrange
+        showSettings = true
+        return settingsStateResponse()
+    }
+
+    /// `debug.settingsReset` — restores the real Keychain-backed settings model
+    /// and closes the overlay.
+    private func settingsReset() -> JSONValue {
+        settings = SettingsModel(store: KeychainKeyStore())
+        showSettings = false
+        return settingsStateResponse()
+    }
+
+    /// `debug.settingsState` — status-only snapshot (visibility + per-row
+    /// configured/source/locked). Never carries a key value — same discipline as
+    /// the `ai.providerStatus` wire surface.
+    private func settingsStateResponse() -> JSONValue {
+        .object([
+            "visible": .bool(showSettings),
+            "rows": .array(settings.rows.map { row in
+                .object([
+                    "id": .string(row.id),
+                    "configured": .bool(row.configured),
+                    "source": .string(row.source.rawValue),
+                    "locked": .bool(row.isLocked),
+                ])
+            }),
+        ])
+    }
+
+    /// `debug.sketchpadState` — read-only snapshot of the panel (candidates +
+    /// visibility + sidecar), so a capture flow can poll for the state it wants.
+    private func sketchpadStateResponse() -> JSONValue {
+        .object([
+            "visible": .bool(showSketchpad),
+            "sidecar": .string(sketchpad.sidecarStatus?.state.rawValue ?? "unknown"),
+            "candidates": .array(sketchpad.candidates.map(Self.candidateSummary)),
+        ])
+    }
+
+    /// A compact JSON summary of one candidate for the debug commands.
+    private static func candidateSummary(_ c: SketchpadCandidate) -> JSONValue {
+        var obj: [String: JSONValue] = [
+            "id": .string(c.id.uuidString),
+            "jobId": .string(c.jobID),
+            "prompt": .string(c.promptSnippet),
+            "stale": .bool(c.isStale),
+        ]
+        switch c.state {
+        case .queued:
+            obj["state"] = .string("queued")
+        case .running(let progress, let statusText):
+            obj["state"] = .string("running")
+            if let progress { obj["progress"] = .number(progress) }
+            if let statusText { obj["statusText"] = .string(statusText) }
+        case .succeeded(let audioPath, let bpm, let duration):
+            obj["state"] = .string("succeeded")
+            obj["audioPath"] = .string(audioPath)
+            if let bpm { obj["bpm"] = .number(bpm) }
+            if let duration { obj["durationSeconds"] = .number(duration) }
+        case .failed(let message):
+            obj["state"] = .string("failed")
+            obj["message"] = .string(message)
+        case .imported(let trackID, let trackName):
+            obj["state"] = .string("imported")
+            obj["trackId"] = .string(trackID.uuidString)
+            obj["trackName"] = .string(trackName)
+        }
+        return .object(obj)
     }
 
     // MARK: - Arrange automation UI actions (sidebar disclosure + picker)
@@ -322,6 +1505,16 @@ final class AppModel {
     /// `selectClip` (a clip UUID to open the piano roll on — set before capture
     /// and left set, so the live window follows).
     private func captureUI(_ params: [String: JSONValue]) throws -> JSONValue {
+        // target:"plugin" (M3 vi-b) captures a floating plugin window instead of
+        // the main window. KNOWN LIMIT: an out-of-process AUv3 remote view
+        // rasterizes BLANK through cacheDisplay (the body then proves chrome +
+        // frame only; plugin.listOpenUIs is the functional assertion). In-process
+        // bodies — all of cycle vi-b-1 (generic) and cycle vi-b-2's v2 views —
+        // capture fully.
+        if params["target"]?.stringValue == "plugin" {
+            return try capturePluginUI(params)
+        }
+
         // Selection first: a bad uuid is a caller error, reported readably. The
         // set persists (the live window mirrors it — intended and useful).
         var selectionChanged = false
@@ -386,6 +1579,47 @@ final class AppModel {
             "width": .number(Double(cgImage.width)),
             "height": .number(Double(cgImage.height)),
             "method": .string("imageRenderer"),
+        ])
+    }
+
+    /// Captures one open plugin window's contentView to a PNG (the
+    /// `debug.captureUI {target:"plugin", trackId, effectId?}` path). Same
+    /// `cacheDisplay(in:to:)` pipeline as the main-window capture — so an
+    /// in-process generic/v2 body renders its real pixels (chrome header + the
+    /// parameter rows). Returns `{path, width, height, method:"plugin"}`.
+    private func capturePluginUI(_ params: [String: JSONValue]) throws -> JSONValue {
+        guard let rawTrack = params["trackId"]?.stringValue else {
+            throw DebugError("debug.captureUI target:\"plugin\" requires trackId")
+        }
+        guard let trackID = UUID(uuidString: rawTrack) else {
+            throw DebugError("trackId is not a valid UUID: \(rawTrack)")
+        }
+        var effectID: UUID?
+        if let rawEffect = params["effectId"]?.stringValue {
+            guard let parsed = UUID(uuidString: rawEffect) else {
+                throw DebugError("effectId is not a valid UUID: \(rawEffect)")
+            }
+            effectID = parsed
+        }
+        guard let panel = pluginWindows.panel(forTrackID: trackID, effectID: effectID),
+              let contentView = panel.contentView,
+              contentView.bounds.width > 1, contentView.bounds.height > 1 else {
+            throw DebugError(
+                "no plugin window open for that target — open it with plugin.openUI first")
+        }
+        let url = captureURL(params)
+        panel.displayIfNeeded()
+        contentView.layoutSubtreeIfNeeded()
+        guard let rep = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
+            throw DebugError("plugin window has no drawable backing yet — retry once it has displayed")
+        }
+        contentView.cacheDisplay(in: contentView.bounds, to: rep)
+        try writePNG(rep, to: url)
+        return .object([
+            "path": .string(url.path),
+            "width": .number(Double(rep.pixelsWide)),
+            "height": .number(Double(rep.pixelsHigh)),
+            "method": .string("plugin"),
         ])
     }
 

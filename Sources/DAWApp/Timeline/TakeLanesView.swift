@@ -156,6 +156,9 @@ private struct TakeLaneRow: View {
             Rectangle().fill(DAWTheme.hairline.opacity(0.5)).frame(height: 1)
         }
         .contentShape(Rectangle())
+        // Pointer affordance (docs/DESIGN-LANGUAGE.md): a take lane is a place/paint
+        // surface — click selects it, drag paints it into the comp → crosshair.
+        .hoverCursor(.crosshair)
         .gesture(paintDrag)
         .contextMenu { menu }
         .help("Take “\(lane.name)” — drag to paint into the comp, click to select the whole take")
@@ -166,8 +169,11 @@ private struct TakeLaneRow: View {
     @ViewBuilder
     private var material: some View {
         if lane.clip.isMIDI {
-            TakeMIDIStrip(notes: lane.clip.notes ?? [], lengthBeats: lane.clip.lengthBeats,
-                          pixelsPerBeat: geometry.pixelsPerBeat, tint: tint)
+            // The shared arrange note map (beta m10-f), faded to 0.5 for the dim
+            // take-lane look — 0.8 pill × 0.5 = the strip's original 0.4 weight, so
+            // no visual regression while both renderings share one geometry.
+            ClipMIDIMap(notes: lane.clip.notes ?? [], lengthBeats: lane.clip.lengthBeats,
+                        pixelsPerBeat: geometry.pixelsPerBeat, tint: tint)
                 .frame(width: laneClipW, height: rowHeight)
                 .offset(x: laneClipX)
                 .opacity(0.5)
@@ -214,6 +220,7 @@ private struct TakeLaneRow: View {
     private var paintDrag: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
+                DragCursor.set(.crosshair)
                 if paintStartBeat == nil {
                     paintStartBeat = geometry.beat(forX: value.startLocation.x)
                     baseComp = group.comp
@@ -232,6 +239,7 @@ private struct TakeLaneRow: View {
                 if g.isClick { onSelectLane() }
                 paintStartBeat = nil
                 baseComp = nil
+                DragCursor.clear()
             }
     }
 
@@ -251,35 +259,5 @@ private struct TakeLaneRow: View {
         Divider()
         Button("Remove \(lane.name)", role: .destructive) { onRemoveLane() }
         Button("Flatten Group") { onFlatten() }
-    }
-}
-
-/// A dim MIDI note strip for a take lane: each note a small pill at its beat
-/// position, pitch mapped across the row. Value-in only (notes + geometry) so it
-/// previews without the store; redraws only on data change (no TimelineView).
-private struct TakeMIDIStrip: View {
-    var notes: [MIDINote]
-    var lengthBeats: Double
-    var pixelsPerBeat: CGFloat
-    var tint: Color
-
-    var body: some View {
-        Canvas { context, size in
-            guard !notes.isEmpty else { return }
-            let pitches = notes.map(\.pitch)
-            let lo = pitches.min() ?? 60
-            let hi = pitches.max() ?? 72
-            let span = max(1, hi - lo)
-            for note in notes {
-                let x = CGFloat(note.startBeat) * pixelsPerBeat
-                let w = max(2, CGFloat(note.lengthBeats) * pixelsPerBeat)
-                let frac = Double(note.pitch - lo) / Double(span)
-                let y = size.height - 3 - CGFloat(frac) * (size.height - 6)
-                let rect = CGRect(x: x, y: y - 1.5, width: w, height: 3)
-                context.fill(Path(roundedRect: rect, cornerRadius: 1.5),
-                             with: .color(tint.opacity(0.8)))
-            }
-        }
-        .allowsHitTesting(false)
     }
 }

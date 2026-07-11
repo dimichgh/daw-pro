@@ -23,6 +23,7 @@ final class StubACEStepServer: @unchecked Sendable {
     private var responseQueues: [String: [Data]] = [:]
     private var callCounts: [String: Int] = [:]
     private var lastBodies: [String: Data] = [:]
+    private var lastTargets: [String: String] = [:]
 
     func enqueue(_ response: Data, forKey key: String) {
         stateLock.lock()
@@ -42,6 +43,16 @@ final class StubACEStepServer: @unchecked Sendable {
         stateLock.lock()
         defer { stateLock.unlock() }
         return lastBodies[key]
+    }
+
+    /// The most recent FULL request target (path + query, exactly as sent on
+    /// the request line) for `key` — for asserting URL construction, e.g.
+    /// that a pre-built `/v1/audio?path=…` was requested verbatim, not
+    /// re-wrapped/double-encoded.
+    func lastRequestTarget(forKey key: String) -> String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return lastTargets[key]
     }
 
     func start() throws {
@@ -98,6 +109,7 @@ final class StubACEStepServer: @unchecked Sendable {
         stateLock.lock()
         callCounts[key, default: 0] += 1
         lastBodies[key] = body
+        lastTargets[key] = fullPath
         let response: Data
         if var queued = responseQueues[key], !queued.isEmpty {
             response = queued.count > 1 ? queued.removeFirst() : queued[0]
@@ -165,8 +177,8 @@ final class StubACEStepServer: @unchecked Sendable {
 /// inside the outer JSON) is always correctly escaped, including characters
 /// like the newline in a `[Verse 1]\n...` lyric that a naive quote-only
 /// string-replace would corrupt.
-private enum ACEStepFixtures {
-    private static func envelope(data: Any) -> Data {
+enum ACEStepFixtures {
+    static func envelope(data: Any) -> Data {
         let object: [String: Any] = [
             "data": data,
             "code": 200,
@@ -178,7 +190,7 @@ private enum ACEStepFixtures {
         return StubACEStepServer.httpResponse(contentType: "application/json", bodyData: bytes)
     }
 
-    private static func queryResultItem(
+    static func queryResultItem(
         taskID: String, progressText: String?, resultItems: [[String: Any]], status: Int
     ) -> [String: Any] {
         let resultBytes = try! JSONSerialization.data(withJSONObject: resultItems)
@@ -193,6 +205,60 @@ private enum ACEStepFixtures {
 
     static func releaseTaskAccepted(taskID: String, queuePosition: Int = 1) -> Data {
         envelope(data: ["task_id": taskID, "status": "queued", "queue_position": queuePosition])
+    }
+
+    // MARK: - Model inventory / on-demand init (M6 iii-c-real)
+    //
+    // Shapes verified against `scripts/ace-step/runtime/src/acestep/api/http/
+    // model_service_routes.py` (`_collect_model_inventory`, `GET /v1/model_inventory`,
+    // `POST /v1/init`) — READ-ONLY, never edited.
+
+    /// `GET /v1/model_inventory`'s `data.models` entries: one per DiT model name, with
+    /// `is_loaded` true for exactly the names in `loadedModelNames`
+    /// (mirrors upstream's actual "known checkpoint dirs, some loaded, some
+    /// not" shape — pass extra `otherKnownModelNames` for models that exist
+    /// on disk but aren't loaded, if a test needs one).
+    static func modelInventory(loadedModelNames: [String], otherKnownModelNames: [String] = []) -> Data {
+        var models: [[String: Any]] = loadedModelNames.map {
+            ["name": $0, "is_default": false, "is_loaded": true, "supported_task_types": ["extract", "lego", "complete"]]
+        }
+        models += otherKnownModelNames.map {
+            ["name": $0, "is_default": false, "is_loaded": false, "supported_task_types": ["release"]]
+        }
+        return envelope(data: [
+            "models": models,
+            "default_model": loadedModelNames.first as Any,
+            "lm_models": [[String: Any]](),
+            "loaded_lm_model": NSNull(),
+            "llm_initialized": false,
+        ])
+    }
+
+    /// `POST /v1/init`'s success envelope.
+    static func initModelAccepted(model: String, slot: Int) -> Data {
+        envelope(data: [
+            "message": "Model initialization completed",
+            "slot": slot,
+            "loaded_model": model,
+            "loaded_lm_model": NSNull(),
+            "models": [[String: Any]](),
+            "lm_models": [[String: Any]](),
+            "llm_initialized": false,
+        ])
+    }
+
+    /// `POST /v1/init`'s upstream 400 when the requested slot's handler was
+    /// never constructed (`ACESTEP_CONFIG_PATHn` unset at sidecar startup) —
+    /// verified message text from `model_init_service.py`'s `_resolve_slot`.
+    /// NOTE the envelope's HTTP transport status is always 200 (`_wrap_response`
+    /// never sets a non-200 FastAPI status); the 400 lives in the JSON body's
+    /// `code` field, which is what `ACEStepClient` actually inspects.
+    static func initSlotUnavailable(slot: Int) -> Data {
+        StubACEStepServer.jsonResponse("""
+        {"data":null,"code":400,"error":"Slot \(slot) is not available because \
+        ACESTEP_CONFIG_PATH\(slot) was not set at startup. Restart the API with \
+        ACESTEP_CONFIG_PATH\(slot) to enable this slot.","timestamp":1720000000000,"extra":null}
+        """)
     }
 
     static func queryResultQueued(taskID: String) -> Data {
@@ -223,6 +289,22 @@ private enum ACEStepFixtures {
             "metas": [
                 "bpm": 120, "duration": 30.0, "genres": "pop",
                 "keyscale": "C Major", "timesignature": "4/4",
+            ] as [String: Any],
+        ]]
+        let item = queryResultItem(taskID: taskID, progressText: "done", resultItems: inner, status: 1)
+        return envelope(data: [item])
+    }
+
+    /// A succeeded job whose result carries NO `metas`/`prompt` (a metas-less
+    /// sidecar build, or an instrumental with nothing to report) — proves the
+    /// status fields stay nil rather than surfacing blanks. `genres` here is a
+    /// LIST to prove list-joining.
+    static func queryResultSucceededListGenres(taskID: String, remoteFile: String) -> Data {
+        let inner: [[String: Any]] = [[
+            "file": remoteFile, "wave": "", "status": 1, "create_time": 1_720_000_005,
+            "env": "development", "prompt": "  ", "lyrics": "",
+            "metas": [
+                "genres": ["lofi", "chillhop"],
             ] as [String: Any],
         ]]
         let item = queryResultItem(taskID: taskID, progressText: "done", resultItems: inner, status: 1)
@@ -325,12 +407,17 @@ struct ACEStepClientTests {
         let queuedStatus = try await client.generationStatus(jobID: "job-progress")
         #expect(queuedStatus.state == .queued)
         #expect(queuedStatus.audioPath == nil)
+        // Metas ride ONLY the succeeded payload — a queued/running poll has none.
+        #expect(queuedStatus.bpm == nil)
+        #expect(queuedStatus.durationSeconds == nil)
+        #expect(queuedStatus.prompt == nil)
 
         let runningStatus = try await client.generationStatus(jobID: "job-progress")
         #expect(runningStatus.state == .running)
         #expect(runningStatus.progress == 0.4)
         #expect(runningStatus.statusText == "step 3/8")
         #expect(runningStatus.audioPath == nil)
+        #expect(runningStatus.bpm == nil)
 
         let succeededStatus = try await client.generationStatus(jobID: "job-progress")
         #expect(succeededStatus.state == .succeeded)
@@ -339,12 +426,79 @@ struct ACEStepClientTests {
         #expect(FileManager.default.fileExists(atPath: audioPath))
         #expect(try Data(contentsOf: URL(fileURLWithPath: audioPath)) == wav)
         #expect(server.callCount(forKey: "GET /v1/audio") == 1)
+        // Metas surfaced from the succeeded result payload (M6 iii-a).
+        #expect(succeededStatus.bpm == 120)
+        #expect(succeededStatus.durationSeconds == 30.0)
+        #expect(succeededStatus.genres == "pop")
+        #expect(succeededStatus.keyScale == "C Major")
+        #expect(succeededStatus.timeSignature == "4/4")
+        #expect(succeededStatus.prompt == "a song")
 
         // Polling again after success reuses the cached local path without a
         // second GET /v1/audio call (the documented fetch-once contract).
         let secondSucceededStatus = try await client.generationStatus(jobID: "job-progress")
         #expect(secondSucceededStatus.audioPath == audioPath)
         #expect(server.callCount(forKey: "GET /v1/audio") == 1)
+    }
+
+    @Test("succeeded metas: absent bpm/keyscale stay nil; a list of genres is joined; blank prompt is nil")
+    func succeededMetasPartialAndListGenres() async throws {
+        let server = StubACEStepServer()
+        try server.start()
+        defer { server.stop() }
+        let downloadDir = try makeTempDownloadDir()
+        defer { try? FileManager.default.removeItem(at: downloadDir) }
+
+        server.enqueue(
+            ACEStepFixtures.queryResultSucceededListGenres(
+                taskID: "job-nometa", remoteFile: "/sidecar/tmp/job-nometa.wav"),
+            forKey: "POST /query_result")
+        server.enqueue(
+            StubACEStepServer.httpResponse(contentType: "audio/wav", bodyData: ACEStepFixtures.tinyWAV()),
+            forKey: "GET /v1/audio")
+
+        let client = makeClient(port: server.port, downloadDirectory: downloadDir)
+        let status = try await client.generationStatus(jobID: "job-nometa")
+        #expect(status.state == .succeeded)
+        #expect(status.genres == "lofi, chillhop")   // list joined with ", "
+        #expect(status.bpm == nil)                    // absent in metas
+        #expect(status.durationSeconds == nil)
+        #expect(status.keyScale == nil)
+        #expect(status.timeSignature == nil)
+        #expect(status.prompt == nil)                 // blank "  " → nil, not present-but-empty
+    }
+
+    @Test("succeeded result.file as a PRE-BUILT /v1/audio URL is requested directly, never re-wrapped")
+    func prebuiltAudioURLIsNotDoubleWrapped() async throws {
+        // The REAL sidecar returns `file` as an already-percent-encoded
+        // relative URL ("/v1/audio?path=%2F…"), not a raw filesystem path.
+        // Re-wrapping it double-encodes and the sidecar 403s — regression
+        // found by the first real-generation gate (2026-07-06).
+        let server = StubACEStepServer()
+        try server.start()
+        defer { server.stop() }
+        let downloadDir = try makeTempDownloadDir()
+        defer { try? FileManager.default.removeItem(at: downloadDir) }
+
+        let prebuilt = "/v1/audio?path=%2Fsidecar%2Ftmp%2Fjob-prebuilt.wav"
+        server.enqueue(
+            ACEStepFixtures.queryResultSucceeded(taskID: "job-prebuilt", remoteFile: prebuilt),
+            forKey: "POST /query_result")
+        let wav = ACEStepFixtures.tinyWAV()
+        server.enqueue(
+            StubACEStepServer.httpResponse(contentType: "audio/wav", bodyData: wav),
+            forKey: "GET /v1/audio")
+
+        let client = makeClient(port: server.port, downloadDirectory: downloadDir)
+        let status = try await client.generationStatus(jobID: "job-prebuilt")
+        #expect(status.state == .succeeded)
+        let audioPath = try #require(status.audioPath)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: audioPath)) == wav)
+
+        // The GET must carry the ORIGINAL single-encoded query — path decodes
+        // to the plain filesystem path, not to a nested "/v1/audio?path=…".
+        let requestedTarget = try #require(server.lastRequestTarget(forKey: "GET /v1/audio"))
+        #expect(requestedTarget == prebuilt)
     }
 
     @Test("generationStatus throws jobFailed with the upstream error detail, not a bare 'failed' state")

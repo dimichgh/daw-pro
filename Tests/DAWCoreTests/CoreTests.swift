@@ -403,13 +403,17 @@ final class FakeEngine: AudioEngineControlling {
     /// Transient-detection stub (M5 iii-e/iii-f): configurable onsets and an
     /// optional error, plus a record of every request for spying.
     var detectTransientsStub: [TransientMarker] = []
+    /// Per-URL onset stubs (M6 v-d): a URL with an entry here wins over
+    /// `detectTransientsStub`, so take-alignment tests can feed the reference
+    /// and candidate lanes DIFFERENT onset sets.
+    var detectTransientsStubByURL: [URL: [TransientMarker]] = [:]
     var detectTransientsError: (any Error)?
     private(set) var detectTransientsCalls: [(url: URL, sensitivity: Double)] = []
 
     func detectTransients(inFileAt url: URL, sensitivity: Double) async throws -> [TransientMarker] {
         detectTransientsCalls.append((url, sensitivity))
         if let detectTransientsError { throw detectTransientsError }
-        return detectTransientsStub
+        return detectTransientsStubByURL[url] ?? detectTransientsStub
     }
 
     func startPlayback(_ transport: TransportState) {

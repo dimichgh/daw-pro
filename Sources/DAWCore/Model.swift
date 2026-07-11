@@ -1041,6 +1041,198 @@ public struct SessionMeters: Codable, Sendable, Equatable {
     }
 }
 
+/// One master-mix analysis snapshot (M8 vm-a, "session vibe meter"),
+/// published from the audio engine at UI rate alongside the meters and
+/// polled by the app / `mixer.masterAnalysis`. Every field is FINITE by
+/// contract (floor-clamped — JSON has no NaN/Inf); a stopped or silent
+/// session decays to `.floor`.
+public struct MasterAnalysisSnapshot: Codable, Sendable, Equatable {
+    /// Number of spectral bands (24 log-spaced, 40 Hz → 16 kHz).
+    public static let bandCount = 24
+    /// dB floor shared by `bands`, `levelDB`, and `peakDB`.
+    public static let floorDB: Float = -80
+
+    /// Per-band energy in dB (floor −80), 24 log-spaced bands 40 Hz → 16 kHz.
+    public var bands: [Float]
+    /// Short-term RMS level of the master mix, dB (floor −80). NOT LUFS —
+    /// use `render.measureLoudness` for gated BS.1770 loudness.
+    public var levelDB: Float
+    /// Held sample peak, dB (floor −80), −20 dB/s release.
+    public var peakDB: Float
+    /// Spectral centroid ("brightness"), Hz; 0 when silent.
+    public var centroidHz: Float
+    /// Normalized spectral flux 0–1 ("energy movement" between frames);
+    /// 0 when silent or steady-state.
+    public var flux: Float
+
+    public init(bands: [Float], levelDB: Float, peakDB: Float,
+                centroidHz: Float, flux: Float) {
+        self.bands = bands
+        self.levelDB = levelDB
+        self.peakDB = peakDB
+        self.centroidHz = centroidHz
+        self.flux = flux
+    }
+
+    /// The all-floors snapshot: what stopped/silent/engine-less sessions read.
+    public static let floor = MasterAnalysisSnapshot(
+        bands: [Float](repeating: floorDB, count: bandCount),
+        levelDB: floorDB, peakDB: floorDB, centroidHz: 0, flux: 0)
+}
+
+/// Engine render-performance telemetry (M9 perf-b): render-load / overrun
+/// counters accumulated per render callback by the engine's two Tier-1
+/// workhorses (instrument source nodes and per-strip chain hosts — their sum
+/// ≈ the engine's own DSP work; AVFoundation-internal work is not measured).
+/// Offline renders count too, so headless bounces are profilable. Every
+/// field is FINITE by contract (JSON has no NaN/Inf); a stopped engine
+/// freezes the counters but the snapshot stays readable. Counters are a
+/// WINDOW: since engine start or the last `reset` (`engine.performanceStats`
+/// with `reset: true` returns the closing window and starts a fresh one —
+/// the windowed-profiling idiom).
+public struct EnginePerformanceStats: Codable, Sendable, Equatable {
+    /// Render callbacks observed in this window (each instrumented block
+    /// counts once per quantum, so this scales with strip count).
+    public var callbackCount: Int
+    /// Frames rendered in this window, summed across instrumented blocks —
+    /// one engine quantum of N frames through K blocks adds K × N.
+    public var renderedFrames: Int
+    /// Wall-clock nanoseconds spent inside instrumented render callbacks,
+    /// accumulated over the window.
+    public var renderTimeNs: Int
+    /// Slowest single callback in the window, nanoseconds.
+    public var peakCallbackNs: Int
+    /// Callbacks whose elapsed time exceeded their own quantum's real-time
+    /// budget (frames / sampleRate). A budget-overrun PROXY, not a CoreAudio
+    /// xrun observation (AVAudioEngine exposes no xrun count): one block
+    /// alone ate a whole quantum's budget — the true overload threshold is
+    /// the sum of all blocks, so treat any nonzero value as trouble.
+    public var overrunCount: Int
+    /// renderTimeNs / the window's accumulated per-callback budget — the
+    /// average fraction of its real-time budget each instrumented callback
+    /// consumed (0 = idle, 1.0 = callbacks on average ate their whole
+    /// quantum). Derived reader-side, never on the render thread.
+    public var averageLoad: Double
+    /// One-pole EMA of the per-callback load (~1 s time constant at
+    /// 512-frame quanta on one block; N blocks shorten it to ~1/N s) — the
+    /// "load right now" feel to averageLoad's calibrated integral.
+    public var recentLoad: Double
+    /// Sample rate (Hz) of the most recent instrumented callback; 0 until
+    /// anything has rendered.
+    public var sampleRate: Double
+    /// Frame count of the most recent instrumented callback (the typical
+    /// render quantum); 0 until anything has rendered.
+    public var quantumFrames: Int
+    /// Seconds since this window opened (engine start or last reset).
+    public var sinceResetSeconds: Double
+
+    public init(callbackCount: Int, renderedFrames: Int, renderTimeNs: Int,
+                peakCallbackNs: Int, overrunCount: Int, averageLoad: Double,
+                recentLoad: Double, sampleRate: Double, quantumFrames: Int,
+                sinceResetSeconds: Double) {
+        self.callbackCount = callbackCount
+        self.renderedFrames = renderedFrames
+        self.renderTimeNs = renderTimeNs
+        self.peakCallbackNs = peakCallbackNs
+        self.overrunCount = overrunCount
+        self.averageLoad = averageLoad
+        self.recentLoad = recentLoad
+        self.sampleRate = sampleRate
+        self.quantumFrames = quantumFrames
+        self.sinceResetSeconds = sinceResetSeconds
+    }
+
+    /// The all-zero snapshot: engines without telemetry (fakes, headless
+    /// stores) and freshly reset windows before any render work.
+    public static let idle = EnginePerformanceStats(
+        callbackCount: 0, renderedFrames: 0, renderTimeNs: 0,
+        peakCallbackNs: 0, overrunCount: 0, averageLoad: 0, recentLoad: 0,
+        sampleRate: 0, quantumFrames: 0, sinceResetSeconds: 0)
+}
+
+/// Engine watchdog state (M9 crash-c): the stall-detector's view of the
+/// render side, surfaced over `engine.watchdogStatus`. The watchdog reads
+/// the perf-b telemetry heartbeat (a lifetime-monotone callback counter):
+/// while the engine claims to be running that counter must advance every
+/// check window, so a frozen heartbeat across consecutive checks means the
+/// render side is dead (HAL stall, device death without a configuration-
+/// change notification) and the watchdog drives the same auto-restart the
+/// config-change path uses. Simple, always-finite types by contract.
+public struct EngineWatchdogStatus: Codable, Sendable, Equatable {
+    /// Watchdog state machine position, encoded as a plain JSON string.
+    public enum State: String, Codable, Sendable {
+        /// Engine intentionally stopped (or headless / no heartbeat signal
+        /// expected) — an idle engine is NOT a stall; nothing to watch.
+        case idle
+        /// Engine running and the heartbeat advanced on the last check.
+        case ok
+        /// Stall declared; an auto-restart attempt is in progress (or has
+        /// failed fewer than the give-up threshold of times and will retry).
+        case recovering
+        /// Auto-restart failed repeatedly; the watchdog stands down until a
+        /// later successful engine start re-arms it. Manual intervention.
+        case failed
+    }
+
+    public var state: State
+    /// Lifetime count of successful watchdog auto-restarts. Nonzero means
+    /// the engine died and self-healed at least once this session.
+    public var restartCount: Int
+    /// Consecutive failed restart attempts in the CURRENT stall (resets when
+    /// a heartbeat advances); reaching the give-up threshold flips `failed`.
+    public var consecutiveFailures: Int
+    /// The heartbeat value (lifetime render-callback count) the watchdog saw
+    /// on its most recent check; 0 before anything has rendered.
+    public var lastHeartbeat: Int
+    /// The engine's own running claim at read time (the protocol surface's
+    /// `isRunning`, not the watchdog's armed view).
+    public var engineRunning: Bool
+
+    public init(state: State, restartCount: Int, consecutiveFailures: Int,
+                lastHeartbeat: Int, engineRunning: Bool) {
+        self.state = state
+        self.restartCount = restartCount
+        self.consecutiveFailures = consecutiveFailures
+        self.lastHeartbeat = lastHeartbeat
+        self.engineRunning = engineRunning
+    }
+
+    /// The zero/idle default: engines without a watchdog (fakes, headless
+    /// stores) and fresh engines before their first start.
+    public static let idle = EngineWatchdogStatus(
+        state: .idle, restartCount: 0, consecutiveFailures: 0,
+        lastHeartbeat: 0, engineRunning: false)
+}
+
+/// Wire-facing result of writing one local diagnostics bundle (M9 beta): the
+/// receipt a tester (or an agent) gets back after `app.feedbackBundle`. Points
+/// at the folder to attach to a bug report and summarizes what landed in it —
+/// enough for a client to say "wrote N files (M crashes), share this folder"
+/// without re-scanning the disk. Value type; `Codable`/`Sendable`. See
+/// `DiagnosticsReporter` for the bundle layout and privacy rationale.
+public struct FeedbackBundleSummary: Codable, Sendable, Equatable {
+    /// Absolute path to the `feedback-<timestamp>/` folder just written.
+    public var path: String
+    /// Total regular files in the bundle (manifest/engine/overview + any
+    /// crash reports + any opted-in project snapshot files).
+    public var fileCount: Int
+    /// Total bytes of those files.
+    public var byteCount: Int
+    /// Recent `DAWApp*.ips` crash reports copied into `crashes/`.
+    public var crashReportCount: Int
+    /// Whether the full project snapshot was included (the opt-in toggle).
+    public var includesProject: Bool
+
+    public init(path: String, fileCount: Int, byteCount: Int,
+                crashReportCount: Int, includesProject: Bool) {
+        self.path = path
+        self.fileCount = fileCount
+        self.byteCount = byteCount
+        self.crashReportCount = crashReportCount
+        self.includesProject = includesProject
+    }
+}
+
 /// One frame of output metering, published from the audio engine at UI rate.
 public struct MeterFrame: Codable, Sendable, Equatable {
     /// Linear peak 0...1+ (>1 means clipping).

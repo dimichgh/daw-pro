@@ -19,6 +19,16 @@
 
 const DEFAULT_PORT = "17600";
 const REQUEST_TIMEOUT_MS = 5000;
+/** Per-command override for commands whose app-side work routinely exceeds
+ * the default budget — full renders and loudness measurement over a
+ * complete mixdown can take tens of seconds of wall time. */
+const LONG_RUNNING_TIMEOUT_MS = 180000;
+const LONG_RUNNING_COMMANDS: ReadonlySet<string> = new Set([
+  "render.bounce",
+  "render.mixdown",
+  "render.stems",
+  "render.measureLoudness",
+]);
 
 interface ControlResponse {
   id: string;
@@ -56,22 +66,24 @@ export class DawBridge {
    *
    * Resolves with `result` (may be `undefined`) on `ok: true`.
    * Rejects with an Error carrying an actionable message on `ok: false`,
-   * connection failure, or a 5s timeout.
+   * connection failure, or a timeout (5s by default; longer for commands in
+   * `LONG_RUNNING_COMMANDS`).
    */
   async send(command: string, params: Record<string, unknown> = {}): Promise<unknown> {
     const socket = await this.ensureConnected();
     const id = `mcp-${this.nextId++}-${Date.now()}`;
+    const timeoutMs = LONG_RUNNING_COMMANDS.has(command) ? LONG_RUNNING_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
 
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(
           new Error(
-            `Timed out waiting ${REQUEST_TIMEOUT_MS}ms for the DAW app to respond to "${command}". ` +
+            `Timed out waiting ${timeoutMs}ms for the DAW app to respond to "${command}". ` +
               "Is the app running and responsive?"
           )
         );
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
 
       this.pending.set(id, { resolve, reject, timer });
 
