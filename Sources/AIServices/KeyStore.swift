@@ -48,6 +48,26 @@ public enum APIKeySource: String, Sendable, Codable, Equatable {
     case none
 }
 
+/// The result of a NON-VALUE presence probe (m10-t): does a key exist for this
+/// provider, WITHOUT reading — and therefore without decrypting — its value.
+/// This is the seam that keeps app startup from ever blocking on a Keychain
+/// consent prompt: unlike `key(for:)` (a value read that trips the item's ACL
+/// dialog for a foreign-identity binary), a presence probe reads metadata only
+/// and never prompts, never blocks.
+///
+/// - `present`: a key is stored and its metadata read cleanly (usable now).
+/// - `absent`: no key is stored for this provider.
+/// - `interactionRequired`: a key IS stored, but macOS will demand an
+///   interactive consent/auth prompt to actually read its VALUE (e.g. a
+///   rebuilt binary with a new code-signing identity hitting the item's ACL).
+///   Surfaced truthfully so the UI can say "stored — macOS will ask on first
+///   use"; the probe itself never triggers that prompt.
+public enum KeyPresence: Sendable, Equatable {
+    case present
+    case absent
+    case interactionRequired
+}
+
 /// The result of resolving a provider's key: the value (nil when `source`
 /// is `.none`) and where it came from. Callers that only need presence read
 /// `source`; the value is used solely to configure a provider client and is
@@ -70,12 +90,31 @@ public struct ResolvedKey: Sendable, Equatable {
 /// stored value back for display (see `SettingsModel`).
 public protocol APIKeyStoring: Sendable {
     /// The stored key for `provider`, or nil when none is stored. Used to
-    /// CONFIGURE a client and to compute presence — never surfaced to an agent.
+    /// CONFIGURE a client — the interactive, value-reading path that MAY prompt
+    /// (correct on USE, when a window exists) and must NEVER be called during
+    /// startup or from a wire status handler.
     func key(for provider: AIProviderID) -> String?
     /// Stores (adds or replaces) the key for `provider`.
     func setKey(_ key: String, for provider: AIProviderID) throws
     /// Removes any stored key for `provider`. A no-op when none is stored.
     func removeKey(for provider: AIProviderID) throws
+    /// PRESENCE ONLY (m10-t): whether a key exists, without reading its value —
+    /// so it never decrypts the secret and therefore never triggers the Keychain
+    /// consent prompt or blocks. Backs status surfaces (Settings, the
+    /// `ai.providerStatus` wire limb) that used to route through the value-reading
+    /// `key(for:)` and could hang before the window existed.
+    func keyPresence(for provider: AIProviderID) -> KeyPresence
+}
+
+extension APIKeyStoring {
+    /// Default presence: fall back to a value read. SAFE for the in-memory/fake
+    /// stores (they never prompt or block), so tests and previews keep compiling
+    /// with no change. `KeychainKeyStore` OVERRIDES this with a real
+    /// attributes-only, UI-skipping probe — the whole point of the seam is that
+    /// the REAL Keychain never uses this value-reading fallback.
+    public func keyPresence(for provider: AIProviderID) -> KeyPresence {
+        key(for: provider) != nil ? .present : .absent
+    }
 }
 
 /// The env-first resolution chain: a process/dev environment variable wins
@@ -164,6 +203,43 @@ public struct KeychainKeyStore: APIKeyStoring {
         }
     }
 
+    /// PRESENCE PROBE (m10-t) — the non-blocking, non-prompting counterpart to
+    /// `key(for:)`. Two properties make it safe to call before the window exists
+    /// (and from a wire handler):
+    ///   1. `kSecReturnAttributes` (NOT `kSecReturnData`): reads metadata only, so
+    ///      the secret is never decrypted and the item's ACL consent dialog — the
+    ///      exact prompt that hung startup for a rebuilt, different-identity binary
+    ///      — is never engaged.
+    ///   2. `kSecUseAuthenticationUISkip`: should any authentication still be
+    ///      required, `securityd` returns an ERROR INSTANTLY instead of parking on
+    ///      a modal, so a wedged/consent-gated item can never block the caller.
+    /// Maps success → `.present`, not-found → `.absent`, and any "needs
+    /// interaction" status → `.interactionRequired` (truthful: the value is there
+    /// but a prompt will appear on first real USE). Logs NOTHING (house directive).
+    public func keyPresence(for provider: AIProviderID) -> KeyPresence {
+        var query = baseQuery(provider)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            return .present
+        case errSecItemNotFound:
+            return .absent
+        // errSecInteractionRequired (brief) plus errSecInteractionNotAllowed — the
+        // status `UISkip` actually returns when an item would need a prompt — both
+        // mean "stored, but reading the value needs interaction". Additive to the
+        // brief's single mapping for robustness (labeled in the report).
+        case errSecInteractionRequired, errSecInteractionNotAllowed:
+            return .interactionRequired
+        default:
+            // Any other status: no usable key AND we must not block — report absent.
+            return .absent
+        }
+    }
+
     private func baseQuery(_ provider: AIProviderID) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
@@ -228,28 +304,57 @@ public final class InMemoryKeyStore: APIKeyStoring, Sendable {
 public struct AIProviderStatus: Codable, Sendable, Equatable {
     /// `AIProviderID.rawValue`.
     public var provider: String
-    /// True when a key is available from either source.
+    /// True when a key is available from either source. A keychain key that is
+    /// stored but consent-gated STILL reads `true` (it is configured; the source
+    /// is `keychain`) — see `consentRequired`.
     public var configured: Bool
     /// Where the key would come from: `env`, `keychain`, or `none`.
     public var source: APIKeySource
+    /// ADDITIVE (m10-t): true only when `source == .keychain` AND macOS will
+    /// require an interactive consent/auth prompt to READ the value on first use
+    /// (a rebuilt binary with a fresh code-signing identity, say). `configured`
+    /// and `source` keep their existing meanings for current consumers; this is a
+    /// truthful extra signal, defaulting false so old readers are unaffected.
+    public var consentRequired: Bool
 
-    public init(provider: String, configured: Bool, source: APIKeySource) {
+    public init(
+        provider: String,
+        configured: Bool,
+        source: APIKeySource,
+        consentRequired: Bool = false
+    ) {
         self.provider = provider
         self.configured = configured
         self.source = source
+        self.consentRequired = consentRequired
     }
 }
 
-/// Builds the per-provider status report for every `AIProviderID`, resolving
-/// each through `resolveKey` and DISCARDING the value — only the source/presence
-/// leave this function. Headless and testable; the `ai.providerStatus` command
-/// is a thin passthrough over it.
+/// Builds the per-provider status report for every `AIProviderID` via the
+/// NON-VALUE presence probe (m10-t): env still wins WITHOUT touching the store,
+/// else a `keyPresence` probe that never reads the value, never prompts, and
+/// never blocks — so a headless `ai.providerStatus` caller can no longer trip
+/// the Keychain consent dialog the way the old `resolveKey` (value-read) path
+/// could. Only source/presence leave this function; no value is ever read here.
 public func providerStatuses(
     environment: [String: String] = ProcessInfo.processInfo.environment,
     store: APIKeyStoring?
 ) -> [AIProviderStatus] {
     AIProviderID.allCases.map { provider in
-        let source = resolveKey(provider: provider, environment: environment, store: store).source
-        return AIProviderStatus(provider: provider.rawValue, configured: source != .none, source: source)
+        // Env wins — a pure dict lookup, no store access, no prompt.
+        if let envValue = environment[provider.environmentKey], !envValue.isEmpty {
+            return AIProviderStatus(provider: provider.rawValue, configured: true, source: .env)
+        }
+        // Else PRESENCE ONLY — never the value.
+        switch store?.keyPresence(for: provider) ?? .absent {
+        case .present:
+            return AIProviderStatus(provider: provider.rawValue, configured: true, source: .keychain)
+        case .interactionRequired:
+            return AIProviderStatus(
+                provider: provider.rawValue, configured: true, source: .keychain,
+                consentRequired: true)
+        case .absent:
+            return AIProviderStatus(provider: provider.rawValue, configured: false, source: .none)
+        }
     }
 }

@@ -121,7 +121,7 @@ struct StemNullTests {
         // same auto-plan (forcing the plan's own targets is a parity no-op).
         let rawPath = dir.appendingPathComponent("raw-mixdown.wav")
         _ = try await engine.renderMixdown(
-            tracks: store.tracks, tempoBPM: 120, masterVolume: 1,
+            tracks: store.tracks, tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 1.0, to: rawPath)
         let raw = try TestSignals.readFile(rawPath)
         let mixdownParity = residualPeak(mixdown, raw)
@@ -229,7 +229,7 @@ struct StemNullTests {
             try StemPlan.descriptors(tracks: store.tracks, including: [dry.id]).first)
         let subsetDry = try await engine.renderOffline(
             tracks: StemPlan.passTracks(for: dryDescriptor, session: store.tracks),
-            tempoBPM: 120, masterVolume: 1,
+            tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 1.0,
             forcedCompensationTargets: nil)
         let limitedStem = try TestSignals.readFile(

@@ -55,13 +55,13 @@ struct BusRoutingRenderTests {
         let fixtures = try TestSignals.fixtures()
         let master = try OfflineRenderer().render(
             tracks: [sourceTrack(clip: fixtures.cos1k48)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let busID = UUID()
         let routed = try OfflineRenderer().render(
             tracks: [sourceTrack(clip: fixtures.cos1k48, outputBusID: busID),
                      bus(busID)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         #expect(master.frameCount == 48_000)
         #expect(routed.frameCount == 48_000)
@@ -82,7 +82,7 @@ struct BusRoutingRenderTests {
         _ = try renderer.render(
             tracks: [sourceTrack(clip: fixtures.cos1k48, outputBusID: busID),
                      bus(busID)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         // Tap frames hop to the main actor as queued Tasks; the pulls are
         // synchronous, so they only land once we suspend. Drain them.
@@ -104,7 +104,7 @@ struct BusRoutingRenderTests {
         let audio = try OfflineRenderer().render(
             tracks: [sourceTrack(clip: fixtures.cos1k48, outputBusID: busID),
                      bus(busID, volume: 0.5)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let expected = Self.baselineRMS / 2
         for channel in audio.channelData {
@@ -124,7 +124,7 @@ struct BusRoutingRenderTests {
                                  sends: [Send(destinationBusID: busB, level: 0.5)]),
                      bus(busA, name: "Kill", volume: 0),
                      bus(busB, name: "Return", volume: 0.5)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let expected = Self.baselineRMS * 0.25
         for channel in audio.channelData {
@@ -145,7 +145,7 @@ struct BusRoutingRenderTests {
                                  sends: [Send(destinationBusID: busB, level: 1)]),
                      bus(busA, name: "Kill", volume: 0),
                      bus(busB, name: "Return")],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         // Post-fader: the send tap sits after track volume → ×0.5. A
         // pre-fader tap would read ×1.0 here.
@@ -170,7 +170,7 @@ struct BusRoutingRenderTests {
             tracks: [sourceTrack(clip: fixtures.cos1k48, isMuted: true,
                                  sends: [Send(destinationBusID: busID, level: 1)]),
                      bus(busID)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         for channel in audio.channelData {
             let peak = TestSignals.peak(channel, in: 0..<channel.count)
@@ -198,7 +198,7 @@ struct BusRoutingRenderTests {
                                  outputBusID: busID),
                      sourceTrack(clip: fixtures.cos1k48),
                      bus(busID)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let expected = Self.baselineRMS / 2  // amp 0.25 fixture
         let rms = TestSignals.rms(audio.channelData[0], in: Self.window)
@@ -219,7 +219,7 @@ struct BusRoutingRenderTests {
                                  sends: [Send(destinationBusID: busID, level: 1)]),
                      sourceTrack(clip: fixtures.cos1k48),
                      bus(busID, isSoloed: true)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let expected = Self.baselineRMS  // 0.25 direct + 0.25 return, in phase
         let rms = TestSignals.rms(audio.channelData[0], in: Self.window)
@@ -241,7 +241,7 @@ struct BusRoutingRenderTests {
                                  sends: [Send(destinationBusID: busID, level: 1)]),
                      sourceTrack(clip: fixtures.cos1k48),
                      bus(busID)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let expected = Self.baselineRMS
         let rms = TestSignals.rms(audio.channelData[0], in: Self.window)
@@ -305,7 +305,7 @@ struct BusRoutingRenderTests {
         graph.applyParameters(tracks: [before] + buses)
         try engine.start()
         graph.applyParameters(tracks: [before] + buses)
-        graph.scheduleAll(fromBeat: 0, tempoBPM: 120)
+        graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
         graph.startAllPlayers(at: nil)
 
         var channelData: [[Float]] = [[], []]
@@ -382,7 +382,7 @@ struct BusRoutingRenderTests {
         graph.applyParameters(tracks: [track])
         try engine.start()
         graph.applyParameters(tracks: [track])
-        graph.scheduleAll(fromBeat: 0, tempoBPM: 120)
+        graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
         graph.startAllPlayers(at: nil)
         var channelData: [[Float]] = [[], []]
         try pull(engine, frames: 48_000, into: &channelData)
@@ -390,7 +390,7 @@ struct BusRoutingRenderTests {
 
         let master = try OfflineRenderer().render(
             tracks: [sourceTrack(clip: fixtures.cos1k48)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         var maxDiff: Float = 0
         for channel in 0..<2 {
@@ -434,7 +434,7 @@ struct BusRoutingRenderTests {
         graph.applyParameters(tracks: [before] + buses)
         try engine.start()
         graph.applyParameters(tracks: [before] + buses)
-        graph.scheduleAll(fromBeat: 0, tempoBPM: 120)
+        graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
         graph.startAllPlayers(at: nil)
         var channelData: [[Float]] = [[], []]
         try pull(engine, frames: 24_000, into: &channelData)
@@ -452,14 +452,14 @@ struct BusRoutingRenderTests {
         engine.reset()
         try engine.start()
         graph.applyParameters(tracks: [after] + buses)
-        graph.scheduleAll(fromBeat: 1.0, tempoBPM: 120)     // 24k frames = 1 beat
+        graph.scheduleAll(fromBeat: 1.0, tempoMap: TempoMap(constantBPM: 120))     // 24k frames = 1 beat
         graph.startAllPlayers(at: nil)
         try pull(engine, frames: 24_000, into: &channelData)
 
         // Path 2 — the C-case transport cycle on the same engine: plain
         // player stop/reschedule/start, no rewire, no bounce.
         graph.stopAllPlayers()
-        graph.scheduleAll(fromBeat: 1.0, tempoBPM: 120)
+        graph.scheduleAll(fromBeat: 1.0, tempoMap: TempoMap(constantBPM: 120))
         graph.startAllPlayers(at: nil)
         try pull(engine, frames: 24_000, into: &channelData)
         engine.stop()
@@ -472,7 +472,7 @@ struct BusRoutingRenderTests {
         // From-scratch reference over the same beats (cold start, send wired
         // before the first pull) — both paths must match it.
         let reference = try OfflineRenderer().render(
-            tracks: [after] + buses, tempoBPM: 120,
+            tracks: [after] + buses, tempoMap: TempoMap(constantBPM: 120),
             fromBeat: 1.0, durationSeconds: 0.5
         )
         let referenceRMS = TestSignals.rms(reference.channelData[0], in: 6_000..<22_000)
@@ -515,7 +515,7 @@ struct BusRoutingRenderTests {
         graph.applyParameters(tracks: withBuses)
         try engine.start()
         graph.applyParameters(tracks: withBuses)
-        graph.scheduleAll(fromBeat: 0, tempoBPM: 120)
+        graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
         graph.startAllPlayers(at: nil)
         var channelData: [[Float]] = [[], []]
         try pull(engine, frames: 24_000, into: &channelData)
@@ -543,7 +543,7 @@ struct BusRoutingRenderTests {
         // Keeps rendering, and the surviving send still sums: direct master
         // (0.5) + send 0.5 → busB@unity (0.25) = amp 0.75.
         graph.stopAllPlayers()
-        graph.scheduleAll(fromBeat: 1.0, tempoBPM: 120)
+        graph.scheduleAll(fromBeat: 1.0, tempoMap: TempoMap(constantBPM: 120))
         graph.startAllPlayers(at: nil)
         try pull(engine, frames: 24_000, into: &channelData)
         engine.stop()

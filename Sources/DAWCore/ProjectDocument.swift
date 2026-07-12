@@ -23,9 +23,16 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
     /// `GrooveTemplate` is reused directly (like `TrackDocument.automation`): it
     /// carries no media/URLs, so its Codable IS the disk shape.
     public var grooveTemplates: [GrooveTemplate]?
+    /// Session markers (m11-c). Additive and optional; nil when the project has
+    /// no markers (an EMPTY array is stored as nil so the key is omitted on encode
+    /// and a pre-marker project stays byte-identical — the `grooveTemplates`/
+    /// `sends`/`takeGroups` omit-when-empty rule, no schemaVersion bump). `Marker`
+    /// is reused directly (like `grooveTemplates`): it carries no media/URLs, so
+    /// its Codable IS the disk shape.
+    public var markers: [Marker]?
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, savedAt, name, masterVolume, transport, tracks, grooveTemplates
+        case schemaVersion, savedAt, name, masterVolume, transport, tracks, grooveTemplates, markers
     }
 
     /// Builds a document from runtime state. `mediaRefs` maps each clip id to
@@ -38,7 +45,8 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         tracks: [Track],
         masterVolume: Double,
         mediaRefs: [UUID: String?],
-        grooveTemplates: [GrooveTemplate] = []
+        grooveTemplates: [GrooveTemplate] = [],
+        markers: [Marker] = []
     ) {
         self.schemaVersion = ProjectBundle.currentSchemaVersion
         self.savedAt = Date()
@@ -49,6 +57,9 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         // Empty palette persists as nil → the synthesized `encodeIfPresent`
         // omits the key, keeping a pre-groove project byte-identical.
         self.grooveTemplates = grooveTemplates.isEmpty ? nil : grooveTemplates
+        // Empty markers persist as nil (same rule) → a pre-marker project stays
+        // byte-identical.
+        self.markers = markers.isEmpty ? nil : markers
     }
 
     public init(from decoder: any Decoder) throws {
@@ -64,6 +75,8 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         tracks = try c.decodeIfPresent([TrackDocument].self, forKey: .tracks) ?? []
         // Additive optional (M5 iii-g): a pre-groove project has no key → nil.
         grooveTemplates = try c.decodeIfPresent([GrooveTemplate].self, forKey: .grooveTemplates)
+        // Additive optional (m11-c): a pre-marker project has no key → nil.
+        markers = try c.decodeIfPresent([Marker].self, forKey: .markers)
     }
 
     /// Restores runtime state, resolving each clip's media reference against
@@ -528,8 +541,14 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
     /// through Codable's Data default). Additive optional — a pre-AU project
     /// has no key and stays byte-identical across a round trip.
     public var audioUnit: AudioUnitConfig?
+    /// Sound-bank program selection (m10-n). Additive optional — a
+    /// pre-soundBank project has no key and stays byte-identical across a
+    /// round trip. `SoundBankConfig` persists directly (the AutomationLane
+    /// rule): its source is the `"gm"` sentinel or an absolute path — bank
+    /// files are deliberately NOT bundle media (design §4.2).
+    public var soundBank: SoundBankConfig?
 
-    private enum CodingKeys: String, CodingKey { case kind, polySynth, sampler, audioUnit }
+    private enum CodingKeys: String, CodingKey { case kind, polySynth, sampler, audioUnit, soundBank }
 
     init(from d: InstrumentDescriptor, mediaRefs: [UUID: String?]) {
         kind = d.kind
@@ -538,6 +557,7 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         // zones), preserving "was a sampler configured" across a round trip.
         sampler = d.sampler.map { SamplerDocument(from: $0, mediaRefs: mediaRefs) }
         audioUnit = d.audioUnit
+        soundBank = d.soundBank
     }
 
     public init(from decoder: any Decoder) throws {
@@ -547,6 +567,7 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         polySynth = try c.decodeIfPresent(PolySynthParams.self, forKey: .polySynth) ?? d.polySynth
         sampler = try c.decodeIfPresent(SamplerDocument.self, forKey: .sampler)
         audioUnit = try c.decodeIfPresent(AudioUnitConfig.self, forKey: .audioUnit)
+        soundBank = try c.decodeIfPresent(SoundBankConfig.self, forKey: .soundBank)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -554,9 +575,11 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         try c.encode(kind, forKey: .kind)
         try c.encode(polySynth, forKey: .polySynth)
         // Omit sampler when absent, so a poly-synth-only instrument stays
-        // byte-identical to a pre-sampler save. Same rule for audioUnit.
+        // byte-identical to a pre-sampler save. Same rule for audioUnit and
+        // soundBank.
         try c.encodeIfPresent(sampler, forKey: .sampler)
         try c.encodeIfPresent(audioUnit, forKey: .audioUnit)
+        try c.encodeIfPresent(soundBank, forKey: .soundBank)
     }
 
     /// Rebuilds a runtime `InstrumentDescriptor`, resolving each zone's media
@@ -581,8 +604,12 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         // The AU config round-trips intact even when the component isn't
         // installed on this machine — the engine reports `.missing` and
         // renders the placeholder; the selection (and state) is never lost.
+        // The sound-bank config likewise: a bank missing on THIS machine
+        // surfaces as a `.failed` status at prepare time (LAW L5), never as a
+        // dropped selection.
         return InstrumentDescriptor(kind: kind, polySynth: polySynth,
-                                    sampler: params, audioUnit: audioUnit)
+                                    sampler: params, audioUnit: audioUnit,
+                                    soundBank: soundBank)
     }
 }
 

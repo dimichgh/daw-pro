@@ -70,6 +70,9 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// the clip-body honest-scope precedent).
     case pianoRollGrid
     case pianoRollVelocity
+    /// The insert-/delete-bar control cluster in the header (beta m10-h) — one card
+    /// for the whole time-range affordance.
+    case pianoRollBarOps
 
     // MARK: Arrange (timeline + sidebar)
     case arrangeSnap
@@ -79,6 +82,63 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// A timeline clip's body (a Canvas/gesture block; one card summarizes its
     /// move/trim/fade/split affordances — the honest-scope rule for Canvas chrome).
     case clipBlock
+    /// The arrange ruler's loop surface (beta m10-g) — a Canvas/gesture band; one
+    /// card summarizes its sketch/resize/move/toggle/seek affordances (the
+    /// clip-body honest-scope precedent). Distinct from `.transportLoop` (the chip):
+    /// the ruler is the direct-manipulation region, the chip is the on/off twin.
+    case loopRuler
+    /// The crossfade marker over two overlapping audio clips (m11-d) — the "X"
+    /// wedge where one clip fades out as the next fades in. Anchors the card that
+    /// explains a crossfade; the "Crossfade with Next…" clip menu creates it. NOT
+    /// an AI surface — no violet.
+    case crossfade
+
+    // MARK: Instrument picker (m10-n-3)
+    /// The instrument CHIP on an instrument track's header + mixer strip — shows
+    /// the track's current sound and opens the picker. ONE shared id across both
+    /// renders (per-instance anchoring). NOT an AI surface — no violet.
+    case trackInstrumentChip
+    /// The picker's Sound Banks section (the General MIDI + imported/scanned banks
+    /// + the "Add SoundFont…" import affordance).
+    case instrumentPickerSoundBanks
+    /// The picker's Audio Units section (installed AU instrument plugins).
+    case instrumentPickerAudioUnits
+
+    // MARK: Quantize & groove (m11-a)
+    /// The QUANTIZE affordance (piano-roll header + arrange clip menu) that opens
+    /// the timing-tightening flow. NOT an AI surface — no violet.
+    case quantize
+    /// The grid picker in the quantize panel (1/4 … 1/16 triplet).
+    case quantizeGrid
+    /// The strength slider — how far notes move toward the grid.
+    case quantizeStrength
+    /// The swing slider — the MPC shuffle amount (inert while a groove is chosen).
+    case quantizeSwing
+    /// The "also snap note ends" toggle (MIDI only).
+    case quantizeEnds
+    /// The groove picker section — built-in swings + saved templates + the
+    /// extract-from-clip affordance. One card for the whole groove surface.
+    case quantizeGroove
+
+    // MARK: Undo history (m11-b)
+    /// The HISTORY affordance (arrange toolbar) + the panel it opens: the list of
+    /// past edits you can step back to and undone edits you can step forward to.
+    /// One card for the whole surface (the chip and the panel share it — the
+    /// loop-ruler honest-scope precedent). NOT an AI surface — no violet.
+    case editHistory
+
+    // MARK: Session markers (m11-c)
+    /// The arrange ruler's marker lane (m11-c) — named song-section flags you can
+    /// add, drag, rename, and click to jump to. One card for the whole surface (a
+    /// Canvas/gesture lane; the loop-ruler honest-scope precedent). Distinct from
+    /// `.loopRuler` (the loop band, one strip up). NOT an AI surface — no violet.
+    case sessionMarkers
+
+    // MARK: Track bounce-in-place (m11-e)
+    /// The "Bounce in Place" track-header menu action (m11-e) — renders a track
+    /// down to a fresh audio track+clip so an instrument part becomes plain
+    /// audio. One card for the action. NOT an AI surface — no violet.
+    case bounceInPlace
 
     // MARK: AI panels (violet affordances — Rule 3)
     case aiCopilot
@@ -102,6 +162,12 @@ public enum ExplainID: String, CaseIterable, Sendable {
     case settingsGear
     /// A provider's key row in Settings (shared across every provider row).
     case settingsApiKey
+    /// The Agent Connection section in Settings (beta m10-l) — the control-plane
+    /// URL + port surface for hooking an AI agent up to the app.
+    case settingsConnection
+    /// The Copilot round-budget field in Settings (beta m10-m) — caps how many
+    /// tool rounds one Copilot reply may take.
+    case copilotMaxRounds
 }
 
 /// One control's curated explanation copy: a short control name and 2–3
@@ -219,6 +285,9 @@ public enum ExplainCatalog {
         .pianoRollVelocity: ExplainEntry(
             title: "Velocity Lane",
             body: "Sets how hard each note is struck, which mostly shapes how loud and punchy it sounds. Drag a bar up for an accent or down for a softer touch, so the part feels more human."),
+        .pianoRollBarOps: ExplainEntry(
+            title: "Insert / Delete Bar",
+            body: "Adds or removes a whole bar at the marked spot. Insert opens an empty bar and slides the rest of the part later; delete takes that bar out and pulls everything after it back to close the gap."),
 
         // MARK: Arrange (timeline + sidebar)
         .arrangeSnap: ExplainEntry(
@@ -233,6 +302,58 @@ public enum ExplainCatalog {
         .clipBlock: ExplainEntry(
             title: "Clip",
             body: "A block of sound or notes on the timeline. Drag it to move it in time; in Pro you can also drag its edges to trim, its top corners to fade, and double-click to split it in two."),
+        .loopRuler: ExplainEntry(
+            title: "Loop Region",
+            body: "The strip along the top of the timeline where you mark a section to repeat. Drag across it to set the loop, click inside to turn looping on or off, or click an empty spot to jump the playhead there."),
+        .crossfade: ExplainEntry(
+            title: "Crossfade",
+            body: "The blend where two audio clips overlap: the first fades out as the next fades in, so the join sounds smooth with no click or bump. Right-click a clip and choose Crossfade with Next to create one; drag either clip apart to undo it."),
+
+        // MARK: Instrument picker (m10-n-3)
+        .trackInstrumentChip: ExplainEntry(
+            title: "Instrument",
+            body: "Shows the sound this track plays and lets you change it — a built-in synth, a ready-made instrument set, or a plugin. Click it to pick a different sound; the notes you have written stay exactly the same."),
+        .instrumentPickerSoundBanks: ExplainEntry(
+            title: "Sound Banks",
+            body: "Ready-to-play instrument sounds. General MIDI gives you 128 classic instruments — piano, strings, brass, drums — with nothing to download. You can also add your own SoundFont bank files to grow the list."),
+        .instrumentPickerAudioUnits: ExplainEntry(
+            title: "Audio Units",
+            body: "Instrument plugins installed on your Mac, from Apple or other makers. Pick one to play this track through it; its own settings window opens from the plugin button on the track and mixer strip."),
+
+        // MARK: Quantize & groove (m11-a)
+        .quantize: ExplainEntry(
+            title: "Quantize",
+            body: "Nudges your notes onto a tidy timing grid, so a part that was played a little loose lands right in the pocket. Choose how fine the grid is and how strongly to pull, then apply."),
+        .quantizeGrid: ExplainEntry(
+            title: "Quantize Grid",
+            body: "Sets the timing grid your notes snap to — whole beats for big moves, or finer divisions like eighths and sixteenths for detailed parts. Pick the smallest division your part actually uses."),
+        .quantizeStrength: ExplainEntry(
+            title: "Quantize Strength",
+            body: "Controls how far each note is pulled toward the grid. All the way tightens the timing completely; part way keeps some of the human feel of the original take while still cleaning it up."),
+        .quantizeSwing: ExplainEntry(
+            title: "Swing",
+            body: "Adds a relaxed shuffle by nudging the in-between notes a touch late — the classic bounce behind hip-hop and jazz. Slide it up for more swing; it switches off when you choose a saved groove instead."),
+        .quantizeEnds: ExplainEntry(
+            title: "Snap Note Ends",
+            body: "Also lines up where each note stops, not just where it starts. Turn it on when you want the note lengths tidy too; leave it off to keep the original lengths and only fix the starts."),
+        .quantizeGroove: ExplainEntry(
+            title: "Groove",
+            body: "A feel borrowed from elsewhere — a swing preset, or one you extract from a clip — that shapes exactly how the notes sit. Pick one to stamp that groove onto this part; a chosen groove sets the grid and swing for you."),
+
+        // MARK: Undo history (m11-b)
+        .editHistory: ExplainEntry(
+            title: "Edit History",
+            body: "Shows every change you have made as a list you can step through. Click a past edit to jump back to it, or a step above the marker to move forward again. Your project rewinds or replays one edit at a time, so nothing is ever lost."),
+
+        // MARK: Session markers (m11-c)
+        .sessionMarkers: ExplainEntry(
+            title: "Song Markers",
+            body: "Named flags that label the parts of your song, like Intro, Chorus, or Drop. Drag empty ruler space here to add one, drag a flag to move it, double-click to rename, and click a flag to jump the playhead straight to that section."),
+
+        // MARK: Track bounce-in-place (m11-e)
+        .bounceInPlace: ExplainEntry(
+            title: "Bounce in Place",
+            body: "Renders this track down to one new audio track, turning a software instrument or effect-heavy part into plain recorded sound. Use it to lock in a decision, free up your computer, or share a clean copy. The original is muted, not deleted, and one undo brings it back."),
 
         // MARK: AI panels (violet affordances — Rule 3)
         .aiCopilot: ExplainEntry(
@@ -282,6 +403,12 @@ public enum ExplainCatalog {
         .settingsApiKey: ExplainEntry(
             title: "API Key",
             body: "A private password from an AI provider that turns on its features inside the app. It is saved in your Mac's Keychain, stays on this computer, and is never shown back to you in full."),
+        .settingsConnection: ExplainEntry(
+            title: "Agent Connection",
+            body: "Shows the local address an AI helper connects to so it can drive the app for you, with a button to copy it and a box to change the port. Reach for it when you are hooking up an outside agent or automation tool."),
+        .copilotMaxRounds: ExplainEntry(
+            title: "Copilot Rounds",
+            body: "How many back-and-forth rounds the Copilot may take to finish one request. In each round it reads your project, thinks, then makes a batch of changes. Raise it for big jobs, or lower it to keep every reply short and quick."),
     ]
 
     /// The curated entry for `id`, or nil if none is registered yet (an unregistered

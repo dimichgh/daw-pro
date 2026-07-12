@@ -111,18 +111,18 @@ final class AutomationSchedule {
 
     // MARK: - Build math (main actor / headless-testable, pure)
 
-    /// Maps one lane's canonical points to schedule-relative sample times at a
-    /// FIXED tempo (no tempo map v0; a tempo change restarts → rebuilds, the
-    /// `MIDIEventSchedule` rule). Values arrive store-clamped; beats arrive
+    /// Maps one lane's canonical points to schedule-relative sample times
+    /// under the tempo map (m12-b: the integral from the schedule anchor —
+    /// the `MIDIEventSchedule.buildEvents` rule; a tempo change still
+    /// restarts → rebuilds). Values arrive store-clamped; beats arrive
     /// canonically ordered and distinct — two beats that round onto the SAME
     /// sample dedupe last-wins here so segments always have positive span.
     static func buildBreakpoints(points: [AutomationPoint], fromBeat: Double,
-                                 tempoBPM: Double, sampleRate: Double) -> [AutomationBreakpoint] {
-        let secondsPerBeat = 60.0 / tempoBPM
+                                 tempoMap: TempoMap, sampleRate: Double) -> [AutomationBreakpoint] {
         var result: [AutomationBreakpoint] = []
         result.reserveCapacity(points.count)
         for point in points {
-            let time = Int64(((point.beat - fromBeat) * secondsPerBeat * sampleRate).rounded())
+            let time = Int64((tempoMap.seconds(from: fromBeat, to: point.beat) * sampleRate).rounded())
             let breakpoint = AutomationBreakpoint(
                 sampleTime: time, value: point.value,
                 holdsSegment: point.curve == .hold)
@@ -140,20 +140,20 @@ final class AutomationSchedule {
     /// to publish — the mixer node and effect knobs behave exactly as today).
     static func build(volumeLane: AutomationLane?, panLane: AutomationLane?,
                       effectParamLanes: [EffectParamLaneSpec] = [],
-                      fromBeat: Double, tempoBPM: Double, sampleRate: Double,
+                      fromBeat: Double, tempoMap: TempoMap, sampleRate: Double,
                       generation: UInt64, mode: Mode) -> AutomationSchedule? {
         let volume = volumeLane.map {
             buildBreakpoints(points: $0.points, fromBeat: fromBeat,
-                             tempoBPM: tempoBPM, sampleRate: sampleRate)
+                             tempoMap: tempoMap, sampleRate: sampleRate)
         } ?? []
         let pan = panLane.map {
             buildBreakpoints(points: $0.points, fromBeat: fromBeat,
-                             tempoBPM: tempoBPM, sampleRate: sampleRate)
+                             tempoMap: tempoMap, sampleRate: sampleRate)
         } ?? []
         let effectTracks = effectParamLanes.map { lane in
             (effectID: lane.effectID, paramSlot: lane.paramSlot,
              points: buildBreakpoints(points: lane.points, fromBeat: fromBeat,
-                                      tempoBPM: tempoBPM, sampleRate: sampleRate))
+                                      tempoMap: tempoMap, sampleRate: sampleRate))
         }
         guard !volume.isEmpty || !pan.isEmpty
             || effectTracks.contains(where: { !$0.points.isEmpty }) else { return nil }

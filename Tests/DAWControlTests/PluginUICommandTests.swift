@@ -57,6 +57,7 @@ struct PluginUICommandTests {
         let store: ProjectStore
         let auInstrumentTrack: UUID     // instrument track hosting an AU
         let builtinInstrumentTrack: UUID // instrument track, built-in polySynth
+        let soundBankInstrumentTrack: UUID // instrument track, GM sound bank
         let audioTrack: UUID            // audio track (no instrument)
         let auEffect: UUID              // AU insert on the audio track
         let builtinEffect: UUID         // built-in gain insert on the audio track
@@ -75,6 +76,10 @@ struct PluginUICommandTests {
 
         let builtinInst = store.addTrack(kind: .instrument).id  // default polySynth
 
+        let sbInst = store.addTrack(kind: .instrument).id
+        _ = try store.setInstrument(id: sbInst,
+                                    soundBank: SoundBankConfig(source: .generalMIDI, program: 56))
+
         let audio = store.addTrack(kind: .audio).id
         let builtinFx = try store.addEffect(toTrack: audio, kind: .gain).id
         let auFx = try store.addEffect(
@@ -84,7 +89,8 @@ struct PluginUICommandTests {
                 name: "AUDelay", manufacturerName: "Apple")).id
 
         return Fixtures(router: router, store: store, auInstrumentTrack: auInst,
-                        builtinInstrumentTrack: builtinInst, audioTrack: audio,
+                        builtinInstrumentTrack: builtinInst,
+                        soundBankInstrumentTrack: sbInst, audioTrack: audio,
                         auEffect: auFx, builtinEffect: builtinFx)
     }
 
@@ -128,6 +134,14 @@ struct PluginUICommandTests {
         #expect(!r.ok)
         #expect(r.error?.contains("built-in polySynth instrument") == true)
         #expect(r.error?.contains("Audio Unit instruments") == true)
+
+        // 4b. sound-bank instrument track — tailored copy (m10-q fold-in):
+        // never "built-in soundBank"; points at the program-browsing path.
+        r = await open(f.router, ["trackId": .string(f.soundBankInstrumentTrack.uuidString)])
+        #expect(!r.ok)
+        #expect(r.error?.contains("uses a sound-bank instrument") == true)
+        #expect(r.error?.contains("instrument.listSoundBankPrograms") == true)
+        #expect(r.error?.contains("built-in") == false)
 
         // 5. audio track, no effectId
         r = await open(f.router, ["trackId": .string(f.audioTrack.uuidString)])
@@ -296,11 +310,15 @@ struct PluginUICommandTests {
     @Test("plugin.closeUI still validates a malformed trackId (syntax)")
     func closeMalformedTrackId() async throws {
         let f = try makeFixtures()
-        f.router.pluginUI = FakePluginUI()
+        // Hold the fake strongly for the whole test — `pluginUI` is weak, and the
+        // point is that syntax validation fires even when the seam IS present.
+        let fake = FakePluginUI()
+        f.router.pluginUI = fake
         let r = await f.router.handle(ControlRequest(id: "1", command: "plugin.closeUI",
                                                      params: ["trackId": .string("bad")]))
         #expect(!r.ok)
         #expect(r.error?.contains("not a valid UUID") == true)
+        withExtendedLifetime(fake) {}
     }
 
     // MARK: - 5. plugin.listOpenUIs

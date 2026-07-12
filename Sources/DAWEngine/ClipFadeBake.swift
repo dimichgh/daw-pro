@@ -45,13 +45,6 @@ enum ClipFadeBake {
         var needsBake: Bool { fadeInFrames > 0 || fadeOutFrames > 0 }
     }
 
-    /// Frames per beat at a fixed tempo and file rate — the ONE beats→frames
-    /// conversion the bake uses everywhere (same `.rounded()` convention as
-    /// the existing segment math in `scheduleAll`).
-    static func framesPerBeat(tempoBPM: Double, fileRate: Double) -> Double {
-        fileRate * 60.0 / tempoBPM
-    }
-
     /// Splits the scheduled region `[segmentStart, segmentStart +
     /// segmentFrameCount)` (clip-relative file-rate frames) into fade-in /
     /// middle / fade-out pieces. Fade windows are computed ONCE from the
@@ -60,20 +53,51 @@ enum ClipFadeBake {
     /// so scheduling from a playhead INSIDE a fade window yields a partial
     /// fade piece whose envelope starts at the correct analytic value.
     ///
+    /// Beats→frames (m12-c, design rows 40–41): a clip whose whole span sits
+    /// in ONE tempo segment uses the constant `framesPerBeat` fast path —
+    /// `TempoMap.framesPerBeat(atBeat:sampleRate:)` keeps the legacy
+    /// `fileRate * 60.0 / bpm` op order verbatim, so trivial maps stay
+    /// BIT-IDENTICAL to the scalar era (the Phase-A byte-gate contract,
+    /// re-proven by the m12-c null-case gate). A clip crossing a boundary
+    /// takes the piecewise path: every window edge is the map integral from
+    /// the clip's start beat (`seconds(from:to:) · fileRate`, `.rounded()`),
+    /// the SAME frame convention `scheduleAll` uses for the region itself, so
+    /// fades warp in wall time exactly with the audio they shape.
+    ///
     /// Overlapping fades (fadeIn + fadeOut > length, only constructible
     /// outside the store) collapse the middle to zero and both baked pieces
     /// still evaluate the full domain envelope per frame, so the multiplied
     /// overlap region renders exactly what `envelopeGain` defines.
     static func piecePlan(
-        clip: Clip, tempoBPM: Double, fileRate: Double,
+        clip: Clip, tempoMap: TempoMap, fileRate: Double,
         segmentStart: Int64, segmentFrameCount: Int64
     ) -> PiecePlan {
-        let perBeat = framesPerBeat(tempoBPM: tempoBPM, fileRate: fileRate)
-        let clipLengthFrames = Int64((clip.lengthBeats * perBeat).rounded())
         let inLenBeats = min(max(0, clip.fadeInBeats), clip.lengthBeats)
         let outLenBeats = min(max(0, clip.fadeOutBeats), clip.lengthBeats)
-        let fadeInFrames = Int64((inLenBeats * perBeat).rounded())
-        let fadeOutFrames = Int64((outLenBeats * perBeat).rounded())
+        let clipLengthFrames: Int64
+        let fadeInFrames: Int64
+        let fadeOutFrames: Int64
+        if tempoMap.isConstant(from: clip.startBeat,
+                               to: clip.startBeat + clip.lengthBeats) {
+            // Constant-tempo fast path — the pre-m12-c arithmetic verbatim.
+            let perBeat = tempoMap.framesPerBeat(atBeat: clip.startBeat,
+                                                 sampleRate: fileRate)
+            clipLengthFrames = Int64((clip.lengthBeats * perBeat).rounded())
+            fadeInFrames = Int64((inLenBeats * perBeat).rounded())
+            fadeOutFrames = Int64((outLenBeats * perBeat).rounded())
+        } else {
+            // Piecewise: integrate each window's beat span from the clip
+            // start. The fade-out span integrates over ITS OWN beat window
+            // (the clip's last `outLenBeats`), so a boundary inside either
+            // fade lands the frame edges on the true wall-clock positions.
+            let start = clip.startBeat
+            let end = clip.startBeat + clip.lengthBeats
+            clipLengthFrames = Int64((tempoMap.seconds(from: start, to: end) * fileRate).rounded())
+            fadeInFrames = Int64((tempoMap.seconds(from: start, to: start + inLenBeats)
+                                  * fileRate).rounded())
+            fadeOutFrames = Int64((tempoMap.seconds(from: end - outLenBeats, to: end)
+                                   * fileRate).rounded())
+        }
 
         let segStart = segmentStart
         let segEnd = segmentStart + max(0, segmentFrameCount)
@@ -94,18 +118,35 @@ enum ClipFadeBake {
     /// is the clip-relative frame of the buffer's sample 0, so arbitrary
     /// segment starts (mid-fade playheads) evaluate the correct partial ramp
     /// from the very first frame. Main-actor schedule-time math only.
+    ///
+    /// Frame→beat (m12-c): single-segment clips divide by the constant
+    /// `framesPerBeat` (bit-identical to the scalar era); a clip crossing a
+    /// tempo boundary inverts the map per frame —
+    /// `beat(from: clip.startBeat, elapsedSeconds: frame / fileRate)` — so
+    /// the envelope stays BEAT-normalized while its wall-clock realization
+    /// warps with the tempo (equal-power complementarity of a crossfaded
+    /// pair is pointwise in beat progress and both sides warp identically:
+    /// design §3.5.3, proven by the m12-c seam-continuity gate).
     static func applyEnvelope(
         buffer: AVAudioPCMBuffer, clip: Clip,
-        clipRelativeStartFrame: Int64, tempoBPM: Double, fileRate: Double
+        clipRelativeStartFrame: Int64, tempoMap: TempoMap, fileRate: Double
     ) {
         guard let channels = buffer.floatChannelData else { return }
         var shape = clip
         shape.gainDb = 0
-        let perBeat = framesPerBeat(tempoBPM: tempoBPM, fileRate: fileRate)
         let frames = Int(buffer.frameLength)
         let channelCount = Int(buffer.format.channelCount)
+        let constantTempo = tempoMap.isConstant(from: clip.startBeat,
+                                                to: clip.startBeat + clip.lengthBeats)
+        let perBeat = constantTempo
+            ? tempoMap.framesPerBeat(atBeat: clip.startBeat, sampleRate: fileRate)
+            : 0
         for frame in 0..<frames {
-            let beat = Double(clipRelativeStartFrame + Int64(frame)) / perBeat
+            let clipFrame = clipRelativeStartFrame + Int64(frame)
+            let beat = constantTempo
+                ? Double(clipFrame) / perBeat
+                : tempoMap.beat(from: clip.startBeat,
+                                elapsedSeconds: Double(clipFrame) / fileRate) - clip.startBeat
             let gain = Float(shape.envelopeGain(atBeat: beat))
             for channel in 0..<channelCount {
                 channels[channel][frame] *= gain
@@ -121,7 +162,7 @@ enum ClipFadeBake {
     /// stateful and not shareable).
     static func bakePiece(
         file: AVAudioFile, sourceStartFrame: Int64, frameCount: Int64,
-        clip: Clip, clipRelativeStartFrame: Int64, tempoBPM: Double
+        clip: Clip, clipRelativeStartFrame: Int64, tempoMap: TempoMap
     ) throws -> AVAudioPCMBuffer {
         let format = file.processingFormat
         guard frameCount > 0, frameCount <= Int64(AVAudioFrameCount.max),
@@ -135,7 +176,7 @@ enum ClipFadeBake {
         try file.read(into: buffer, frameCount: AVAudioFrameCount(frameCount))
         applyEnvelope(buffer: buffer, clip: clip,
                       clipRelativeStartFrame: clipRelativeStartFrame,
-                      tempoBPM: tempoBPM, fileRate: format.sampleRate)
+                      tempoMap: tempoMap, fileRate: format.sampleRate)
         return buffer
     }
 }

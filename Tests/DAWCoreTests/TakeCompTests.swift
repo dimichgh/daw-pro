@@ -45,7 +45,7 @@ struct CompFlattenerTests {
         var group = TakeGroup(id: UUID(), name: "G", lanes: [lane])
         group.comp = [CompSegment(laneID: lane.id, startBeat: 0, endBeat: 4)]
 
-        let members = CompFlattener.flatten(group, tempoBPM: 120)
+        let members = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120))
         #expect(members.count == 1)
         let m = members[0]
         #expect(m.takeGroupID == group.id)
@@ -65,12 +65,12 @@ struct CompFlattenerTests {
         group.comp = [CompSegment(laneID: a.id, startBeat: 0, endBeat: 4),
                       CompSegment(laneID: b.id, startBeat: 4, endBeat: 8)]
 
-        let first = CompFlattener.flatten(group, tempoBPM: 120).map(normalized)
-        let second = CompFlattener.flatten(group, tempoBPM: 120).map(normalized)
+        let first = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120)).map(normalized)
+        let second = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120)).map(normalized)
         #expect(first == second)
         // Fresh clip ids each pass.
-        let ids1 = CompFlattener.flatten(group, tempoBPM: 120).map(\.id)
-        let ids2 = CompFlattener.flatten(group, tempoBPM: 120).map(\.id)
+        let ids1 = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120)).map(\.id)
+        let ids2 = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120)).map(\.id)
         #expect(Set(ids1).isDisjoint(with: Set(ids2)))
     }
 
@@ -83,7 +83,7 @@ struct CompFlattenerTests {
         group.comp = [CompSegment(laneID: a.id, startBeat: 0, endBeat: 4),
                       CompSegment(laneID: b.id, startBeat: 4, endBeat: 8)]
 
-        let members = CompFlattener.flatten(group, tempoBPM: 120)
+        let members = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120))
         #expect(members.count == 2)
         let left = members[0], right = members[1]
 
@@ -113,7 +113,7 @@ struct CompFlattenerTests {
         var group = TakeGroup(id: UUID(), name: "G", lanes: [a, b], crossfadeSeconds: 0.2)
         group.comp = [CompSegment(laneID: a.id, startBeat: 0, endBeat: 0.3),
                       CompSegment(laneID: b.id, startBeat: 0.3, endBeat: 0.6)]
-        let members = CompFlattener.flatten(group, tempoBPM: 120)
+        let members = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120))
         #expect(members.count == 2)
         #expect(approx(members[0].fadeOutBeats, 0.15))
         #expect(approx(members[1].fadeInBeats, 0.15))
@@ -127,7 +127,7 @@ struct CompFlattenerTests {
         var group = TakeGroup(id: UUID(), name: "G", lanes: [a, b], crossfadeSeconds: 0.1)
         group.comp = [CompSegment(laneID: a.id, startBeat: 0, endBeat: 4),
                       CompSegment(laneID: b.id, startBeat: 4, endBeat: 8)]
-        let members = CompFlattener.flatten(group, tempoBPM: 120)
+        let members = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120))
         #expect(members.count == 2)
         #expect(members[0].fadeOutBeats == 0)
         #expect(members[1].fadeInBeats == 0)
@@ -142,7 +142,7 @@ struct CompFlattenerTests {
         // Two segments with a [2,4) gap between them.
         group.comp = [CompSegment(laneID: a.id, startBeat: 0, endBeat: 2),
                       CompSegment(laneID: a.id, startBeat: 4, endBeat: 6)]
-        let members = CompFlattener.flatten(group, tempoBPM: 120)
+        let members = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120))
         #expect(members.count == 2)
         // No overlap across the gap; no fades.
         #expect(members[0].fadeOutBeats == 0)
@@ -156,7 +156,7 @@ struct CompFlattenerTests {
         let a = audioLane("A", start: 1, length: 3, file: "/a.wav")  // covers [1,4]
         var group = TakeGroup(id: UUID(), name: "G", lanes: [a])
         group.comp = [CompSegment(laneID: a.id, startBeat: 0, endBeat: 10)]
-        let members = CompFlattener.flatten(group, tempoBPM: 120)
+        let members = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120))
         #expect(members.count == 1)
         #expect(approx(members[0].startBeat, 1))
         #expect(approx(members[0].lengthBeats, 3))
@@ -174,7 +174,7 @@ struct CompFlattenerTests {
         var group = TakeGroup(id: UUID(), name: "G", lanes: [lane], crossfadeSeconds: 0.1)
         group.comp = [CompSegment(laneID: lane.id, startBeat: 2, endBeat: 4)]
 
-        let members = CompFlattener.flatten(group, tempoBPM: 120)
+        let members = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120))
         #expect(members.count == 1)
         let m = members[0]
         #expect(m.isMIDI)
@@ -195,7 +195,7 @@ struct CompFlattenerTests {
         var group = TakeGroup(id: UUID(), name: "G", lanes: [lane], crossfadeSeconds: 0.1)
         group.comp = [CompSegment(laneID: lane.id, startBeat: 0, endBeat: 4),
                       CompSegment(laneID: lane.id, startBeat: 4, endBeat: 8)]
-        let members = CompFlattener.flatten(group, tempoBPM: 120)
+        let members = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120))
         #expect(members.count == 2)
         #expect(members.allSatisfy { $0.fadeInBeats == 0 && $0.fadeOutBeats == 0 })
     }

@@ -50,10 +50,10 @@ struct MIDIRenderTests {
         let audio = audioTrack(clip: fixtures.cos1k48, startBeat: 0, lengthBeats: 4)
 
         let audioOnly = try OfflineRenderer().render(
-            tracks: [audio], tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tracks: [audio], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let withMIDI = try OfflineRenderer().render(
-            tracks: [audio, midiTrack(isMuted: true)], tempoBPM: 120,
+            tracks: [audio, midiTrack(isMuted: true)], tempoMap: TempoMap(constantBPM: 120),
             fromBeat: 0, durationSeconds: 1.0
         )
 
@@ -72,13 +72,13 @@ struct MIDIRenderTests {
         let audio = audioTrack(clip: fixtures.cos1k48, startBeat: 0, lengthBeats: 4)
 
         let audioOnly = try OfflineRenderer().render(
-            tracks: [audio], tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tracks: [audio], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let capture = EventCaptureInstrument()
         let renderer = OfflineRenderer()
         renderer.instrumentFactory = { _ in capture }
         let withMIDI = try renderer.render(
-            tracks: [audio, midiTrack()], tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tracks: [audio, midiTrack()], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
 
         let difference = maxDifference(audioOnly, withMIDI)

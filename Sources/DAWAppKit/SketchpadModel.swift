@@ -95,7 +95,12 @@ public final class SketchpadModel {
         case .healthy:
             return nil
         case .installedNotRunning:
-            return SketchpadBanner(message: status.message, canStartSidecar: true, tone: .warning)
+            // status.message is wire-speak ("call ai.sidecarStart") — right for
+            // agents reading command errors, wrong register for this user-facing
+            // banner. The Start button below IS the fix, so the copy points there.
+            return SketchpadBanner(
+                message: "The AI generator is installed but not running — press Start to launch it.",
+                canStartSidecar: true, tone: .warning)
         case .starting:
             // M10-b: a first-class in-progress banner — `.progress` tone (the
             // view shows a spinner for it) and `canStartSidecar: false` always

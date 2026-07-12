@@ -102,17 +102,132 @@ server.registerTool(
   {
     title: "Move the playhead",
     description:
-      "Move the transport playhead to an absolute position, given in beats " +
-      "(quarter notes) from the start of the timeline, e.g. beat 0 is the " +
-      "very start, beat 4 is the downbeat of bar 2 in 4/4 time. Must be >= 0.",
+      "Move the transport playhead to a position, named EITHER as an absolute " +
+      "`beats` value OR as a session `marker`. With `beats` (quarter notes from " +
+      "the start of the timeline), beat 0 is the very start, beat 4 is the " +
+      "downbeat of bar 2 in 4/4; must be >= 0. With `marker` (a marker's id or " +
+      "its exact name, from marker_list), the playhead jumps to that section — " +
+      "this is how you honor a request like \"drop at the second chorus\": call " +
+      "marker_list, pick the right marker, then seek to it. Pass EXACTLY ONE of " +
+      "`beats` or `marker` — passing both is rejected, and a `marker` that matches " +
+      "no marker (or an ambiguous name shared by several) is an error naming the " +
+      "field.",
     inputSchema: {
       beats: z
         .number()
         .min(0)
-        .describe("Absolute position in beats (quarter notes) from timeline start. Must be >= 0."),
+        .optional()
+        .describe(
+          "Absolute position in beats (quarter notes) from timeline start. Must be >= 0. " +
+            "Omit when passing `marker`."
+        ),
+      marker: z
+        .string()
+        .optional()
+        .describe(
+          "A session marker's id or exact name (from marker_list) to seek to. Omit when " +
+            "passing `beats`; passing both is rejected."
+        ),
     },
   },
-  async ({ beats }) => toToolResult(() => bridge.send("transport.seek", { beats }))
+  async ({ beats, marker }) => toToolResult(() => bridge.send("transport.seek", { beats, marker }))
+);
+
+// ---------------------------------------------------------------------------
+// Markers (m11-c) — named song-section anchors on the timeline
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "marker_add",
+  {
+    title: "Add a session marker",
+    description:
+      "Add a named marker at a beat on the timeline — a stable, human-meaningful " +
+      "anchor for a song section like \"Intro\", \"Verse 1\", \"Chorus\", or \"Drop\". " +
+      "Markers are how an agent and the musician navigate a song by MEANING rather " +
+      "than raw beats: once placed, transport_seek can jump straight to one by id or " +
+      "name. Adding a marker changes no audio or notes and is one undo step " +
+      "(edit_undo). Returns the created marker {id, name, beat}.",
+    inputSchema: {
+      name: z
+        .string()
+        .optional()
+        .describe('Marker name, e.g. "Chorus". Omit or pass empty for an auto name like "Marker 3".'),
+      beat: z
+        .number()
+        .min(0)
+        .describe("Absolute timeline position in beats (quarter notes) to place the marker. Must be >= 0."),
+    },
+  },
+  async ({ name, beat }) => toToolResult(() => bridge.send("marker.add", { name, beat }))
+);
+
+server.registerTool(
+  "marker_remove",
+  {
+    title: "Remove a session marker",
+    description:
+      "Remove a session marker by id (from marker_list / project_snapshot). This " +
+      "deletes ONLY the marker anchor — never any audio, clips, or notes. Reversible " +
+      "with edit_undo. Errors with a field-named message when no marker has that id. " +
+      "Returns {removed: true}.",
+    inputSchema: {
+      markerId: z.string().describe("Id of the marker to remove, from marker_list or project_snapshot."),
+    },
+  },
+  async ({ markerId }) => toToolResult(() => bridge.send("marker.remove", { markerId }))
+);
+
+server.registerTool(
+  "marker_rename",
+  {
+    title: "Rename a session marker",
+    description:
+      "Rename an existing session marker (e.g. \"Marker 2\" -> \"Chorus\"). An empty " +
+      "or unchanged name is a no-op and adds no undo step; otherwise it is one undo " +
+      "step (edit_undo). Errors with a field-named message when no marker has that " +
+      "id. Returns the updated marker {id, name, beat}.",
+    inputSchema: {
+      markerId: z.string().describe("Id of the marker to rename, from marker_list or project_snapshot."),
+      name: z.string().describe("New marker name (non-empty after trimming whitespace)."),
+    },
+  },
+  async ({ markerId, name }) => toToolResult(() => bridge.send("marker.rename", { markerId, name }))
+);
+
+server.registerTool(
+  "marker_move",
+  {
+    title: "Move a session marker",
+    description:
+      "Move a session marker to a new beat on the timeline. A live scrub of several " +
+      "moves within a moment coalesces into a single undo step (edit_undo). Errors " +
+      "with a field-named message when no marker has that id. Returns the moved " +
+      "marker {id, name, beat}.",
+    inputSchema: {
+      markerId: z.string().describe("Id of the marker to move, from marker_list or project_snapshot."),
+      beat: z
+        .number()
+        .min(0)
+        .describe("New absolute timeline position in beats (quarter notes). Clamped to >= 0."),
+    },
+  },
+  async ({ markerId, beat }) => toToolResult(() => bridge.send("marker.move", { markerId, beat }))
+);
+
+server.registerTool(
+  "marker_list",
+  {
+    title: "List session markers",
+    description:
+      "List every session marker, sorted by beat: {markers: [{id, name, beat}]}. This " +
+      "is the lookup an agent uses to turn a section request into a position — e.g. " +
+      "for \"drop at the second chorus\", call marker_list, find the second marker " +
+      "named like a chorus, then transport_seek to it by id. No params. (marker data " +
+      "also rides project_snapshot, but this is the focused call.)",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("marker.list", {}))
 );
 
 server.registerTool(
@@ -554,6 +669,73 @@ const audioUnitSchema = z
       "to open. Omit `audioUnit` to leave the track's current instrument untouched."
   );
 
+const soundBankSchema = z
+  .object({
+    source: z
+      .string()
+      .min(1)
+      .describe(
+        "Which sound bank to address: the string \"gm\" for the built-in General MIDI bank " +
+          "(ships with every Mac — zero downloads, zero setup, the go-to default), or the " +
+          "ABSOLUTE path to a .sf2/.dls file exactly as returned by instrument_list_sound_banks " +
+          "(already-discovered) or instrument_import_sound_bank (freshly imported). An unknown " +
+          "source, missing file, or wrong extension is rejected with a readable error pointing " +
+          "you back to instrument_list_sound_banks."
+      ),
+    program: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "MIDI program number, 0-BASED 0-127 (e.g. on General MIDI, 0 = \"Acoustic Grand " +
+          "Piano\", 56 = \"Trumpet\" — human GM charts are 1-based, this is the raw MIDI byte). " +
+          "Call instrument_list_sound_bank_programs with this `source` first to see the exact " +
+          "program numbers and names available. Defaults to 0."
+      ),
+    bankMSB: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "Bank select MSB, 0-127. Defaults to 121 (0x79), the General MIDI MELODIC convention " +
+          "— 120 (0x78) addresses a percussion/drum kit program instead. " +
+          "instrument_list_sound_bank_programs reports the exact bankMSB each program actually " +
+          "needs; copy it from there rather than guessing."
+      ),
+    bankLSB: z
+      .number()
+      .int()
+      .min(0)
+      .max(127)
+      .optional()
+      .describe(
+        "Bank select LSB, 0-127. Defaults to 0. Most banks (General MIDI included) never use " +
+          "a nonzero LSB; instrument_list_sound_bank_programs reports it when a bank does."
+      ),
+  })
+  .describe(
+    "Addresses a SoundFont2 (.sf2) or DLS (.dls) bank program — General MIDI or any other " +
+      "discovered/imported bank — used only when `kind` is (or is being set to) `soundBank`. " +
+      "ZERO-SETUP flow: call instrument_list_sound_banks (General MIDI is always listed " +
+      "first, no downloads required) to see available banks, instrument_list_sound_bank_programs " +
+      "to see that bank's exact program numbers/names, then pass the chosen `source`/`program`/" +
+      "`bankMSB`/`bankLSB` here — e.g. `{source: \"gm\", program: 56}` selects General MIDI's " +
+      "Trumpet. Providing `soundBank` implies `kind` `soundBank` even if `kind` is omitted, and " +
+      "is MUTUALLY EXCLUSIVE with `audioUnit` in the same call — providing both is rejected " +
+      "with \"provide either audioUnit or soundBank, not both\" and nothing lands. The resolved " +
+      "selection echoes back (and rides project_snapshot) as `soundBank: {source, path, " +
+      "program, bankMSB, bankLSB, name, status}`: `name` is a server-derived display name " +
+      "(e.g. \"Trumpet — General MIDI\"); `status` starts \"pending\" and becomes \"ready\" " +
+      "once the bank finishes loading into the sampler, \"missing\" if the bank file can't be " +
+      "found on this machine, or `failed: <reason>` (may include a low-level OSStatus code) if " +
+      "loading it otherwise fails. Omit `soundBank` to leave the track's current instrument " +
+      "untouched."
+  );
+
 server.registerTool(
   "track_set_instrument",
   {
@@ -567,7 +749,11 @@ server.registerTool(
       "instrument, good for pads, leads, and basic chords), `sampler` (plays " +
       "back your own audio files/samples across a keyboard range — configured " +
       "via the `sampler` param, good for drum kits, real-instrument recordings, " +
-      "and one-shots), or `audioUnit` (hosts an installed Audio Unit instrument " +
+      "and one-shots), `soundBank` (plays SoundFont2/DLS bank programs — " +
+      "General MIDI ships with macOS with zero setup, or use an imported/" +
+      "discovered .sf2/.dls library — selected via the `soundBank` param; " +
+      "call instrument_list_sound_banks then instrument_list_sound_bank_programs " +
+      "to pick one), or `audioUnit` (hosts an installed Audio Unit instrument " +
       "plugin — third-party or Apple synths/samplers registered with the " +
       "system — selected via the `audioUnit` param; call " +
       "instrument_list_audio_units first to discover what's installed). This " +
@@ -590,19 +776,26 @@ server.registerTool(
       "params are clamped to their safe range if you pass a value outside it. " +
       "`audioUnit` (see its own description) selects a specific installed AU " +
       "by component triple, is only meaningful for `kind` `audioUnit`, and " +
-      "implies that kind even if `kind` is omitted. Default instrument (a " +
+      "implies that kind even if `kind` is omitted. `soundBank` (see its own " +
+      "description) addresses a SoundFont2/DLS bank program by source/program/" +
+      "bankMSB/bankLSB, is only meaningful for `kind` `soundBank`, implies " +
+      "that kind even if `kind` is omitted, and is MUTUALLY EXCLUSIVE with " +
+      "`audioUnit` in the same call (providing both errors, nothing lands). " +
+      "Default instrument (a " +
       "fresh instrument track) is polySynth with a saw wave. Audio and bus " +
       "tracks reject this — use track_add or project_snapshot to find/create " +
       "an instrument track first.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the instrument track, from project_snapshot."),
       kind: z
-        .enum(["testTone", "polySynth", "sampler", "audioUnit"])
+        .enum(["testTone", "polySynth", "sampler", "audioUnit", "soundBank"])
         .optional()
         .describe(
           "Which instrument to use: `testTone` (simple fixed test tone), `polySynth` " +
             "(polyphonic subtractive synth), `sampler` (plays back your own audio files, " +
-            "configured via `sampler`), or `audioUnit` (hosts an installed Audio Unit " +
+            "configured via `sampler`), `soundBank` (plays a SoundFont2/DLS bank program, " +
+            "selected via `soundBank`; see instrument_list_sound_banks to discover banks — " +
+            "General MIDI needs no setup), or `audioUnit` (hosts an installed Audio Unit " +
             "instrument plugin, selected via `audioUnit`; see instrument_list_audio_units " +
             "to discover installed AUs). Omit to keep the current instrument."
         ),
@@ -667,6 +860,7 @@ server.registerTool(
         ),
       sampler: samplerSchema.optional(),
       audioUnit: audioUnitSchema.optional(),
+      soundBank: soundBankSchema.optional(),
     },
   },
   async ({
@@ -682,6 +876,7 @@ server.registerTool(
     gain,
     sampler,
     audioUnit,
+    soundBank,
   }) =>
     toToolResult(() =>
       bridge.send("track.setInstrument", {
@@ -697,6 +892,7 @@ server.registerTool(
         gain,
         sampler,
         audioUnit,
+        soundBank,
       })
     )
 );
@@ -876,6 +1072,98 @@ server.registerTool(
       "`audioUnit` param to select it.",
   },
   async () => toToolResult(() => bridge.send("instrument.listAudioUnits"))
+);
+
+server.registerTool(
+  "instrument_list_sound_banks",
+  {
+    title: "List available SoundFont2/DLS sound banks",
+    description:
+      "List every sound bank this Mac can use as a track_set_instrument `soundBank` source " +
+      "— the built-in General MIDI bank is ALWAYS FIRST (`source: \"gm\"`; ships with every " +
+      "Mac, zero downloads, zero setup — the go-to default for realistic instrument sounds " +
+      "without hunting for sample libraries), followed by every .sf2/.dls file found in the " +
+      "central imported-bank library and the two standard macOS bank folders (deduplicated, " +
+      "alphabetized within each folder). No params, never errors (an unreadable folder is " +
+      "skipped silently). Each entry has: `source` (pass this straight into " +
+      "instrument_list_sound_bank_programs's `source` or track_set_instrument's " +
+      "`soundBank.source` — \"gm\" for the built-in bank, or the bank's absolute file path); " +
+      "`name` (display name — \"General MIDI\" for the built-in bank, else the filename " +
+      "without its extension); `path` (the resolved absolute file path, for reference); " +
+      "`format` (\"dls\" or \"sf2\"); `builtin` (true only for the General MIDI entry); and " +
+      "`sizeBytes` (file size in bytes — some SF2 libraries run into the gigabytes). Don't " +
+      "see a bank you expect? Import it first with instrument_import_sound_bank. Next step: " +
+      "call instrument_list_sound_bank_programs with a bank's `source` to see its exact " +
+      "playable programs before selecting one on track_set_instrument.",
+  },
+  async () => toToolResult(() => bridge.send("instrument.listSoundBanks"))
+);
+
+server.registerTool(
+  "instrument_list_sound_bank_programs",
+  {
+    title: "List a sound bank's programs (instrument presets)",
+    description:
+      "List every program (instrument preset) available on one sound bank, so you can pick " +
+      "an exact `program`/`bankMSB`/`bankLSB` for track_set_instrument's `soundBank` param " +
+      "instead of guessing. `source` is required — \"gm\" for the built-in General MIDI " +
+      "bank, or the absolute path of a bank exactly as returned by instrument_list_sound_banks " +
+      "or instrument_import_sound_bank; an unknown source, missing file, or wrong extension " +
+      "is rejected with a readable error pointing you back to instrument_list_sound_banks. " +
+      "Returns `{source, namesParsed, programs}`: for \"gm\" this is the full General MIDI " +
+      "table — 128 melodic instruments (program 0-127, 0-BASED — e.g. 0 = \"Acoustic Grand " +
+      "Piano\", 56 = \"Trumpet\") each with a `category` (e.g. \"Piano\", \"Brass\"), plus " +
+      "one \"Standard Drum Kit\" entry at bankMSB 120 — 129 entries total, `namesParsed: " +
+      "true`. For a .sf2 file whose preset names parse successfully, `namesParsed` is also " +
+      "true and `name`/`category` reflect that file's actual presets. For any other .dls " +
+      "(or a .sf2 whose names can't be parsed), this returns a generic \"Program 0\" … " +
+      "\"Program 127\" list with `namesParsed: false` — the bank likely still sounds fine, " +
+      "you just won't get friendly names; try programs by ear via track_set_instrument. Each " +
+      "entry's `program`/`bankMSB`/`bankLSB` is exactly what to pass into " +
+      "track_set_instrument's `soundBank` object to select that sound.",
+    inputSchema: {
+      source: z
+        .string()
+        .min(1)
+        .describe(
+          "Which bank to list: \"gm\" for the built-in General MIDI bank, or the absolute " +
+            "file path of a bank exactly as returned by instrument_list_sound_banks or " +
+            "instrument_import_sound_bank."
+        ),
+    },
+  },
+  async ({ source }) => toToolResult(() => bridge.send("instrument.listSoundBankPrograms", { source }))
+);
+
+server.registerTool(
+  "instrument_import_sound_bank",
+  {
+    title: "Import a SoundFont2/DLS file into the sound bank library",
+    description:
+      "Copy a .sf2 or .dls sound bank file into DAW Pro's central sound bank library " +
+      "(`~/Library/Application Support/DAWPro/SoundBanks/`) so it shows up in " +
+      "instrument_list_sound_banks and can be selected on track_set_instrument going " +
+      "forward. `path` must be the ABSOLUTE path to an existing, readable .sf2 or .dls file " +
+      "on this Mac — a relative path, wrong extension, or missing file is rejected with a " +
+      "readable error. This is always a COPY: the source file at `path` is left in place, " +
+      "never moved or deleted. A name collision in the library is uniquified automatically " +
+      "(e.g. \"Vintage-2\") rather than overwriting an existing bank. Returns `{bank: " +
+      "{source, name, path, format, builtin, sizeBytes}}` — the freshly imported bank's " +
+      "info, in the exact shape instrument_list_sound_banks returns; use its `source` (the " +
+      "new library path) as-is on instrument_list_sound_bank_programs or " +
+      "track_set_instrument. Skip this entirely for General MIDI (`source: \"gm\"`) — it " +
+      "ships with macOS and needs no import.",
+    inputSchema: {
+      path: z
+        .string()
+        .min(1)
+        .describe(
+          "Absolute path to the .sf2 or .dls file to import on this Mac. Copied into the " +
+            "central library; the original file at this path is left untouched."
+        ),
+    },
+  },
+  async ({ path }) => toToolResult(() => bridge.send("instrument.importSoundBank", { path }))
 );
 
 // ---------------------------------------------------------------------------
@@ -1558,8 +1846,14 @@ server.registerTool(
       "content — same-track only in v0 (moving a clip onto a different track isn't " +
       "supported yet). Use this for rearranging a section without resizing it; use " +
       "clip_trim instead when you want to change what's audible at an edge. " +
-      "Repeated calls while dragging the same clip coalesce into one undo step. " +
-      "Returns the updated clip.",
+      "OVERLAP POLICY: if the move lands the clip over an ordinary same-track clip, " +
+      "the STATIONARY clip automatically yields the covered region (its edge is " +
+      "trimmed, or it is removed if fully covered) so two clips never sound at once " +
+      "with no crossfade — all inside the one undo step. To deliberately overlap " +
+      "two audio clips with a smooth blend, use clip_crossfade instead. Repeated " +
+      "calls while dragging the same clip coalesce into one undo step. Returns the " +
+      "updated clip, plus additive `trimmed` and `removed` arrays listing the ids " +
+      "of any stationary clips the overlap policy edited (empty on a clean move).",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track that owns the clip, from project_snapshot."),
       clipId: z.string().uuid().describe("Id of the clip to move, from project_snapshot."),
@@ -1630,6 +1924,47 @@ server.registerTool(
     toToolResult(() =>
       bridge.send("clip.setFades", { trackId, clipId, fadeInBeats, fadeOutBeats, fadeInCurve, fadeOutCurve })
     )
+);
+
+server.registerTool(
+  "clip_crossfade",
+  {
+    title: "Crossfade two adjacent/overlapping audio clips",
+    description:
+      "Blend the seam between two AUDIO clips on the same track so the earlier one " +
+      "fades OUT exactly as the later one fades IN — the clean, click-free join. " +
+      "This is the ONE way to legitimately overlap two same-track clips: it creates " +
+      "the overlap with complementary EQUAL-POWER fades that sum to constant volume " +
+      "(no dip, no doubling). The typical workflow: two clips sit side by side " +
+      "(e.g. after clip_split, or two takes butted together) — call this with both " +
+      "ids and a crossfade length in beats. The clips must be ADJACENT (the later " +
+      "one starts exactly where the earlier one ends) OR already overlap by no more " +
+      "than `lengthBeats`; if there is a gap, clip_move them together first. When " +
+      "adjacent, the overlap is created by extending each clip into its surrounding " +
+      "source audio — if a clip has no material to extend (e.g. its source file " +
+      "ends right at the seam), the call fails naming that clip/side, so use a " +
+      "shorter length. Pass the two ids in EITHER order (the earlier-starting clip " +
+      "is chosen as the fade-out side). One undo step. Returns {left, right, " +
+      "overlapBeats}.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the track that owns both clips, from project_snapshot."),
+      clipId: z.string().uuid().describe("Id of one of the two audio clips to crossfade."),
+      otherClipId: z
+        .string()
+        .uuid()
+        .describe("Id of the other audio clip — must be adjacent to or overlapping the first, on the same track."),
+      lengthBeats: z
+        .number()
+        .positive()
+        .describe(
+          "Crossfade length in beats (quarter notes). Must be > 0. For adjacent clips " +
+            "this is the overlap that gets created; for already-overlapping clips it is " +
+            "the ceiling (the existing overlap is kept and faded)."
+        ),
+    },
+  },
+  async ({ trackId, clipId, otherClipId, lengthBeats }) =>
+    toToolResult(() => bridge.send("clip.crossfade", { trackId, clipId, otherClipId, lengthBeats }))
 );
 
 server.registerTool(
@@ -1971,6 +2306,91 @@ server.registerTool(
         groove,
       })
     )
+);
+
+server.registerTool(
+  "clip_delete_time_range",
+  {
+    title: "Delete a time range from a MIDI clip (excise + close the gap)",
+    description:
+      "Cut `[startBeat, startBeat + lengthBeats)` OUT of a MIDI clip and close the " +
+      "gap — the \"remove a bar/phrase and ripple everything after it left\" move. " +
+      "`startBeat`/`lengthBeats` are CLIP-LOCAL beats, the SAME space as " +
+      "clip_set_notes's note `startBeat` (relative to the clip's own start, not " +
+      "the timeline). A note whose onset falls INSIDE the deleted range is REMOVED " +
+      "entirely, however far it extends; a note crossing IN from before the range " +
+      "keeps its outside part — its start is unchanged and only the overlapping " +
+      "portion inside the cut is spliced out of its length; a note at or after the " +
+      "range is shifted left by `lengthBeats` to close the gap, length unchanged. " +
+      "The clip's own length shrinks by the excised amount (floored at one beat, or " +
+      "at the furthest surviving note's end, whichever is longer — a clip never " +
+      "strands a note past its own end). One call = one undo step (edit_undo " +
+      "restores the exact prior notes and length). MIDI CLIPS ONLY: an audio clip " +
+      "is rejected; a take-comp member clip is rejected (change the comp with " +
+      "take_set_comp/take_select, or take_flatten first — the clip_quantize " +
+      "precedent). Errors readably if `startBeat` falls outside [0, clip length) or " +
+      "`lengthBeats` is not positive. Returns the updated clip.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI clip to edit, from project_snapshot."),
+      startBeat: z
+        .number()
+        .min(0)
+        .describe(
+          "CLIP-LOCAL start of the range to delete, in beats (quarter notes), relative to " +
+            "the clip's own start (not the timeline). Must fall inside [0, clip length)."
+        ),
+      lengthBeats: z
+        .number()
+        .positive()
+        .describe(
+          "Length of the range to delete, in beats. Must be > 0. A range extending past the " +
+            "clip's end is truncated at the clip's end (the clip can't shrink past what exists)."
+        ),
+    },
+  },
+  async ({ clipId, startBeat, lengthBeats }) =>
+    toToolResult(() => bridge.send("clip.deleteTimeRange", { clipId, startBeat, lengthBeats }))
+);
+
+server.registerTool(
+  "clip_insert_time_range",
+  {
+    title: "Insert silence into a MIDI clip (open a gap, shift later notes right)",
+    description:
+      "Insert `lengthBeats` of SILENCE at clip-local `atBeat` in a MIDI clip, " +
+      "pushing later material right — the \"add a bar/rest here\" move, and the " +
+      "inverse of clip_delete_time_range. `atBeat`/`lengthBeats` are CLIP-LOCAL " +
+      "beats, the SAME space as clip_set_notes's note `startBeat` (relative to the " +
+      "clip's own start, not the timeline). A note starting AT OR AFTER `atBeat` is " +
+      "shifted right by `lengthBeats`, length unchanged; a note starting BEFORE " +
+      "`atBeat` (crossing the insert point, still sounding) keeps BOTH its start " +
+      "and its length exactly as-is — the new silence lands after its onset and it " +
+      "simply sustains through the gap; no note is ever split. The clip's own " +
+      "length grows by `lengthBeats`. `atBeat` may equal the clip's current length " +
+      "to append silence at the tail. One call = one undo step (edit_undo restores " +
+      "the exact prior notes and length). MIDI CLIPS ONLY: an audio clip is " +
+      "rejected; a take-comp member clip is rejected (change the comp with " +
+      "take_set_comp/take_select, or take_flatten first — the clip_quantize " +
+      "precedent). Errors readably if `atBeat` falls outside [0, clip length] or " +
+      "`lengthBeats` is not positive. Returns the updated clip.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI clip to edit, from project_snapshot."),
+      atBeat: z
+        .number()
+        .min(0)
+        .describe(
+          "CLIP-LOCAL position to insert silence at, in beats (quarter notes), relative to " +
+            "the clip's own start (not the timeline). Must fall inside [0, clip length] — " +
+            "equal to the clip's length appends silence at the tail."
+        ),
+      lengthBeats: z
+        .number()
+        .positive()
+        .describe("Length of silence to insert, in beats. Must be > 0. The clip grows by exactly this amount."),
+    },
+  },
+  async ({ clipId, atBeat, lengthBeats }) =>
+    toToolResult(() => bridge.send("clip.insertTimeRange", { clipId, atBeat, lengthBeats }))
 );
 
 // ---------------------------------------------------------------------------
@@ -2571,6 +2991,29 @@ server.registerTool(
     toToolResult(() => bridge.send("app.feedbackBundle", { includeProject }))
 );
 
+server.registerTool(
+  "app_connection_info",
+  {
+    title: "Read the control endpoint this agent is connected through",
+    description:
+      "Read-only introspection of the LIVE control WebSocket endpoint this bridge reached the " +
+      "app on — the bound port, and where that port came from. No params, never throws. Returns " +
+      "`{url, port, source, defaultPort}`: `url` is the loopback WebSocket URL (`ws://127.0.0.1:" +
+      "<port>`) — the same value the app's Settings > Agent Connection section shows and lets a " +
+      "human copy; `port` is the currently bound port; `source` is one of `\"environment\"` (the " +
+      "`DAW_CONTROL_PORT` env var overrode everything for this launch — always wins), " +
+      "`\"settings\"` (an operator changed the port field in the app's Settings), or `\"default\"` " +
+      "(the built-in 17600, untouched); `defaultPort` is that built-in 17600 for reference, so a " +
+      "caller can tell at a glance whether the endpoint has been customized. Useful for " +
+      "diagnostics (confirming exactly which app instance/port this session is bridged to before " +
+      "reporting a bug) and for agents that manage multiple DAW Pro instances or non-default " +
+      "setups. The port is deliberately READ-only here: changing it can sever the caller's own " +
+      "connection mid-session, so re-pointing the control server stays a human decision in the " +
+      "app's Settings, not something this tool can do.",
+  },
+  async () => toToolResult(() => bridge.send("app.connectionInfo"))
+);
+
 // ---------------------------------------------------------------------------
 // Composition macros (M7 macro-c)
 // ---------------------------------------------------------------------------
@@ -3118,6 +3561,89 @@ server.registerTool(
     )
 );
 
+server.registerTool(
+  "track_bounce_in_place",
+  {
+    title: "Bounce a track to a new audio track (commit it to audio)",
+    description:
+      "Render ONE track offline and land the result as a brand-new audio " +
+      "track + clip, in a single undo step. This 'commits' a track to plain " +
+      "audio: reach for it to freeze a software-instrument part into a WAV " +
+      "so it always plays the same and frees the CPU that instrument was " +
+      "using, to lock in an effect-heavy chain before an edit, or to prep a " +
+      "clean stem for exchange with someone else. The bounce is the track's " +
+      "own dry, post-fader signal, rendered under the full-session " +
+      "plugin-delay compensation exactly like render_stems for that track — " +
+      "in fact the file is byte-identical to `render_stems {trackIds:[id]}` " +
+      "over the same window, and is NEVER loudness-normalized. Eligibility " +
+      "matches render_stems: the target must be a MASTER INPUT (a track " +
+      "routed directly to master, or a bus). A track routed INTO a bus has " +
+      "no stem of its own and errors with stemNotMasterInput (bounce the bus " +
+      "instead); an unknown id errors, and a session with no clips in the " +
+      "window errors with nothing-to-render. By default the SOURCE track is " +
+      "muted (muteSource=true) so the bounce replaces it in the mix rather " +
+      "than doubling it — pass muteSource=false to keep the original audible " +
+      "alongside the bounce. This is a plain render-and-land, NOT a " +
+      "reversible freeze: undo removes the new track+clip and un-mutes the " +
+      "source, but the rendered file stays on disk (undo un-references it, it " +
+      "does not delete media). Returns `{track, clip, file, sourceTrackId, " +
+      "sourceMuted, measurement}` where `track`/`clip` are the new objects, " +
+      "`file` is the WAV path, and `measurement` is the same un-normalized " +
+      "loudness report a render_stems stem carries.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .min(1)
+        .describe(
+          "Id of the track (or bus) to bounce — a master input (see " +
+            "project_snapshot). A track routed into a bus cannot be bounced " +
+            "directly; bounce the bus instead."
+        ),
+      fromBeat: z
+        .number()
+        .min(0)
+        .optional()
+        .default(0)
+        .describe(
+          "Timeline position, in beats (quarter notes), to start rendering " +
+            "from. Must be >= 0. Defaults to 0 (the very start). The landed " +
+            "clip is placed at this beat."
+        ),
+      durationSeconds: z
+        .number()
+        .gt(0)
+        .optional()
+        .describe(
+          "How many seconds to render, starting at fromBeat. Must be > 0. " +
+            "When omitted, defaults to the same window as render_stems: the " +
+            "extent of every track's clips at the current tempo, plus a 2.0 s " +
+            "tail."
+        ),
+      muteSource: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe(
+          "Mute the source track after bouncing so the new audio replaces it " +
+            "in the mix (recommended, and the default). Pass false to keep " +
+            "the original track audible alongside the bounce."
+        ),
+      name: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Optional name for the new audio track and its clip. Defaults to " +
+            "'<source name> (Bounced)'."
+        ),
+    },
+  },
+  async ({ trackId, fromBeat, durationSeconds, muteSource, name }) =>
+    toToolResult(() =>
+      bridge.send("track.bounceInPlace", { trackId, fromBeat, durationSeconds, muteSource, name })
+    )
+);
+
 // ---------------------------------------------------------------------------
 // Project files
 // ---------------------------------------------------------------------------
@@ -3295,6 +3821,29 @@ server.registerTool(
       "after an undo, so redoing is only possible immediately after undoing.",
   },
   async () => toToolResult(() => bridge.send("edit.redo"))
+);
+
+server.registerTool(
+  "edit_history",
+  {
+    title: "Read the undo / redo history",
+    description:
+      "Read the full labeled undo and redo history in one call — the backing " +
+      "for the app's history panel. No params. Returns `{undo: [string], " +
+      "redo: [string], canUndo: boolean, canRedo: boolean}`. Both lists are " +
+      "NEWEST-FIRST: `undo[0]` is the label edit_undo would revert NEXT, and " +
+      "each later item is a progressively OLDER edit; `redo[0]` is the label " +
+      "edit_redo would reapply NEXT, and each later item was undone EARLIER. " +
+      "Empty lists mirror canUndo/canRedo === false (nothing to undo/redo). " +
+      "This is READ-ONLY and adds no new way to change the project: to STEP to " +
+      "a specific point in history, call edit_undo repeatedly to reach undo[i] " +
+      "(i+1 calls) or edit_redo repeatedly to reach redo[j] (j+1 calls) — the " +
+      "same one-step-at-a-time path the panel and Cmd-Z use, so recording " +
+      "guards and edit coalescing still apply. Richer than " +
+      "project_snapshot's single `undoLabel`/`redoLabel` (which show only the " +
+      "top of each stack).",
+  },
+  async () => toToolResult(() => bridge.send("edit.history"))
 );
 
 // ---------------------------------------------------------------------------
@@ -3479,7 +4028,10 @@ server.registerTool(
       "Returns `{providers: [{provider, configured, source}]}` where `source` " +
       "is `\"env\"` (an environment variable — takes precedence and is " +
       "read-only from the app), `\"keychain\"` (set in the app's Settings " +
-      "panel), or `\"none\"` (not set). ACE-Step is the LOCAL, KEYLESS song " +
+      "panel), or `\"none\"` (not set). An entry may also carry " +
+      "`consentRequired: true` — the key IS stored (configured=true, source " +
+      "keychain) but macOS will show a one-time access prompt the first time " +
+      "it is actually used. ACE-Step is the LOCAL, KEYLESS song " +
       "sidecar and never appears here — use ai_sidecar_status for it. " +
       "IMPORTANT: this is STATUS ONLY. Key VALUES are never exposed and can " +
       "NOT be set over MCP or the control protocol (this traffic is logged in " +
@@ -4269,9 +4821,23 @@ server.registerTool(
         .string()
         .min(1)
         .describe("The instruction to send to the copilot, e.g. \"add a bassline on the Bass track\"."),
+      maxRounds: z
+        .number()
+        .int()
+        .min(1)
+        .max(32)
+        .optional()
+        .describe(
+          "Bound THIS reply's tool-call rounds, 1-32 (clamped), overriding the in-app " +
+            "copilot setting for this turn only — the app's own default is 8. Lower it " +
+            "(e.g. 2-3) for a cheap, single-step ask so a wandering turn can't run long; " +
+            "raise it (e.g. 16-32) for a complex multi-track arrangement that needs many " +
+            "rounds of tool calls to finish. Omit to use the user's configured setting. " +
+            "See ai_copilot_state's `limits` for the effective value and the full policy."
+        ),
     },
   },
-  async ({ message }) => toToolResult(() => bridge.send("ai.copilotSend", { message }))
+  async ({ message, maxRounds }) => toToolResult(() => bridge.send("ai.copilotSend", { message, maxRounds }))
 );
 
 server.registerTool(
@@ -4281,13 +4847,17 @@ server.registerTool(
     description:
       "Poll the in-app copilot's session state (the ai_generate_song / " +
       "ai_generation_status poll precedent). Returns `{status, currentTurnId?, " +
-      "transcript}` where `status` is one of \"idle\", \"running\", \"done\", " +
+      "transcript, limits}` where `status` is one of \"idle\", \"running\", \"done\", " +
       "\"failed\", \"cancelled\", and `transcript` is an array of entries " +
       "`{id, turnId, kind, text?, command?, ok?, summary?}` — `kind` is one of " +
       "\"user\" (your message), \"assistant\" (the copilot's reply text), " +
       "\"toolCall\" (a DAW command it invoked), \"toolResult\" (that command's " +
-      "outcome), or \"failure\" (a turn-level error). Call ai_copilot_send first " +
-      "to get a turnId.",
+      "outcome), or \"failure\" (a turn-level error). `limits` is " +
+      "`{maxRounds, defaultMaxRounds, validMin, validMax}` — the effective per-turn " +
+      "tool-round budget (the app setting, or the last ai_copilot_send call's " +
+      "`maxRounds` override) alongside the app's built-in default (8) and the valid " +
+      "range (1-32), so you can introspect the budget without guessing. Call " +
+      "ai_copilot_send first to get a turnId.",
     inputSchema: {
       turnId: z
         .string()

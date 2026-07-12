@@ -391,4 +391,159 @@ struct CrashRecoveryTests {
         #expect(store.pruneUntitledRecoveryBundles(keep: 5) == 0)
         #expect(FileManager.default.fileExists(atPath: one.path))
     }
+
+    // MARK: - 12. Observable `recoveryOfferAvailable` flag (m10-s)
+
+    /// A store that never began a session has no offer — the flag defaults false.
+    @Test("recoveryOfferAvailable defaults false and stays false when no crash is detected")
+    func availabilityDefaultsAndStaysFalseWithoutCrash() {
+        let dir = tempDir()
+        let store = makeStore(dir: dir)
+        #expect(!store.recoveryOfferAvailable)          // fresh store
+
+        // First launch: no prior lock → no crash → nothing to offer.
+        #expect(!store.beginCrashDetection())
+        #expect(!store.recoveryOfferAvailable)
+    }
+
+    /// The single legitimate arm point: a relaunch after a crash with a readable
+    /// snapshot raises the flag; a bare lock with no snapshot never over-arms.
+    @Test("beginCrashDetection arms recoveryOfferAvailable exactly when a snapshot is on offer")
+    func armAtLaunchSetsAvailability() async {
+        let dir = tempDir()
+
+        // Session 1: begin, edit, autosave, then "crash" (lock survives).
+        let s1 = makeStore(dir: dir)
+        _ = s1.beginCrashDetection()
+        s1.addTrack(name: "Armed")
+        await s1.autosaveTick()
+
+        // Session 2 relaunches on the same dir → stale lock + snapshot = a genuine
+        // offer, so the flag arms true.
+        let s2 = makeStore(dir: dir)
+        #expect(s2.beginCrashDetection())
+        #expect(s2.recoveryStatus().available)
+        #expect(s2.recoveryOfferAvailable)
+
+        // A crash with NO snapshot (bare lock only) must not over-arm.
+        let bareDir = tempDir()
+        let b1 = makeStore(dir: bareDir)
+        _ = b1.beginCrashDetection()                    // writes the lock, no autosave
+        let b2 = makeStore(dir: bareDir)
+        #expect(b2.beginCrashDetection())               // stale lock → crash detected
+        #expect(!b2.recoveryStatus().available)         // ...but nothing to restore
+        #expect(!b2.recoveryOfferAvailable)
+    }
+
+    /// Accepting the offer over the store lowers the flag (the restore path).
+    @Test("recoverFromAutosave(accept:true) lowers recoveryOfferAvailable")
+    func recoverAcceptLowersAvailability() async throws {
+        let (_, s2) = try await armedRelaunch(name: "Kept")
+        #expect(s2.recoveryOfferAvailable)
+        _ = try s2.recoverFromAutosave(accept: true)
+        #expect(!s2.recoveryOfferAvailable)
+    }
+
+    /// Discarding the offer over the store lowers the flag (the decline path — the
+    /// `project.recover {accept:false}` the m10-s bug ignored).
+    @Test("recoverFromAutosave(accept:false) lowers recoveryOfferAvailable")
+    func recoverDiscardLowersAvailability() async throws {
+        let (_, s2) = try await armedRelaunch(name: "Dropped")
+        #expect(s2.recoveryOfferAvailable)
+        _ = try s2.recoverFromAutosave(accept: false)
+        #expect(!s2.recoveryOfferAvailable)
+    }
+
+    /// A project transition (new / open / save) that supersedes the snapshot also
+    /// lowers the flag — the sheet must not linger past a `project.new`/`project.open`.
+    @Test("a new/open/save transition lowers recoveryOfferAvailable while an offer is armed")
+    func projectTransitionLowersAvailability() async throws {
+        // project.new
+        let (_, sNew) = try await armedRelaunch(name: "A")
+        #expect(sNew.recoveryOfferAvailable)
+        try sNew.newProject()
+        #expect(!sNew.recoveryOfferAvailable)
+
+        // project.open
+        let projectDir = tempDir()
+        let other = ProjectStore(); other.media = FakeMedia()
+        other.addTrack(name: "Other")
+        let otherPath = projectDir.appendingPathComponent("Other").path
+        _ = try other.saveProject(to: otherPath)
+        let (_, sOpen) = try await armedRelaunch(name: "B")
+        #expect(sOpen.recoveryOfferAvailable)
+        _ = try sOpen.openProject(at: otherPath)
+        #expect(!sOpen.recoveryOfferAvailable)
+
+        // A manual save
+        let (_, sSave) = try await armedRelaunch(name: "C")
+        #expect(sSave.recoveryOfferAvailable)
+        _ = try sSave.saveProject(to: tempDir().appendingPathComponent("Saved").path)
+        #expect(!sSave.recoveryOfferAvailable)
+    }
+
+    /// Resolving an armed offer over the store fires the availability observer
+    /// EXACTLY once (true→false) — proving the app's transition observer gets one
+    /// clean edge, not a spurious toggle, and that the flag never re-arms after.
+    @Test("resolving an armed offer over the store flips recoveryOfferAvailable exactly once")
+    func resolvingArmedOfferFlipsAvailabilityOnce() async throws {
+        let (_, s2) = try await armedRelaunch(name: "Once")
+        #expect(s2.recoveryOfferAvailable)
+
+        let recorder = AvailabilityFlipRecorder(s2)
+        _ = try s2.recoverFromAutosave(accept: false)
+        #expect(recorder.flips == 1)                    // one true→false edge
+        #expect(!s2.recoveryOfferAvailable)
+
+        // The flag never re-arms mid-session: fresh autosaves don't resurrect it,
+        // and no further edge reaches the observer.
+        s2.addTrack(name: "MoreWork")
+        await s2.autosaveTick()
+        #expect(!s2.recoveryOfferAvailable)
+        #expect(recorder.flips == 1)
+    }
+
+    // MARK: - m10-s helpers
+
+    /// Drives the "crash then relaunch with a readable snapshot" shape and returns
+    /// both stores; `s2.recoveryOfferAvailable` is armed true on return.
+    private func armedRelaunch(name: String) async throws -> (s1: ProjectStore, s2: ProjectStore) {
+        let dir = tempDir()
+        let s1 = makeStore(dir: dir)
+        _ = s1.beginCrashDetection()
+        s1.addTrack(name: name)
+        await s1.autosaveTick()
+
+        let s2 = makeStore(dir: dir)
+        #expect(s2.beginCrashDetection())
+        return (s1, s2)
+    }
+}
+
+/// Counts observable transitions of `ProjectStore.recoveryOfferAvailable` (m10-s).
+/// Every mutation of the flag happens synchronously on the main actor, so re-arming
+/// `withObservationTracking` from within the (main-actor) notification — reached via
+/// `MainActor.assumeIsolated`, valid because the change fires on the actor that
+/// mutated — counts a back-to-back sequence exactly, with no async settle to race.
+@MainActor
+private final class AvailabilityFlipRecorder {
+    private(set) var flips = 0
+    private let store: ProjectStore
+
+    init(_ store: ProjectStore) {
+        self.store = store
+        arm()
+    }
+
+    private func arm() {
+        withObservationTracking {
+            _ = store.recoveryOfferAvailable
+        } onChange: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.flips += 1
+                self.arm()
+            }
+        }
+    }
 }

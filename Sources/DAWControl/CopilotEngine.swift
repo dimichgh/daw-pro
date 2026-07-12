@@ -53,7 +53,14 @@ public final class CopilotEngine {
     private let providerFactory: (@MainActor () throws -> any CopilotProviding)?
     private let catalog: [CopilotTool]
     private let catalogByCommand: [String: CopilotTool]
-    private let maxToolRounds: Int
+    /// Resolves the per-turn tool-round budget (beta m10-m). A closure, not a stored
+    /// Int, so a live user setting (Settings → Copilot) is read FRESH at the start of
+    /// each turn without live-patching the engine — the bootstrap injects
+    /// `{ copilotLimitsStore.maxRounds }`. `@MainActor`, matching the engine's own
+    /// isolation and its `dispatch`/`provider` closures (this reads a @MainActor
+    /// store, and every `send`/`runTurn` runs on the main actor per rail-a), rather
+    /// than a `@Sendable` closure that couldn't touch that store.
+    private let maxToolRoundsResolver: @MainActor () -> Int
     private let historyLimit: Int
 
     /// Provider-facing conversation history (trimmed; see `trimHistory()`).
@@ -66,7 +73,7 @@ public final class CopilotEngine {
         dispatch: @escaping @MainActor (ControlRequest) async -> ControlResponse,
         provider: (@MainActor () throws -> any CopilotProviding)? = nil,
         catalog: [CopilotTool] = CopilotToolCatalog.v1,
-        maxToolRounds: Int = 8,
+        maxToolRounds: @escaping @MainActor () -> Int = { CopilotLimits.defaultMaxRounds },
         historyLimit: Int = 20
     ) {
         self.store = store
@@ -74,7 +81,7 @@ public final class CopilotEngine {
         self.providerFactory = provider
         self.catalog = catalog
         self.catalogByCommand = Dictionary(uniqueKeysWithValues: catalog.map { ($0.command, $0) })
-        self.maxToolRounds = maxToolRounds
+        self.maxToolRoundsResolver = maxToolRounds
         self.historyLimit = historyLimit
     }
 
@@ -87,7 +94,7 @@ public final class CopilotEngine {
     /// runs asynchronously — poll `stateJSON(turnID:)` or await
     /// `waitForTurn()`.
     @discardableResult
-    public func send(_ message: String) throws -> String {
+    public func send(_ message: String, maxRoundsOverride: Int? = nil) throws -> String {
         guard status != .running else {
             throw ControlError("a copilot turn is already running — poll ai.copilotState, or ai.copilotReset")
         }
@@ -97,6 +104,14 @@ public final class CopilotEngine {
         // wire doc (§6).
         let resolvedProvider = try resolveProvider()
 
+        // Resolve the per-turn round budget ONCE, here on the calling stack (beta
+        // m10-m), and hand the fixed value to `runTurn` — so a mid-turn settings
+        // change (or a resolver read on a later poll) can never tear a running turn.
+        // A caller-supplied override outranks the resolver for THIS turn only; both
+        // are clamped into `CopilotLimits.validRange` (an override of 0 → 1, 99 → 32),
+        // since a caller bounding its own budget only ever harms itself.
+        let effectiveMaxRounds = CopilotLimits.clamp(maxRoundsOverride ?? maxToolRoundsResolver())
+
         let turnID = UUID().uuidString
         currentTurnID = turnID
         status = .running
@@ -105,7 +120,7 @@ public final class CopilotEngine {
         trimHistory()
 
         turnTask = Task { [weak self] in
-            await self?.runTurn(turnID: turnID, provider: resolvedProvider)
+            await self?.runTurn(turnID: turnID, provider: resolvedProvider, maxRounds: effectiveMaxRounds)
         }
         return turnID
     }
@@ -144,11 +159,29 @@ public final class CopilotEngine {
         var object: [String: JSONValue] = [
             "status": .string(status.rawValue),
             "transcript": .array(entries.map(Self.entryJSON)),
+            // Additive limits echo (beta m10-m): the effective per-turn round budget
+            // the engine would honor RIGHT NOW (the resolver value, clamped — an
+            // `ai.copilotSend` override is per-turn and never reflected here) plus the
+            // fixed default and valid bounds, so a client/agent can surface and
+            // respect the same policy the Settings field edits.
+            "limits": Self.limitsJSON(effectiveMaxRounds: CopilotLimits.clamp(maxToolRoundsResolver())),
         ]
         if let currentTurnID {
             object["currentTurnId"] = .string(currentTurnID)
         }
         return .object(object)
+    }
+
+    /// The `limits` sub-object shape (beta m10-m). `maxRounds` is the currently
+    /// effective resolver value; `defaultMaxRounds`/`validMin`/`validMax` are the
+    /// fixed `CopilotLimits` policy so a client needn't hardcode them.
+    private static func limitsJSON(effectiveMaxRounds: Int) -> JSONValue {
+        .object([
+            "maxRounds": .number(Double(effectiveMaxRounds)),
+            "defaultMaxRounds": .number(Double(CopilotLimits.defaultMaxRounds)),
+            "validMin": .number(Double(CopilotLimits.validRange.lowerBound)),
+            "validMax": .number(Double(CopilotLimits.validRange.upperBound)),
+        ])
     }
 
     // MARK: - Capture seeding (rail-d; debug-tier only)
@@ -170,9 +203,9 @@ public final class CopilotEngine {
 
     // MARK: - Turn loop (§5)
 
-    private func runTurn(turnID: String, provider: any CopilotProviding) async {
+    private func runTurn(turnID: String, provider: any CopilotProviding, maxRounds: Int) async {
         do {
-            for round in 0..<maxToolRounds {
+            for round in 0..<maxRounds {
                 // Rebuilt EVERY round: mid-turn tool calls mutate the
                 // project, and the model must see the results.
                 let (contextText, idMap) = Self.buildContext(store: store)
@@ -261,7 +294,7 @@ public final class CopilotEngine {
             // Rounds exhausted while the model still wants tools: work done
             // so far is real (each step is its own undo entry), not a failure.
             appendTranscript(turnID: turnID, .failure(
-                "tool-round limit (\(maxToolRounds)) reached — partial work applied "
+                "tool-round limit (\(maxRounds)) reached — partial work applied "
                 + "(each step is undoable); send a follow-up to continue"))
             status = .done
         } catch is CancellationError {

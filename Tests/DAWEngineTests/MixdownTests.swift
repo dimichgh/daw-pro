@@ -29,7 +29,7 @@ struct MixdownTests {
             .appendingPathComponent("mix.wav")
 
         let info = try OfflineRenderer().renderToWAV(
-            tracks: [track], tempoBPM: 120, masterVolume: 1,
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 1.0, to: url
         )
         #expect(FileManager.default.fileExists(atPath: url.path))
@@ -50,7 +50,7 @@ struct MixdownTests {
         // here would be a write-path corruption.)
         let written = try TestSignals.readFile(url)
         let rerendered = try OfflineRenderer().render(
-            tracks: [track], tempoBPM: 120, fromBeat: 0,
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0,
             durationSeconds: 1.0, masterVolume: 1
         )
         #expect(written.count == rerendered.channelData.count)
@@ -83,10 +83,10 @@ struct MixdownTests {
             audioTrack(clip: fixtures.cos1k48Quarter, startBeat: 1, lengthBeats: 2),
         ]
         let first = try OfflineRenderer().render(
-            tracks: tracks, tempoBPM: 120, fromBeat: 0, durationSeconds: 1.5
+            tracks: tracks, tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.5
         )
         let second = try OfflineRenderer().render(
-            tracks: tracks, tempoBPM: 120, fromBeat: 0, durationSeconds: 1.5
+            tracks: tracks, tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.5
         )
         #expect(first.frameCount == second.frameCount)
         #expect(first.channelData.count == second.channelData.count)

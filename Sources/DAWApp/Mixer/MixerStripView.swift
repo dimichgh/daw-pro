@@ -95,13 +95,27 @@ struct MixerChannelStrip: View {
                 KindBadge(kind: track.kind)
                     .explainable(.mixerKindBadge)
                 Spacer(minLength: 0)
-                // The AU-instrument plugin window (M3 vi-b) — one button.
+                // The AU-instrument plugin window (M3 vi-b) — one button. NEVER
+                // shown for a soundBank instrument (LAW L7): AUSampler's generic
+                // view isn't user-meaningful — the picker IS its editor. The guard
+                // is `hostsAUInstrument` == `.kind == .audioUnit`, so soundBank
+                // tracks never reach it.
                 if hostsAUInstrument {
                     PluginWindowButton { model.openPluginWindow(trackID: track.id) }
                         .help("Open the instrument plugin window")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // The instrument chip (m10-n-3): the current sound + the picker opener,
+            // for instrument tracks only. Full variant (the strip has room).
+            if track.kind == .instrument {
+                InstrumentChip(
+                    descriptor: track.instrument,
+                    status: store.audioUnitStatus(forTrack: track.id),
+                    compact: false,
+                    onOpen: { model.openInstrumentPicker(trackID: track.id) }
+                )
+            }
         }
     }
 

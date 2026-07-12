@@ -79,7 +79,7 @@ struct ClipEnvelopeRenderTests {
     private func render(_ tracks: [Track], fromBeat: Double = 0,
                         seconds: Double) throws -> [Float] {
         try OfflineRenderer().render(
-            tracks: tracks, tempoBPM: 120, fromBeat: fromBeat,
+            tracks: tracks, tempoMap: TempoMap(constantBPM: 120), fromBeat: fromBeat,
             durationSeconds: seconds
         ).channelData[0]
     }
@@ -107,7 +107,7 @@ struct ClipEnvelopeRenderTests {
         ]
         for (clip, segStart, count) in cases {
             let plan = ClipFadeBake.piecePlan(
-                clip: clip, tempoBPM: 120, fileRate: 48_000,
+                clip: clip, tempoMap: TempoMap(constantBPM: 120), fileRate: 48_000,
                 segmentStart: segStart, segmentFrameCount: count)
             #expect(plan.fadeInFrames >= 0)
             #expect(plan.middleFrames >= 0)
@@ -118,18 +118,18 @@ struct ClipEnvelopeRenderTests {
 
         // Exact boundaries for the canonical case.
         let plan = ClipFadeBake.piecePlan(
-            clip: clip(fadeIn: 1, fadeOut: 1), tempoBPM: 120, fileRate: 48_000,
+            clip: clip(fadeIn: 1, fadeOut: 1), tempoMap: TempoMap(constantBPM: 120), fileRate: 48_000,
             segmentStart: 0, segmentFrameCount: 96_000)
         #expect(plan.fadeInEnd == 24_000)
         #expect(plan.fadeOutStart == 72_000)
         // No fades ⇒ the pre-i-b single-segment path (needsBake false).
         let unfaded = ClipFadeBake.piecePlan(
-            clip: clip(fadeIn: 0, fadeOut: 0), tempoBPM: 120, fileRate: 48_000,
+            clip: clip(fadeIn: 0, fadeOut: 0), tempoMap: TempoMap(constantBPM: 120), fileRate: 48_000,
             segmentStart: 0, segmentFrameCount: 96_000)
         #expect(!unfaded.needsBake)
         // Overlapping fades collapse the middle; both baked pieces remain.
         let overlapped = ClipFadeBake.piecePlan(
-            clip: clip(fadeIn: 3, fadeOut: 3), tempoBPM: 120, fileRate: 48_000,
+            clip: clip(fadeIn: 3, fadeOut: 3), tempoMap: TempoMap(constantBPM: 120), fileRate: 48_000,
             segmentStart: 0, segmentFrameCount: 96_000)
         #expect(overlapped.middleFrames == 0)
     }
@@ -151,7 +151,7 @@ struct ClipEnvelopeRenderTests {
                         audioFileURL: URL(fileURLWithPath: "/dev/null"),
                         gainDb: -12, fadeInBeats: 1)
         ClipFadeBake.applyEnvelope(buffer: buffer, clip: clip,
-                                   clipRelativeStartFrame: 0, tempoBPM: 120, fileRate: 48_000)
+                                   clipRelativeStartFrame: 0, tempoMap: TempoMap(constantBPM: 120), fileRate: 48_000)
         var shapeClip = clip
         shapeClip.gainDb = 0
         var worst: Float = 0
@@ -229,9 +229,9 @@ struct ClipEnvelopeRenderTests {
                         gainDb: -3, fadeInBeats: 0.5, fadeOutBeats: 1.5,
                         fadeInCurve: .equalPower, fadeOutCurve: .linear)
         let tracks = [Track(name: "T", kind: .audio, clips: [clip])]
-        let first = try OfflineRenderer().render(tracks: tracks, tempoBPM: 120,
+        let first = try OfflineRenderer().render(tracks: tracks, tempoMap: TempoMap(constantBPM: 120),
                                                  fromBeat: 0, durationSeconds: 2.0)
-        let second = try OfflineRenderer().render(tracks: tracks, tempoBPM: 120,
+        let second = try OfflineRenderer().render(tracks: tracks, tempoMap: TempoMap(constantBPM: 120),
                                                   fromBeat: 0, durationSeconds: 2.0)
         #expect(first.channelData == second.channelData,
                 "shared scheduleAll must render bit-identically every time")

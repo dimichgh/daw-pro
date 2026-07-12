@@ -32,6 +32,18 @@ struct PianoRollView: View {
     /// scrub's only side effect. Kept a closure so the view stays store-free and
     /// previewable (the `onCommit` precedent).
     var onSeek: (Double) -> Void
+    /// Excises a CLIP-LOCAL beat range and closes the gap (wired to
+    /// `ProjectStore.deleteTimeRange`); returns the updated clip so the view can
+    /// reseed its edit model, or nil if the store rejected it. Store-free closure
+    /// (the `onCommit`/`onSeek` precedent) so the view stays previewable (m10-h).
+    var onDeleteTimeRange: (_ startBeat: Double, _ lengthBeats: Double) -> Clip?
+    /// Inserts CLIP-LOCAL silence, pushing later notes right (wired to
+    /// `ProjectStore.insertTimeRange`); returns the updated clip or nil (m10-h).
+    var onInsertTimeRange: (_ atBeat: Double, _ lengthBeats: Double) -> Clip?
+    /// Opens the Quantize & Groove panel for this clip (m11-a) — the panel owns its
+    /// own density, so this affordance shows in both piano-roll modes (tightening
+    /// timing is a beginner action; the panel's Simple mode is grid + strength).
+    var onOpenQuantize: () -> Void
     var onClose: () -> Void
 
     @State private var model: PianoRollModel
@@ -57,6 +69,9 @@ struct PianoRollView: View {
 
     init(clip: Clip, beatsPerBar: Int, positionBeats: Double, densityStore: PanelDensityStore,
          onCommit: @escaping ([MIDINote]) -> Void, onSeek: @escaping (Double) -> Void,
+         onDeleteTimeRange: @escaping (_ startBeat: Double, _ lengthBeats: Double) -> Clip?,
+         onInsertTimeRange: @escaping (_ atBeat: Double, _ lengthBeats: Double) -> Clip?,
+         onOpenQuantize: @escaping () -> Void,
          onClose: @escaping () -> Void) {
         self.clip = clip
         self.beatsPerBar = beatsPerBar
@@ -64,6 +79,9 @@ struct PianoRollView: View {
         self.densityStore = densityStore
         self.onCommit = onCommit
         self.onSeek = onSeek
+        self.onDeleteTimeRange = onDeleteTimeRange
+        self.onInsertTimeRange = onInsertTimeRange
+        self.onOpenQuantize = onOpenQuantize
         self.onClose = onClose
         _model = State(initialValue: PianoRollModel(
             notes: clip.notes ?? [],
@@ -141,10 +159,124 @@ struct PianoRollView: View {
                 snapPicker
                     .explainable(.pianoRollSnap)
             }
+            quantizeChip
+                .explainable(.quantize)
+            barOpsCluster
+                .explainable(.pianoRollBarOps)
             closeButton
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    // MARK: - Bar ops (insert / delete a measure, beta m10-h)
+
+    /// Clip-local start beat of the target bar (under the playhead, else bar 0).
+    private var targetBarStart: Double {
+        PianoRollBarOps.targetBarStartBeat(
+            position: positionBeats, clipStartBeat: clip.startBeat,
+            lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
+    }
+
+    /// One-based bar number the buttons act on — the SF Mono readout.
+    private var targetBarNumber: Int {
+        PianoRollBarOps.targetBarNumber(
+            position: positionBeats, clipStartBeat: clip.startBeat,
+            lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
+    }
+
+    /// Delete is off when it would collapse the clip below one bar (invalid → off).
+    private var canDeleteBar: Bool {
+        PianoRollBarOps.canDeleteBar(lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
+    }
+
+    /// A compact glass cluster in the header: the target bar readout + insert/delete
+    /// buttons (v1 acts on the bar under the playhead, or the first bar when the
+    /// transport is elsewhere). Shown in BOTH densities — inserting/removing a
+    /// measure is a structural edit a beginner reaches for, not Pro-only chrome.
+    /// One bar = `beatsPerBar` beats (meter-aware). Dark glass + hairline, the
+    /// snap-picker idiom; the +/− glyphs are neutral chrome (Rule 3 — an accent is
+    /// earned by state, not by inviting a click).
+    private var barOpsCluster: some View {
+        HStack(spacing: 0) {
+            Text("BAR \(targetBarNumber)")
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(DAWTheme.playback)   // cyan = position readout
+                .padding(.horizontal, 7)
+            barOpsDivider
+            barOpButton(system: "plus", enabled: true,
+                        help: "Insert an empty bar at bar \(targetBarNumber), pushing later notes right") {
+                insertBar()
+            }
+            barOpsDivider
+            barOpButton(system: "minus", enabled: canDeleteBar,
+                        help: canDeleteBar
+                            ? "Delete bar \(targetBarNumber) and pull the rest of the part back to close the gap"
+                            : "Add more than one bar of notes before you can delete a bar") {
+                deleteBar()
+            }
+        }
+        .frame(height: 22)
+        .background(DAWTheme.panelRaised)
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+    }
+
+    private var barOpsDivider: some View {
+        Rectangle().fill(DAWTheme.hairline).frame(width: 1, height: 14)
+    }
+
+    private func barOpButton(system: String, enabled: Bool, help: String,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(enabled ? DAWTheme.textPrimary : DAWTheme.textFaint)
+                .frame(width: 26, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .help(help)
+    }
+
+    /// Inserts one empty bar at the target bar start, then reseeds the edit model
+    /// from the updated clip (the store closed/opened the gap — the model must
+    /// re-read, not keep its stale draft).
+    private func insertBar() {
+        if let updated = onInsertTimeRange(targetBarStart, Double(beatsPerBar)) {
+            model.load(notes: updated.notes ?? [], clipLengthBeats: updated.lengthBeats)
+        }
+    }
+
+    /// Deletes the target bar and closes the gap, then reseeds the edit model.
+    private func deleteBar() {
+        if let updated = onDeleteTimeRange(targetBarStart, Double(beatsPerBar)) {
+            model.load(notes: updated.notes ?? [], clipLengthBeats: updated.lengthBeats)
+        }
+    }
+
+    /// Opens the Quantize & Groove panel for this clip (m11-a). Neutral create-
+    /// chrome (Rule 3 — `textPrimary`, no earned accent at rest); the snap-picker
+    /// chip idiom, never a stock control.
+    private var quantizeChip: some View {
+        Button(action: onOpenQuantize) {
+            HStack(spacing: 4) {
+                Image(systemName: "square.grid.3x1.below.line.grid.1x2")
+                    .font(.system(size: 9, weight: .semibold))
+                Text("QUANTIZE")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .tracking(0.6)
+            }
+            .foregroundStyle(DAWTheme.textPrimary)
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Tighten this part's timing to a grid, or apply a groove")
     }
 
     /// Simple / Pro segmented chip — the shared `SimpleProToggle` component bound

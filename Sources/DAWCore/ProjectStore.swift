@@ -47,6 +47,15 @@ public final class ProjectStore {
     /// `performEdit` bodies. Built-in swing presets are NOT stored here — they
     /// resolve on demand (`GrooveTemplate.builtin`).
     public internal(set) var grooveTemplates: [GrooveTemplate] = []
+    /// Session markers (m11-c) — named song-section anchors on the timeline.
+    /// Kept SORTED by beat as an invariant (ties stable, insertion order) by every
+    /// mutation, so this is directly the ordered exposure `marker.list` / the ruler
+    /// consume — no separate raw store. A pure value: no media, no engine
+    /// involvement; it rides `EditState` (undo add/remove/rename/move) and persists
+    /// additively, exactly like `grooveTemplates`. Setter is module-`internal` so
+    /// the mutation helpers below (and the load boundary) can rebuild it inside
+    /// `performEdit` bodies while external callers go through the named methods.
+    public internal(set) var markers: [Marker] = []
     /// Latest per-track meter frame, keyed by track ID. Entries appear when a
     /// track first meters and are dropped when the track is removed.
     public private(set) var trackMeters: [UUID: MeterFrame] = [:]
@@ -77,6 +86,18 @@ public final class ProjectStore {
     /// Volume"), for the "Undo <label>" / "Redo <label>" menu items.
     public var undoLabel: String? { journal.undoLabel }
     public var redoLabel: String? { journal.redoLabel }
+
+    /// A read-only projection of the whole undo/redo history's LABELS (m11-b) —
+    /// the backing for the history panel and the `edit.history` wire command. Both
+    /// lists are NEWEST-FIRST: `undo[0]` is what `undo()` reverses next, `redo[0]`
+    /// is what `redo()` reapplies next (see `UndoHistory`). A PURE read — it never
+    /// mutates the journal and adds NO new mutation surface; the panel steps only
+    /// through `undo()`/`redo()`, so the coalescing barrier and the mid-take
+    /// `transportBusy` guard always apply. Reads the OBSERVED `journal`, so a
+    /// SwiftUI view calling this re-renders when history changes.
+    public func undoHistory() -> UndoHistory {
+        UndoHistory(undo: journal.undoLabels, redo: journal.redoLabels)
+    }
 
     /// The most recently journaled edit — set inside `performEdit` EXACTLY when a
     /// journal entry actually records (a genuine state change; a no-op edit leaves
@@ -110,6 +131,25 @@ public final class ProjectStore {
     /// real Application Support location; a test seam points it at a temp dir so
     /// autosave never writes into the user's real profile.
     @ObservationIgnored var autosaveRecoveryDirectory = ProjectStore.defaultAutosaveDirectory()
+
+    /// Whether a launch crash-recovery offer is currently on the table (m10-s).
+    /// OBSERVED (not `@ObservationIgnored`) so the launch sheet's host can react
+    /// when the offer is resolved by ANY path — the `project.recover` wire command
+    /// or a `project.new`/`project.open` transition — not just by the sheet's own
+    /// buttons (the m10-s bug: a wire-resolved offer lingered on screen because the
+    /// one-shot `AppModel.recoveryOffer` snapshot never observed the store).
+    ///
+    /// Contract: it goes TRUE only at the single legitimate arm point,
+    /// `beginCrashDetection()` (launch), and FALSE at every point the offer stops
+    /// being available — both `recoverFromAutosave` branches and every
+    /// crash-recovery `invalidate()` (save/new/open supersede), all routed through
+    /// `invalidateCrashRecovery()`. It mirrors `crashRecovery.recoveryStatus()
+    /// .available`, but as a stored @Observable fact the app can subscribe to.
+    /// This is DISTINCT from `AppModel.recoveryOffer`, which the debug-tier
+    /// `debug.recoveryOffer` staging still drives directly for captures (that path
+    /// leaves this flag false and unchanging, so the app's transition observer
+    /// never fires against it).
+    public private(set) var recoveryOfferAvailable = false
 
     /// Crash-recovery autosave engine (M9 crash-b) — the rolling `autosave.dawproject`
     /// snapshot + `manifest.json` + `session.lock` in the Autosave dir, SEPARATE
@@ -149,6 +189,12 @@ public final class ProjectStore {
     /// Injected media service that reads audio-file facts at import time;
     /// nil in headless tests unless a fake is provided.
     public var media: (any MediaImporting)?
+
+    /// Sound-bank resolution/discovery (m10-n). Default: the real library
+    /// directories; injectable so tests point it at temp dirs. m10-n-1 uses
+    /// only `resolve` (set-time validation); the scan/import/program
+    /// forwarders arrive with m10-n-2.
+    @ObservationIgnored public var soundBankLibrary = SoundBankLibrary()
 
     /// Injected AI song-generation source (M6 iii-a): resolves a generation
     /// jobId to its finished local audio + metas for `importGeneration`. The
@@ -195,7 +241,9 @@ public final class ProjectStore {
         let armedTrackIDs: [UUID]
         let armedInstrumentTrackIDs: [UUID]
         let recordStartBeats: Double
-        let tempoBPM: Double
+        /// Map frozen at record start (m12-b; design §3.4 — tempo is fixed
+        /// per take, `setTempo` refuses mid-take, so the freeze is exact).
+        let tempoMap: TempoMap
         let takeNumber: Int
     }
 
@@ -313,6 +361,9 @@ public final class ProjectStore {
     /// one, and `importGeneration` (M6 iii-a) folds it into the SAME "Import
     /// Generation" edit so a single undo restores the tempo with the track.
     /// Kept here (not an extension) because `transport` has a private setter.
+    /// m12-b (design row 8): still the scalar segment-0 edit — Phase C turns
+    /// this into the map-mutation entry point; the re-flatten hook (which now
+    /// flattens through `transport.tempoMap`) is retained unchanged.
     func applyTempoChange(_ bpm: Double) {
         transport.tempoBPM = bpm.clamped(to: TransportState.tempoRange)
         engine?.setTempo(transport)
@@ -321,6 +372,25 @@ public final class ProjectStore {
                 rebuildCompMembers(trackIndex: t, groupIndex: g)
             }
         }
+    }
+
+    /// Phase-B staging seam — replaced by tempo.setMap in Phase C. Installs a
+    /// session-only multi-segment tempo map (nil ⇒ back to the scalar-derived
+    /// trivial map) and pushes it to the engine through the SAME `setTempo`
+    /// restart seam a scalar tempo change uses — mid-play the engine restarts
+    /// from its OWN derived beats under the new map (the live-gate contract).
+    /// Deliberately NOT an edit: no `performEdit`, no undo journal entry, no
+    /// dirty mark, never persisted or snapshotted (the override is excluded
+    /// from `TransportState.CodingKeys` and normalized out of undo capture),
+    /// and it resets with the transport on project open/new. Take-group
+    /// re-flattening is NOT triggered (staging-only; Phase C's real map
+    /// mutation owns that hook). Refused while recording, like `setTempo`.
+    public func installSessionTempoMap(_ map: TempoMap?) throws {
+        guard !transport.isRecording else {
+            throw ProjectError.transportBusy("cannot change the tempo map while recording — stop first")
+        }
+        transport.sessionTempoMapOverride = map
+        engine?.setTempo(transport)
     }
 
     /// Sets the loop region fields and notifies the engine WITHOUT opening its
@@ -428,7 +498,7 @@ public final class ProjectStore {
             armedTrackIDs: armedAudioIDs,
             armedInstrumentTrackIDs: armedInstrumentIDs,
             recordStartBeats: transport.positionBeats,
-            tempoBPM: transport.tempoBPM,
+            tempoMap: transport.tempoMap,
             takeNumber: take
         )
         takeCounter = take
@@ -475,7 +545,19 @@ public final class ProjectStore {
         case .success(let take):
             guard let pending else { return }  // no take in flight — stale completion
             let audio = take.audio
-            let audioLengthBeats = audio.map { $0.info.durationSeconds * pending.tempoBPM / 60.0 } ?? 0
+            // Land geometry through the take's FROZEN map (m12-b, design rows
+            // 9–10): the clip start is the inverse integral of the writer's
+            // anchor-relative offset from the record-start beat, and the
+            // length is the inverse integral of the file duration from that
+            // start. Start computed FIRST — the length integrates from it.
+            let audioStartBeat = audio.map {
+                pending.tempoMap.beat(from: pending.recordStartBeats,
+                                      elapsedSeconds: $0.startOffsetSeconds)
+            } ?? pending.recordStartBeats
+            let audioLengthBeats = audio.map {
+                pending.tempoMap.beat(from: audioStartBeat,
+                                      elapsedSeconds: $0.info.durationSeconds) - audioStartBeat
+            } ?? 0
             let audioLands = audio != nil && audioLengthBeats > 0
             let midiLands = !(take.midi?.notes.isEmpty ?? true)
             guard audioLands || midiLands else {
@@ -495,8 +577,7 @@ public final class ProjectStore {
             // clips land at the record start: punch does NOT trim MIDI (v0).
             performEdit("Record Take \(pending.takeNumber)") {
                 if let audio, audioLands {
-                    let startBeat = pending.recordStartBeats
-                        + audio.startOffsetSeconds * pending.tempoBPM / 60.0
+                    let startBeat = audioStartBeat
                     for trackID in pending.armedTrackIDs {
                         guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { continue }
                         let newClip = Clip(
@@ -654,6 +735,83 @@ public final class ProjectStore {
                 engine?.seek(transport)
             }
         }
+    }
+
+    // MARK: - Session markers (m11-c)
+
+    /// Stable sort of markers by beat: ties keep their existing relative order
+    /// (Swift's `sorted(by:)` is NOT guaranteed stable, so sort on `(beat, index)`
+    /// with the current index as the tiebreak). The single funnel every marker
+    /// mutation re-applies so `markers` is always the ordered exposure.
+    private static func markersSortedByBeat(_ markers: [Marker]) -> [Marker] {
+        markers.enumerated()
+            .sorted { a, b in
+                a.element.beat != b.element.beat ? a.element.beat < b.element.beat : a.offset < b.offset
+            }
+            .map(\.element)
+    }
+
+    /// Adds a marker at `beat` (clamped >= 0 by `Marker.init`), auto-naming an
+    /// empty/nil name "Marker N" (N = the new count, the `addTrack` idiom). ONE
+    /// undo step ("Add Marker '<name>'"); the list re-sorts by beat. Returns the
+    /// created marker so the wire can echo its id.
+    @discardableResult
+    public func addMarker(name: String? = nil, beat: Double) -> Marker {
+        let resolvedName = name?.isEmpty == false ? name! : "Marker \(markers.count + 1)"
+        let marker = Marker(name: resolvedName, beat: beat)
+        performEdit("Add Marker '\(marker.name)'") {
+            markers = Self.markersSortedByBeat(markers + [marker])
+        }
+        return marker
+    }
+
+    /// Removes the marker with `id`. Throws `markerNotFound` when absent (the
+    /// wire maps it to a field-named error). ONE undo step ("Remove Marker
+    /// '<name>'").
+    public func removeMarker(id: UUID) throws {
+        guard let marker = markers.first(where: { $0.id == id }) else {
+            throw ProjectError.markerNotFound(id)
+        }
+        performEdit("Remove Marker '\(marker.name)'") {
+            markers.removeAll { $0.id == id }
+        }
+    }
+
+    /// Renames the marker with `id`. Throws `markerNotFound` when absent. Follows
+    /// the `renameTrack` rules the UI's `TrackRename` also enforces: a trimmed,
+    /// non-empty, actually-changed name commits ONE undo step ("Rename Marker
+    /// '<name>'"); an empty or unchanged name is a no-op (no stray undo entry).
+    /// Returns the resulting marker (unchanged on a no-op).
+    @discardableResult
+    public func renameMarker(id: UUID, name: String) throws -> Marker {
+        guard let index = markers.firstIndex(where: { $0.id == id }) else {
+            throw ProjectError.markerNotFound(id)
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != markers[index].name else { return markers[index] }
+        performEdit("Rename Marker '\(trimmed)'") {
+            markers[index].name = trimmed
+        }
+        return markers[index]
+    }
+
+    /// Moves the marker with `id` to `beat` (clamped >= 0). Throws
+    /// `markerNotFound` when absent. Coalesces under `marker.move:<id>` so a live
+    /// drag scrub folds into ONE undo step ("Move Marker '<name>'", the
+    /// `clip.quantize` precedent); the list re-sorts by beat. Returns the moved
+    /// marker.
+    @discardableResult
+    public func moveMarker(id: UUID, beat: Double) throws -> Marker {
+        guard let marker = markers.first(where: { $0.id == id }) else {
+            throw ProjectError.markerNotFound(id)
+        }
+        performEdit("Move Marker '\(marker.name)'", key: "marker.move:\(id.uuidString)") {
+            var updated = marker
+            updated.beat = max(0, beat)
+            markers = Self.markersSortedByBeat(markers.map { $0.id == id ? updated : $0 })
+        }
+        // The list re-sorted; return the fresh value (same id).
+        return markers.first(where: { $0.id == id }) ?? marker
     }
 
     // MARK: - Mixer
@@ -1254,6 +1412,10 @@ public final class ProjectStore {
     /// through the injected media service (reusing `importAudio`'s error strings);
     /// an empty zones array is legal (a silent sampler) and needs no media. This
     /// validation happens OUTSIDE the edit body, so a bad zone changes nothing.
+    /// `audioUnit` and `soundBank` (m10-n) follow the same wholesale rule —
+    /// providing one implies its kind when `kind` is omitted, providing BOTH in
+    /// one call throws `ambiguousInstrumentSelection`, and a provided sound
+    /// bank is validated (existing `.sf2`/`.dls` file) before the edit runs.
     /// Returns the resolved descriptor (so the control layer can echo it), or nil
     /// for an unknown id — mirroring the other per-track setters. Throws
     /// `instrumentRequiresInstrumentTrack` for an audio or bus track (kind guard
@@ -1273,27 +1435,38 @@ public final class ProjectStore {
         resonance: Double? = nil,
         gain: Double? = nil,
         sampler: SamplerParams? = nil,
-        audioUnit: AudioUnitConfig? = nil
+        audioUnit: AudioUnitConfig? = nil,
+        soundBank: SoundBankConfig? = nil
     ) throws -> InstrumentDescriptor? {
         guard let index = tracks.firstIndex(where: { $0.id == id }) else { return nil }
         guard tracks[index].kind == .instrument else {
             throw ProjectError.instrumentRequiresInstrumentTrack(tracks[index].kind)
         }
+        // One instrument selection per call: `audioUnit` and `soundBank` are
+        // mutually exclusive — no silent precedence (m10-n §3.3).
+        if audioUnit != nil && soundBank != nil {
+            throw ProjectError.ambiguousInstrumentSelection
+        }
         // A provided sampler config's zone files are validated NOW, before the
         // edit runs (like importAudio's media read): a bad zone throws and
         // records no undo entry.
         if let sampler { try validateSamplerZones(sampler.zones) }
+        // A provided sound-bank config likewise: the source must resolve to an
+        // existing .sf2/.dls file BEFORE the edit runs (same no-undo-on-failure
+        // rule; no engine involvement — stays headless-testable).
+        if let soundBank { try validateSoundBank(soundBank) }
         // Overlay onto the current descriptor (nil ⇒ default). Rebuilding through
         // the inits re-clamps every field, so an out-of-range overlay is caught
         // even though the stored descriptor is already valid. `sampler` swaps
         // wholesale when supplied; otherwise the current sampler config survives
         // (so poly-synth knob edits never disturb it, and vice versa).
-        // `audioUnit` is wholesale like `sampler`, and providing one implies
-        // kind `.audioUnit` when kind is omitted.
+        // `audioUnit`/`soundBank` are wholesale like `sampler`, and providing
+        // one implies its kind when kind is omitted.
         let current = tracks[index].instrument ?? .default
         let p = current.polySynth
         let resolved = InstrumentDescriptor(
-            kind: kind ?? (audioUnit != nil ? .audioUnit : current.kind),
+            kind: kind ?? (audioUnit != nil ? .audioUnit
+                           : soundBank != nil ? .soundBank : current.kind),
             polySynth: PolySynthParams(
                 waveform: waveform ?? p.waveform,
                 attack: attack ?? p.attack,
@@ -1305,11 +1478,27 @@ public final class ProjectStore {
                 gain: gain ?? p.gain
             ),
             sampler: sampler ?? current.sampler,
-            audioUnit: audioUnit ?? current.audioUnit
+            audioUnit: audioUnit ?? current.audioUnit,
+            soundBank: soundBank ?? current.soundBank
         )
         editTrack(id: id, label: "Change Instrument",
                   key: "track.instrument:\(id.uuidString)") { $0.instrument = resolved }
         return resolved
+    }
+
+    /// Set-time validation for a sound-bank selection (m10-n §3.3, the
+    /// `validateSamplerZones` precedent — runs BEFORE the edit, so a bad bank
+    /// throws and records no undo entry): the source must resolve to an
+    /// existing file (`SoundBankLibrary.resolve`, shared with the engine's
+    /// pre-instantiation check) carrying an `.sf2`/`.dls` extension
+    /// (case-insensitive).
+    private func validateSoundBank(_ config: SoundBankConfig) throws {
+        let url = try soundBankLibrary.resolve(config.source)
+        let ext = url.pathExtension.lowercased()
+        guard ext == "sf2" || ext == "dls" else {
+            throw ProjectError.importFailed(
+                "sound bank must be a .sf2 or .dls file — got \(url.lastPathComponent)")
+        }
     }
 
     /// Validates that every sampler zone points at an existing, readable audio
@@ -1362,6 +1551,34 @@ public final class ProjectStore {
         engine?.audioUnitStatus(forTrack: id)
     }
 
+    // MARK: - Sound banks (m10-n)
+
+    /// Discoverable sound banks — GM first, then each scan dir's `*.sf2`/`*.dls`
+    /// (§6.6). Pure file work through the injected `SoundBankLibrary`; NO engine
+    /// involvement (unlike `availableAudioUnits`). DAWControl's
+    /// `instrument.listSoundBanks` reads exactly this.
+    public func availableSoundBanks() -> [SoundBankInfo] {
+        soundBankLibrary.scan()
+    }
+
+    /// The program list for a bank source — the GM table for `"gm"`, parsed SF2
+    /// names for a `.sf2`, generic 0…127 otherwise (`namesParsed` flags which,
+    /// §6.6). Throws `importFailed` for a missing file. Backs
+    /// `instrument.listSoundBankPrograms`.
+    public func soundBankPrograms(source: SoundBankSource) throws
+        -> (programs: [SoundBankProgram], namesParsed: Bool) {
+        try soundBankLibrary.programs(for: source)
+    }
+
+    /// Copies a `.sf2`/`.dls` into the central library and returns its info;
+    /// NEVER moves/deletes the source (§6.6). Backs `instrument.importSoundBank`.
+    /// Pure file work — the project is untouched, so no undo entry (import is a
+    /// library operation, selection is a separate `setInstrument` call).
+    @discardableResult
+    public func importSoundBank(from url: URL) throws -> SoundBankInfo {
+        try soundBankLibrary.importBank(from: url)
+    }
+
     /// Offline stretch-render state for one clip (M5 ii-d, nil when running
     /// headless) — surfaced in snapshots as the transient `stretchRendering`
     /// / `stretchError` fields (the `audioUnitStatus` forwarding precedent).
@@ -1405,12 +1622,15 @@ public final class ProjectStore {
         }
 
         let info = try media.audioFileInfo(at: url)
-        let lengthBeats = info.durationSeconds * transport.tempoBPM / 60.0
 
         let appendPosition = tracks[index].clips
             .map { $0.startBeat + $0.lengthBeats }
             .max() ?? 0
         let startBeat = max(0, atBeat ?? appendPosition)
+        // File duration → beats via the inverse integral FROM the landing
+        // beat (m12-b, design row 11) — the placement decides the conversion.
+        let lengthBeats = transport.tempoMap.beat(
+            from: startBeat, elapsedSeconds: info.durationSeconds) - startBeat
 
         let name = url.deletingPathExtension().lastPathComponent
         let clip = Clip(
@@ -1508,6 +1728,154 @@ public final class ProjectStore {
         return tracks[t].clips[c]
     }
 
+    // MARK: - MIDI time-range editing (beta m10-h)
+
+    /// Floor on a MIDI clip's length after a `deleteTimeRange` (m10-h): one beat.
+    /// A bar delete can shrink a clip but never collapse it below a single beat
+    /// (nor below the furthest remaining note — see `deleteTimeRange`). A whole-bar
+    /// edit reasons in beats, so its floor is a beat — deliberately coarser than
+    /// the finer `minClipLengthBeats` used by a continuous trim drag.
+    public static let minTimeRangeClipLengthBeats: Double = 1.0
+
+    /// Excises a clip-local beat range from a MIDI clip and CLOSES THE GAP (beta
+    /// m10-h — the "delete a bar" primitive; the piano-roll UI passes one bar =
+    /// `beatsPerBar` beats). `startBeat`/`lengthBeats` are CLIP-LOCAL beats — the
+    /// same space `notes[].startBeat` lives in, NOT timeline beats. The excised
+    /// span is `[startBeat, startBeat + lengthBeats)`, its right edge clamped to
+    /// the clip end (a range that runs off the end simply truncates the clip at
+    /// `startBeat`). Notes fold by these crossing rules (every case is unit-tested):
+    ///
+    ///  - **Wholly before** the span (`note.endBeat <= startBeat`): unchanged.
+    ///  - **Crosses in from before** (`note.startBeat < startBeat` and
+    ///    `note.endBeat > startBeat`): the head is KEPT and the overlapping part is
+    ///    spliced out — the note keeps its start and loses exactly the portion
+    ///    inside the cut. A note ending inside the span ends at the cut
+    ///    (`length = startBeat − note.startBeat`); a note SPANNING the whole span
+    ///    rejoins across it (`length −= lengthBeats`) so its head and tail become
+    ///    continuous.
+    ///  - **Onset inside** the span (`startBeat <= note.startBeat < end`): REMOVED —
+    ///    a note whose onset the cut swallows can't be meaningfully placed, so it's
+    ///    dropped however far it extends.
+    ///  - **At or after** the span end (`note.startBeat >= end`): SHIFTED LEFT by
+    ///    `lengthBeats`, closing the gap (length unchanged).
+    ///
+    /// The clip's `lengthBeats` shrinks by the excised amount, then is clamped up so
+    /// it never falls below one beat (`minTimeRangeClipLengthBeats`) OR the furthest
+    /// remaining note's end (so no surviving note is stranded past the clip end).
+    ///
+    /// ONE `performEdit` folds the note edit AND the length change into a single
+    /// undo step (the house rule: one journal entry per call — undo restores the
+    /// exact prior notes + length). Throws `clipNotFound`, `notAMIDIClip`, or
+    /// `invalidClipEdit` (non-positive `lengthBeats`, or `startBeat` outside
+    /// `[0, lengthBeats)`).
+    @discardableResult
+    public func deleteTimeRange(clipID: UUID, startBeat: Double, lengthBeats: Double) throws -> Clip {
+        guard let (t, c) = locateClip(clipID) else {
+            throw ProjectError.clipNotFound(clipID)
+        }
+        try requireNotCompMember(trackIndex: t, clipIndex: c)
+        guard let notes = tracks[t].clips[c].notes else {
+            throw ProjectError.notAMIDIClip(clipID)
+        }
+        let clipLength = tracks[t].clips[c].lengthBeats
+        guard lengthBeats > 0 else {
+            throw ProjectError.invalidClipEdit(
+                "deleteTimeRange length \(lengthBeats) must be > 0")
+        }
+        guard startBeat >= 0, startBeat < clipLength else {
+            throw ProjectError.invalidClipEdit(
+                "deleteTimeRange startBeat \(startBeat) is outside clip '\(tracks[t].clips[c].name)' [0, \(clipLength)) — startBeat must fall within the clip")
+        }
+        let s = startBeat
+        let e = s + lengthBeats
+        // Amount actually removed from the timeline: a range running past the clip
+        // end truncates the clip at `s` (so the shrink can't exceed what exists).
+        let removed = min(e, clipLength) - s
+
+        var kept: [MIDINote] = []
+        for note in notes {
+            let ns = note.startBeat
+            let ne = note.endBeat
+            if ne <= s {
+                kept.append(note)                                   // wholly before
+            } else if ns < s {
+                // Crosses in from before: keep the head, splice out the overlap
+                // (which is `lengthBeats` when the note spans the whole cut).
+                let overlap = min(ne, e) - s
+                kept.append(MIDINote(id: note.id, pitch: note.pitch, velocity: note.velocity,
+                                     startBeat: ns, lengthBeats: note.lengthBeats - overlap))
+            } else if ns < e {
+                continue                                            // onset inside — dropped
+            } else {
+                // At/after the cut: shift left to close the gap.
+                kept.append(MIDINote(id: note.id, pitch: note.pitch, velocity: note.velocity,
+                                     startBeat: ns - lengthBeats, lengthBeats: note.lengthBeats))
+            }
+        }
+
+        let noteExtent = kept.map(\.endBeat).max() ?? 0
+        let newClipLength = max(clipLength - removed, Self.minTimeRangeClipLengthBeats, noteExtent)
+        let ordered = MIDINote.canonicallyOrdered(kept)
+
+        performEdit("Delete Time Range") {
+            tracks[t].clips[c].notes = ordered
+            tracks[t].clips[c].lengthBeats = newClipLength
+            engine?.tracksDidChange(tracks)
+        }
+        return tracks[t].clips[c]
+    }
+
+    /// Inserts `lengthBeats` of SILENCE at clip-local `atBeat` in a MIDI clip,
+    /// pushing later material right (beta m10-h — the "insert a bar" inverse; the
+    /// piano-roll UI passes one bar = `beatsPerBar` beats). `atBeat`/`lengthBeats`
+    /// are CLIP-LOCAL beats (note space). Rules (unit-tested):
+    ///
+    ///  - A note **at or after** `atBeat` (`note.startBeat >= atBeat`) is SHIFTED
+    ///    RIGHT by `lengthBeats` (length unchanged).
+    ///  - A note **crossing** `atBeat` (`note.startBeat < atBeat`) keeps BOTH its
+    ///    start and its length — the inserted silence lands after the note's
+    ///    sounding onset, so a note held across the insert point simply sustains
+    ///    through the new gap. The simplest predictable rule: no note is split.
+    ///
+    /// The clip's `lengthBeats` GROWS by `lengthBeats`. ONE `performEdit` folds the
+    /// note shift AND the length change into a single undo step. Throws
+    /// `clipNotFound`, `notAMIDIClip`, or `invalidClipEdit` (non-positive
+    /// `lengthBeats`, or `atBeat` outside `[0, lengthBeats]`).
+    @discardableResult
+    public func insertTimeRange(clipID: UUID, atBeat: Double, lengthBeats: Double) throws -> Clip {
+        guard let (t, c) = locateClip(clipID) else {
+            throw ProjectError.clipNotFound(clipID)
+        }
+        try requireNotCompMember(trackIndex: t, clipIndex: c)
+        guard let notes = tracks[t].clips[c].notes else {
+            throw ProjectError.notAMIDIClip(clipID)
+        }
+        let clipLength = tracks[t].clips[c].lengthBeats
+        guard lengthBeats > 0 else {
+            throw ProjectError.invalidClipEdit(
+                "insertTimeRange length \(lengthBeats) must be > 0")
+        }
+        // `atBeat == lengthBeats` is legal (append silence at the tail).
+        guard atBeat >= 0, atBeat <= clipLength else {
+            throw ProjectError.invalidClipEdit(
+                "insertTimeRange atBeat \(atBeat) is outside clip '\(tracks[t].clips[c].name)' [0, \(clipLength)] — atBeat must fall within the clip")
+        }
+        let shifted = notes.map { note -> MIDINote in
+            guard note.startBeat >= atBeat else { return note }     // crosses/before → unchanged
+            return MIDINote(id: note.id, pitch: note.pitch, velocity: note.velocity,
+                            startBeat: note.startBeat + lengthBeats, lengthBeats: note.lengthBeats)
+        }
+        let ordered = MIDINote.canonicallyOrdered(shifted)
+        let newClipLength = clipLength + lengthBeats
+
+        performEdit("Insert Time Range") {
+            tracks[t].clips[c].notes = ordered
+            tracks[t].clips[c].lengthBeats = newClipLength
+            engine?.tracksDidChange(tracks)
+        }
+        return tracks[t].clips[c]
+    }
+
     /// Removes a clip (audio or MIDI) by id, from whichever track holds it.
     /// Throws `clipNotFound` for an unknown id. Returns the removed clip.
     @discardableResult
@@ -1592,11 +1960,9 @@ public final class ProjectStore {
     /// inserted right after it as the right half. One undo step, NO coalescing.
     ///
     /// - Audio: the right half's `startOffsetSeconds` advances by the left half's
-    ///   duration, converted beats -> seconds at the CURRENT tempo
-    ///   (`splitBeats · 60 / tempoBPM`). v0 is fixed-tempo — a single global
-    ///   `transport.tempoBPM` governs the whole timeline (no tempo map), so this
-    ///   conversion is exact; a future tempo map would integrate over the split
-    ///   span instead.
+    ///   duration — the tempo-map integral over [clip.startBeat, atBeat]
+    ///   (m12-b; with the Phase-A trivial map this is exactly the old
+    ///   `splitBeats · 60 / tempoBPM`).
     /// - MIDI: notes partition by start beat — a note starting before the split
     ///   stays left (truncated to the split boundary if it overhangs); a note at
     ///   or after the split moves right, rebased to the new clip's start.
@@ -1615,7 +1981,7 @@ public final class ProjectStore {
         }
         let firstLength = relBeat
         let secondLength = clip.lengthBeats - relBeat
-        let splitSeconds = firstLength * 60.0 / transport.tempoBPM
+        let splitSeconds = transport.tempoMap.seconds(from: clip.startBeat, to: atBeat)
 
         // Partition MIDI notes (nil for audio clips stays nil on both sides).
         var firstNotes: [MIDINote]?
@@ -1702,7 +2068,9 @@ public final class ProjectStore {
         let newStart = max(0, newStartBeat)
         let newLength = max(Self.minClipLengthBeats, newLengthBeats)
         let delta = newStart - oldStart  // > 0 trims the leading edge inward
-        let newOffset = max(0, clip.startOffsetSeconds + delta * 60.0 / transport.tempoBPM)
+        // Signed integral over the trimmed span (m12-b, design row 13).
+        let newOffset = max(0, clip.startOffsetSeconds
+            + transport.tempoMap.seconds(from: oldStart, to: newStart))
 
         var newNotes: [MIDINote]?
         if let notes = clip.notes {
@@ -1742,20 +2110,292 @@ public final class ProjectStore {
         return tracks[t].clips[c]
     }
 
-    /// Moves a clip to a new timeline start (clamped >= 0). Same-track only in
-    /// v0 — a cross-track move is additive later. Coalesces under
+    /// Moves a clip to a new timeline start (clamped >= 0), then RESOLVES any
+    /// overlap the move creates against ordinary same-track clips (m11-d). Same-
+    /// track only in v0 — a cross-track move is additive later. Coalesces under
     /// `clip.move:<clipId>` so a drag is one undo step.
+    ///
+    /// Overlap policy (v0, Logic-default — the settled invariant "no SILENT
+    /// overlap of ordinary same-track clips"): when the moved clip lands over an
+    /// ordinary same-track clip, the STATIONARY clip yields the overlapping
+    /// region using trim-window semantics (audio source offset advances, MIDI
+    /// notes drop/truncate at the new edge — the `trimClip` rules):
+    ///  - Covered head → the stationary clip's leading edge trims to the moved
+    ///    clip's right edge (it keeps its tail).
+    ///  - Covered tail OR a moved clip landing strictly inside → the stationary
+    ///    clip's trailing edge trims to the moved clip's left edge (it keeps its
+    ///    head — a single trim can't punch a hole, so the moved clip wins the
+    ///    whole region from its start onward).
+    ///  - Fully covered (or a remnant thinner than `minClipLengthBeats`) → the
+    ///    stationary clip is REMOVED.
+    /// Take-group / comp members are EXEMPT (the `requireNotCompMember`
+    /// precedent — their geometry is comp-managed). A previously-crossfaded clip
+    /// carries no special bookkeeping: the trim runs against CURRENT boundaries
+    /// and any surviving fades stay as plain per-clip fades. All of it rides the
+    /// move's single `performEdit`, so ONE undo restores everything. Returns the
+    /// moved clip plus the ids that were trimmed / removed.
     @discardableResult
-    public func moveClip(trackId: UUID, clipId: UUID, toStartBeat: Double) throws -> Clip {
+    public func moveClip(trackId: UUID, clipId: UUID, toStartBeat: Double) throws -> ClipMoveResult {
         let (t, c) = try locateClip(trackID: trackId, clipID: clipId)
         try requireNotCompMember(trackIndex: t, clipIndex: c)
         let newStart = max(0, toStartBeat)
-        let name = tracks[t].clips[c].name
+        let moved = tracks[t].clips[c]
+        let name = moved.name
+        let tempoMap = transport.tempoMap
+        let aStart = newStart
+        let aEnd = newStart + moved.lengthBeats
+        var trimmedIDs: [UUID] = []
+        var removedIDs: [UUID] = []
         performEdit("Move Clip '\(name)'", key: "clip.move:\(clipId.uuidString)") {
-            tracks[t].clips[c].startBeat = newStart
+            var rebuilt: [Clip] = []
+            rebuilt.reserveCapacity(tracks[t].clips.count)
+            for existing in tracks[t].clips {
+                if existing.id == clipId {
+                    var m = existing
+                    m.startBeat = newStart
+                    rebuilt.append(m)
+                    continue
+                }
+                // Comp members keep their existing guards — never trimmed here.
+                if existing.takeGroupID != nil { rebuilt.append(existing); continue }
+                let resolved = Self.resolveOverlap(
+                    stationary: existing, activeStart: aStart, activeEnd: aEnd, tempoMap: tempoMap)
+                if resolved.isEmpty {
+                    removedIDs.append(existing.id)
+                } else if resolved != [existing] {
+                    trimmedIDs.append(existing.id)
+                }
+                rebuilt.append(contentsOf: resolved)
+            }
+            tracks[t].clips = rebuilt
             engine?.tracksDidChange(tracks)
         }
-        return tracks[t].clips[c]
+        let final = tracks[t].clips.first { $0.id == clipId } ?? moved
+        return ClipMoveResult(clip: final, trimmedClipIDs: trimmedIDs, removedClipIDs: removedIDs)
+    }
+
+    /// Pure geometry (m11-d): rebuilds `clip` so its visible window becomes
+    /// `[newStart, newStart + newLength)`, advancing the audio source offset and
+    /// dropping/truncating MIDI notes EXACTLY as `trimClip` does — but WITHOUT
+    /// journaling, so the overlap-resolution and import paths can fold their
+    /// trims into the caller's single undo step. Returns nil when the remnant is
+    /// shorter than `minClipLengthBeats` (a sub-1/32-beat sliver — dropped so the
+    /// no-silent-overlap invariant can never leave a re-overlapping crumb).
+    static func clipTrimmedToWindow(_ clip: Clip, newStart: Double, newLength: Double,
+                                    tempoMap: TempoMap) -> Clip? {
+        guard newLength >= minClipLengthBeats else { return nil }
+        let start = max(0, newStart)
+        let delta = start - clip.startBeat  // > 0 trims the leading edge inward
+        // Signed integral over the covered span (m12-b, design row 15).
+        let newOffset = max(0, clip.startOffsetSeconds
+            + tempoMap.seconds(from: clip.startBeat, to: start))
+        var newNotes: [MIDINote]?
+        if let notes = clip.notes {
+            newNotes = notes.compactMap { note -> MIDINote? in
+                let shiftedStart = note.startBeat - delta
+                let shiftedEnd = shiftedStart + note.lengthBeats
+                guard shiftedEnd > 0, shiftedStart < newLength else { return nil }
+                let clampedStart = max(0, shiftedStart)
+                let clampedEnd = min(shiftedEnd, newLength)
+                let length = clampedEnd - clampedStart
+                guard length >= MIDINote.minLengthBeats else { return nil }
+                return MIDINote(id: note.id, pitch: note.pitch, velocity: note.velocity,
+                                startBeat: clampedStart, lengthBeats: length)
+            }
+        }
+        let (fin, fout) = clampedFades(fadeIn: clip.fadeInBeats, fadeOut: clip.fadeOutBeats, length: newLength)
+        return Clip(
+            id: clip.id, name: clip.name,
+            startBeat: start, lengthBeats: newLength,
+            audioFileURL: clip.audioFileURL, notes: newNotes,
+            isAIGenerated: clip.isAIGenerated,
+            startOffsetSeconds: newOffset, gainDb: clip.gainDb,
+            fadeInBeats: fin, fadeOutBeats: fout,
+            fadeInCurve: clip.fadeInCurve, fadeOutCurve: clip.fadeOutCurve,
+            stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
+            formantPreserve: clip.formantPreserve)
+    }
+
+    /// Resolves how one STATIONARY same-track clip must change so it no longer
+    /// silently overlaps the active window `[activeStart, activeEnd)` (m11-d).
+    /// Returns the clip(s) that replace it: the clip unchanged (no overlap),
+    /// edge-trimmed (partial overlap — head or tail), or none (fully covered, or
+    /// trimmed below `minClipLengthBeats` → removed). A move landing strictly
+    /// inside the stationary clip trims its tail (keeps its head) — a single trim
+    /// can't punch a hole, so the moved clip wins the whole region from its start
+    /// onward. Comp members are never passed here (the caller exempts them).
+    static func resolveOverlap(stationary: Clip, activeStart: Double, activeEnd: Double,
+                               tempoMap: TempoMap) -> [Clip] {
+        let sStart = stationary.startBeat
+        let sEnd = stationary.startBeat + stationary.lengthBeats
+        // Disjoint — touching at a shared edge counts as adjacent, not overlap.
+        guard activeStart < sEnd, activeEnd > sStart else { return [stationary] }
+        // The active window fully covers the stationary clip → remove it.
+        if activeStart <= sStart, activeEnd >= sEnd { return [] }
+        // Covers the head only → trim the leading edge to the active right edge.
+        if activeStart <= sStart {
+            return clipTrimmedToWindow(stationary, newStart: activeEnd,
+                                       newLength: sEnd - activeEnd, tempoMap: tempoMap).map { [$0] } ?? []
+        }
+        // Covers the tail, or lands strictly inside → trim the trailing edge to
+        // the active left edge (keep the stationary clip's head).
+        return clipTrimmedToWindow(stationary, newStart: sStart,
+                                   newLength: activeStart - sStart, tempoMap: tempoMap).map { [$0] } ?? []
+    }
+
+    /// Crossfades two AUDIO clips on ONE track (m11-d) — the explicit tool that
+    /// SANCTIONS an overlap (the only legitimate same-track overlap; every other
+    /// path upholds `moveClip`'s no-silent-overlap invariant). The two ids may be
+    /// passed in either order; the earlier-starting clip is A (left), the later
+    /// is B (right). Preconditions (else `crossfadeNotEligible`): both clips on
+    /// the given track, both audio, `lengthBeats > 0`, and the clips ADJACENT
+    /// (B.start == A.end) OR already overlapping by `≤ lengthBeats`.
+    ///
+    /// Geometry:
+    ///  - Adjacent → the overlap is CREATED of exactly `lengthBeats`, split
+    ///    symmetrically: A's right edge extends `lengthBeats/2` into its trailing
+    ///    source material and B's left edge extends `lengthBeats/2` into its
+    ///    leading source material — keeping both clips' content time-aligned in
+    ///    the overlap, so the equal-power sum reconstructs the original signal.
+    ///    If either side lacks the source audio to extend, throws
+    ///    `crossfadeNeedsMaterial` NAMING that clip/side.
+    ///  - Already overlapping (a legacy pre-fix overlap) → the EXISTING overlap
+    ///    is KEPT (no extension, no material needed) and the fades are applied
+    ///    over it — "normalize the overlap".
+    ///
+    /// Then A gets a fade-OUT and B a fade-IN, each `FadeCurve.equalPower` (which
+    /// sums to unit power — Model.swift) spanning EXACTLY the final overlap; each
+    /// clip's OTHER fade is preserved (only trimmed if it would collide with the
+    /// overlap fade — the overlap fade is authoritative). ONE undo step
+    /// ("Crossfade Clips"). Comp members are rejected (`requireNotCompMember`).
+    /// Returns the two clips (left/right) and the final overlap length.
+    @discardableResult
+    public func crossfadeClips(trackId: UUID, clipId: UUID, otherClipId: UUID,
+                               lengthBeats: Double) throws -> CrossfadeResult {
+        guard let ti = tracks.firstIndex(where: { $0.id == trackId }) else {
+            throw ProjectError.trackNotFound(trackId)
+        }
+        guard clipId != otherClipId else {
+            throw ProjectError.crossfadeNotEligible(
+                "clipId and otherClipId are the same clip — a crossfade needs two different clips")
+        }
+        guard let i1 = tracks[ti].clips.firstIndex(where: { $0.id == clipId }) else {
+            throw ProjectError.clipNotFound(clipId)
+        }
+        guard let i2 = tracks[ti].clips.firstIndex(where: { $0.id == otherClipId }) else {
+            throw ProjectError.clipNotFound(otherClipId)
+        }
+        try requireNotCompMember(trackIndex: ti, clipIndex: i1)
+        try requireNotCompMember(trackIndex: ti, clipIndex: i2)
+        let c1 = tracks[ti].clips[i1]
+        let c2 = tracks[ti].clips[i2]
+        guard !c1.isMIDI else {
+            throw ProjectError.crossfadeNotEligible(
+                "clip '\(c1.name)' is a MIDI clip — crossfades apply to audio clips only")
+        }
+        guard !c2.isMIDI else {
+            throw ProjectError.crossfadeNotEligible(
+                "clip '\(c2.name)' is a MIDI clip — crossfades apply to audio clips only")
+        }
+        guard lengthBeats > 0 else {
+            throw ProjectError.crossfadeNotEligible(
+                "crossfade length must be greater than 0 beats")
+        }
+        guard c1.startBeat != c2.startBeat else {
+            throw ProjectError.crossfadeNotEligible(
+                "both clips start at the same beat — a crossfade needs an earlier clip and a later one")
+        }
+        let (left, right) = c1.startBeat < c2.startBeat ? (c1, c2) : (c2, c1)
+
+        let tempoMap = transport.tempoMap
+        let eps = 1e-6
+        let seam = left.startBeat + left.lengthBeats
+        let currentOverlap = seam - right.startBeat
+        if currentOverlap < -eps {
+            throw ProjectError.crossfadeNotEligible(
+                "clips '\(left.name)' and '\(right.name)' are not adjacent — there is a "
+                + String(format: "%.3f", -currentOverlap)
+                + "-beat gap between them; move them together (clip.move) before crossfading")
+        }
+        if currentOverlap > lengthBeats + eps {
+            throw ProjectError.crossfadeNotEligible(
+                "clips '\(left.name)' and '\(right.name)' already overlap by "
+                + String(format: "%.3f", currentOverlap)
+                + " beats — more than the requested \(lengthBeats)-beat crossfade; pass a longer length")
+        }
+
+        var newLeft = left
+        var newRight = right
+        let finalOverlap: Double
+        if currentOverlap > eps {
+            // Legacy-overlap normalization: keep the existing overlap, only fade.
+            finalOverlap = currentOverlap
+        } else {
+            // Adjacent: create the overlap symmetrically, extending both source
+            // windows so the overlap stays time-aligned.
+            let half = lengthBeats / 2
+            // Right clip head extension: reveal `half` beats of pre-roll
+            // material — the integral over the extension span AT the seam
+            // (m12-b, design row 16).
+            let rightHeadSource = tempoMap.seconds(from: right.startBeat - half,
+                                                   to: right.startBeat) / right.stretchRatio
+            guard right.startOffsetSeconds + eps >= rightHeadSource else {
+                throw ProjectError.crossfadeNeedsMaterial(
+                    "clip '\(right.name)' has no audio before its start to extend into the crossfade "
+                    + "— use a shorter crossfade, or move the clips so they already overlap")
+            }
+            guard right.startBeat + eps >= half else {
+                throw ProjectError.crossfadeNeedsMaterial(
+                    "clip '\(right.name)' is too close to the start of the timeline to fit a "
+                    + "\(lengthBeats)-beat crossfade")
+            }
+            // Left clip tail extension: needs source material past its window end.
+            guard let media else { throw ProjectError.mediaServiceUnavailable }
+            guard let url = left.audioFileURL else {
+                throw ProjectError.crossfadeNeedsMaterial(
+                    "clip '\(left.name)' has no source file to extend past its end into the crossfade")
+            }
+            let fileDuration = try media.audioFileInfo(at: url).durationSeconds
+            // Left tail extension: the integral over [seam, seam + half]
+            // (m12-b, design row 17).
+            let leftTailSource = tempoMap.seconds(from: seam, to: seam + half)
+                / left.stretchRatio
+            let leftWindowEnd = left.startOffsetSeconds + left.sourceWindowSeconds(tempoMap: tempoMap)
+            guard leftWindowEnd + leftTailSource <= fileDuration + eps else {
+                throw ProjectError.crossfadeNeedsMaterial(
+                    "clip '\(left.name)' has no audio past its end to extend into the crossfade "
+                    + "— use a shorter crossfade, or move the clips so they already overlap")
+            }
+            newLeft.lengthBeats = left.lengthBeats + half
+            newRight.startBeat = right.startBeat - half
+            newRight.lengthBeats = right.lengthBeats + half
+            newRight.startOffsetSeconds = max(0, right.startOffsetSeconds - rightHeadSource)
+            finalOverlap = lengthBeats
+        }
+
+        // Complementary equal-power fades spanning EXACTLY the overlap; the
+        // overlap fade wins, the opposite fade yields only on a collision.
+        let outLen = min(finalOverlap, newLeft.lengthBeats)
+        newLeft.fadeOutBeats = outLen
+        newLeft.fadeOutCurve = .equalPower
+        newLeft.fadeInBeats = min(newLeft.fadeInBeats, max(0, newLeft.lengthBeats - outLen))
+        let inLen = min(finalOverlap, newRight.lengthBeats)
+        newRight.fadeInBeats = inLen
+        newRight.fadeInCurve = .equalPower
+        newRight.fadeOutBeats = min(newRight.fadeOutBeats, max(0, newRight.lengthBeats - inLen))
+
+        performEdit("Crossfade Clips") {
+            if let i = tracks[ti].clips.firstIndex(where: { $0.id == newLeft.id }) {
+                tracks[ti].clips[i] = newLeft
+            }
+            if let j = tracks[ti].clips.firstIndex(where: { $0.id == newRight.id }) {
+                tracks[ti].clips[j] = newRight
+            }
+            engine?.tracksDidChange(tracks)
+        }
+        let finalLeft = tracks[ti].clips.first { $0.id == newLeft.id } ?? newLeft
+        let finalRight = tracks[ti].clips.first { $0.id == newRight.id } ?? newRight
+        return CrossfadeResult(left: finalLeft, right: finalRight, overlapBeats: finalOverlap)
     }
 
     /// Sets a clip's per-clip gain, clamped to `Clip.gainDbRange`. Coalesces
@@ -1923,7 +2563,10 @@ public final class ProjectStore {
             guard let lastEndBeat = clipEnds.max() else {
                 throw ProjectError.nothingToRender
             }
-            let contentSeconds = (lastEndBeat - startBeat) * 60.0 / transport.tempoBPM
+            // Default window = the integral over [startBeat, lastEndBeat]
+            // (m12-b, design row 18 family — the mixdown's audio-only legacy
+            // default; the shared broader default is `renderWindowSeconds`).
+            let contentSeconds = transport.tempoMap.seconds(from: startBeat, to: lastEndBeat)
             guard contentSeconds > 0 else { throw ProjectError.nothingToRender }
             duration = contentSeconds + 0.5  // release/reverb tail headroom
         }
@@ -1931,7 +2574,7 @@ public final class ProjectStore {
         let url = Self.mixdownDestination(from: path)
         let info = try await engine.renderMixdown(
             tracks: tracks,
-            tempoBPM: transport.tempoBPM,
+            tempoMap: transport.tempoMap,
             masterVolume: masterVolume,
             fromBeat: startBeat,
             durationSeconds: duration,
@@ -2014,8 +2657,13 @@ public final class ProjectStore {
         t.isPlaying = false
         t.isRecording = false
         t.positionBeats = 0
+        // Phase-B staging seam — replaced by tempo.setMap in Phase C: the
+        // session map override is NON-undoable, so it is normalized out here
+        // (installing/clearing it never registers as an edit and journal
+        // entries never carry it) and preserved across restore below.
+        t.sessionTempoMapOverride = nil
         return EditState(tracks: tracks, masterVolume: masterVolume, transport: t,
-                         grooveTemplates: grooveTemplates)
+                         grooveTemplates: grooveTemplates, markers: markers)
     }
 
     /// The single funnel every undoable mutation passes through. Captures the
@@ -2053,7 +2701,14 @@ public final class ProjectStore {
         // Compute what changed BEFORE overwriting, to target engine intents.
         let tracksChanged = tracks != target.tracks
         let masterChanged = masterVolume != target.masterVolume
-        let tempoChanged = transport.tempoBPM != target.transport.tempoBPM
+        // Map compare (m12-b, design row 36). Both sides are compared in
+        // captured form (session override normalized out — target already is,
+        // by captureEditState), so an installed Phase-B staging map neither
+        // masks a real scalar-tempo undo nor forces a spurious restart on
+        // every unrelated undo.
+        var liveCaptured = transport
+        liveCaptured.sessionTempoMapOverride = nil
+        let tempoChanged = liveCaptured.tempoMap != target.transport.tempoMap
         let loopChanged = transport.isLoopEnabled != target.transport.isLoopEnabled
             || transport.loopStartBeat != target.transport.loopStartBeat
             || transport.loopEndBeat != target.transport.loopEndBeat
@@ -2065,11 +2720,17 @@ public final class ProjectStore {
         // Groove palette rides the same snapshot (no engine involvement — grooves
         // are pure data applied at quantize time).
         grooveTemplates = target.grooveTemplates
+        // Markers ride the same snapshot (pure data — no engine, no media); the
+        // captured list is already beat-sorted, so undo/redo preserve the invariant.
+        markers = target.markers
         // Keep the live playhead + play state; restore every persistable field.
         var restored = target.transport
         restored.isPlaying = transport.isPlaying
         restored.positionBeats = transport.positionBeats
         restored.isRecording = false
+        // Phase-B staging seam — replaced by tempo.setMap in Phase C: the
+        // session map override survives undo/redo untouched (non-undoable).
+        restored.sessionTempoMapOverride = transport.sessionTempoMapOverride
         transport = restored
 
         for id in vanishedTrackIDs {
@@ -2139,7 +2800,8 @@ public final class ProjectStore {
             tracks: persistedTracks,
             masterVolume: masterVolume,
             mediaRefs: plan.refs,
-            grooveTemplates: grooveTemplates
+            grooveTemplates: grooveTemplates,
+            markers: markers
         )
         do {
             try ProjectBundle.write(document: document, plan: plan, to: bundleURL)
@@ -2190,7 +2852,7 @@ public final class ProjectStore {
         deleteRecoveryBundle()
         // A manual save also supersedes the crash-recovery snapshot (crash-b): the
         // work is now on disk where the user put it — never resurrect it as "unsaved".
-        crashRecovery.invalidate()
+        invalidateCrashRecovery()
 
         return ProjectSaveResult(
             path: bundleURL.path,
@@ -2269,6 +2931,7 @@ public final class ProjectStore {
         transport = TransportState()
         masterVolume = 1
         grooveTemplates = []
+        markers = []
         masterMeter = .silence
         trackMeters = [:]
         lastRecordingError = nil
@@ -2285,7 +2948,7 @@ public final class ProjectStore {
         projectPath = nil
         isDirty = false
         // A deliberate new session supersedes any crash-recovery snapshot (crash-b).
-        crashRecovery.invalidate()
+        invalidateCrashRecovery()
     }
 
     /// The single state-swap primitive shared by open. Rebuilds runtime state
@@ -2303,6 +2966,9 @@ public final class ProjectStore {
         masterVolume = runtime.masterVolume
         // Groove palette (M5 iii-g) restores directly — no media to resolve.
         grooveTemplates = document.grooveTemplates ?? []
+        // Markers (m11-c) restore directly — no media; re-sort so a hand-edited
+        // (unsorted) file still lands beat-sorted (the store's invariant).
+        markers = Self.markersSortedByBeat(document.markers ?? [])
 
         masterMeter = .silence
         trackMeters = [:]
@@ -2321,7 +2987,7 @@ public final class ProjectStore {
         projectPath = bundleURL.path
         isDirty = false
         // Opening another project supersedes any crash-recovery snapshot (crash-b).
-        crashRecovery.invalidate()
+        invalidateCrashRecovery()
         return runtime.warnings
     }
 
@@ -2417,7 +3083,8 @@ public final class ProjectStore {
             tracks: persistedTracks,
             masterVolume: masterVolume,
             mediaRefs: refs,
-            grooveTemplates: grooveTemplates
+            grooveTemplates: grooveTemplates,
+            markers: markers
         )
     }
 
@@ -2513,7 +3180,7 @@ public final class ProjectStore {
     @discardableResult
     public func recoverFromAutosave(accept: Bool) throws -> RecoveryOutcome {
         guard accept else {
-            crashRecovery.invalidate()
+            invalidateCrashRecovery()
             return .discarded
         }
         guard crashRecovery.recoveryStatus().available else {
@@ -2525,7 +3192,7 @@ public final class ProjectStore {
         let (document, sourcePath) = try crashRecovery.readRecoveredDocument()
         if transport.isPlaying { stop() }
         let warnings = applyRecoveredState(document, sourcePath: sourcePath)
-        crashRecovery.invalidate()
+        invalidateCrashRecovery()
         return .recovered(warnings: warnings)
     }
 
@@ -2545,6 +3212,7 @@ public final class ProjectStore {
         transport = runtime.transport
         masterVolume = runtime.masterVolume
         grooveTemplates = document.grooveTemplates ?? []
+        markers = Self.markersSortedByBeat(document.markers ?? [])
 
         masterMeter = .silence
         trackMeters = [:]
@@ -2568,7 +3236,24 @@ public final class ProjectStore {
     /// `recoveryStatus().available`.
     @discardableResult
     public func beginCrashDetection() -> Bool {
-        crashRecovery.beginSession()
+        let crashed = crashRecovery.beginSession()
+        // The single legitimate arm point for `recoveryOfferAvailable` (m10-s):
+        // `recoveryStatus()` also confirms a readable manifest+bundle, so a bare
+        // lock never over-arms and this stays false when there is nothing to offer.
+        recoveryOfferAvailable = crashRecovery.recoveryStatus().available
+        return crashed
+    }
+
+    /// Drops the rolling crash-recovery snapshot AND lowers the observable offer
+    /// flag together (m10-s). Every `crashRecovery.invalidate()` site — the
+    /// `recoverFromAutosave` accept/discard branches and the save/new/open
+    /// transitions that supersede a snapshot — routes through here so
+    /// `recoveryOfferAvailable` can never drift out of lockstep with the on-disk
+    /// availability. The flag never re-arms outside `beginCrashDetection`, so once
+    /// this lowers it a later autosave can't resurrect the offer.
+    private func invalidateCrashRecovery() {
+        crashRecovery.invalidate()
+        recoveryOfferAvailable = false
     }
 
     /// Clean-exit path: removes this session's lock so the next launch sees no
@@ -2673,6 +3358,7 @@ public final class ProjectStore {
             tracks: tracks.map(Self.snapshotResolved),
             masterVolume: masterVolume,
             grooveTemplates: grooveTemplates,
+            markers: markers,
             meters: SessionMeters(
                 master: masterMeter,
                 tracks: Dictionary(uniqueKeysWithValues: trackMeters.map { ($0.key.uuidString, $0.value) })
@@ -2720,7 +3406,10 @@ public final class ProjectStore {
                 last = now
                 let seconds = Double(elapsed.components.seconds)
                     + Double(elapsed.components.attoseconds) / 1e18
-                self.transport.positionBeats += seconds * self.transport.tempoBPM / 60.0
+                // Inverse integral from the current position (m12-b, design
+                // row 19) — advances correctly across future map boundaries.
+                self.transport.positionBeats = self.transport.tempoMap.beat(
+                    from: self.transport.positionBeats, elapsedSeconds: seconds)
             }
         }
     }

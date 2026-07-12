@@ -46,6 +46,13 @@ private func textReply(_ text: String) -> CopilotReply {
     CopilotReply(blocks: [.text(text)], stopReason: .endTurn, provider: "fake")
 }
 
+/// A mutable main-actor slot the m10-m resolver reads, so a test can change the
+/// engine's round budget BETWEEN turns and prove the next turn honors the new value.
+@MainActor final class RoundCapBox {
+    var cap: Int
+    init(_ cap: Int) { self.cap = cap }
+}
+
 /// Builds a helper single-tool-call reply.
 private func toolReply(id: String = UUID().uuidString, name: String, args: [String: JSONValue]) -> CopilotReply {
     let json = (try? JSONEncoder().encode(JSONValue.object(args))) ?? Data("{}".utf8)
@@ -73,7 +80,9 @@ struct CopilotEngineTests {
             dispatch: { await router.handle($0) },
             provider: { provider },
             catalog: CopilotToolCatalog.v1,
-            maxToolRounds: maxToolRounds,
+            // m10-m: the round budget is now an injected resolver; a fixed Int caller
+            // migrates mechanically to a constant closure.
+            maxToolRounds: { maxToolRounds },
             historyLimit: historyLimit
         )
         return (engine, store, provider)
@@ -259,6 +268,92 @@ struct CopilotEngineTests {
             return false
         }
         #expect(limitEntry)
+    }
+
+    // MARK: - Configurable round budget (beta m10-m)
+
+    /// The limit-message text for a turn that exhausted its budget, or nil.
+    private func limitFailureText(_ engine: CopilotEngine) -> String? {
+        for entry in engine.transcript {
+            if case .failure(let text) = entry.kind, text.contains("tool-round limit") { return text }
+        }
+        return nil
+    }
+
+    @Test("a cap of 1 stops after exactly one round, with the limit message showing 1")
+    func capOfOneStopsAfterOneRound() async throws {
+        let alwaysToolCall = toolReply(name: "project_snapshot", args: [:])
+        let (engine, _, provider) = makeEngine(
+            scripted: [alwaysToolCall, alwaysToolCall, alwaysToolCall],
+            maxToolRounds: 1)
+        _ = try engine.send("keep going")
+        await engine.waitForTurn()
+
+        #expect(engine.status == .done)
+        #expect(await provider.requests.count == 1)   // exactly one provider round
+        let text = try #require(limitFailureText(engine))
+        #expect(text.contains("tool-round limit (1)"))
+    }
+
+    @Test("a resolver change between turns takes effect on the next turn")
+    func resolverChangeBetweenTurns() async throws {
+        let box = RoundCapBox(1)
+        let alwaysToolCall = toolReply(name: "project_snapshot", args: [:])
+        let store = ProjectStore()
+        let router = CommandRouter(store: store)
+        let provider = FakeCopilotProvider(Array(repeating: alwaysToolCall, count: 6))
+        let engine = CopilotEngine(
+            store: store,
+            dispatch: { await router.handle($0) },
+            provider: { provider },
+            maxToolRounds: { box.cap })
+
+        _ = try engine.send("first")
+        await engine.waitForTurn()
+        let afterFirst = await provider.requests.count
+        #expect(afterFirst == 1)   // cap 1 → one round this turn
+
+        box.cap = 2                // change the setting between turns
+        _ = try engine.send("second")
+        await engine.waitForTurn()
+        let afterSecond = await provider.requests.count
+        #expect(afterSecond - afterFirst == 2)   // cap 2 now → two rounds this turn
+    }
+
+    @Test("a per-turn override outranks the resolver for that turn only")
+    func overrideOutranksResolver() async throws {
+        let alwaysToolCall = toolReply(name: "project_snapshot", args: [:])
+        let store = ProjectStore()
+        let router = CommandRouter(store: store)
+        let provider = FakeCopilotProvider(Array(repeating: alwaysToolCall, count: 6))
+        // Resolver would allow 8 rounds; the override pins this one turn to 1.
+        let engine = CopilotEngine(
+            store: store,
+            dispatch: { await router.handle($0) },
+            provider: { provider },
+            maxToolRounds: { 8 })
+
+        _ = try engine.send("just once", maxRoundsOverride: 1)
+        await engine.waitForTurn()
+
+        #expect(await provider.requests.count == 1)
+        let text = try #require(limitFailureText(engine))
+        #expect(text.contains("tool-round limit (1)"))
+    }
+
+    @Test("an override below the floor clamps up to 1 (never zero rounds)")
+    func overrideClampsLowerBound() async throws {
+        let alwaysToolCall = toolReply(name: "project_snapshot", args: [:])
+        let (engine, _, provider) = makeEngine(
+            scripted: [alwaysToolCall, alwaysToolCall], maxToolRounds: 8)
+
+        _ = try engine.send("zero please", maxRoundsOverride: 0)
+        await engine.waitForTurn()
+
+        // clamp(0) == 1 → exactly one round ran (a turn that can never think is useless).
+        #expect(await provider.requests.count == 1)
+        let text = try #require(limitFailureText(engine))
+        #expect(text.contains("tool-round limit (1)"))
     }
 
     @Test("send while a turn is running throws")

@@ -132,17 +132,37 @@ public struct GrooveTemplate: Identifiable, Codable, Sendable, Equatable {
                               cycleBeats: cycle, offsets: [0, offbeat])
     }
 
-    /// Deterministic UUID for a built-in name (FNV-1a over the bytes) so the same
-    /// preset carries a stable id across calls and processes — built-ins aren't
+    /// Deterministic, collision-free UUID for a built-in name so the same preset
+    /// carries a stable id across calls and processes — built-ins aren't
     /// persisted, but a stable id keeps `groove.list` output consistent and lets
     /// clients cache by id if they choose.
+    ///
+    /// Two INDEPENDENT 64-bit FNV-1a passes over distinctly-salted strings fill
+    /// the high (bytes 0–7) and low (bytes 8–15) halves, giving a full 128-bit
+    /// value that's a pure function of the name — no RNG, no `Foundation.UUID()`.
+    /// This replaces the original single-pass byte fold (`bytes[i % 16] ^= …`),
+    /// which collapsed the ENTIRE `swing8:54…75` family onto one id (the last two
+    /// digit bytes landed in the same two fold slots for every percentage), so
+    /// `groove.list` served duplicate built-in ids. Version/variant bits are set
+    /// to RFC-4122 v4 so the string is a well-formed UUID (cosmetic — the value is
+    /// derived, not random).
     private static func builtinID(_ name: String) -> UUID {
-        var hash: UInt64 = 0xcbf29ce484222325
-        var bytes = [UInt8](repeating: 0, count: 16)
-        for (i, byte) in Array("groove.builtin:\(name)".utf8).enumerated() {
-            hash = (hash ^ UInt64(byte)) &* 0x100000001b3
-            bytes[i % 16] ^= UInt8(truncatingIfNeeded: hash >> UInt64((i % 8) * 8))
+        func fnv1a(_ string: String) -> UInt64 {
+            var hash: UInt64 = 0xcbf29ce484222325
+            for byte in string.utf8 {
+                hash = (hash ^ UInt64(byte)) &* 0x100000001b3
+            }
+            return hash
         }
+        let hi = fnv1a("groove.builtin.hi:\(name)")
+        let lo = fnv1a("groove.builtin.lo:\(name)")
+        var bytes = [UInt8](repeating: 0, count: 16)
+        for i in 0..<8 {
+            bytes[i]     = UInt8(truncatingIfNeeded: hi >> UInt64(56 - i * 8))
+            bytes[8 + i] = UInt8(truncatingIfNeeded: lo >> UInt64(56 - i * 8))
+        }
+        bytes[6] = (bytes[6] & 0x0F) | 0x40   // RFC-4122 version 4
+        bytes[8] = (bytes[8] & 0x3F) | 0x80   // RFC-4122 variant
         return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3],
                            bytes[4], bytes[5], bytes[6], bytes[7],
                            bytes[8], bytes[9], bytes[10], bytes[11],

@@ -5,12 +5,13 @@ import Foundation
 /// never the render thread (fed by the ~30 Hz capture-ring drain).
 ///
 /// Time base: the SAME `PlaybackAnchor` the audio writer uses —
-/// `beat(hostTime) = anchorBeats + Δticks · ticksToSeconds · tempo/60` with
-/// signed tick math (mirror of `derivedBeats`). Count-in inherits for free:
-/// the anchor is already count-in-delayed, and note-ons with beat < the
-/// anchor beat are dropped (mirror of the writer's pre-anchor trim; their
-/// offs drop with them as orphans). Tempo is fixed per take (`setTempo`
-/// refuses mid-take), so drift is impossible by construction.
+/// `beat(hostTime) = tempoMap.beat(from: anchorBeats, elapsedSeconds:
+/// Δticks · ticksToSeconds)` with signed tick math (mirror of
+/// `derivedBeats`; m12-b design row 54). Count-in inherits for free: the
+/// anchor is already count-in-delayed, and note-ons with beat < the anchor
+/// beat are dropped (mirror of the writer's pre-anchor trim; their offs drop
+/// with them as orphans). The map is fixed per take (`setTempo` refuses
+/// mid-take), so drift is impossible by construction.
 ///
 /// Pairing: channel-agnostic pitch → open note map. A note-off closes the
 /// open pitch; orphan offs are dropped; a RETRIGGER of an open pitch closes
@@ -20,17 +21,17 @@ import Foundation
 final class MIDICaptureSession {
     private let anchorHostTime: UInt64
     private let anchorBeats: Double
-    private let tempoBPM: Double
+    private let tempoMap: TempoMap
     private let ticksToSeconds: Double
     /// pitch → (ABSOLUTE onset beat, velocity) for currently open notes.
     private var openNotes: [UInt8: (onBeat: Double, velocity: Int)] = [:]
     private var closed: [MIDINote] = []
     private var dropped = false
 
-    init(anchorHostTime: UInt64, anchorBeats: Double, tempoBPM: Double, ticksToSeconds: Double) {
+    init(anchorHostTime: UInt64, anchorBeats: Double, tempoMap: TempoMap, ticksToSeconds: Double) {
         self.anchorHostTime = anchorHostTime
         self.anchorBeats = anchorBeats
-        self.tempoBPM = tempoBPM
+        self.tempoMap = tempoMap
         self.ticksToSeconds = ticksToSeconds
     }
 
@@ -77,12 +78,13 @@ final class MIDICaptureSession {
         )
     }
 
-    /// Signed host-tick → absolute beat math (mirror of `derivedBeats`).
+    /// Signed host-tick → absolute beat math (mirror of `derivedBeats`):
+    /// the map's inverse integral from the take anchor (m12-b, row 54).
     private func beat(forHostTime hostTime: UInt64) -> Double {
         let seconds = hostTime >= anchorHostTime
             ? Double(hostTime - anchorHostTime) * ticksToSeconds
             : -Double(anchorHostTime - hostTime) * ticksToSeconds
-        return anchorBeats + seconds * tempoBPM / 60.0
+        return tempoMap.beat(from: anchorBeats, elapsedSeconds: seconds)
     }
 
     /// Clip-relative note; `MIDINote.init` clamps length to ≥ 0.001 beats.

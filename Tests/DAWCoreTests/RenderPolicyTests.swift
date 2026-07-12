@@ -38,13 +38,13 @@ final class FakeBufferEngine: AudioEngineControlling {
                         completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {}
     func stopRecording() {}
 
-    func renderMixdown(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
     }
 
-    func renderOffline(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                        fromBeat: Double, durationSeconds: Double,
                        forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         if let renderError { throw renderError }
@@ -109,7 +109,7 @@ struct RenderPolicyTests {
         let legacy = FakeRecordingEngine()
         await #expect(throws: ProjectError.self) {
             _ = try await legacy.renderOffline(
-                tracks: [], tempoBPM: 120, masterVolume: 1,
+                tracks: [], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
                 fromBeat: 0, durationSeconds: 1, forcedCompensationTargets: nil)
         }
         let targets = await legacy.offlineCompensationTargets(tracks: [])

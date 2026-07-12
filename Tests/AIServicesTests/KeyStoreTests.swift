@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Testing
 @testable import AIServices
 
@@ -145,4 +146,111 @@ struct KeyStoreTests {
         // Delete of an absent item is a clean no-op, not a throw.
         try store.removeKey(for: .suno)
     }
+
+    // MARK: - m10-t: non-value presence probe + presence-based status
+
+    /// The default `keyPresence` (used by in-memory/fake stores) mirrors `key(for:)`
+    /// presence without any prompt/block risk.
+    @Test("default keyPresence falls back to presence-from-value for in-memory stores")
+    func defaultPresenceFallback() {
+        let store = InMemoryKeyStore([.openai: "sk-x"])
+        #expect(store.keyPresence(for: .openai) == .present)
+        #expect(store.keyPresence(for: .anthropic) == .absent)
+    }
+
+    /// The REAL `KeychainKeyStore.keyPresence` code path (success / not-found
+    /// branches) exercised headless: same-process items don't prompt on macOS, and
+    /// an isolated namespace keeps it away from real DAW Pro keys.
+    @Test("KeychainKeyStore.keyPresence round-trip (isolated namespace, no prompt in-process)")
+    func keychainPresenceRoundTrip() throws {
+        let service = "com.dawpro.api-keys.test.\(UUID().uuidString)"
+        let store = KeychainKeyStore(service: service)
+        defer { try? store.removeKey(for: .suno) }
+
+        #expect(store.keyPresence(for: .suno) == .absent)
+        try store.setKey("sk-live-presence-abcd", for: .suno)
+        #expect(store.keyPresence(for: .suno) == .present)
+        try store.removeKey(for: .suno)
+        #expect(store.keyPresence(for: .suno) == .absent)
+    }
+
+    @Test("providerStatuses maps presence → source/configured/consentRequired")
+    func statusesFromPresence() {
+        let store = RecordingKeyStore([
+            .anthropic: .present,
+            .openai: .interactionRequired,
+            .suno: .absent,
+        ])
+        let statuses = providerStatuses(environment: [:], store: store)
+        let byId = Dictionary(uniqueKeysWithValues: statuses.map { ($0.provider, $0) })
+
+        #expect(byId["anthropic"]?.configured == true)
+        #expect(byId["anthropic"]?.source == .keychain)
+        #expect(byId["anthropic"]?.consentRequired == false)
+        // Stored-but-consent-gated stays configured=true / source=keychain — only the
+        // additive flag changes, so existing consumers are unaffected.
+        #expect(byId["openai"]?.configured == true)
+        #expect(byId["openai"]?.source == .keychain)
+        #expect(byId["openai"]?.consentRequired == true)
+        #expect(byId["suno"]?.configured == false)
+        #expect(byId["suno"]?.source == APIKeySource.none)
+        #expect(byId["suno"]?.consentRequired == false)
+    }
+
+    /// The m10-t WIRE-LIMB regression pin: the status report must resolve through
+    /// the presence probe and never the value-reading `key(for:)` (which could trip
+    /// the consent prompt for a headless caller).
+    @Test("providerStatuses never uses the value-reading key(for:) path")
+    func statusesNeverValueRead() {
+        let store = RecordingKeyStore([.anthropic: .present, .openai: .interactionRequired])
+        _ = providerStatuses(environment: [:], store: store)
+        #expect(!store.didValueRead)
+    }
+
+    @Test("providerStatuses: env still wins and does not probe the store")
+    func statusesEnvWins() {
+        let store = RecordingKeyStore([.anthropic: .interactionRequired])
+        let statuses = providerStatuses(environment: ["ANTHROPIC_API_KEY": "sk-env"], store: store)
+        let anthropic = statuses.first { $0.provider == "anthropic" }!
+        #expect(anthropic.source == .env)
+        #expect(anthropic.configured == true)
+        #expect(anthropic.consentRequired == false)
+        // Env short-circuits BEFORE any store access — the forbidden value-read path
+        // (and any probe) is untouched.
+        #expect(!store.didValueRead)
+    }
+
+    @Test("AIProviderStatus.consentRequired defaults false (additive, back-compatible)")
+    func consentDefaultsFalse() {
+        let status = AIProviderStatus(provider: "openai", configured: true, source: .keychain)
+        #expect(status.consentRequired == false)
+        // Encodes the field but never a value/length.
+        let json = String(data: try! JSONEncoder().encode(status), encoding: .utf8)!
+        #expect(json.contains("consentRequired"))
+        #expect(!json.contains("\"length\""))
+    }
+}
+
+/// A fake store that returns a scripted `KeyPresence` and RECORDS whether the
+/// forbidden value-reading `key(for:)` path was ever hit — so the suite can pin
+/// that the status surface resolves via presence only (m10-t). Sendable via a lock
+/// (no `@unchecked`).
+private final class RecordingKeyStore: APIKeyStoring, Sendable {
+    private let box: OSAllocatedUnfairLock<(presence: [AIProviderID: KeyPresence], valueRead: Bool)>
+
+    init(_ presence: [AIProviderID: KeyPresence]) {
+        box = OSAllocatedUnfairLock(initialState: (presence, false))
+    }
+
+    func key(for provider: AIProviderID) -> String? {
+        box.withLock { $0.valueRead = true }
+        return nil
+    }
+    func setKey(_ key: String, for provider: AIProviderID) throws {}
+    func removeKey(for provider: AIProviderID) throws {}
+    func keyPresence(for provider: AIProviderID) -> KeyPresence {
+        box.withLock { $0.presence[provider] ?? .absent }
+    }
+
+    var didValueRead: Bool { box.withLock { $0.valueRead } }
 }

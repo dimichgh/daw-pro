@@ -15,9 +15,14 @@ public enum HostedAUEndpoint: Hashable, Sendable {
 
 /// Owns hosted Audio Unit instrument lifecycle for a set of tracks: discovery,
 /// async instantiation, format/state/resource setup, and save-time state
-/// capture. All AU property access happens here, on the main actor; the
-/// render-safe product is a `HostedAUInstrument` whose render path touches
-/// only its two captured blocks.
+/// capture. All AU property access happens here, on the main actor — with ONE
+/// documented exception (m10-n §5.3): the `.soundBank` bank load runs on a
+/// DETACHED task against an AU that is exclusively owned by its prepare
+/// (allocated, never yet published to any graph), because
+/// `kAUSamplerProperty_LoadInstrument` is calling-thread-synchronous and a
+/// GB-scale SF2 would stall the main actor. The render-safe product is a
+/// `HostedAUInstrument` whose render path touches only its two captured
+/// blocks.
 ///
 /// Every AU call runs inside a timeout-raced Task so a stalled (v3 XPC)
 /// component can never block the main actor: on timeout the track fails
@@ -37,12 +42,25 @@ public final class AUHostRegistry {
 
     private var instruments: [UUID: HostedAUInstrument] = [:]
 
-    /// Idempotency identity of one prepare attempt.
+    /// Idempotency identity of one prepare attempt. `soundBankAddress` is the
+    /// STRUCTURAL bank identity for `.soundBank` tracks (nil for plain AU
+    /// hosting/effects) — `displayName` is excluded by construction (LAW L8).
     struct PrepareKey: Equatable {
         let component: AudioUnitComponentID
         let sampleRate: Double
         let stateData: Data?
+        let soundBankAddress: SoundBankConfig.Address?
     }
+
+    /// The Apple AUSampler music device that hosts every `.soundBank` track
+    /// (m10-n) — an implementation detail SYNTHESIZED here, never read from
+    /// (or written to) the track's `audioUnit` config.
+    static let auSamplerComponent = AudioUnitComponentID(
+        type: "aumu", subType: "samp", manufacturer: "appl")
+
+    /// Resolves the `"gm"` sentinel / bank paths for the pre-instantiation
+    /// existence check (default directories — resolution never touches them).
+    private static let soundBankLibrary = SoundBankLibrary()
 
     /// Key of the last attempt per track — successful or not — so repeated
     /// `tracksDidChange` passes never re-instantiate an unchanged (or
@@ -112,10 +130,12 @@ public final class AUHostRegistry {
 
     // MARK: - Lifecycle
 
-    /// Full async setup for one track's Audio Unit: instantiate →
+    /// Full async setup for one track's hosted instrument (`.audioUnit`, or
+    /// `.soundBank` hosting AUSampler — m10-n): instantiate →
     /// maximumFramesPerSlice → setFormat → apply saved state →
-    /// allocateRenderResources → wrap in `HostedAUInstrument`. Idempotent per
-    /// (trackID, componentID, sampleRate, stateData identity); serialized per
+    /// allocateRenderResources → (soundBank only) detached bank load → wrap
+    /// in `HostedAUInstrument`. Idempotent per `prepareKey` identity
+    /// (component, sampleRate, stateData, bank address); serialized per
     /// track; the whole sequence races `timeout`.
     public func prepare(track: Track, sampleRate: Double,
                         timeout: Duration = .seconds(10)) async {
@@ -243,7 +263,8 @@ public final class AUHostRegistry {
                             sampleRate: Double) -> Bool {
         effectAttempted[effectID] != PrepareKey(component: config.component,
                                                 sampleRate: sampleRate,
-                                                stateData: config.stateData)
+                                                stateData: config.stateData,
+                                                soundBankAddress: nil)
     }
 
     /// Every effect id this registry holds any state for.
@@ -255,7 +276,7 @@ public final class AUHostRegistry {
                                       sampleRate: Double, maxFrames: Int,
                                       timeout: Duration) async {
         let key = PrepareKey(component: config.component, sampleRate: sampleRate,
-                             stateData: config.stateData)
+                             stateData: config.stateData, soundBankAddress: nil)
         guard effectAttempted[effectID] != key else { return }  // idempotent per identity
 
         // A different config replaces the old effect wholesale.
@@ -347,19 +368,37 @@ public final class AUHostRegistry {
 
     // MARK: - Internals
 
-    private static func prepareKey(track: Track, sampleRate: Double) -> PrepareKey? {
-        guard let config = track.instrument?.audioUnit else { return nil }
-        return PrepareKey(component: config.component, sampleRate: sampleRate,
-                          stateData: config.stateData)
+    /// Structural prepare identity for one track's hosted instrument, for
+    /// BOTH hosted kinds (m10-n §5.5 — the ONE keying authority, shared with
+    /// `AudioEngine.syncAudioUnitInstruments` so the engine's desired-map and
+    /// this registry's idempotency check can never drift): `.audioUnit` keys
+    /// component + stateData; `.soundBank` keys the synthesized AUSampler
+    /// component + the bank ADDRESS, stateData ALWAYS nil (LAW L3) and
+    /// displayName excluded by construction (LAW L8). nil when there is
+    /// nothing to instantiate (componentless/configless → the `.missing`
+    /// placeholder branch; built-in kinds).
+    static func prepareKey(track: Track, sampleRate: Double) -> PrepareKey? {
+        let descriptor = track.instrument ?? .default
+        switch descriptor.kind {
+        case .audioUnit:
+            guard let config = descriptor.audioUnit else { return nil }
+            return PrepareKey(component: config.component, sampleRate: sampleRate,
+                              stateData: config.stateData, soundBankAddress: nil)
+        case .soundBank:
+            guard let config = descriptor.soundBank else { return nil }
+            return PrepareKey(component: Self.auSamplerComponent, sampleRate: sampleRate,
+                              stateData: nil, soundBankAddress: config.address)
+        case .testTone, .polySynth, .sampler:
+            return nil
+        }
     }
 
     private func performPrepare(track: Track, sampleRate: Double, timeout: Duration) async {
         let id = track.id
         let descriptor = track.instrument ?? .default
-        guard descriptor.kind == .audioUnit else { return }
-        guard let config = descriptor.audioUnit,
-              let key = Self.prepareKey(track: track, sampleRate: sampleRate) else {
-            // Legal descriptor with no component selected → missing placeholder.
+        guard descriptor.kind == .audioUnit || descriptor.kind == .soundBank else { return }
+        guard let key = Self.prepareKey(track: track, sampleRate: sampleRate) else {
+            // Legal descriptor with no component/bank selected → missing placeholder.
             attempted[id] = nil
             status[id] = .missing
             return
@@ -370,11 +409,30 @@ public final class AUHostRegistry {
         if instruments[id] != nil { releaseInstrument(forTrack: id) }
         attempted[id] = key
 
-        // Component lookup never instantiates: unknown → .missing.
+        // `.soundBank`: resolve the bank file BEFORE instantiating (the
+        // lookup-never-instantiates spirit) — a missing bank fails readably
+        // with no AU ever created, and the track renders honest silence,
+        // never a built-in fallback (LAW L5).
+        let soundBank: (config: SoundBankConfig, url: URL)?
+        if descriptor.kind == .soundBank, let config = descriptor.soundBank {
+            do {
+                soundBank = (config, try Self.soundBankLibrary.resolve(config.source))
+            } catch {
+                status[id] = .failed(Self.reason(error))
+                return
+            }
+        } else {
+            soundBank = nil
+        }
+
+        // Component lookup never instantiates: unknown → .missing. For
+        // `.soundBank` the description is SYNTHESIZED from
+        // `auSamplerComponent` (already folded into `key.component`) — never
+        // read from the track's `audioUnit` config.
         var componentDescription = AudioComponentDescription()
-        componentDescription.componentType = Self.fourCC(config.component.type)
-        componentDescription.componentSubType = Self.fourCC(config.component.subType)
-        componentDescription.componentManufacturer = Self.fourCC(config.component.manufacturer)
+        componentDescription.componentType = Self.fourCC(key.component.type)
+        componentDescription.componentSubType = Self.fourCC(key.component.subType)
+        componentDescription.componentManufacturer = Self.fourCC(key.component.manufacturer)
         let matches = AVAudioUnitComponentManager.shared()
             .components(matching: componentDescription)
         guard let match = matches.first else {
@@ -407,8 +465,11 @@ public final class AUHostRegistry {
             try au.outputBusses[0].setFormat(format)
 
             // Restore order contract: state BEFORE allocateRenderResources
-            // (maxFrames → format → state → allocate).
-            if let stateData = config.stateData {
+            // (maxFrames → format → state → allocate). `key.stateData` is
+            // ALWAYS nil for `.soundBank` (LAW L3 — `SoundBankConfig` is the
+            // single source of truth, `fullStateForDocument` is never
+            // captured or restored for that kind).
+            if let stateData = key.stateData {
                 do {
                     let plist = try PropertyListSerialization.propertyList(
                         from: stateData, options: [], format: nil)
@@ -433,11 +494,34 @@ public final class AUHostRegistry {
                 throw EngineError.renderFailed(
                     "output bus allocated at \(allocatedRate) Hz, wanted \(sampleRate) Hz")
             }
+            // `.soundBank`: load the bank program AFTER allocate (an
+            // uninitialized-AU load would hide its cost inside the main-actor
+            // AudioUnitInitialize) and BEFORE wrapping/publishing — still
+            // inside this timeout race, on an instance nobody else can see
+            // (m10-n §5.3). Failure lands the existing `.failed` outcome.
+            if let soundBank {
+                do {
+                    try await Self.loadSoundBank(into: au, config: soundBank.config,
+                                                 resolvedURL: soundBank.url)
+                } catch {
+                    au.deallocateRenderResources()
+                    throw error
+                }
+            }
             return try HostedAUInstrument(au: au, sampleRate: sampleRate)
         }
 
         switch outcome {
         case .value(let instrument):
+            if let soundBank {
+                // R7 reload hook (§5.8): T6 measured that render-resource
+                // reallocation drops AUSampler's loaded instrument, so a rate
+                // renegotiation must re-apply the bank before the next pull.
+                instrument.reloadAfterRenegotiation = { au in
+                    Self.reloadSoundBankAfterRenegotiation(
+                        au: au, config: soundBank.config, resolvedURL: soundBank.url)
+                }
+            }
             instruments[id] = instrument
             status[id] = .ready
         case .error(let error):
@@ -445,6 +529,92 @@ public final class AUHostRegistry {
         case .timedOut:
             status[id] = .failed(
                 "Audio Unit preparation timed out after \(timeout) — component may be stalled")
+        }
+    }
+
+    /// Loads one SF2/DLS program into a freshly allocated AUSampler (m10-n
+    /// §5.3). Called from the timeout-raced prepare closure; the AU is
+    /// EXCLUSIVELY owned here — allocated, never yet published to any graph,
+    /// so no render pulls it and no other code holds it.
+    ///
+    /// Threading: `kAUSamplerProperty_LoadInstrument` on an INITIALIZED AU
+    /// loads synchronously on the calling thread (TN2283), and a GB-scale
+    /// SF2 can block for seconds — so the call runs on a DETACHED task
+    /// (LAW L2), never on the main actor. v2 CoreAudio property calls are
+    /// safe from any single thread; the `@unchecked Sendable` box is the
+    /// sanctioned pre-publish-exclusive crossing (the
+    /// `HostedAUInstrument: @unchecked Sendable` precedent). A timed-out
+    /// prepare abandons the detached task harmlessly: it finishes against an
+    /// AU that was never published and dies by ARC.
+    private static func loadSoundBank(into au: AUAudioUnit, config: SoundBankConfig,
+                                      resolvedURL: URL) async throws {
+        guard let bridge = au as? AUAudioUnitV2Bridge else {
+            // All-v2 machine today; if Apple ever ships samp as v3 this fails
+            // readably instead of hosting a half-configured sampler.
+            throw EngineError.renderFailed("AUSampler did not expose a v2 handle — cannot load bank")
+        }
+        struct UnitBox: @unchecked Sendable { let unit: AudioUnit }  // pre-publish exclusive (§5.3a)
+        let box = UnitBox(unit: bridge.audioUnit)
+        let path = resolvedURL.path
+        let msb = UInt8(clamping: config.bankMSB)
+        let lsb = UInt8(clamping: config.bankLSB)
+        let program = UInt8(clamping: config.program)
+
+        let status: OSStatus = await Task.detached(priority: .userInitiated) {
+            Self.setLoadInstrumentProperty(unit: box.unit, path: path,
+                                           bankMSB: msb, bankLSB: lsb, program: program)
+        }.value
+
+        guard status == noErr else {
+            throw EngineError.renderFailed(
+                "sound bank load failed (OSStatus \(status)) — \(path), program \(program), bank \(msb)/\(lsb)")
+        }
+    }
+
+    /// The raw `kAUSamplerProperty_LoadInstrument` write, shared by the
+    /// detached prepare-time load and the R7 post-renegotiation re-load.
+    /// `nonisolated`: pure C-API call, runs on whatever thread owns the AU
+    /// at that moment (detached task pre-publish; main actor for R7).
+    private nonisolated static func setLoadInstrumentProperty(
+        unit: AudioUnit, path: String,
+        bankMSB: UInt8, bankLSB: UInt8, program: UInt8
+    ) -> OSStatus {
+        let url = URL(fileURLWithPath: path) as CFURL
+        return withExtendedLifetime(url) {  // R6: the CFURL must outlive the call
+            var data = AUSamplerInstrumentData(
+                fileURL: Unmanaged.passUnretained(url),
+                instrumentType: UInt8(kInstrumentType_SF2Preset),  // == DLSPreset == 1: ONE path (R5)
+                bankMSB: bankMSB, bankLSB: bankLSB, presetID: program)
+            return AudioUnitSetProperty(unit, kAUSamplerProperty_LoadInstrument,
+                                        kAudioUnitScope_Global, 0, &data,
+                                        UInt32(MemoryLayout<AUSamplerInstrumentData>.size))
+        }
+    }
+
+    /// R7 (m10-n §5.8) — synchronous bank RE-load after a rate renegotiation.
+    /// MEASURED NECESSITY (T6, 2026-07-11): `deallocateRenderResources` →
+    /// `allocateRenderResources` DROPS AUSampler's loaded instrument — the
+    /// renegotiated sampler reverted to the factory default (sine) preset,
+    /// byte-identical output to an unloaded instance. Runs synchronously on
+    /// the main actor INSIDE `HostedAUInstrument.prepare`'s already
+    /// synchronous, bounded, logged renegotiation path: a transient
+    /// wrong-timbre window (async reload) would violate LAW L5's honesty —
+    /// for the rare registry-rate ≠ graph-rate recovery path, a bounded
+    /// stall is the lesser evil (the NORMAL prepare path stays detached,
+    /// LAW L2). Failure logs and leaves the default preset — the same
+    /// degrade-with-stderr contract as a failed renegotiation itself.
+    private nonisolated static func reloadSoundBankAfterRenegotiation(
+        au: AUAudioUnit, config: SoundBankConfig, resolvedURL: URL
+    ) {
+        guard let bridge = au as? AUAudioUnitV2Bridge else { return }
+        let status = setLoadInstrumentProperty(
+            unit: bridge.audioUnit, path: resolvedURL.path,
+            bankMSB: UInt8(clamping: config.bankMSB),
+            bankLSB: UInt8(clamping: config.bankLSB),
+            program: UInt8(clamping: config.program))
+        if status != noErr {
+            FileHandle.standardError.write(Data(
+                "AUHostRegistry: sound bank re-load after rate renegotiation failed (OSStatus \(status)) — instrument may render the factory default preset\n".utf8))
         }
     }
 

@@ -129,12 +129,12 @@ struct AutomationFXParamTests {
         // Build carries the tracks; a schedule with ONLY effect lanes builds.
         let schedule = AutomationSchedule.build(
             volumeLane: nil, panLane: nil, effectParamLanes: specs,
-            fromBeat: 0, tempoBPM: 120, sampleRate: 48_000, generation: 1, mode: .offline)
+            fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: 48_000, generation: 1, mode: .offline)
         #expect(schedule?.effectParamTracks.count == 2)
         #expect(schedule?.volumePoints.count == 0)
         #expect(AutomationSchedule.build(
             volumeLane: nil, panLane: nil, effectParamLanes: [],
-            fromBeat: 0, tempoBPM: 120, sampleRate: 48_000,
+            fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: 48_000,
             generation: 1, mode: .offline) == nil)
     }
 
@@ -160,7 +160,7 @@ struct AutomationFXParamTests {
                 points: [AutomationPoint(beat: 0, value: 0),
                          AutomationPoint(beat: 4, value: 1)])])
         let audio = try OfflineRenderer(sampleRate: Self.sampleRate).render(
-            tracks: [track], tempoBPM: 120, fromBeat: 0, durationSeconds: 2.0)
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 2.0)
         #expect(audio.frameCount == 96_000)
         let out = audio.channelData[0]
 
@@ -213,7 +213,7 @@ struct AutomationFXParamTests {
                 points: [AutomationPoint(beat: 0, value: 0, curve: .hold),
                          AutomationPoint(beat: 2, value: 1, curve: .hold)])])
         let renderer = OfflineRenderer(sampleRate: Self.sampleRate)
-        let audio = try renderer.render(tracks: [track], tempoBPM: 120, durationSeconds: 1.5)
+        let audio = try renderer.render(tracks: [track], tempoMap: TempoMap(constantBPM: 120), durationSeconds: 1.5)
         let out = audio.channelData[0]
 
         var dryDiff: Float = 0
@@ -230,7 +230,7 @@ struct AutomationFXParamTests {
         #expect(lateEchoPeak > 0.1)      // ≈ 0.8³ · 0.5 recirculation surfaces after the step
 
         // Determinism: the automated bounce is bit-identical run-to-run.
-        let again = try renderer.render(tracks: [track], tempoBPM: 120, durationSeconds: 1.5)
+        let again = try renderer.render(tracks: [track], tempoMap: TempoMap(constantBPM: 120), durationSeconds: 1.5)
         let diffs = bitDiffCount(audio, again)
         print("[measured] determinism: \(diffs) differing bit patterns across two bounces "
               + "of \(audio.frameCount) × 2 samples")
@@ -255,15 +255,15 @@ struct AutomationFXParamTests {
         }
         let renderer = OfflineRenderer(sampleRate: Self.sampleRate)
         let plain = try renderer.render(
-            tracks: [track(effects: [], automation: [])], tempoBPM: 120, durationSeconds: 1.0)
+            tracks: [track(effects: [], automation: [])], tempoMap: TempoMap(constantBPM: 120), durationSeconds: 1.0)
         let bypassed = try renderer.render(
             tracks: [track(effects: [EffectDescriptor(id: fxID, kind: .gain, isBypassed: true)],
                            automation: [lane])],
-            tempoBPM: 120, durationSeconds: 1.0)
+            tempoMap: TempoMap(constantBPM: 120), durationSeconds: 1.0)
         let active = try renderer.render(
             tracks: [track(effects: [EffectDescriptor(id: fxID, kind: .gain)],
                            automation: [lane])],
-            tempoBPM: 120, durationSeconds: 1.0)
+            tempoMap: TempoMap(constantBPM: 120), durationSeconds: 1.0)
         let bypassDiffs = bitDiffCount(plain, bypassed)
         let settled = active.channelData[0][10_000]
         print("[measured] bypassed-effect lane: \(bypassDiffs) differing bit patterns vs "
@@ -294,7 +294,7 @@ struct AutomationFXParamTests {
         let (engine, graph) = try makeGraph(tracks: [audio, inst])
         try engine.start()
         graph.applyParameters(tracks: [audio, inst])
-        graph.scheduleAll(fromBeat: 0, tempoBPM: 120)
+        graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
         graph.startAllPlayers(at: nil)
         let midiRenderer = try #require(graph.instrumentRenderer(forTrack: inst.id))
         let midiBefore = try #require(midiRenderer.currentSchedule)

@@ -56,21 +56,22 @@ public final class PanelLayoutStore {
     //
     // These ranges are deliberately CONSERVATIVE (beta m10-d gate): the reachable
     // extremes must not visibly break at the window size the app actually runs at.
-    // The track-header row does not yet priority-shrink (fixed-width meter + M/S/A
-    // chips), and the arrange chrome is not yet scroll/shrink-adaptive, so a very
-    // small WINDOW can still overflow at an extreme value — that graceful
-    // adaptivity is roadmap item m10-j. Until then the ranges keep every reachable
-    // value honest at the ~1080×760+ window the app opens at.
+    // The track-header row does not fully priority-shrink (fixed-width meter + M/S/A
+    // chips). As of m10-j the WINDOW has a measured floor (`WindowFloor`) and the
+    // arrange track area SCROLLS as one unit rather than overflowing, so a small
+    // window scrolls instead of pushing chrome off-frame — the ranges + the floor +
+    // the shared scroll now hold the line together.
 
     /// Sidebar min = the header row's measured intrinsic floor (headless
     /// `fittingSize`: ~242 pt empty / ~267 pt with a clip-count, name truncated),
     /// tolerance-matched to the proven-clean 260 pt default; max leaves the timeline
-    /// room. Narrower than this needs the m10-j priority-shrink (meter/chip
-    /// truncation), not a wider clamp.
+    /// room. The soft name (m10-i) + the take-group automation fold (m10-j,
+    /// `TrackHeaderLayout`) keep the name readable at this floor without inflating it.
     public static let sidebarWidthRange: ClosedRange<CGFloat> = 250...420
-    /// Editor max (0.55) keeps the app header + arrange chrome + transport visible
-    /// at the ~760–873 pt content height the app runs at; min stays comfortably
-    /// usable. A SMALLER window can still overflow at 0.55 → m10-j.
+    /// Editor max (0.55) keeps the app header + arrange chrome + transport visible;
+    /// it is the WORST case the window's measured height floor (`WindowFloor`, m10-j)
+    /// is derived against, so the chrome stays visible at the floor with the editor
+    /// open. Min stays comfortably usable.
     public static let editorFractionRange: ClosedRange<CGFloat> = 0.30...0.55
     /// Row height spans a dense multitrack view up to a comfortable large row (this
     /// range was innocent — the earlier tall-editor overflow came from the fraction,

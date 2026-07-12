@@ -66,9 +66,13 @@ final class MIDIEventSchedule {
     ///    off-before-on tie rule is load-bearing: back-to-back same-pitch notes
     ///    ([0,1) then [1,2)) must deliver off(A) before on(B) at the shared
     ///    frame so the new voice isn't killed
-    static func buildEvents(clips: [Clip], fromBeat: Double, tempoBPM: Double,
+    static func buildEvents(clips: [Clip], fromBeat: Double, tempoMap: TempoMap,
                             sampleRate: Double) -> [ScheduledMIDIEvent] {
-        let secondsPerBeat = 60.0 / tempoBPM
+        // m12-b (design row 37): event frames are the tempo-map integral from
+        // the schedule anchor — `round(seconds(from: fromBeat, to: beat) ·
+        // rate)`. Trivial-map arithmetic is bit-identical to the old
+        // `(beat − fromBeat) · spb` (the map's same-segment fast path). The
+        // no-chase guard below is beat-domain and stays untouched.
         var events: [ScheduledMIDIEvent] = []
         var nextNoteID: UInt64 = 0
         for clip in clips where clip.isMIDI {
@@ -77,9 +81,9 @@ final class MIDIEventSchedule {
                 let onBeat = clip.startBeat + note.startBeat
                 guard onBeat >= fromBeat else { continue }                 // no chase v0
                 let offBeat = clip.startBeat + min(note.endBeat, clip.lengthBeats)
-                let on = Int64(((onBeat - fromBeat) * secondsPerBeat * sampleRate).rounded())
+                let on = Int64((tempoMap.seconds(from: fromBeat, to: onBeat) * sampleRate).rounded())
                 let off = max(on + 1,
-                              Int64(((offBeat - fromBeat) * secondsPerBeat * sampleRate).rounded()))
+                              Int64((tempoMap.seconds(from: fromBeat, to: offBeat) * sampleRate).rounded()))
                 let id = nextNoteID
                 nextNoteID += 1
                 let pitch = UInt8(clamping: note.pitch)

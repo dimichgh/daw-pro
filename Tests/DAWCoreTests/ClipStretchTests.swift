@@ -43,10 +43,10 @@ struct ClipStretchModelTests {
     func derivedWindow() {
         // 4 beats @120 BPM, ratio 1 → 2.0 s of source.
         let a = Clip(name: "a", lengthBeats: 4, audioFileURL: audioURL())
-        #expect(abs(a.sourceWindowSeconds(tempoBPM: 120) - 2.0) < 1e-12)
+        #expect(abs(a.sourceWindowSeconds(tempoMap: TempoMap(constantBPM: 120)) - 2.0) < 1e-12)
         // Same length at ratio 2 reads HALF the source window (1.0 s).
         let b = Clip(name: "b", lengthBeats: 4, audioFileURL: audioURL(), stretchRatio: 2)
-        #expect(abs(b.sourceWindowSeconds(tempoBPM: 120) - 1.0) < 1e-12)
+        #expect(abs(b.sourceWindowSeconds(tempoMap: TempoMap(constantBPM: 120)) - 1.0) < 1e-12)
     }
 
     // 3.
@@ -170,12 +170,12 @@ struct ProjectStoreClipStretchTests {
     @Test("stretchClip: doubling the length doubles the ratio and the source window is invariant")
     func stretchCompoundMath() throws {
         let (store, trackID, clip) = try storeWithAudioClip()
-        let windowBefore = clip.sourceWindowSeconds(tempoBPM: store.transport.tempoBPM)
+        let windowBefore = clip.sourceWindowSeconds(tempoMap: store.transport.tempoMap)
 
         let updated = try store.stretchClip(trackId: trackID, clipId: clip.id, toLengthBeats: 8)
         #expect(updated.lengthBeats == 8)
         #expect(abs(updated.stretchRatio - 2) < 1e-12)   // ratio 1 · (8/4)
-        let windowAfter = updated.sourceWindowSeconds(tempoBPM: store.transport.tempoBPM)
+        let windowAfter = updated.sourceWindowSeconds(tempoMap: store.transport.tempoMap)
         #expect(abs(windowAfter - windowBefore) < 1e-12) // source window held constant
 
         // Halving the (now 8-beat) clip back to 4 restores ratio 1.
@@ -188,13 +188,13 @@ struct ProjectStoreClipStretchTests {
     @Test("stretchClip: ratio clamp re-derives the length so the window survives")
     func stretchRatioClampReDerivesLength() throws {
         let (store, trackID, clip) = try storeWithAudioClip()  // length 4, ratio 1
-        let windowBefore = clip.sourceWindowSeconds(tempoBPM: store.transport.tempoBPM)
+        let windowBefore = clip.sourceWindowSeconds(tempoMap: store.transport.tempoMap)
 
         // toLength 20 → desired ratio 5, clamps to 4 → length re-derives to 16.
         let updated = try store.stretchClip(trackId: trackID, clipId: clip.id, toLengthBeats: 20)
         #expect(updated.stretchRatio == 4)
         #expect(abs(updated.lengthBeats - 16) < 1e-12)
-        let windowAfter = updated.sourceWindowSeconds(tempoBPM: store.transport.tempoBPM)
+        let windowAfter = updated.sourceWindowSeconds(tempoMap: store.transport.tempoMap)
         #expect(abs(windowAfter - windowBefore) < 1e-12)
     }
 

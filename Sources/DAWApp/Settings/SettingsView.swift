@@ -21,6 +21,16 @@ struct SettingsOverlay: View {
     var store: ProjectStore
     /// Deep-link to the below-the-fold Beta row (M9 beta capture affordance).
     var revealBeta: Bool = false
+    /// Deep-link to the Agent Connection section (beta m10-l capture / guide jump).
+    var revealConnection: Bool = false
+    /// The ACTUAL bound control-server port (beta m10-l) — what agents connect to,
+    /// so the URL row is honest even when a different port is pending in the field.
+    var controlPort: UInt16
+    /// The in-app port SETTING store (beta m10-l): the field reads/commits through it.
+    var portStore: ControlPortStore
+    /// The in-app Copilot round-budget SETTING store (beta m10-m): the Copilot
+    /// section's field reads/commits through it.
+    var copilotLimits: CopilotLimitsStore
     /// Replays the onboarding tour (M8 ob-b): resets it and starts from welcome.
     var onReplayTour: () -> Void
     var onClose: () -> Void
@@ -34,11 +44,17 @@ struct SettingsOverlay: View {
                 .onTapGesture(perform: onClose)
 
             SettingsPanel(model: model, store: store, revealBeta: revealBeta,
+                          revealConnection: revealConnection, controlPort: controlPort,
+                          portStore: portStore, copilotLimits: copilotLimits,
                           onReplayTour: onReplayTour, onClose: onClose)
                 .frame(width: 480)
                 .shadow(color: .black.opacity(0.5), radius: 30, y: 12)
         }
         .transition(.opacity)
+        // Re-run the non-blocking presence probe each time Settings opens (m10-t),
+        // so a key added/removed elsewhere shows up and a `.checking` row resolves.
+        // Cheap and off-main; a no-op for a capture's already-resolved in-memory model.
+        .task { await model.refresh() }
     }
 }
 
@@ -46,11 +62,17 @@ private struct SettingsPanel: View {
     var model: SettingsModel
     var store: ProjectStore
     var revealBeta: Bool
+    var revealConnection: Bool
+    var controlPort: UInt16
+    var portStore: ControlPortStore
+    var copilotLimits: CopilotLimitsStore
     var onReplayTour: () -> Void
     var onClose: () -> Void
 
     /// ScrollViewReader anchor for the Beta row (deep-link target).
     private static let betaAnchorID = "beta-feedback-row"
+    /// ScrollViewReader anchor for the Agent Connection section (deep-link target).
+    private static let connectionAnchorID = "agent-connection-row"
 
     /// Beta row: include the full project in the feedback bundle (default off —
     /// the privacy-lean default; on shares every track/clip/note + media paths).
@@ -63,6 +85,21 @@ private struct SettingsPanel: View {
     /// Inline per-provider action feedback (e.g. a Keychain error, or a saved
     /// confirmation). Keyed by provider raw value.
     @State private var notice: [String: String] = [:]
+
+    /// Agent Connection (beta m10-l): the port field's editable draft (seeded from
+    /// the persisted setting on appear), an inline error flag when a committed value
+    /// is invalid, and a brief "Copied" confirmation after the URL copy button.
+    @State private var portDraft: String = ""
+    @State private var portError = false
+    @State private var urlCopied = false
+    @FocusState private var portFieldFocused: Bool
+
+    /// Copilot (beta m10-m): the max-rounds field's editable draft (seeded from the
+    /// persisted setting on appear) and an inline error flag when a committed value is
+    /// out of range — the port field's validate/revert idiom, reused.
+    @State private var roundsDraft: String = ""
+    @State private var roundsError = false
+    @FocusState private var roundsFieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -85,18 +122,34 @@ private struct SettingsPanel: View {
                             // The copy never surfaces a key value (Keychain-stored).
                             .explainable(.settingsApiKey)
                         }
+                        copilotSection
+                            .explainable(.copilotMaxRounds)
                         tourRow
+                        connectionSection
+                            .id(Self.connectionAnchorID)
+                            .explainable(.settingsConnection)
                         betaRow
                             .id(Self.betaAnchorID)
                     }
                     .padding(18)
                 }
                 .frame(maxHeight: 520)
-                // Deep-link the below-the-fold Beta row into view (capture staging);
-                // normal opens leave revealBeta false and stay at the top.
-                .onAppear { if revealBeta { proxy.scrollTo(Self.betaAnchorID, anchor: .bottom) } }
+                // Deep-link a below-the-fold section into view (capture staging /
+                // guide jump); normal opens leave both flags false and stay at the top.
+                .onAppear {
+                    // Seed the port field from the persisted setting (blank shows
+                    // the "17600" placeholder).
+                    portDraft = portStore.configuredPort.map(String.init) ?? ""
+                    // Seed the Copilot rounds field (blank shows the "8" placeholder).
+                    roundsDraft = copilotLimits.configuredMaxRounds.map(String.init) ?? ""
+                    if revealBeta { proxy.scrollTo(Self.betaAnchorID, anchor: .bottom) }
+                    if revealConnection { proxy.scrollTo(Self.connectionAnchorID, anchor: .center) }
+                }
                 .onChange(of: revealBeta) { _, now in
                     if now { withAnimation { proxy.scrollTo(Self.betaAnchorID, anchor: .bottom) } }
+                }
+                .onChange(of: revealConnection) { _, now in
+                    if now { withAnimation { proxy.scrollTo(Self.connectionAnchorID, anchor: .center) } }
                 }
             }
         }
@@ -216,6 +269,246 @@ private struct SettingsPanel: View {
         .background(DAWTheme.panelRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(DAWTheme.hairline, lineWidth: 1))
+    }
+
+    /// The "Copilot" section (beta m10-m): governs the in-app AI Copilot's per-turn
+    /// budget. This configures an AI behavior, so the section icon carries a VIOLET
+    /// accent (docs/DESIGN-LANGUAGE.md Rule 3 — violet = AI). One validated field caps
+    /// how many tool ROUNDS a single reply may take (1–32); a change applies to the
+    /// Copilot's NEXT reply, with no restart (contrast the port field, which is
+    /// restart-scoped).
+    private var copilotSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(DAWTheme.ai)   // violet: this configures an AI behavior
+                Text("Copilot")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(DAWTheme.textPrimary)
+            }
+            Text("The Copilot works in rounds: each round it reads your project, thinks, then makes a batch of changes. This caps how many rounds one reply may take.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(DAWTheme.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+
+            copilotRoundsRow
+        }
+        .padding(12)
+        .background(DAWTheme.panelRaised)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(DAWTheme.hairline, lineWidth: 1))
+    }
+
+    /// The persisted max-rounds field: shows the current setting (or the "8"
+    /// placeholder), commits through the validator on Return or focus loss, flags an
+    /// inline error on out-of-range input, and reminds that a change applies to the
+    /// next reply. Mirrors `connectionPortRow` (the validate/revert idiom).
+    private var copilotRoundsRow: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Text("MAX ROUNDS")
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .tracking(1)
+                    .foregroundStyle(DAWTheme.textDim)
+                TextField("8", text: $roundsDraft)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(DAWTheme.textPrimary)
+                    .focused($roundsFieldFocused)
+                    .onSubmit(commitRounds)
+                    .onChange(of: roundsFieldFocused) { _, focused in
+                        if !focused { commitRounds() }   // commit on focus loss
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 6)
+                    .frame(width: 72)
+                    .background(DAWTheme.background)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6)
+                        .stroke(roundsError ? DAWTheme.clip.opacity(0.7) : DAWTheme.hairline, lineWidth: 1))
+                Spacer(minLength: 0)
+            }
+            if roundsError {
+                Text("Enter a whole number from 1 to 32.")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(DAWTheme.clip)
+            } else {
+                Text("Applies to the Copilot's next reply.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.textDim)
+            }
+        }
+    }
+
+    /// Commits the rounds field through the validator (beta m10-m). A valid value is
+    /// persisted (applies to the next reply); an empty field reverts to the current
+    /// setting without error (nothing persisted); any other invalid input flags the
+    /// inline error and persists nothing — the `commitPort` behavior, reused.
+    private func commitRounds() {
+        let trimmed = roundsDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            roundsError = false
+            roundsDraft = copilotLimits.configuredMaxRounds.map(String.init) ?? ""
+            return
+        }
+        if let committed = copilotLimits.commit(roundsDraft) {
+            roundsError = false
+            roundsDraft = String(committed)
+        } else {
+            roundsError = true
+        }
+    }
+
+    /// The "Agent Connection" section (beta m10-l): the control-plane hookup
+    /// surface a beginner reaches for when wiring an AI agent to the app. This IS
+    /// the AI-agent identity surface, so the section icon carries a VIOLET accent
+    /// (docs/DESIGN-LANGUAGE.md Rule 3 — violet = AI); cyan is reserved for the
+    /// earned "Copied" confirmation. Shows the LIVE bound URL (copyable), the
+    /// persisted port field (commit-validated; restart to apply), and — under an
+    /// env override — an honesty note so the field never looks broken.
+    private var connectionSection: some View {
+        let resolution = portStore.resolution()
+        let overridden = resolution.source == .environment
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(DAWTheme.ai)   // violet: this is the AI hookup surface
+                Text("Agent Connection")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(DAWTheme.textPrimary)
+            }
+            Text("AI agents control this app over a local connection. Copy the address into your agent or MCP setup; nothing leaves this Mac.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(DAWTheme.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+
+            connectionURLRow
+            connectionPortRow
+
+            if overridden {
+                HStack(spacing: 5) {
+                    Image(systemName: "lock.fill").font(.system(size: 9))
+                    Text("Overridden by DAW_CONTROL_PORT for this session.")
+                        .font(.system(size: 10, design: .monospaced))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundStyle(DAWTheme.textDim)
+            }
+        }
+        .padding(12)
+        .background(DAWTheme.panelRaised)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(DAWTheme.hairline, lineWidth: 1))
+    }
+
+    /// The live, copyable control URL — always the ACTUAL bound port so agents copy
+    /// what really works, even while a different port sits pending in the field.
+    private var connectionURLRow: some View {
+        HStack(spacing: 8) {
+            Text(controlURL)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(DAWTheme.textPrimary)
+                .textSelection(.enabled)
+                .padding(.horizontal, 8).padding(.vertical, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(DAWTheme.background)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(DAWTheme.hairline, lineWidth: 1))
+
+            Button(action: copyURL) {
+                HStack(spacing: 5) {
+                    Image(systemName: urlCopied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 9, weight: .bold))
+                    Text(urlCopied ? "COPIED" : "COPY")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .tracking(1)
+                }
+                // Cyan only on the EARNED confirmation; neutral otherwise.
+                .foregroundStyle(urlCopied ? DAWTheme.playback : DAWTheme.textPrimary)
+                .padding(.horizontal, 12).padding(.vertical, 7)
+                .background(urlCopied ? DAWTheme.playback.opacity(0.12) : DAWTheme.panel)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6)
+                    .stroke((urlCopied ? DAWTheme.playback : DAWTheme.textDim).opacity(0.5), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .help("Copy the control URL to the clipboard")
+        }
+    }
+
+    /// The persisted port field: shows the current setting (or the 17600
+    /// placeholder), commits through the validator on Return or focus loss, flags an
+    /// inline error on bad input, and reminds that a change applies next launch.
+    private var connectionPortRow: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Text("PORT")
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .tracking(1)
+                    .foregroundStyle(DAWTheme.textDim)
+                TextField("17600", text: $portDraft)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(DAWTheme.textPrimary)
+                    .focused($portFieldFocused)
+                    .onSubmit(commitPort)
+                    .onChange(of: portFieldFocused) { _, focused in
+                        if !focused { commitPort() }   // commit on focus loss
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 6)
+                    .frame(width: 96)
+                    .background(DAWTheme.background)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6)
+                        .stroke(portError ? DAWTheme.clip.opacity(0.7) : DAWTheme.hairline, lineWidth: 1))
+                Spacer(minLength: 0)
+            }
+            if portError {
+                Text("Enter a whole number from 1024 to 65535.")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(DAWTheme.clip)
+            } else {
+                Text("Takes effect the next time DAW Pro starts.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.textDim)
+            }
+        }
+    }
+
+    /// The live bound control URL (m10-l) — the real endpoint agents connect to.
+    private var controlURL: String { "ws://127.0.0.1:\(controlPort)" }
+
+    /// Copies the live control URL and shows a brief cyan "Copied" confirmation.
+    private func copyURL() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(controlURL, forType: .string)
+        withAnimation(.easeOut(duration: 0.15)) { urlCopied = true }
+        Task {
+            try? await Task.sleep(for: .seconds(1.6))
+            withAnimation(.easeOut(duration: 0.2)) { urlCopied = false }
+        }
+    }
+
+    /// Commits the port field through the validator (beta m10-l). A valid value is
+    /// persisted (applies next launch); an empty field reverts to the current
+    /// setting without error (nothing persisted); any other invalid input flags the
+    /// inline error and persists nothing. Deviation from the brief noted in the
+    /// report: empty reverts quietly rather than showing the error state.
+    private func commitPort() {
+        let trimmed = portDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            portError = false
+            portDraft = portStore.configuredPort.map(String.init) ?? ""
+            return
+        }
+        if let committed = portStore.commit(portDraft) {
+            portError = false
+            portDraft = String(committed)
+        } else {
+            portError = true
+        }
     }
 
     private var includeProjectToggle: some View {
@@ -348,15 +641,26 @@ private struct ProviderRowView: View {
 
     @ViewBuilder
     private var statusBadge: some View {
-        switch (row.kind, row.source, row.configured) {
-        case (.localKeyless, _, _):
+        switch row.kind {
+        case .localKeyless:
             badge("NO KEY NEEDED", systemImage: "checkmark.seal.fill", color: DAWTheme.signal)
-        case (.key, .env, _):
-            badge("CONFIGURED · ENV", systemImage: "lock.fill", color: DAWTheme.signal)
-        case (.key, .keychain, _):
-            badge("CONFIGURED · KEYCHAIN", systemImage: "key.fill", color: DAWTheme.signal)
-        default:
-            badge("NOT SET", systemImage: "circle", color: DAWTheme.textDim)
+        case .key:
+            switch row.status {
+            case .checking:
+                // Honest transient state while the non-blocking presence probe runs
+                // (m10-t) — never a premature "NOT SET".
+                badge("CHECKING…", systemImage: "hourglass", color: DAWTheme.textDim)
+            case .env:
+                badge("CONFIGURED · ENV", systemImage: "lock.fill", color: DAWTheme.signal)
+            case .keychain:
+                badge("CONFIGURED · KEYCHAIN", systemImage: "key.fill", color: DAWTheme.signal)
+            case .keychainConsentRequired:
+                // Still configured (a key IS stored), but macOS will ask on first
+                // use — the detail is spelled out in the entry area below.
+                badge("STORED · NEEDS ACCESS", systemImage: "key.fill", color: DAWTheme.signal)
+            case .notSet:
+                badge("NOT SET", systemImage: "circle", color: DAWTheme.textDim)
+            }
         }
     }
 
@@ -388,6 +692,17 @@ private struct ProviderRowView: View {
 
     private var entryRow: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if row.consentRequired {
+                // Truthful, beginner-readable (docs/DESIGN-LANGUAGE): the key IS
+                // there; macOS just guards reading it after a rebuild/identity change.
+                HStack(spacing: 6) {
+                    Image(systemName: "lock.shield").font(.system(size: 9))
+                    Text("Key stored — macOS will ask for access the first time it's used.")
+                        .font(.system(size: 10))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundStyle(DAWTheme.textDim)
+            }
             if let mask = row.savedMask {
                 Text("Saved this session: \(mask)")
                     .font(.system(size: 10, design: .monospaced))

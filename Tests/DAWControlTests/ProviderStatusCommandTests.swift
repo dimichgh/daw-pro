@@ -105,4 +105,43 @@ struct ProviderStatusCommandTests {
             ControlRequest(id: "1", command: "ai.providerStatus", params: ["unused": .bool(true)]))
         #expect(response.ok)
     }
+
+    /// m10-t wire limb: a stored-but-consent-gated keychain key reports through the
+    /// presence probe as configured=true source=keychain (existing meanings kept)
+    /// PLUS the additive `consentRequired=true` — and, crucially, promptly (the
+    /// probe never blocks the way the old value-reading path could).
+    @Test("a consent-gated keychain key reads configured=true source=keychain + consentRequired=true")
+    func consentGatedOverWire() async throws {
+        let store = PresenceControlStore([.anthropic: .interactionRequired, .openai: .present])
+        let router = makeRouter(store: store, environment: [:])
+
+        let response = await router.handle(ControlRequest(id: "1", command: "ai.providerStatus"))
+        #expect(response.ok)
+        let providers = response.result?["providers"]?.arrayValue ?? []
+        let byId: [String: JSONValue] = providers.reduce(into: [:]) { acc, item in
+            if let name = item["provider"]?.stringValue { acc[name] = item }
+        }
+
+        #expect(byId["anthropic"]?["configured"]?.boolValue == true)
+        #expect(byId["anthropic"]?["source"]?.stringValue == "keychain")
+        #expect(byId["anthropic"]?["consentRequired"]?.boolValue == true)
+
+        #expect(byId["openai"]?["configured"]?.boolValue == true)
+        #expect(byId["openai"]?["source"]?.stringValue == "keychain")
+        #expect(byId["openai"]?["consentRequired"]?.boolValue == false)
+
+        #expect(byId["suno"]?["configured"]?.boolValue == false)
+        #expect(byId["suno"]?["source"]?.stringValue == "none")
+    }
+}
+
+/// A fake store returning scripted presence for the wire-limb consent test — the
+/// value-reading `key(for:)` is never expected to be called by the status path.
+private struct PresenceControlStore: APIKeyStoring {
+    let presence: [AIProviderID: KeyPresence]
+    init(_ presence: [AIProviderID: KeyPresence]) { self.presence = presence }
+    func key(for provider: AIProviderID) -> String? { nil }
+    func setKey(_ key: String, for provider: AIProviderID) throws {}
+    func removeKey(for provider: AIProviderID) throws {}
+    func keyPresence(for provider: AIProviderID) -> KeyPresence { presence[provider] ?? .absent }
 }

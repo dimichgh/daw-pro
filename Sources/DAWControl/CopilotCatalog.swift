@@ -164,9 +164,9 @@ public enum CopilotToolCatalog {
     ]
 
     /// The versioned catalog of commands exposed to the Copilot. `v1` is the
-    /// initial 36-command allow-list (design §3): transport (6), track (7),
-    /// clip (9), take (2), mixer (1), render (2), ai (6), discovery (2),
-    /// edit (1).
+    /// curated allow-list (design §3), now 44 commands: transport (6),
+    /// marker (5, m11-c), track (7), clip (12), take (2), mixer (1), render (2),
+    /// ai (6), discovery (2), edit (1).
     public static let v1: [CopilotTool] = [
         // MARK: transport (6)
 
@@ -182,12 +182,14 @@ public enum CopilotToolCatalog {
         ),
         CopilotTool(
             command: "transport.seek",
-            description: "Move the playhead to an absolute position in beats (quarter notes) from the start of the timeline.",
+            description: "Move the playhead to an absolute position in beats (quarter notes) from the start of the timeline, OR to a named session marker. Pass `beats` for an absolute jump, or `marker` (a marker's id or exact name from marker_list) to jump to that section — e.g. \"go to the second chorus\": marker_list, then seek with that marker. Pass exactly one of the two.",
             schema: schemaObject([
                 ("beats", numberSchema(
-                    "Absolute position in beats (quarter notes) from timeline start. Must be >= 0.",
+                    "Absolute position in beats (quarter notes) from timeline start. Must be >= 0. Omit when passing `marker`.",
                     minimum: 0)),
-            ], required: ["beats"])
+                ("marker", stringSchema(
+                    "A session marker's id or exact name (from marker_list) to seek to. Omit when passing `beats`; passing both is rejected.")),
+            ])
         ),
         CopilotTool(
             command: "transport.setTempo",
@@ -217,6 +219,45 @@ public enum CopilotToolCatalog {
                     "Number of bars of count-in clicks before recording starts, 0-4. Omit to keep the current value.",
                     minimum: 0, maximum: 4)),
             ], required: ["enabled"])
+        ),
+
+        // MARK: marker (5)
+
+        CopilotTool(
+            command: "marker.add",
+            description: "Add a named song-section marker at a beat, so you (and the musician) can jump there later with transport.seek. Use it to anchor sections like \"Verse 1\", \"Chorus\", \"Drop\". Reversible with edit.undo. Returns the created marker {id, name, beat}.",
+            schema: schemaObject([
+                ("name", stringSchema("Marker name, e.g. \"Chorus\". Omit for an auto name like \"Marker 3\".")),
+                ("beat", numberSchema("Absolute timeline beat (quarter notes) to place the marker. Must be >= 0.", minimum: 0)),
+            ], required: ["beat"])
+        ),
+        CopilotTool(
+            command: "marker.remove",
+            description: "Remove a session marker by id. Markers are lightweight anchors — this only deletes the marker, never any audio or notes. Reversible with edit.undo. Returns {removed: true}.",
+            schema: schemaObject([
+                ("markerId", stringSchema("Id of the marker to remove, from marker.list / project.snapshot.")),
+            ], required: ["markerId"])
+        ),
+        CopilotTool(
+            command: "marker.rename",
+            description: "Rename an existing session marker. An empty or unchanged name is a no-op (no undo step). Reversible with edit.undo. Returns the updated marker.",
+            schema: schemaObject([
+                ("markerId", stringSchema("Id of the marker to rename, from marker.list / project.snapshot.")),
+                ("name", stringSchema("New marker name (non-empty).")),
+            ], required: ["markerId", "name"])
+        ),
+        CopilotTool(
+            command: "marker.move",
+            description: "Move a session marker to a new beat (a live scrub coalesces into one undo step). Reversible with edit.undo. Returns the moved marker.",
+            schema: schemaObject([
+                ("markerId", stringSchema("Id of the marker to move, from marker.list / project.snapshot.")),
+                ("beat", numberSchema("New absolute timeline beat (quarter notes). Clamped to >= 0.", minimum: 0)),
+            ], required: ["markerId", "beat"])
+        ),
+        CopilotTool(
+            command: "marker.list",
+            description: "List every session marker, sorted by beat — {markers: [{id, name, beat}]}. Use it to find a section's beat before transport.seek (e.g. \"drop at the second chorus\": list markers, pick the right one, seek to it).",
+            schema: schemaObject([])
         ),
 
         // MARK: track (7)
@@ -302,7 +343,7 @@ public enum CopilotToolCatalog {
             ], required: ["trackId"])
         ),
 
-        // MARK: clip (9)
+        // MARK: clip (12)
 
         CopilotTool(
             command: "clip.addAudio",
@@ -389,6 +430,16 @@ public enum CopilotToolCatalog {
             ], required: ["trackId", "clipId", "gainDb"])
         ),
         CopilotTool(
+            command: "clip.crossfade",
+            description: "Crossfade two ADJACENT (or already-overlapping) audio clips on one track: creates a sanctioned overlap of the given beats with complementary equal-power fades so one clip fades out as the next fades in, with no click or volume bump. Pass the two clip ids in any order.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track that owns both clips, from project.snapshot.")),
+                ("clipId", stringSchema("Id of one of the two audio clips to crossfade.")),
+                ("otherClipId", stringSchema("Id of the other audio clip — must be adjacent to or overlapping the first, on the same track.")),
+                ("lengthBeats", numberSchema("Crossfade length in beats. Must be > 0. The clips must be adjacent, or already overlap by no more than this.")),
+            ], required: ["trackId", "clipId", "otherClipId", "lengthBeats"])
+        ),
+        CopilotTool(
             command: "clip.stretchToLength",
             description: "Time-stretch an AUDIO clip so it fills a new timeline length in beats while reading the same source material (the drag-the-stretch-handle move). Audio clips only.",
             schema: schemaObject([
@@ -396,6 +447,24 @@ public enum CopilotToolCatalog {
                 ("clipId", stringSchema("Id of the AUDIO clip to stretch, from project.snapshot.")),
                 ("lengthBeats", numberSchema("New timeline length in beats. The clip's stretch ratio scales to match so it reads the same source window.")),
             ], required: ["trackId", "clipId", "lengthBeats"])
+        ),
+        CopilotTool(
+            command: "clip.deleteTimeRange",
+            description: "Cut a beat range out of a MIDI clip and close the gap (the 'delete a bar' edit): notes after the range move earlier, notes starting inside it are removed, and a note held from before keeps its head. Beats are CLIP-LOCAL (same as clip.setNotes). MIDI clips only.",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the MIDI clip to edit, from project.snapshot.")),
+                ("startBeat", numberSchema("Clip-local beat where the excised range begins. Must be within the clip.")),
+                ("lengthBeats", numberSchema("How many beats to remove. To delete one bar, pass the project's beats-per-bar.")),
+            ], required: ["clipId", "startBeat", "lengthBeats"])
+        ),
+        CopilotTool(
+            command: "clip.insertTimeRange",
+            description: "Insert empty beats into a MIDI clip and push later notes right (the 'insert a bar' edit): notes at or after the insert point move later; a note held across it keeps sounding. Beats are CLIP-LOCAL (same as clip.setNotes). MIDI clips only.",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the MIDI clip to edit, from project.snapshot.")),
+                ("atBeat", numberSchema("Clip-local beat where the silence is inserted. 0 to the clip's length.")),
+                ("lengthBeats", numberSchema("How many empty beats to insert. To insert one bar, pass the project's beats-per-bar.")),
+            ], required: ["clipId", "atBeat", "lengthBeats"])
         ),
 
         // MARK: take (2)

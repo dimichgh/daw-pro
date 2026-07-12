@@ -110,7 +110,7 @@ struct LatencyCompensationRenderTests {
                         seconds: Double = 0.5) throws -> RenderedAudio {
         let renderer = OfflineRenderer()
         renderer.compensationTargets = targets
-        return try renderer.render(tracks: tracks, tempoBPM: 120,
+        return try renderer.render(tracks: tracks, tempoMap: TempoMap(constantBPM: 120),
                                    fromBeat: 0, durationSeconds: seconds)
     }
 

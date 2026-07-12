@@ -17,7 +17,7 @@ struct MIDICaptureTests {
 
     private func makeSession(anchorBeats: Double = MIDICaptureTests.anchorBeats) -> MIDICaptureSession {
         MIDICaptureSession(anchorHostTime: Self.anchorTicks, anchorBeats: anchorBeats,
-                           tempoBPM: 120, ticksToSeconds: 1e-9)
+                           tempoMap: TempoMap(constantBPM: 120), ticksToSeconds: 1e-9)
     }
 
     /// Host time for an ABSOLUTE beat position (may be before the anchor).

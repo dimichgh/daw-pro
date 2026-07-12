@@ -106,9 +106,14 @@ public final class AudioEngine: AudioEngineControlling {
 
     /// Set while playing; nil when idle. Beats derive from the output node's
     /// sample clock against this anchor (host clock as fallback).
+    /// m12-b (design row 51): the anchor carries the tempo MAP value (an
+    /// immutable copy — the anchor stays a value type); `derivedBeats` is the
+    /// map's inverse integral from `startBeats`. The design's `mapRevision`
+    /// staleness integer arrives with Phase C's store-side map mutations —
+    /// there is no revision producer yet.
     private struct PlaybackAnchor {
         let startBeats: Double
-        let tempoBPM: Double
+        let tempoMap: TempoMap
         let anchorSampleTime: AVAudioFramePosition
         let anchorHostTime: UInt64
         let outputSampleRate: Double
@@ -207,11 +212,11 @@ public final class AudioEngine: AudioEngineControlling {
     /// unsafe — see the hook wiring in `init`); consumed by `tracksDidChange`,
     /// which restarts the engine with the double-apply convention.
     private var engineStoppedForRoutingRewire = false
-    /// Position + tempo captured when the routing-rewire hook wound down
+    /// Position + tempo map captured when the routing-rewire hook wound down
     /// ACTIVE playback (quiescence-before-stop, see init); consumed by
     /// `tracksDidChange`, which resumes through the cold-start primitive
     /// (`startPlayers` + playhead task) after the engine is back up.
-    private var resumeAfterRoutingRewire: (beats: Double, tempoBPM: Double)?
+    private var resumeAfterRoutingRewire: (beats: Double, tempoMap: TempoMap)?
     public var meteringHandler: ((MeterFrame) -> Void)?
     public var trackMeteringHandler: ((UUID, MeterFrame) -> Void)?
     public var playheadHandler: ((Double) -> Void)?
@@ -268,7 +273,7 @@ public final class AudioEngine: AudioEngineControlling {
             guard let self, self.engine.isRunning else { return }
             if let anchor = self.currentAnchor {
                 self.resumeAfterRoutingRewire =
-                    (beats: self.derivedBeats(), tempoBPM: anchor.tempoBPM)
+                    (beats: self.derivedBeats(), tempoMap: anchor.tempoMap)
                 self.playheadTask?.cancel()
                 self.playheadTask = nil
                 self.graph.stopAllPlayers()
@@ -373,7 +378,7 @@ public final class AudioEngine: AudioEngineControlling {
                 return
             }
         }
-        startPlayers(fromBeat: transport.positionBeats, tempoBPM: transport.tempoBPM)
+        startPlayers(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap)
         startPlayheadTask()
     }
 
@@ -402,7 +407,7 @@ public final class AudioEngine: AudioEngineControlling {
     public func seek(_ transport: TransportState) {
         cacheTransportFlags(from: transport)
         guard currentAnchor != nil else { return }  // stopped: position arrives with next start
-        restart(fromBeat: transport.positionBeats, tempoBPM: transport.tempoBPM)
+        restart(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap)
     }
 
     public func setTempo(_ transport: TransportState) {
@@ -410,8 +415,10 @@ public final class AudioEngine: AudioEngineControlling {
         guard currentAnchor != nil else { return }
         // Engine-derived beats are authoritative here — the incoming
         // transport.positionBeats can be a display-stale ~33 ms behind.
+        // m12-b (design row 49): the same restart seam serves any future
+        // map edit — the transport's (trivial) map rides in whole.
         let beats = derivedBeats()
-        restart(fromBeat: beats, tempoBPM: transport.tempoBPM)
+        restart(fromBeat: beats, tempoMap: transport.tempoMap)
         lastKnownBeats = beats
         playheadHandler?(beats)
     }
@@ -483,7 +490,7 @@ public final class AudioEngine: AudioEngineControlling {
         if changed, isRunning, let anchor = currentAnchor {
             // Structural change WITHOUT an engine bounce (clip edits etc.):
             // the pre-M4 player-only restart, unchanged.
-            restart(fromBeat: derivedBeats(), tempoBPM: anchor.tempoBPM)
+            restart(fromBeat: derivedBeats(), tempoMap: anchor.tempoMap)
         }
         if let resume = resumeAfterRoutingRewire {
             // A routing rewire interrupted active playback (the hook wound
@@ -499,7 +506,7 @@ public final class AudioEngine: AudioEngineControlling {
             // until stop/play" (M4 i, pinned live 2026-07-06).
             resumeAfterRoutingRewire = nil
             if isRunning {
-                startPlayers(fromBeat: resume.beats, tempoBPM: resume.tempoBPM,
+                startPlayers(fromBeat: resume.beats, tempoMap: resume.tempoMap,
                              renderClockTrusted: false)
                 startPlayheadTask()
             }
@@ -555,17 +562,18 @@ public final class AudioEngine: AudioEngineControlling {
 
     /// Reconciles the AU registry with the track list: releases instruments
     /// for tracks that no longer host an AU, and spawns one async prepare Task
-    /// per `.audioUnit` track whose configuration isn't already prepared or in
-    /// flight. Until a prepare lands, the track renders the silent
-    /// placeholder; on success the node is invalidated and `tracksDidChange`
-    /// re-enters to rebuild it with the real instrument.
+    /// per hosted (`.audioUnit`/`.soundBank`) track whose configuration isn't
+    /// already prepared or in flight. Until a prepare lands, the track renders
+    /// the silent placeholder; on success the node is invalidated and
+    /// `tracksDidChange` re-enters to rebuild it with the real instrument.
     private func syncAudioUnitInstruments(_ tracks: [Track]) {
         let graphRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
         let sampleRate = graphRate > 0 ? graphRate : 48_000
 
         var auTracks: [UUID: Track] = [:]
         for track in tracks
-        where track.kind == .instrument && (track.instrument ?? .default).kind == .audioUnit {
+        where track.kind == .instrument
+            && [.audioUnit, .soundBank].contains((track.instrument ?? .default).kind) {
             auTracks[track.id] = track
         }
 
@@ -580,11 +588,10 @@ public final class AudioEngine: AudioEngineControlling {
         auDesired = auDesired.filter { auTracks[$0.key] != nil }
 
         for (id, track) in auTracks {
-            let key = track.instrument?.audioUnit.map {
-                AUHostRegistry.PrepareKey(component: $0.component,
-                                          sampleRate: sampleRate,
-                                          stateData: $0.stateData)
-            }
+            // ONE keying authority for both hosted kinds (m10-n §5.5): the
+            // registry's own prepareKey — the engine's desired-map can never
+            // drift from the registry's idempotency identity.
+            let key = AUHostRegistry.prepareKey(track: track, sampleRate: sampleRate)
             guard auDesired[id] != key else { continue }  // already prepared or in flight
             auDesired[id] = key
             if auRegistry.needsPrepare(track: track, sampleRate: sampleRate) {
@@ -635,7 +642,8 @@ public final class AudioEngine: AudioEngineControlling {
         for (id, entry) in auEffects {
             let key = AUHostRegistry.PrepareKey(component: entry.config.component,
                                                 sampleRate: sampleRate,
-                                                stateData: entry.config.stateData)
+                                                stateData: entry.config.stateData,
+                                                soundBankAddress: nil)
             guard auEffectDesired[id] != key else { continue }  // prepared or in flight
             auEffectDesired[id] = key
             guard auRegistry.effectNeedsPrepare(effectID: id, config: entry.config,
@@ -759,7 +767,7 @@ public final class AudioEngine: AudioEngineControlling {
         engine.mainMixerNode.outputVolume = Float(masterVolume)
     }
 
-    public func renderMixdown(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    public func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                               fromBeat: Double, durationSeconds: Double,
                               to url: URL) async throws -> AudioFileInfo {
         // Refactored over the M5 iv-b buffer seam: render to memory (the
@@ -767,14 +775,14 @@ public final class AudioEngine: AudioEngineControlling {
         // write — the exact composition `renderToWAV` performed, behavior
         // frozen (the existing mixdown/stretch suites are the proof).
         let audio = try await renderOffline(
-            tracks: tracks, tempoBPM: tempoBPM, masterVolume: masterVolume,
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
             fromBeat: fromBeat, durationSeconds: durationSeconds,
             forcedCompensationTargets: nil
         )
         return try writeAudioFile(audio, to: url)
     }
 
-    public func renderOffline(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    public func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                               fromBeat: Double, durationSeconds: Double,
                               forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         // Stretch WYSIWYG (M5 ii-d): a bounce WAITS for pending stretch
@@ -813,7 +821,7 @@ public final class AudioEngine: AudioEngineControlling {
         renderer.compensationTargets = forcedCompensationTargets
         await renderer.prepareAudioUnits(tracks: tracks)
         return try renderer.render(
-            tracks: tracks, tempoBPM: tempoBPM, fromBeat: fromBeat,
+            tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
             durationSeconds: durationSeconds, masterVolume: masterVolume
         )
     }
@@ -993,7 +1001,7 @@ public final class AudioEngine: AudioEngineControlling {
         //    (see startPlayers). Everything below reads the delayed anchor, so
         //    capture trims to the actual take start — the finished take
         //    excludes the count-in and clip placement math is unchanged.
-        startPlayers(fromBeat: transport.positionBeats, tempoBPM: transport.tempoBPM,
+        startPlayers(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap,
                      countInBars: transport.countInBars)
         startPlayheadTask()
         // 4. Align the writer to the shared player-start anchor: capture
@@ -1002,20 +1010,26 @@ public final class AudioEngine: AudioEngineControlling {
         //    With punch enabled, the accept window is [punchIn, punchOut]
         //    translated onto the host clock from that same anchor, and the
         //    REFERENCE stays the anchor: startOffsetSeconds then reports the
-        //    anchor → punch-in gap, which ProjectStore's fan-out formula
-        //    (recordStart + offset × tempo/60) turns into the punch-in beat.
+        //    anchor → punch-in gap, which ProjectStore's fan-out (the inverse
+        //    map integral from the record-start beat) turns into the punch-in
+        //    beat.
         //    A window-relative offset (≈ 0) would land the clip at the record
         //    position — that was a live-E2E bug. punchOutBeat > positionBeats
         //    is a ProjectStore.record() precondition.
         let anchor = currentAnchor!
         if let writer {
             if transport.isPunchEnabled {
-                let secondsPerBeat = 60.0 / transport.tempoBPM
+                // Punch window = the map integral from the record position to
+                // each punch beat (m12-b, design row 46; signed for the end,
+                // clamped >= 0 for the start exactly as before).
+                let map = transport.tempoMap
                 let startHost = anchor.anchorHostTime + AVAudioTime.hostTime(
-                    forSeconds: max(0, transport.punchInBeat - transport.positionBeats) * secondsPerBeat
+                    forSeconds: max(0, map.seconds(from: transport.positionBeats,
+                                                   to: transport.punchInBeat))
                 )
                 let endHost = anchor.anchorHostTime + AVAudioTime.hostTime(
-                    forSeconds: (transport.punchOutBeat - transport.positionBeats) * secondsPerBeat
+                    forSeconds: map.seconds(from: transport.positionBeats,
+                                            to: transport.punchOutBeat)
                 )
                 writer.setAcceptWindow(reference: anchor.anchorHostTime, start: startHost, end: endHost)
             } else {
@@ -1035,7 +1049,7 @@ public final class AudioEngine: AudioEngineControlling {
             midi.captureSession = MIDICaptureSession(
                 anchorHostTime: anchor.anchorHostTime,
                 anchorBeats: anchor.startBeats,
-                tempoBPM: anchor.tempoBPM,
+                tempoMap: anchor.tempoMap,
                 ticksToSeconds: Self.hostTicksToSeconds
             )
         }
@@ -1173,10 +1187,10 @@ public final class AudioEngine: AudioEngineControlling {
     /// The single reschedule primitive: stop-all → reschedule-from-beat →
     /// re-anchor → resume. Individual scheduled segments cannot be cancelled;
     /// costs one ~60 ms lead-in gap.
-    private func restart(fromBeat beats: Double, tempoBPM: Double) {
+    private func restart(fromBeat beats: Double, tempoMap: TempoMap) {
         graph.stopAllPlayers()
         currentAnchor = nil
-        startPlayers(fromBeat: beats, tempoBPM: tempoBPM)
+        startPlayers(fromBeat: beats, tempoMap: tempoMap)
     }
 
     /// Schedules every clip from `beats`, then starts all players in lockstep
@@ -1206,14 +1220,15 @@ public final class AudioEngine: AudioEngineControlling {
     /// M4 (i) "mid-play send stays silent" defect). The host clock is
     /// monotonic across the bounce, and players start on a hostTime anchor in
     /// both branches, so nothing else changes.
-    private func startPlayers(fromBeat beats: Double, tempoBPM: Double, countInBars: Int = 0,
+    private func startPlayers(fromBeat beats: Double, tempoMap: TempoMap, countInBars: Int = 0,
                               renderClockTrusted: Bool = true) {
         metronome.stop()  // clears the click queue; player time resets to 0
-        graph.scheduleAll(fromBeat: beats, tempoBPM: tempoBPM)
+        graph.scheduleAll(fromBeat: beats, tempoMap: tempoMap)
         graph.prepareAllPlayers(withFrameCount: 8_192)
 
         let countIn = Metronome.countInPlan(
-            countInBars: countInBars, beatsPerBar: beatsPerBar, tempoBPM: tempoBPM
+            countInBars: countInBars, beatsPerBar: beatsPerBar,
+            tempoMap: tempoMap, atBeat: beats
         )
         let output = engine.outputNode
         let hardwareRate = output.outputFormat(forBus: 0).sampleRate
@@ -1230,14 +1245,14 @@ public final class AudioEngine: AudioEngineControlling {
             )
             currentAnchor = PlaybackAnchor(
                 startBeats: beats,
-                tempoBPM: tempoBPM,
+                tempoMap: tempoMap,
                 anchorSampleTime: anchorSample,
                 anchorHostTime: anchorHost,
                 outputSampleRate: hardwareRate,
                 hasSampleAnchor: true
             )
             graph.startAllPlayers(at: AVAudioTime(hostTime: anchorHost))
-            startMetronome(fromBeat: beats, tempoBPM: tempoBPM,
+            startMetronome(fromBeat: beats, tempoMap: tempoMap,
                            countInClickBeats: countIn.clickBeats,
                            at: AVAudioTime(hostTime: clickAnchorHost))
         } else {
@@ -1247,14 +1262,14 @@ public final class AudioEngine: AudioEngineControlling {
             let anchorHost = clickAnchorHost + countInHostTicks
             currentAnchor = PlaybackAnchor(
                 startBeats: beats,
-                tempoBPM: tempoBPM,
+                tempoMap: tempoMap,
                 anchorSampleTime: 0,
                 anchorHostTime: anchorHost,
                 outputSampleRate: hardwareRate > 0 ? hardwareRate : 48_000,
                 hasSampleAnchor: false
             )
             graph.startAllPlayers(at: AVAudioTime(hostTime: anchorHost))
-            startMetronome(fromBeat: beats, tempoBPM: tempoBPM,
+            startMetronome(fromBeat: beats, tempoMap: tempoMap,
                            countInClickBeats: countIn.clickBeats,
                            at: AVAudioTime(hostTime: clickAnchorHost))
         }
@@ -1267,19 +1282,20 @@ public final class AudioEngine: AudioEngineControlling {
     /// player-timeline convention (player time 0 ≡ playerStartBeat) holds
     /// against the ORIGINAL anchor the player starts on. Metronome disabled
     /// and no count-in → the player stays stopped.
-    private func startMetronome(fromBeat beats: Double, tempoBPM: Double,
+    private func startMetronome(fromBeat beats: Double, tempoMap: TempoMap,
                                 countInClickBeats: Int, at anchor: AVAudioTime) {
         guard metronomeEnabled || countInClickBeats > 0 else { return }
         if countInClickBeats > 0 {
             metronome.scheduleCountIn(clickBeats: countInClickBeats,
-                                      tempoBPM: tempoBPM, beatsPerBar: beatsPerBar)
+                                      tempoMap: tempoMap, atBeat: beats,
+                                      beatsPerBar: beatsPerBar)
         }
         if metronomeEnabled {
             metronome.scheduleClicks(
                 fromBeat: beats,
                 throughBeat: beats + Metronome.topUpChunkBeats,
-                tempoBPM: tempoBPM,
-                beatsPerBar: beatsPerBar,
+                tempoMap: tempoMap,
+                meterMap: MeterMap(constant: TimeSignature(beatsPerBar: beatsPerBar, beatUnit: 4)),
                 playerStartBeat: beats - Double(countInClickBeats)
             )
         }
@@ -1298,14 +1314,19 @@ public final class AudioEngine: AudioEngineControlling {
            let renderTime = engine.outputNode.lastRenderTime, renderTime.isSampleTimeValid {
             let seconds = Double(renderTime.sampleTime - anchor.anchorSampleTime)
                 / anchor.outputSampleRate
-            return max(anchor.startBeats, anchor.startBeats + seconds * anchor.tempoBPM / 60)
+            // m12-b (design row 47): the map's inverse integral — for the
+            // trivial map bit-identical to the old linear term. The max()
+            // clamp is retained verbatim (lead-in / count-in pin).
+            return max(anchor.startBeats,
+                       anchor.tempoMap.beat(from: anchor.startBeats, elapsedSeconds: seconds))
         }
         let now = mach_absolute_time()
         // Signed host-tick delta: during the lead-in `now` is before the anchor.
         let seconds = now >= anchor.anchorHostTime
             ? AVAudioTime.seconds(forHostTime: now - anchor.anchorHostTime)
             : -AVAudioTime.seconds(forHostTime: anchor.anchorHostTime - now)
-        return max(anchor.startBeats, anchor.startBeats + seconds * anchor.tempoBPM / 60)
+        return max(anchor.startBeats,
+                   anchor.tempoMap.beat(from: anchor.startBeats, elapsedSeconds: seconds))
     }
 
     /// Pushes engine-derived beats to the main actor at ~30 Hz while playing.
@@ -1325,7 +1346,7 @@ public final class AudioEngine: AudioEngineControlling {
                 if self.activeTake == nil,
                    self.loopEnabled, self.loopEndBeat > self.loopStartBeat,
                    beats >= self.loopEndBeat {
-                    self.restart(fromBeat: self.loopStartBeat, tempoBPM: anchor.tempoBPM)
+                    self.restart(fromBeat: self.loopStartBeat, tempoMap: anchor.tempoMap)
                     beats = self.loopStartBeat
                 }
                 self.lastKnownBeats = beats
@@ -1364,7 +1385,9 @@ public final class AudioEngine: AudioEngineControlling {
         let seconds = now >= anchor.anchorHostTime
             ? AVAudioTime.seconds(forHostTime: now - anchor.anchorHostTime)
             : 0
-        let beats = max(anchor.startBeats, anchor.startBeats + seconds * anchor.tempoBPM / 60)
+        // m12-b (design row 48): same inverse integral + clamp as derivedBeats.
+        let beats = max(anchor.startBeats,
+                        anchor.tempoMap.beat(from: anchor.startBeats, elapsedSeconds: seconds))
         lastKnownBeats = beats
 
         graph.stopAllPlayers()
@@ -1381,7 +1404,7 @@ public final class AudioEngine: AudioEngineControlling {
             // A fresh start re-initializes mixer parameters — restore the mix.
             engine.mainMixerNode.outputVolume = Float(masterVolume)
             graph.applyParameters(tracks: lastTracks)
-            startPlayers(fromBeat: beats, tempoBPM: anchor.tempoBPM)
+            startPlayers(fromBeat: beats, tempoMap: anchor.tempoMap)
         } catch {
             playheadTask?.cancel()
             playheadTask = nil

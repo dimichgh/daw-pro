@@ -8,7 +8,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 |---------|--------|-------|
 | **Track kinds** | ✅ Shipped | Audio, instrument, bus. One way to route: audio/instrument→master or bus→master. |
 | **Add/remove tracks** | ✅ Shipped | `track.add` (kind + name), `track.remove`. UI: the + button in Arrange. |
-| **Rename track** | 🔶 Wire-only | `track.rename` command exists. UI rename feature is coming. |
+| **Rename track** | ✅ Shipped | `track.rename` command + in-app inline rename (double-click the track name or use the context menu; m10-i). |
 | **Track color badges** | ✅ Shipped | Signal-green (audio), playback-cyan (instrument), neutral (bus). Violet badge + border for AI-generated tracks. |
 | **Volume per track** | ✅ Shipped | Long-throw fader in mixer, or `track.setVolume` command. Range: −72…+24 dB. |
 | **Pan per track** | ✅ Shipped | Pan knob in mixer (center = stereo, ±100% = mono L/R), or `track.setPan` command. |
@@ -28,7 +28,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Metronome/click** | ✅ Shipped | Count-in and steady click (audible). `transport.setMetronome` command. |
 | **Play, stop, seek** | ✅ Shipped | `transport.play`, `transport.stop`, `transport.seek` commands. UI: PLAY/STOP buttons + position readout. |
 | **Tempo** | ✅ Shipped | `transport.setTempo` command. UI: inline editable BPM in transport bar. Range: 20–300 BPM. |
-| **Loop region** | ✅ Shipped (wire) | `transport.setLoop` command (enabled bool + startBeat, endBeat). UI loop affordance is coming; currently set via Copilot or MCP. |
+| **Loop region** | ✅ Shipped | `transport.setLoop` command + interactive loop ruler in the arrange (drag to create, edge-resize, move, click to toggle; m10-g). |
 | **Sample-accurate playback** | ✅ Shipped | Multitrack audio + MIDI, host-time-aligned from the engine clock. No round-trip latency compensation in v0 (comes with PDC in M4). |
 
 ## Audio Editing
@@ -195,9 +195,9 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| **Control protocol** | ✅ Shipped | WebSocket JSON on `ws://127.0.0.1:17600` (loopback, local network off). Default port configurable via `DAW_CONTROL_PORT` env var. Request: `{id, command, params}`. Response: `{id, ok, result?, error?}`. 102 commands across namespaces (transport, track, clip, mixer, fx, automation, ai, render, plugin, project, input, midi, edit, engine, macro, groove, take, app). |
+| **Control protocol** | ✅ Shipped | WebSocket JSON on `ws://127.0.0.1:17600` (loopback, local network off). Default port configurable via `DAW_CONTROL_PORT` env var or Settings → Agent Connection. Request: `{id, command, params}`. Response: `{id, ok, result?, error?}`. 108 commands across namespaces (transport, track, clip, mixer, fx, automation, ai, render, plugin, project, input, midi, edit, engine, macro, groove, take, app). |
 | **Command parity** | ✅ Shipped | Every control-protocol command maps 1:1 to an MCP tool (bijection, enforced by test). `audit-tools.test.ts` verifies the mapping on every build. |
-| **MCP server** | ✅ Shipped | TypeScript, stdio transport. 105 tools (102 commands + 3 provider-direct generation tools). Runs as a subprocess of an MCP client (Claude Code, Claude Desktop, etc.). Bridges `control.WebSocket` ← → app. Build: `npm install && npm run build`. Run: `node dist/index.js`. |
+| **MCP server** | ✅ Shipped | TypeScript, stdio transport. 111 tools (108 commands + 3 provider-direct generation tools). Runs as a subprocess of an MCP client (Claude Code, Claude Desktop, etc.). Bridges `control.WebSocket` ← → app. Build: `npm install && npm run build`. Run: `node dist/index.js`. |
 | **Tool descriptions** | ✅ Shipped | Every MCP tool has a human-readable title (≤60 chars) and description (≥40 chars, beginner language per Rule 6). Input schema properties all documented recursively. Schema enforced by headless tests. |
 | **Error surface** | ✅ Shipped | Commands return structured errors (ControlError subclasses — `invalidParameter`, `noTrack`, `invalidClip`, etc.). Agents see the specific error and can retry intelligently. |
 | **Async handling** | ✅ Shipped | Render commands (`render.bounce`, `render.mixdown`, `render.stems`, `render.measureLoudness`) support long-running work (180s timeout vs. 5s default). Async AI job commands (`ai.generateSong`, `ai.fixClipRegion`) return immediately with jobId, poll with status commands. |
@@ -217,8 +217,8 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| **Track rename UI** | ❌ Wire-only | Command exists (`track.rename`). UI rename feature (e.g., double-click track header) is in the backlog. |
-| **Loop region UI** | ❌ Wire-only | Command exists (`transport.setLoop`). UI affordance (loop markers in the arrange ruler or transport) coming later. |
+| **Track rename UI** | ✅ Shipped | Double-click the track header name or use the context menu (m10-i); `track.rename` on the wire. |
+| **Loop region UI** | ✅ Shipped | Interactive loop ruler in the arrange (m10-g); `transport.setLoop` on the wire. |
 | **MIDI CC / learn** | ❌ Not yet | MIDI control-change messages and learning (mapping hardware knobs to DAW parameters) not yet shipped. |
 | **Touch/latch/write modes** | ❌ Not yet | Automation is read-only on playback. Recording arm for automation deferred to v1. |
 | **Bezier curves** | ❌ Not yet | Automation lanes use linear interpolation only. Bezier curves deferred to v1 polish. |
@@ -232,10 +232,10 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 
 ## Command & Tool Counts
 
-- **Wire commands**: 102 (verified against `Sources/DAWControl/Commands.swift` `allCommands` array)
-- **MCP tools**: 105 (102 commands + 3 provider-direct tools: `generate_lyrics`, `generate_image`, `generate_song_suno`)
+- **Wire commands**: 108 (verified against `Sources/DAWControl/Commands.swift` `allCommands` array)
+- **MCP tools**: 111 (108 commands + 3 provider-direct tools: `generate_lyrics`, `generate_image`, `generate_song_suno`)
 - **Built-in effects**: 9 (Gain, EQ, Compressor, Limiter, Reverb, Delay, Saturator, Gate, Chorus)
-- **Explain catalog entries**: 46 (transport, mixer, piano roll, arrange, AI panels, settings coverage)
+- **Explain catalog entries**: 53 (transport, mixer, piano roll, arrange, AI panels, settings, instrument picker coverage)
 
 ---
 

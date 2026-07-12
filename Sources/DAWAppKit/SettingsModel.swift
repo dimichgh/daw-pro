@@ -29,7 +29,30 @@ public final class SettingsModel {
         self.store = store
         self.environment = environment
         self.rows = Self.makeRows()
-        refresh()
+        // m10-t: init performs ZERO store access — the old synchronous
+        // `refresh()` here resolved each row through the value-reading `key(for:)`,
+        // which, for a rebuilt/foreign-identity binary with a stored key, parked on
+        // the macOS Keychain consent dialog BEFORE the window (and the control
+        // server) existed — an indefinite, UI-less hang. Env is a pure dict lookup
+        // (no store, no prompt), so env-locked rows resolve immediately and keep
+        // their precedence; every other key row starts `.checking` until the async
+        // `refresh()` (kicked AFTER the window appears) probes the Keychain.
+        resolveEnvOnly()
+    }
+
+    /// Resolves ONLY the environment source for each key row — a pure dict lookup
+    /// that touches neither the store nor the network, so it never prompts or
+    /// blocks. Env-provided rows become `.env` (locked, highest precedence);
+    /// everything else stays `.checking` until the presence probe runs.
+    private func resolveEnvOnly() {
+        for i in rows.indices {
+            guard case .key(let provider) = rows[i].kind else { continue }
+            if let envValue = environment[provider.environmentKey], !envValue.isEmpty {
+                rows[i].status = .env
+            } else {
+                rows[i].status = .checking
+            }
+        }
     }
 
     static func makeRows() -> [ProviderRow] {
@@ -61,17 +84,71 @@ public final class SettingsModel {
         ]
     }
 
-    // MARK: - Resolution (source only — never the value)
+    // MARK: - Resolution (presence only — never the value)
 
-    /// Recomputes each key row's `source`/`configured` from the resolution chain.
-    /// The resolved VALUE is discarded here — only presence and source drive the
-    /// UI, so the model never retains stored key material.
-    public func refresh() {
+    /// Recomputes each keychain-backed row's state via the NON-VALUE presence
+    /// probe (m10-t). Env rows are already resolved (init, no store) and are left
+    /// untouched. The probe runs OFF the main actor: it is designed not to block,
+    /// but a wedged `securityd` must still never freeze the UI — so the store call
+    /// hops to a detached task and only the mapped results come back to the actor.
+    /// No key VALUE is ever read here.
+    ///
+    /// Kicked AFTER the window appears (see DAWProApp), never from `init`.
+    public func refresh() async {
+        let providers = pendingProbeProviders()
+        guard !providers.isEmpty else { return }
+        let store = self.store   // Sendable; safe to cross into the detached task.
+        let presences: [AIProviderID: KeyPresence] = await Task.detached(priority: .utility) {
+            var out: [AIProviderID: KeyPresence] = [:]
+            for provider in providers { out[provider] = store.keyPresence(for: provider) }
+            return out
+        }.value
+        apply(presences)
+    }
+
+    /// Debug/capture ONLY: resolves presence SYNCHRONOUSLY on the current actor.
+    /// Safe because captures always drive an `InMemoryKeyStore` (never the real
+    /// Keychain), so there is no prompt and no possible block — the async
+    /// `refresh()` off-main path is reserved for the real Keychain at launch.
+    /// Public only so the app's `debug.settingsSeed` capture handler can call it
+    /// (the `setSavedMaskForCapture` precedent).
+    public func resolveForCapture() {
+        var presences: [AIProviderID: KeyPresence] = [:]
+        for provider in pendingProbeProviders() {
+            presences[provider] = store.keyPresence(for: provider)
+        }
+        apply(presences)
+    }
+
+    /// The key rows still awaiting a Keychain probe: every `.key` row whose
+    /// environment variable is NOT set (env rows are resolved without the store
+    /// and must never be probed — that preserves env precedence AND avoids a
+    /// pointless store hit).
+    private func pendingProbeProviders() -> [AIProviderID] {
+        rows.compactMap { row in
+            guard case .key(let provider) = row.kind else { return nil }
+            if let envValue = environment[provider.environmentKey], !envValue.isEmpty { return nil }
+            return provider
+        }
+    }
+
+    /// Applies presence results to the matching rows (env rows are absent from
+    /// `presences`, so they are never overwritten).
+    private func apply(_ presences: [AIProviderID: KeyPresence]) {
         for i in rows.indices {
-            guard case .key(let provider) = rows[i].kind else { continue }
-            let source = resolveKey(provider: provider, environment: environment, store: store).source
-            rows[i].source = source
-            rows[i].configured = source != .none
+            guard case .key(let provider) = rows[i].kind,
+                  let presence = presences[provider] else { continue }
+            rows[i].status = Self.status(for: presence)
+        }
+    }
+
+    /// Maps a presence probe result to a keychain-row status. Extracted so it is
+    /// testable headless and shared by the async/sync/capture paths.
+    static func status(for presence: KeyPresence) -> ProviderRow.Status {
+        switch presence {
+        case .present: return .keychain
+        case .interactionRequired: return .keychainConsentRequired
+        case .absent: return .notSet
         }
     }
 
@@ -124,7 +201,12 @@ public final class SettingsModel {
         // the store — and lives only for this session.
         rows[i].savedMask = Self.mask(validated)
         rows[i].draftKey = ""
-        refresh()
+        // We KNOW the outcome without a probe: a save only reaches here for a
+        // non-env row (env rows are locked and refused above), and the key is now
+        // stored → `.keychain`. Setting it directly avoids a redundant store read
+        // (and never touches the value-reading path). Consent-gated same-process
+        // saves read cleanly on the next real use.
+        rows[i].status = .keychain
         return .saved
     }
 
@@ -141,7 +223,9 @@ public final class SettingsModel {
         }
         rows[i].savedMask = nil
         rows[i].draftKey = ""
-        refresh()
+        // Only non-env rows reach here (env rows are locked/refused), and the key
+        // is now removed → `.notSet`. Set directly; no probe needed.
+        rows[i].status = .notSet
         return .cleared
     }
 
@@ -203,16 +287,27 @@ public struct ProviderRow: Identifiable, Sendable, Equatable {
         case localKeyless
     }
 
+    /// A row's resolution state (m10-t). `checking` is the honest INITIAL state
+    /// before the async presence probe has run — the UI shows "checking", never a
+    /// false "NOT SET". `env`/`keychain` are usable-now; `keychainConsentRequired`
+    /// means a key is stored but macOS will prompt to read it on first use.
+    public enum Status: Sendable, Equatable {
+        case checking
+        case notSet
+        case env
+        case keychain
+        case keychainConsentRequired
+    }
+
     public let kind: Kind
     public let title: String
     public let subtitle: String
     /// Suno is a dormant fallback — flagged so the view can badge it.
     public let dormant: Bool
 
-    /// Resolved source (meaningful only for `.key` rows; `.none` otherwise).
-    public internal(set) var source: APIKeySource = .none
-    /// Whether a key is available (env or keychain).
-    public internal(set) var configured: Bool = false
+    /// Resolution state (meaningful only for `.key` rows). Starts `.checking` so
+    /// the row never lies before the presence probe lands.
+    public internal(set) var status: Status = .checking
     /// Transient entry text.
     public internal(set) var draftKey: String = ""
     /// Session-only masked display of a just-saved key (nil when none).
@@ -239,9 +334,37 @@ public struct ProviderRow: Identifiable, Sendable, Equatable {
         return nil
     }
 
+    /// Resolved source, derived from `status` (unchanged meaning for consumers):
+    /// `env`, `keychain` (incl. consent-gated), else `none`.
+    public var source: APIKeySource {
+        switch status {
+        case .env: return .env
+        case .keychain, .keychainConsentRequired: return .keychain
+        case .notSet, .checking: return .none
+        }
+    }
+
+    /// Whether a key is available (env or keychain — a consent-gated keychain key
+    /// still counts as configured). False while `.checking` and when `.notSet`.
+    public var configured: Bool {
+        switch status {
+        case .env, .keychain, .keychainConsentRequired: return true
+        case .notSet, .checking: return false
+        }
+    }
+
+    /// True before the first presence probe resolves this row (drives the neutral
+    /// "checking" badge so the UI never claims NOT SET prematurely). Only key rows
+    /// can be "checking" — the keyless ACE-Step info row is never resolving.
+    public var isChecking: Bool { provider != nil && status == .checking }
+
+    /// True when a key is stored but macOS will require an interactive prompt to
+    /// read its value on first use — the row is configured, but should say so.
+    public var consentRequired: Bool { status == .keychainConsentRequired }
+
     /// True when set by an environment variable — the UI can't edit it (remove
     /// the env var to manage it in-app).
-    public var isLocked: Bool { source == .env }
+    public var isLocked: Bool { status == .env }
 
     /// True when this row accepts key entry (a key-backed row that isn't
     /// env-locked).

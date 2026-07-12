@@ -126,7 +126,7 @@ struct AUEffectHostingTests {
         #expect(delaySeconds > 0.75)  // window math below assumes the stock ~1 s default
 
         // Note @ 120 BPM occupies 0–0.5 s; its wet echo starts at delayTime.
-        let audio = try renderer.render(tracks: [track], tempoBPM: 120,
+        let audio = try renderer.render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
                                         fromBeat: 0, durationSeconds: delaySeconds + 1.0)
         let leftChannel = audio.channelData[0]
         let gap = 33_600..<Int(48_000 * (delaySeconds - 0.05))

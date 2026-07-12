@@ -163,10 +163,15 @@ final class PlaybackGraph {
     /// Audio Unit COMPONENT identity is structural too (switching plugins
     /// rebuilds the node); stateData/name are deliberately NOT in the key —
     /// preset tweaks never tear the node down.
+    /// Sound-bank ADDRESS (m10-n) is structural the same way: a
+    /// source/program/MSB/LSB change rebuilds the node (release → prepare →
+    /// reconcile, the AU-component swap machinery verbatim); the cosmetic
+    /// `displayName` is excluded by construction and never rebuilds (LAW L8).
     struct InstrumentTrackKey: Equatable {
         let kind: InstrumentDescriptor.Kind
         let samplerZones: [SamplerZone]?
         let audioUnitComponent: AudioUnitComponentID?
+        let soundBank: SoundBankConfig.Address?
         let clips: [MIDIClipKey]
     }
 
@@ -183,6 +188,9 @@ final class PlaybackGraph {
         /// Structural Audio Unit component the node was built with (nil for
         /// non-AU kinds) — same rebuild rule as sampler zones.
         let audioUnitComponent: AudioUnitComponentID?
+        /// Structural sound-bank address the node was built with (nil for
+        /// other kinds, m10-n) — same rebuild rule as the AU component.
+        let soundBankAddress: SoundBankConfig.Address?
         let mixer: AVAudioMixerNode
         let source: AVAudioSourceNode
         let renderer: InstrumentRenderer
@@ -198,12 +206,14 @@ final class PlaybackGraph {
 
         init(kind: InstrumentDescriptor.Kind, samplerZones: [SamplerZone]?,
              audioUnitComponent: AudioUnitComponentID?,
+             soundBankAddress: SoundBankConfig.Address?,
              mixer: AVAudioMixerNode, source: AVAudioSourceNode,
              renderer: InstrumentRenderer, instrument: any InstrumentRendering,
              chainState: EffectChainState) {
             self.kind = kind
             self.samplerZones = samplerZones
             self.audioUnitComponent = audioUnitComponent
+            self.soundBankAddress = soundBankAddress
             self.mixer = mixer
             self.source = source
             self.renderer = renderer
@@ -239,10 +249,11 @@ final class PlaybackGraph {
     /// mid-playback point edit republish against the SAME timeline (same
     /// anchor/epoch — the render cursors just re-seek).
     private var automationRollContext:
-        (fromBeat: Double, tempoBPM: Double, mode: AutomationSchedule.Mode)?
+        (fromBeat: Double, tempoMap: TempoMap, mode: AutomationSchedule.Mode)?
     /// Timeline mapping staged by `scheduleAll` for the next `startAllPlayers`
     /// (the `pendingEvents` convention).
-    private var stagedAutomationStart: (fromBeat: Double, tempoBPM: Double) = (0, 120)
+    private var stagedAutomationStart: (fromBeat: Double, tempoMap: TempoMap) =
+        (0, TempoMap(constantBPM: 120))
     /// ACTIVE (enabled, non-empty) volume/pan lanes per strip plus the
     /// RESOLVED effect-param lane specs (M4 vii-c), recorded by
     /// `applyParameters` from the SAME tracks pass that writes the mixers —
@@ -284,6 +295,10 @@ final class PlaybackGraph {
         case .polySynth: return PolySynthInstrument(params: descriptor.polySynth)
         case .sampler: return SamplerInstrument(params: descriptor.resolvedSampler)
         case .audioUnit: return self.audioUnitProvider(track) ?? SilentPlaceholderInstrument()
+        // The provider consults the registry BY TRACK ID, so the hosted
+        // AUSampler for a sound-bank track (m10-n) arrives through the same
+        // seam — no new provider needed. Pending/failed/missing → silence.
+        case .soundBank: return self.audioUnitProvider(track) ?? SilentPlaceholderInstrument()
         }
     }
 
@@ -568,6 +583,8 @@ final class PlaybackGraph {
                     ? descriptor.resolvedSampler.zones : nil,
                 audioUnitComponent: descriptor.kind == .audioUnit
                     ? descriptor.audioUnit?.component : nil,
+                soundBank: descriptor.kind == .soundBank
+                    ? descriptor.soundBank?.address : nil,
                 clips: track.clips.map {
                     MIDIClipKey(id: $0.id, startBeat: $0.startBeat,
                                 lengthBeats: $0.lengthBeats, notes: $0.notes ?? [])
@@ -575,14 +592,16 @@ final class PlaybackGraph {
         }
 
         // Removed instrument tracks — and tracks whose instrument KIND,
-        // sampler ZONES, or AU COMPONENT changed (torn down here, rebuilt
-        // below with the new instrument; a fresh SamplerInstrument reloads the
-        // zone files): unpublish + flush (all-notes-off), then tap removal
-        // before detach — same rule as audio tracks.
+        // sampler ZONES, AU COMPONENT, or sound-bank ADDRESS changed (torn
+        // down here, rebuilt below with the new instrument; a fresh
+        // SamplerInstrument reloads the zone files): unpublish + flush
+        // (all-notes-off), then tap removal before detach — same rule as
+        // audio tracks.
         for (trackID, node) in instrumentNodes
         where newInstrumentSignature[trackID]?.kind != node.kind
             || newInstrumentSignature[trackID]?.samplerZones != node.samplerZones
-            || newInstrumentSignature[trackID]?.audioUnitComponent != node.audioUnitComponent {
+            || newInstrumentSignature[trackID]?.audioUnitComponent != node.audioUnitComponent
+            || newInstrumentSignature[trackID]?.soundBank != node.soundBankAddress {
             if !isTrivial(routingSignature[trackID]) || !node.sendGainNodes.isEmpty {
                 announceRoutingMutation()  // tearing down bus-facing wiring
             }
@@ -1095,7 +1114,7 @@ final class PlaybackGraph {
             automationGeneration += 1
             schedule = AutomationSchedule.build(
                 volumeLane: volume, panLane: pan, effectParamLanes: effectParams,
-                fromBeat: context.fromBeat, tempoBPM: context.tempoBPM,
+                fromBeat: context.fromBeat, tempoMap: context.tempoMap,
                 sampleRate: graphFormat().sampleRate,
                 generation: automationGeneration, mode: context.mode)
         }
@@ -1108,8 +1127,8 @@ final class PlaybackGraph {
     /// `engine.start()` and never ramps into the bounce head (the measured
     /// post-start outputVolume ramp leak). Live starts don't need this — the
     /// ~60 ms anchor lead-in absorbs the pin before schedule t=0.
-    func armOfflineAutomation(fromBeat: Double, tempoBPM: Double) {
-        automationRollContext = (fromBeat, tempoBPM, .offline)
+    func armOfflineAutomation(fromBeat: Double, tempoMap: TempoMap) {
+        automationRollContext = (fromBeat, tempoMap, .offline)
     }
 
     private func addTrackNode(for trackID: UUID) -> TrackNode {
@@ -1189,6 +1208,8 @@ final class PlaybackGraph {
                                       ? descriptor.resolvedSampler.zones : nil,
                                   audioUnitComponent: descriptor.kind == .audioUnit
                                       ? descriptor.audioUnit?.component : nil,
+                                  soundBankAddress: descriptor.kind == .soundBank
+                                      ? descriptor.soundBank?.address : nil,
                                   mixer: mixer, source: source,
                                   renderer: renderer, instrument: instrument,
                                   chainState: chainState)
@@ -1313,20 +1334,24 @@ final class PlaybackGraph {
     // MARK: - Scheduling
 
     /// Schedules every clip player-relative: player sample time 0 ≡ transport
-    /// position `fromBeat`. All math is in file-rate frames. Fixed-tempo v0:
-    /// audio never time-stretches; the region window truncates or under-fills
-    /// the file.
-    func scheduleAll(fromBeat startBeats: Double, tempoBPM: Double) {
+    /// position `fromBeat`. All math is in file-rate frames. m12-b: clip
+    /// boundaries convert through the tempo-map integral (signed for pre-roll
+    /// clips) — bit-identical to the old fixed `secondsPerBeat` for the
+    /// Phase-A trivial map. Audio never time-stretches with tempo; the region
+    /// window truncates or under-fills the file.
+    func scheduleAll(fromBeat startBeats: Double, tempoMap: TempoMap) {
         // Stage the timeline mapping the next startAllPlayers rolls
         // automation with (the pendingEvents convention).
-        stagedAutomationStart = (startBeats, tempoBPM)
-        let secondsPerBeat = 60.0 / tempoBPM
+        stagedAutomationStart = (startBeats, tempoMap)
         forEachClip { clip in
             let fileRate = clip.file.processingFormat.sampleRate
             let fileLength = clip.file.length
 
-            let clipStartSec = (clip.key.startBeat - startBeats) * secondsPerBeat  // may be < 0
-            let regionSec = clip.key.lengthBeats * secondsPerBeat
+            // may be < 0 — seconds(from:to:) is signed
+            let clipStartSec = tempoMap.seconds(from: startBeats, to: clip.key.startBeat)
+            let regionSec = tempoMap.seconds(
+                from: clip.key.startBeat,
+                to: clip.key.startBeat + clip.key.lengthBeats)
             let offsetSec = max(0, -clipStartSec)
 
             // M5 i-b: the clip sounds its source starting `startOffsetSeconds`
@@ -1361,7 +1386,7 @@ final class PlaybackGraph {
             // inside a fade yields a partial piece whose envelope starts at
             // the analytic value for that clip-relative frame.
             let plan = ClipFadeBake.piecePlan(
-                clip: clip.clip, tempoBPM: tempoBPM, fileRate: fileRate,
+                clip: clip.clip, tempoMap: tempoMap, fileRate: fileRate,
                 segmentStart: segStart, segmentFrameCount: frameCount)
 
             // completionHandler stays nil by design — callbacks fire on
@@ -1396,7 +1421,7 @@ final class PlaybackGraph {
                         frameCount: plan.fadeInFrames,
                         clip: clip.clip,
                         clipRelativeStartFrame: plan.segmentStart,
-                        tempoBPM: tempoBPM)
+                        tempoMap: tempoMap)
                 }
                 if plan.fadeOutFrames > 0 {
                     fadeOutBuffer = try ClipFadeBake.bakePiece(
@@ -1405,7 +1430,7 @@ final class PlaybackGraph {
                         frameCount: plan.fadeOutFrames,
                         clip: clip.clip,
                         clipRelativeStartFrame: plan.fadeOutStart,
-                        tempoBPM: tempoBPM)
+                        tempoMap: tempoMap)
                 }
             } catch {
                 FileHandle.standardError.write(Data(
@@ -1447,11 +1472,12 @@ final class PlaybackGraph {
 
         // Instrument tracks: stage the merged, sorted event build for each
         // track's schedule (published by startAllPlayers). Pure math on the
-        // main actor — microseconds, never render-thread work. Fixed tempo
-        // per schedule; setTempo restarts → rebuilds (no tempo map v0).
+        // main actor — microseconds, never render-thread work. Fixed MAP
+        // per schedule (m12-b); setTempo (and any future map edit) restarts
+        // → rebuilds.
         for node in instrumentNodes.values {
             node.pendingEvents = MIDIEventSchedule.buildEvents(
-                clips: node.clips, fromBeat: startBeats, tempoBPM: tempoBPM,
+                clips: node.clips, fromBeat: startBeats, tempoMap: tempoMap,
                 sampleRate: node.renderer.sampleRate
             )
         }
@@ -1496,7 +1522,7 @@ final class PlaybackGraph {
         // Automation rolls against the SAME anchor (live) / first-pull epoch
         // (offline) as the MIDI schedules — one seam, offline parity free.
         automationRollContext = (
-            stagedAutomationStart.fromBeat, stagedAutomationStart.tempoBPM,
+            stagedAutomationStart.fromBeat, stagedAutomationStart.tempoMap,
             anchor.map { .live(anchorHostTime: $0.hostTime) } ?? .offline
         )
         for trackID in trackIDs {

@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Testing
 import AIServices
 @testable import DAWAppKit
@@ -65,10 +66,10 @@ struct SettingsModelTests {
     // MARK: - Clear
 
     @Test("clear removes the stored key and the mask")
-    func clearRemoves() {
+    func clearRemoves() async {
         let store = InMemoryKeyStore([.openai: "sk-existing"])
         let m = model(store: store)
-        m.refresh()
+        await m.refresh()
         #expect(m.rows.first { $0.id == "openai" }?.configured == true)
 
         #expect(m.clear(.openai) == .cleared)
@@ -145,5 +146,159 @@ struct SettingsModelTests {
         #expect(SettingsModel.validatedKey("") == nil)
         #expect(SettingsModel.validatedKey("a b") == nil)
         #expect(SettingsModel.validatedKey("a\tb") == nil)
+    }
+
+    // MARK: - m10-t: no init store access, off-main presence probe
+
+    /// THE regression pin for the startup hang: constructing the model must never
+    /// touch the store — not the value-reading `key(for:)` (which triggered the
+    /// Keychain consent dialog before the window existed) and not even the
+    /// presence probe. All resolution is deferred to the async `refresh()`.
+    @Test("init makes ZERO store calls — the m10-t startup-hang regression pin")
+    func initTouchesNoStore() {
+        let store = CountingKeyStore(presence: [.anthropic: .present, .openai: .present, .suno: .present])
+        _ = SettingsModel(store: store, environment: [:])
+        #expect(store.valueReads == 0)
+        #expect(store.totalPresenceCalls == 0)
+    }
+
+    @Test("init makes ZERO store calls even when an env key is present")
+    func initTouchesNoStoreWithEnv() {
+        let store = CountingKeyStore(presence: [.openai: .present])
+        _ = SettingsModel(store: store, environment: ["ANTHROPIC_API_KEY": "sk-env"])
+        #expect(store.valueReads == 0)
+        #expect(store.totalPresenceCalls == 0)
+    }
+
+    @Test("rows start in the honest .checking state before any probe")
+    func rowsStartChecking() {
+        let store = CountingKeyStore(presence: [.anthropic: .present])
+        let m = SettingsModel(store: store, environment: [:])
+        for id in ["anthropic", "openai", "suno"] {
+            let row = m.rows.first { $0.id == id }!
+            #expect(row.isChecking)
+            #expect(!row.configured)
+            #expect(row.source == APIKeySource.none)
+        }
+    }
+
+    @Test("refresh probes each keychain row exactly once — never a value read")
+    func refreshProbesOncePerRow() async {
+        let store = CountingKeyStore(presence: [.anthropic: .present, .openai: .absent, .suno: .present])
+        let m = SettingsModel(store: store, environment: [:])
+        await m.refresh()
+        #expect(store.valueReads == 0)
+        #expect(store.presenceCalls(for: .anthropic) == 1)
+        #expect(store.presenceCalls(for: .openai) == 1)
+        #expect(store.presenceCalls(for: .suno) == 1)
+    }
+
+    @Test("presence maps to truthful row state including interactionRequired")
+    func presenceMapsToRowState() async {
+        let store = CountingKeyStore(presence: [
+            .anthropic: .present,
+            .openai: .interactionRequired,
+            .suno: .absent,
+        ])
+        let m = SettingsModel(store: store, environment: [:])
+        await m.refresh()
+
+        let anthropic = m.rows.first { $0.id == "anthropic" }!
+        #expect(anthropic.status == .keychain)
+        #expect(anthropic.configured)
+        #expect(anthropic.source == .keychain)
+        #expect(!anthropic.consentRequired)
+        #expect(!anthropic.isChecking)
+
+        // A stored-but-consent-gated key is STILL configured (source keychain), and
+        // the row says so truthfully via `consentRequired`.
+        let openai = m.rows.first { $0.id == "openai" }!
+        #expect(openai.status == .keychainConsentRequired)
+        #expect(openai.configured)
+        #expect(openai.source == .keychain)
+        #expect(openai.consentRequired)
+        #expect(!openai.isChecking)
+
+        let suno = m.rows.first { $0.id == "suno" }!
+        #expect(suno.status == .notSet)
+        #expect(!suno.configured)
+        #expect(suno.source == APIKeySource.none)
+    }
+
+    @Test("env precedence short-circuits the store — the env row is never probed")
+    func envShortCircuitsProbe() async {
+        let store = CountingKeyStore(presence: [
+            .anthropic: .present, .openai: .present, .suno: .present,
+        ])
+        let m = SettingsModel(store: store, environment: ["ANTHROPIC_API_KEY": "sk-env"])
+        // Env resolves at init without any store access.
+        let anthropic = m.rows.first { $0.id == "anthropic" }!
+        #expect(anthropic.source == .env)
+        #expect(anthropic.isLocked)
+        #expect(!anthropic.isChecking)
+
+        await m.refresh()
+        #expect(store.presenceCalls(for: .anthropic) == 0)   // env row never touches the store
+        #expect(store.presenceCalls(for: .openai) == 1)
+        #expect(store.presenceCalls(for: .suno) == 1)
+        #expect(store.valueReads == 0)
+    }
+
+    @Test("resolveForCapture resolves presence synchronously (capture path)")
+    func resolveForCaptureSync() {
+        let store = InMemoryKeyStore([.openai: "sk-x"])
+        let m = SettingsModel(store: store, environment: [:])
+        #expect(m.rows.first { $0.id == "openai" }?.isChecking == true)
+        m.resolveForCapture()
+        let row = m.rows.first { $0.id == "openai" }!
+        #expect(row.status == .keychain)
+        #expect(row.configured)
+    }
+
+    @Test("status(for:) maps presence → row status")
+    func statusMappingHelper() {
+        #expect(SettingsModel.status(for: .present) == .keychain)
+        #expect(SettingsModel.status(for: .absent) == .notSet)
+        #expect(SettingsModel.status(for: .interactionRequired) == .keychainConsentRequired)
+    }
+}
+
+/// A fake store that COUNTS accesses so the suite can pin the m10-t invariants:
+/// `init` must make zero calls, the status path must use the presence probe (never
+/// the value-reading `key(for:)`), and env rows must not be probed at all. Thread-
+/// safe (the probe runs off the main actor in `refresh()`), Sendable without
+/// `@unchecked` — every access is serialized by the lock.
+private final class CountingKeyStore: APIKeyStoring, Sendable {
+    private struct Box: Sendable {
+        var valueReads = 0
+        var presenceCalls: [AIProviderID: Int] = [:]
+        var presence: [AIProviderID: KeyPresence]
+    }
+    private let lock: OSAllocatedUnfairLock<Box>
+
+    init(presence: [AIProviderID: KeyPresence] = [:]) {
+        lock = OSAllocatedUnfairLock(initialState: Box(presence: presence))
+    }
+
+    /// The forbidden value-reading path — records a hit so a test can assert it
+    /// stays at zero.
+    func key(for provider: AIProviderID) -> String? {
+        lock.withLock { $0.valueReads += 1 }
+        return nil
+    }
+    func setKey(_ key: String, for provider: AIProviderID) throws {}
+    func removeKey(for provider: AIProviderID) throws {}
+
+    func keyPresence(for provider: AIProviderID) -> KeyPresence {
+        lock.withLock { box in
+            box.presenceCalls[provider, default: 0] += 1
+            return box.presence[provider] ?? .absent
+        }
+    }
+
+    var valueReads: Int { lock.withLock { $0.valueReads } }
+    var totalPresenceCalls: Int { lock.withLock { $0.presenceCalls.values.reduce(0, +) } }
+    func presenceCalls(for provider: AIProviderID) -> Int {
+        lock.withLock { $0.presenceCalls[provider] ?? 0 }
     }
 }

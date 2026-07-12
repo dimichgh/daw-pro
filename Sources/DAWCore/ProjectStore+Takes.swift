@@ -29,7 +29,7 @@ extension ProjectStore {
     func rebuildCompMembers(trackIndex t: Int, groupIndex g: Int) {
         let group = tracks[t].takeGroups[g]
         tracks[t].clips.removeAll { $0.takeGroupID == group.id }
-        tracks[t].clips.append(contentsOf: CompFlattener.flatten(group, tempoBPM: transport.tempoBPM))
+        tracks[t].clips.append(contentsOf: CompFlattener.flatten(group, tempoMap: transport.tempoMap))
         engine?.tracksDidChange(tracks)
     }
 

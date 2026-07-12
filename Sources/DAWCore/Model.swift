@@ -270,15 +270,19 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     }
 
     /// Source-material window this clip consumes, in SECONDS, DERIVED from the
-    /// timeline length and the stretch ratio (spec §1):
-    /// `lengthBeats · 60/tempo / stretchRatio`. The single evaluator of "how
-    /// much of the source file this clip reads" (the mirror of `envelopeGain`'s
-    /// role). Holding this constant across a length change is exactly what
-    /// `ProjectStore.stretchClip` does — since the tempo factor cancels, window
-    /// invariance is equivalently `lengthBeats / stretchRatio == const`.
-    public func sourceWindowSeconds(tempoBPM: Double) -> Double {
-        guard stretchRatio > 0, tempoBPM > 0 else { return 0 }
-        return lengthBeats * (60.0 / tempoBPM) / stretchRatio
+    /// timeline span and the stretch ratio (spec §1): the tempo-map integral
+    /// over [startBeat, startBeat + lengthBeats], divided by the ratio. The
+    /// single evaluator of "how much of the source file this clip reads" (the
+    /// mirror of `envelopeGain`'s role). Holding this constant across a length
+    /// change is exactly what `ProjectStore.stretchClip` does — with a TRIVIAL
+    /// map the tempo factor cancels, so window invariance is equivalently
+    /// `lengthBeats / stretchRatio == const`; across a multi-segment boundary
+    /// that cancellation no longer holds and `stretchToLength` must re-derive
+    /// the ratio from this integral (design §6 — Phase B re-proves it).
+    /// The map's bpm is clamp-guaranteed positive, so only the ratio guards.
+    public func sourceWindowSeconds(tempoMap: TempoMap) -> Double {
+        guard stretchRatio > 0 else { return 0 }
+        return tempoMap.seconds(from: startBeat, to: startBeat + lengthBeats) / stretchRatio
     }
 
     public init(
@@ -428,6 +432,37 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         // Members carry their group marker; ordinary clips (nil) omit it, so a
         // pre-take clip stays byte-identical.
         try c.encodeIfPresent(takeGroupID, forKey: .takeGroupID)
+    }
+}
+
+/// Outcome of `ProjectStore.moveClip` (m11-d): the moved clip in its final
+/// geometry, plus the ids of ordinary same-track clips the move's overlap policy
+/// TRIMMED (edge-trimmed, id preserved) or REMOVED (fully covered / a
+/// sub-minimum sliver). Both arrays are empty for a plain move onto free space.
+public struct ClipMoveResult: Sendable, Equatable {
+    public var clip: Clip
+    public var trimmedClipIDs: [UUID]
+    public var removedClipIDs: [UUID]
+
+    public init(clip: Clip, trimmedClipIDs: [UUID] = [], removedClipIDs: [UUID] = []) {
+        self.clip = clip
+        self.trimmedClipIDs = trimmedClipIDs
+        self.removedClipIDs = removedClipIDs
+    }
+}
+
+/// Outcome of `ProjectStore.crossfadeClips` (m11-d): the two clips in their final
+/// geometry (left/right by timeline start) and the beat length of the overlap
+/// their complementary equal-power fades now span.
+public struct CrossfadeResult: Sendable, Equatable {
+    public var left: Clip
+    public var right: Clip
+    public var overlapBeats: Double
+
+    public init(left: Clip, right: Clip, overlapBeats: Double) {
+        self.left = left
+        self.right = right
+        self.overlapBeats = overlapBeats
     }
 }
 
@@ -599,6 +634,46 @@ public struct Send: Identifiable, Codable, Sendable, Equatable {
     }
 }
 
+/// A named song-section anchor on the timeline (m11-c) — "Intro", "Chorus",
+/// "Drop". Markers give agents and humans stable, human-meaningful positions to
+/// navigate to ("drop at the second chorus"): `transport.seek {marker}` jumps to
+/// one, and the arrange ruler renders them as flags you can drag/rename. A pure
+/// value type: no media, no engine involvement — it rides `EditState` (undo) and
+/// persists additively, exactly like a groove template.
+///
+/// `beat` is an ABSOLUTE timeline position in beats (quarter notes), floored at 0
+/// by the clamping init (the `Clip`/`MIDINote` precedent — a hand-authored or
+/// decoded payload can never smuggle in a negative anchor). Markers carry no
+/// ordering of their own; the store exposes them SORTED by beat (ties stable).
+public struct Marker: Identifiable, Codable, Sendable, Equatable {
+    public let id: UUID
+    /// Display name, e.g. "Chorus". Free text; the store auto-names an empty one
+    /// "Marker N" so a marker always reads as something.
+    public var name: String
+    /// Absolute timeline position in beats (quarter notes), >= 0.
+    public var beat: Double
+
+    public init(id: UUID = UUID(), name: String, beat: Double) {
+        self.id = id
+        self.name = name
+        self.beat = max(0, beat)
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, beat }
+
+    /// Decoding routes through the clamping init (the `MIDINote`/`Send` precedent):
+    /// `id` is required (identity — a missing id is a damaged payload), `name`/
+    /// `beat` tolerate absence with the model defaults, and `beat` re-floors at 0.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try c.decode(UUID.self, forKey: .id),
+            name: try c.decodeIfPresent(String.self, forKey: .name) ?? "Marker",
+            beat: try c.decodeIfPresent(Double.self, forKey: .beat) ?? 0
+        )
+    }
+}
+
 /// Component identity of a hosted Audio Unit, FourCCs as exactly-4-ASCII-char
 /// strings ("aumu", "dls "). Init normalizes: right-pad with spaces, truncate
 /// to 4, non-ASCII scalars → "?". Decoding routes through the normalizing init
@@ -666,6 +741,10 @@ public struct InstrumentDescriptor: Codable, Sendable, Equatable {
         case sampler
         /// A hosted Audio Unit music device (see `audioUnit`).
         case audioUnit
+        /// An AUSampler-backed SoundFont2/DLS bank program (m10-n). The
+        /// hosting AU is an implementation detail — identity lives entirely
+        /// in `soundBank`.
+        case soundBank
     }
 
     public var kind: Kind
@@ -679,6 +758,12 @@ public struct InstrumentDescriptor: Codable, Sendable, Equatable {
     /// switches like `sampler`). `kind == .audioUnit && audioUnit == nil` is
     /// legal and renders as the missing placeholder (silence).
     public var audioUnit: AudioUnitConfig?
+    /// Sound-bank program selection (m10-n; additive optional, carried
+    /// across kind switches like `sampler`/`audioUnit`, so pre-soundBank
+    /// project files still decode). `kind == .soundBank && soundBank == nil`
+    /// is legal and renders the silent placeholder — the
+    /// componentless-`.audioUnit` rule.
+    public var soundBank: SoundBankConfig?
 
     public static let `default` = InstrumentDescriptor()
 
@@ -689,12 +774,14 @@ public struct InstrumentDescriptor: Codable, Sendable, Equatable {
         kind: Kind = .polySynth,
         polySynth: PolySynthParams = PolySynthParams(),
         sampler: SamplerParams? = nil,
-        audioUnit: AudioUnitConfig? = nil
+        audioUnit: AudioUnitConfig? = nil,
+        soundBank: SoundBankConfig? = nil
     ) {
         self.kind = kind
         self.polySynth = polySynth
         self.sampler = sampler
         self.audioUnit = audioUnit
+        self.soundBank = soundBank
     }
 }
 
@@ -857,6 +944,25 @@ public struct TransportState: Codable, Sendable, Equatable {
     /// metronome itself is disabled.
     public var countInBars: Int
 
+    /// Phase-B staging seam — replaced by tempo.setMap in Phase C. When
+    /// non-nil, `tempoMap` (TempoMap.swift) prefers this multi-segment map
+    /// over the scalar-derived trivial one so the m12-c engine paths are
+    /// live-testable before the wire exists. TRANSIENT by construction:
+    /// excluded from `CodingKeys` (never on the wire, never in a snapshot or
+    /// save file), normalized out of undo capture (`captureEditState`), and
+    /// reset with the transport on project open/new.
+    public var sessionTempoMapOverride: TempoMap? = nil
+
+    /// Wire/persist surface = exactly the pre-m12-c keys. The synthesized
+    /// Codable uses this enum, so `sessionTempoMapOverride` (staging-only)
+    /// can never leak into a snapshot, broadcast, or document.
+    private enum CodingKeys: String, CodingKey {
+        case isPlaying, isRecording, positionBeats, tempoBPM, timeSignature
+        case isLoopEnabled, loopStartBeat, loopEndBeat
+        case isPunchEnabled, punchInBeat, punchOutBeat
+        case isMetronomeEnabled, countInBars
+    }
+
     public static let tempoRange: ClosedRange<Double> = 20...400
     /// Count-in length bound — more than 4 bars of pre-roll is never useful.
     public static let countInBarsRange: ClosedRange<Int> = 0...4
@@ -898,15 +1004,13 @@ public struct TransportState: Codable, Sendable, Equatable {
     }
 
     public var positionSeconds: TimeInterval {
-        positionBeats * 60.0 / tempoBPM
+        tempoMap.seconds(fromBeatZeroTo: positionBeats)
     }
 
     /// 1-based "bar.beat" display, e.g. "3.2" for bar 3, beat 2.
     public var barsBeatsDisplay: String {
-        let beatsPerBar = Double(timeSignature.beatsPerBar)
-        let bar = Int(positionBeats / beatsPerBar) + 1
-        let beat = Int(positionBeats.truncatingRemainder(dividingBy: beatsPerBar)) + 1
-        return "\(bar).\(beat)"
+        let position = meterMap.barBeat(atBeat: positionBeats)
+        return "\(position.bar + 1).\(Int(position.beatInBar) + 1)"
     }
 
     /// "m:ss.mmm" clock display of the playhead.
@@ -932,6 +1036,11 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
     /// byte-identical. Built-in swing presets are NOT included — pull them via
     /// `groove.list`.
     public var grooveTemplates: [GrooveTemplate]?
+    /// Session markers (m11-c), SORTED by beat. Additive and optional; nil (key
+    /// omitted) when the session has no markers, so a pre-marker snapshot stays
+    /// byte-identical. Full fidelity — id/name/beat — so an agent orienting from
+    /// `project.snapshot` can seek to a section without a separate `marker.list`.
+    public var markers: [Marker]?
     public var meters: SessionMeters
     /// Human-readable reason the last record attempt failed (or why the last
     /// take was discarded); nil when the last attempt succeeded. Additive and
@@ -967,6 +1076,7 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         tracks: [Track],
         masterVolume: Double = 1,
         grooveTemplates: [GrooveTemplate]? = nil,
+        markers: [Marker]? = nil,
         meters: SessionMeters = SessionMeters(),
         lastRecordingError: String? = nil,
         selectedInputDeviceUID: String? = nil,
@@ -984,6 +1094,9 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         // Empty palette → nil so the encoder omits the key (pre-groove snapshots
         // stay byte-identical).
         self.grooveTemplates = (grooveTemplates?.isEmpty ?? true) ? nil : grooveTemplates
+        // Empty marker list → nil so the encoder omits the key (pre-marker
+        // snapshots stay byte-identical — the grooveTemplates rule).
+        self.markers = (markers?.isEmpty ?? true) ? nil : markers
         self.meters = meters
         self.lastRecordingError = lastRecordingError
         self.selectedInputDeviceUID = selectedInputDeviceUID

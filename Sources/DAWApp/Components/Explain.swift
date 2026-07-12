@@ -369,14 +369,20 @@ struct ExplainOverlay: View {
     }
 
     /// Card center: horizontally centered on the control (clamped on-screen),
-    /// vertically below when there's room, else above.
+    /// vertically below when there's room, else above — then clamped so the card
+    /// stays fully on-window in BOTH axes. Without the Y clamp a card that flips
+    /// above a high anchor (e.g. a crossfade seam badge near the ruler) whose space
+    /// above is shorter than the card would clip its title off the top edge.
     private func cardCenter(anchoredTo frame: CGRect, in container: CGSize) -> CGPoint {
         let gap: CGFloat = 8
+        let margin: CGFloat = 8
         let fitsBelow = frame.maxY + gap + cardSize.height <= container.height
-        let centerY = fitsBelow
+        let rawCenterY = fitsBelow
             ? frame.maxY + gap + cardSize.height / 2
             : frame.minY - gap - cardSize.height / 2
-        let halfWidth = cardWidth / 2 + 8
+        let halfHeight = cardSize.height / 2 + margin
+        let centerY = min(max(rawCenterY, halfHeight), container.height - halfHeight)
+        let halfWidth = cardWidth / 2 + margin
         let centerX = min(max(frame.midX, halfWidth), container.width - halfWidth)
         return CGPoint(x: centerX, y: centerY)
     }

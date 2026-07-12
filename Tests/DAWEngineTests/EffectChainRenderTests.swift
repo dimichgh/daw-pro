@@ -82,7 +82,7 @@ struct EffectChainRenderTests {
     }
 
     private func render(_ tracks: [Track], seconds: Double = 1.0) throws -> RenderedAudio {
-        try OfflineRenderer().render(tracks: tracks, tempoBPM: 120,
+        try OfflineRenderer().render(tracks: tracks, tempoMap: TempoMap(constantBPM: 120),
                                      fromBeat: 0, durationSeconds: seconds)
     }
 
@@ -358,7 +358,7 @@ struct EffectChainRenderTests {
         graph.applyParameters(tracks: [plain, bus])
         try engine.start()
         graph.applyParameters(tracks: [plain, bus])
-        graph.scheduleAll(fromBeat: 0, tempoBPM: 120)
+        graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
         graph.startAllPlayers(at: nil)
         var channelData: [[Float]] = [[], []]
         try pull(engine, frames: 24_000, into: &channelData)

@@ -255,7 +255,7 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // count is a bijection" check (commands.length + exception-table-B size).
   // Hardcoded here (per the brief) as a fast, focused real-transport check —
   // if this drifts, audit-tools.test.ts is the source of truth for why.
-  assert.equal(result.tools.length, 105);
+  assert.equal(result.tools.length, 119);
 });
 
 // ---------------------------------------------------------------------------
@@ -532,4 +532,44 @@ test("render_bounce writes a WAV file and reports re-measured output loudness", 
       rmSync(tempPath);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// 13. instrument_list_sound_banks -> track_set_instrument(soundBank gm) ->
+//     project_snapshot round trip (m10-n-2 MCP half, real app + real GM bank)
+// ---------------------------------------------------------------------------
+
+test("General MIDI sound bank round-trips: list -> set gm/56 -> snapshot carries the resolved object", { skip: SKIP_REASON }, async () => {
+  const banks = parseJSON(await callTool("instrument_list_sound_banks"));
+  assert.ok(Array.isArray(banks.banks) && banks.banks.length > 0, "at least the built-in GM bank is listed");
+  assert.equal(banks.banks[0].source, "gm", "General MIDI is always listed first");
+  assert.equal(banks.banks[0].builtin, true);
+  assert.equal(banks.banks[0].name, "General MIDI");
+
+  const programs = parseJSON(await callTool("instrument_list_sound_bank_programs", { source: "gm" }));
+  assert.equal(programs.namesParsed, true);
+  assert.equal(programs.programs.length, 129, "128 melodic GM programs + 1 drum kit");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const trumpet = programs.programs.find((p: any) => p.program === 56 && p.bankMSB === 121);
+  assert.ok(trumpet, "GM program 56/bankMSB 121 (Trumpet) is listed");
+  assert.equal(trumpet.name, "Trumpet");
+
+  await callTool("project_new", { discardChanges: true });
+  const track = parseJSON(await callTool("track_add", { name: "GM Horns", kind: "instrument" }));
+  const setResult = parseJSON(
+    await callTool("track_set_instrument", { trackId: track.id, soundBank: { source: "gm", program: 56 } })
+  );
+  assert.equal(setResult.kind, "soundBank");
+  assert.equal(setResult.soundBank.source, "gm");
+  assert.equal(setResult.soundBank.program, 56);
+  assert.equal(setResult.soundBank.bankMSB, 121, "melodic default");
+  assert.equal(setResult.soundBank.name, "Trumpet — General MIDI", "server-derived display name");
+  assert.ok(["pending", "ready"].includes(setResult.soundBank.status), `unexpected status: ${setResult.soundBank.status}`);
+
+  const snapshot = parseJSON(await callTool("project_snapshot"));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const horns = snapshot.tracks.find((t: any) => t.id === track.id);
+  assert.ok(horns, "project_snapshot lists the GM Horns track");
+  assert.equal(horns.instrument.soundBank.source, "gm");
+  assert.equal(horns.instrument.soundBank.name, "Trumpet — General MIDI");
 });

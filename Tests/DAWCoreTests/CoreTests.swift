@@ -369,7 +369,7 @@ final class FakeEngine: AudioEngineControlling {
     /// Everything a renderMixdown intent carried, for URL/parameter asserts.
     struct MixdownRequest {
         var tracks: [Track]
-        var tempoBPM: Double
+        var tempoMap: TempoMap
         var masterVolume: Double
         var fromBeat: Double
         var durationSeconds: Double
@@ -440,12 +440,12 @@ final class FakeEngine: AudioEngineControlling {
         calls.append(.masterVolume(volume))
     }
 
-    func renderMixdown(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         calls.append(.renderMixdown(fromBeat: fromBeat, durationSeconds: durationSeconds))
         mixdownRequests.append(MixdownRequest(
-            tracks: tracks, tempoBPM: tempoBPM, masterVolume: masterVolume,
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
             fromBeat: fromBeat, durationSeconds: durationSeconds, url: url
         ))
         return mixdownStub

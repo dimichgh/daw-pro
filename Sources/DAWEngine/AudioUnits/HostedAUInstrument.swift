@@ -31,6 +31,15 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
     /// dereferenced by `render()`/`reset()`.
     let auAudioUnit: AUAudioUnit
 
+    /// MAIN-ACTOR-ONLY (set once by the registry right after wrapping, read
+    /// only inside `prepare`'s renegotiation block): re-applies per-instance
+    /// AU state that `deallocateRenderResources` destroys. m10-n R7: T6
+    /// MEASURED that AUSampler's loaded bank does NOT survive the
+    /// dealloc/realloc cycle (the sampler reverts to its factory default
+    /// sine preset), so the registry installs a synchronous bank re-load
+    /// here for `.soundBank` instruments. nil for every other kind.
+    var reloadAfterRenegotiation: ((AUAudioUnit) -> Void)?
+
     // The only two AU-derived values the render thread may touch.
     private let renderBlock: AURenderBlock
     private let scheduleMIDI: AUScheduleMIDIEventBlock
@@ -97,6 +106,11 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
                 }
                 try auAudioUnit.outputBusses[0].setFormat(format)
                 try auAudioUnit.allocateRenderResources()
+                // Reallocation destroys per-instance sampler state (measured,
+                // m10-n T6) — restore it BEFORE the next render pull. The AU
+                // is initialized here, so the re-load is synchronous on this
+                // (main) actor — bounded like the renegotiation itself.
+                reloadAfterRenegotiation?(auAudioUnit)
                 preparedSampleRate = sampleRate
                 FileHandle.standardError.write(Data(
                     "HostedAUInstrument: renegotiated render format to \(sampleRate) Hz\n".utf8))

@@ -40,7 +40,7 @@ struct InstrumentRenderTests {
         let renderer = OfflineRenderer(maximumFrameCount: maximumFrameCount)
         renderer.instrumentFactory = { _ in capture }
         _ = try renderer.render(
-            tracks: [instrumentTrack(clips: clips)], tempoBPM: 120,
+            tracks: [instrumentTrack(clips: clips)], tempoMap: TempoMap(constantBPM: 120),
             fromBeat: fromBeat, durationSeconds: durationSeconds
         )
         #expect(capture.overflowCount == 0)
@@ -148,7 +148,7 @@ struct InstrumentRenderTests {
             MIDINote(pitch: 69, velocity: 127, startBeat: 1, lengthBeats: 1),
         ])
         let audio = try OfflineRenderer().render(
-            tracks: [instrumentTrack(clips: [clip], instrument: testTone)], tempoBPM: 120,
+            tracks: [instrumentTrack(clips: [clip], instrument: testTone)], tempoMap: TempoMap(constantBPM: 120),
             fromBeat: 0, durationSeconds: 2.0
         )
         let left = audio.channelData[0]
@@ -173,7 +173,7 @@ struct InstrumentRenderTests {
             MIDINote(pitch: 60, velocity: 127, startBeat: 1, lengthBeats: 1),
         ])
         let audio = try OfflineRenderer().render(
-            tracks: [instrumentTrack(clips: [clip], instrument: testTone)], tempoBPM: 120,
+            tracks: [instrumentTrack(clips: [clip], instrument: testTone)], tempoMap: TempoMap(constantBPM: 120),
             fromBeat: 0, durationSeconds: 2.0
         )
         let frequency = TestSignals.dominantFrequency(
@@ -190,7 +190,7 @@ struct InstrumentRenderTests {
                 MIDINote(pitch: $0, velocity: 127, startBeat: 1, lengthBeats: 1)
             })
             return try OfflineRenderer().render(
-                tracks: [instrumentTrack(clips: [clip], instrument: testTone)], tempoBPM: 120,
+                tracks: [instrumentTrack(clips: [clip], instrument: testTone)], tempoMap: TempoMap(constantBPM: 120),
                 fromBeat: 0, durationSeconds: 2.0
             )
         }
@@ -219,7 +219,7 @@ struct InstrumentRenderTests {
         // (a) Muted instrument track → the whole render is exact silence.
         let muted = try OfflineRenderer().render(
             tracks: [instrumentTrack(clips: [midiClip], isMuted: true, instrument: testTone)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         for channel in muted.channelData {
             #expect(TestSignals.peak(channel, in: 0..<channel.count) == 0)
@@ -230,11 +230,11 @@ struct InstrumentRenderTests {
         var soloedAudio = audioTrack
         soloedAudio.isSoloed = true
         let audioOnly = try OfflineRenderer().render(
-            tracks: [audioTrack], tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tracks: [audioTrack], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let audioSolo = try OfflineRenderer().render(
             tracks: [soloedAudio, instrumentTrack(clips: [midiClip], instrument: testTone)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         #expect(maxDifference(audioOnly, audioSolo) == 0.0)
 
@@ -242,12 +242,12 @@ struct InstrumentRenderTests {
         // instrument-only render (pins the NEW cross-kind solo semantics).
         let instOnly = try OfflineRenderer().render(
             tracks: [instrumentTrack(clips: [midiClip], instrument: testTone)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let instSolo = try OfflineRenderer().render(
             tracks: [audioTrack,
                      instrumentTrack(clips: [midiClip], isSoloed: true, instrument: testTone)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         #expect(TestSignals.peak(instOnly.channelData[0], in: 0..<instOnly.frameCount) > 0.2)
         #expect(maxDifference(instOnly, instSolo) == 0.0)

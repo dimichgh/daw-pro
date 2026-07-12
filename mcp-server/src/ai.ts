@@ -1,18 +1,26 @@
 /**
  * Direct AI-provider clients for the MCP server (docs/AI-INTEGRATIONS.md).
  *
- * These call provider HTTPS APIs directly with the global `fetch` (Node >=
- * 22, no flag needed) — do not add `node-fetch`. Keys are read from
- * environment variables only (populated from `.env` by whatever launches
- * this process) and are never logged or included in thrown error messages.
+ * Anthropic and OpenAI calls go through the official `@anthropic-ai/sdk` and
+ * `openai` npm packages (m10-o — USER DIRECTIVE: use the standard SDKs
+ * instead of hand-rolled HTTP/JSON parsing). Suno has no official SDK as of
+ * 2026-07, so `generateSongSuno` remains a hand-rolled `fetch` call — see its
+ * doc comment below for why. Keys are read from environment variables only
+ * (populated from `.env` by whatever launches this process), passed
+ * explicitly to each SDK client constructor (never relying on the SDKs'
+ * ambient env pickup, since the anthropic-first selection logic below needs
+ * to inspect the keys itself anyway), and are never logged or included in
+ * thrown error messages.
  */
+
+import Anthropic, { APIError as AnthropicAPIError } from "@anthropic-ai/sdk";
+import OpenAI, { APIError as OpenAiAPIError } from "openai";
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ANTHROPIC_MODEL = "claude-sonnet-5";
-const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_OPENAI_TEXT_MODEL = "gpt-4o";
 const DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-2";
 const DEFAULT_SUNO_API_BASE = "https://api.suno.com/v1";
@@ -59,6 +67,56 @@ async function readErrorBody(response: Response): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// SDK client construction (test-only fetch-injection seam)
+// ---------------------------------------------------------------------------
+
+type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Test-only fetch injection seam. Both official SDKs accept a custom `fetch`
+ * in their client constructor options; `test/ai.test.ts` uses this to stub
+ * provider HTTP calls (success and error responses) without touching the
+ * network or needing real API keys. This is NOT part of the public tool
+ * surface — never call it from server.ts or any tool handler, only from
+ * tests. Passing `undefined` restores the SDKs' normal behavior (global
+ * `fetch`).
+ */
+let testFetch: FetchLike | undefined;
+export function __setFetchForTests(fn: FetchLike | undefined): void {
+  testFetch = fn;
+}
+
+/**
+ * DECISION (m10-o): both SDKs default to `maxRetries: 2` with their own
+ * backoff/timeout policy; the hand-rolled `fetch` code this replaces never
+ * retried a failed request. We pin `maxRetries: 0` on both clients so
+ * call-count and error-surfacing behavior stay identical to before rather
+ * than silently gaining retries. Revisit if flaky-provider retries become
+ * desirable — that would be a deliberate, separately-tested behavior change.
+ */
+function anthropicClient(apiKey: string): Anthropic {
+  return new Anthropic({ apiKey, maxRetries: 0, fetch: testFetch });
+}
+
+function openAiClient(apiKey: string): OpenAI {
+  return new OpenAI({ apiKey, maxRetries: 0, fetch: testFetch });
+}
+
+/**
+ * Map an error thrown by an SDK call into an `Error` safe to surface to MCP
+ * callers: informative (status + provider error detail when available) but
+ * never containing key material — the SDKs' `APIError.message` already
+ * embeds `${status} ${body}` from the provider's own response, never the
+ * request we sent.
+ */
+function wrapProviderError(label: string, err: unknown): Error {
+  if (err instanceof AnthropicAPIError || err instanceof OpenAiAPIError || err instanceof Error) {
+    return new Error(`${label}: ${err.message}`);
+  }
+  return new Error(`${label}: ${String(err)}`);
+}
+
+// ---------------------------------------------------------------------------
 // Lyrics
 // ---------------------------------------------------------------------------
 
@@ -66,14 +124,6 @@ export interface GenerateLyricsInput {
   theme: string;
   style?: string;
   structure?: string;
-}
-
-interface AnthropicMessagesResponse {
-  content?: Array<{ type: string; text?: string }>;
-}
-
-interface OpenAiChatResponse {
-  choices?: Array<{ message?: { content?: string | null } }>;
 }
 
 function buildLyricsUserPrompt({ theme, style, structure }: GenerateLyricsInput): string {
@@ -89,29 +139,24 @@ async function generateLyricsWithAnthropic(
   input: GenerateLyricsInput,
   apiKey: string
 ): Promise<string> {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify({
+  const client = anthropicClient(apiKey);
+
+  let message: Anthropic.Message;
+  try {
+    message = await client.messages.create({
       model: ANTHROPIC_MODEL,
       max_tokens: 2048,
       system: LYRICIST_SYSTEM_PROMPT,
       messages: [{ role: "user", content: buildLyricsUserPrompt(input) }],
-    }),
-  });
-
-  if (!response.ok) {
-    const body = await readErrorBody(response);
-    throw new Error(`Anthropic API error (${response.status} ${response.statusText}): ${body}`);
+    });
+  } catch (err) {
+    throw wrapProviderError("Anthropic API error", err);
   }
 
-  const data = (await response.json()) as AnthropicMessagesResponse;
-  const text = data.content
-    ?.filter((block) => block.type === "text" && typeof block.text === "string")
+  // Collect ALL text blocks (not just content[0]) — modern models can emit
+  // thinking/tool_use blocks before the text block(s); see m10-a.
+  const text = message.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
     .map((block) => block.text)
     .join("\n");
 
@@ -125,29 +170,23 @@ async function generateLyricsWithOpenAi(
   input: GenerateLyricsInput,
   apiKey: string
 ): Promise<string> {
+  const client = openAiClient(apiKey);
   const model = process.env["OPENAI_TEXT_MODEL"] || DEFAULT_OPENAI_TEXT_MODEL;
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
+
+  let completion: OpenAI.Chat.ChatCompletion;
+  try {
+    completion = await client.chat.completions.create({
       model,
       messages: [
         { role: "system", content: LYRICIST_SYSTEM_PROMPT },
         { role: "user", content: buildLyricsUserPrompt(input) },
       ],
-    }),
-  });
-
-  if (!response.ok) {
-    const body = await readErrorBody(response);
-    throw new Error(`OpenAI API error (${response.status} ${response.statusText}): ${body}`);
+    });
+  } catch (err) {
+    throw wrapProviderError("OpenAI API error", err);
   }
 
-  const data = (await response.json()) as OpenAiChatResponse;
-  const text = data.choices?.[0]?.message?.content;
+  const text = completion.choices?.[0]?.message?.content;
   if (!text) {
     throw new Error("OpenAI API returned no content for the lyrics request.");
   }
@@ -189,6 +228,9 @@ export interface GenerateSongSunoInput {
 
 /**
  * Generate a song via the Suno API.
+ *
+ * No official Suno SDK exists (checked as of m10-o) — this stays a
+ * hand-rolled `fetch` call, unlike the Anthropic/OpenAI paths above.
  *
  * UNVERIFIED: the official Suno API's endpoint path, request body shape, and
  * response shape have not been confirmed against current provider docs — see
@@ -240,10 +282,6 @@ export interface GenerateImageInput {
   size?: string;
 }
 
-interface OpenAiImagesResponse {
-  data?: Array<{ b64_json?: string }>;
-}
-
 export interface GenerateImageResult {
   filePath: string;
 }
@@ -258,27 +296,20 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
     throw missingKeysError("OPENAI_API_KEY");
   }
   const model = process.env["OPENAI_IMAGE_MODEL"] || DEFAULT_OPENAI_IMAGE_MODEL;
+  const client = openAiClient(apiKey);
 
-  const response = await fetch("https://api.openai.com/v1/images/generations", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
+  let images: OpenAI.Images.ImagesResponse;
+  try {
+    images = await client.images.generate({
       model,
       prompt: input.prompt,
       size: input.size ?? "1024x1024",
-    }),
-  });
-
-  if (!response.ok) {
-    const body = await readErrorBody(response);
-    throw new Error(`OpenAI Images API error (${response.status} ${response.statusText}): ${body}`);
+    });
+  } catch (err) {
+    throw wrapProviderError("OpenAI Images API error", err);
   }
 
-  const data = (await response.json()) as OpenAiImagesResponse;
-  const b64 = data.data?.[0]?.b64_json;
+  const b64 = images.data?.[0]?.b64_json;
   if (!b64) {
     throw new Error("OpenAI Images API returned no image data.");
   }

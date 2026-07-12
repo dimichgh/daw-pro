@@ -31,7 +31,7 @@ struct MixdownStoreTests {
         // Clip ends at beat 4 → 2.0 s at 120 BPM, + 0.5 s tail.
         #expect(abs(request.durationSeconds - 2.5) < 1e-9)
         #expect(request.fromBeat == 0)
-        #expect(request.tempoBPM == 120)
+        #expect(request.tempoMap == TempoMap(constantBPM: 120))
         #expect(request.masterVolume == 1)
         #expect(request.tracks.count == 1)
     }

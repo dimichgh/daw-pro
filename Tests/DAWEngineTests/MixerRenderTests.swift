@@ -30,7 +30,7 @@ struct MixerRenderTests {
         let fixtures = try TestSignals.fixtures()
         let audio = try OfflineRenderer().render(
             tracks: [track(clip: fixtures.cos1k48, volume: 0.5)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let expected = Self.baselineRMS / 2
         for channel in audio.channelData {
@@ -46,7 +46,7 @@ struct MixerRenderTests {
         let fixtures = try TestSignals.fixtures()
         let audio = try OfflineRenderer().render(
             tracks: [track(clip: fixtures.cos1k48, isMuted: true)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         for channel in audio.channelData {
             let peak = TestSignals.peak(channel, in: 0..<channel.count)
@@ -65,10 +65,10 @@ struct MixerRenderTests {
         let other = track(clip: fixtures.cos1k48)
 
         let soloMix = try OfflineRenderer().render(
-            tracks: [soloed, other], tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tracks: [soloed, other], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let soloAlone = try OfflineRenderer().render(
-            tracks: [soloed], tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tracks: [soloed], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
 
         let mixRMS = TestSignals.rms(soloMix.channelData[0], in: Self.window)
@@ -88,7 +88,7 @@ struct MixerRenderTests {
         let fixtures = try TestSignals.fixtures()
         let audio = try OfflineRenderer().render(
             tracks: [track(clip: fixtures.cos1k48, pan: -1)],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let leftRMS = TestSignals.rms(audio.channelData[0], in: Self.window)
         let rightRMS = TestSignals.rms(audio.channelData[1], in: Self.window)
@@ -106,7 +106,7 @@ struct MixerRenderTests {
         let tracks = [track(clip: fixtures.cos1k48)]
 
         let half = try OfflineRenderer().render(
-            tracks: tracks, tempoBPM: 120, fromBeat: 0,
+            tracks: tracks, tempoMap: TempoMap(constantBPM: 120), fromBeat: 0,
             durationSeconds: 1.0, masterVolume: 0.5
         )
         let expected = Self.baselineRMS / 2
@@ -117,7 +117,7 @@ struct MixerRenderTests {
         }
 
         let zero = try OfflineRenderer().render(
-            tracks: tracks, tempoBPM: 120, fromBeat: 0,
+            tracks: tracks, tempoMap: TempoMap(constantBPM: 120), fromBeat: 0,
             durationSeconds: 1.0, masterVolume: 0
         )
         for channel in zero.channelData {

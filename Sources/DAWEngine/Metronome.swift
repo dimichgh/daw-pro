@@ -1,4 +1,5 @@
 import AVFAudio
+import DAWCore
 import Foundation
 
 /// Metronome click source: one `AVAudioPlayerNode` fed from two precomputed
@@ -39,10 +40,13 @@ final class Metronome {
 
     // Scheduling state remembered from the last scheduleClicks call so
     // topUp(currentBeat:) can extend the queue with identical parameters.
+    // m12-b (design row 45): the MAP values (tempo + meter) are cached
+    // instead of scalars so top-ups extend under the same mapping the run
+    // started with.
     private(set) var scheduledThroughBeat: Double = 0
     private var playerStartBeat: Double = 0
-    private var tempoBPM: Double = 120
-    private var beatsPerBar: Int = 4
+    private var tempoMap = TempoMap(constantBPM: 120)
+    private var meterMap = MeterMap(constant: TimeSignature())
     /// True only after scheduleClicks (open-ended click run). A count-in-only
     /// schedule leaves this false so the player just drains and goes silent.
     private var topUpEnabled = false
@@ -85,28 +89,35 @@ final class Metronome {
 
     /// Pure count-in arithmetic, extracted for headless testing: how long the
     /// record anchor is delayed and how many count-in clicks fill the gap.
+    /// m12-b (design row 42): the pre-roll runs at the SEGMENT AT THE RECORD
+    /// BEAT's tempo — a LOOKUP by policy (count-in precedes the record beat
+    /// in wall time; the beat domain does not extend backward across it).
     static func countInPlan(
-        countInBars: Int, beatsPerBar: Int, tempoBPM: Double
+        countInBars: Int, beatsPerBar: Int, tempoMap: TempoMap, atBeat beat: Double
     ) -> (delaySeconds: Double, clickBeats: Int) {
         let clickBeats = max(0, countInBars) * max(1, beatsPerBar)
-        return (Double(clickBeats) * 60.0 / tempoBPM, clickBeats)
+        return (Double(clickBeats) * tempoMap.secondsPerBeat(atBeat: beat), clickBeats)
     }
 
     /// Schedules one click per integer beat in [ceil(fromBeat), throughBeat)
-    /// at player-relative sample time (beat − playerStartBeat) × spb × rate;
-    /// downbeat buffer when beat % beatsPerBar == 0. Remembers the parameters
-    /// so `topUp` can extend the run.
-    func scheduleClicks(fromBeat: Double, throughBeat: Double, tempoBPM: Double,
-                        beatsPerBar: Int, playerStartBeat: Double) {
-        self.tempoBPM = tempoBPM
-        self.beatsPerBar = max(1, beatsPerBar)
+    /// at player-relative sample time = the tempo-map integral from
+    /// `playerStartBeat` to the click beat, × rate (m12-b, design row 43;
+    /// trivial-map arithmetic identical to the old fixed spb). Downbeat
+    /// buffer when the click falls on a MeterMap barline. Remembers the
+    /// parameters so `topUp` can extend the run.
+    func scheduleClicks(fromBeat: Double, throughBeat: Double, tempoMap: TempoMap,
+                        meterMap: MeterMap, playerStartBeat: Double) {
+        self.tempoMap = tempoMap
+        self.meterMap = meterMap
         self.playerStartBeat = playerStartBeat
-        let secondsPerBeat = 60.0 / tempoBPM
         var beat = fromBeat.rounded(.up)
         while beat < throughBeat {
-            let isDownbeat = Int(beat.rounded()) % self.beatsPerBar == 0
+            // Downbeat = the click sits on a MeterMap barline (design row 43;
+            // click beats are integers, so beatInBar is exact — 0.0 on the
+            // barline, identical to the old `beat % beatsPerBar == 0`).
+            let isDownbeat = meterMap.barBeat(atBeat: beat.rounded()).beatInBar == 0
             schedule(downbeat: isDownbeat,
-                     atSeconds: (beat - playerStartBeat) * secondsPerBeat)
+                     atSeconds: tempoMap.seconds(from: playerStartBeat, to: beat))
             beat += 1
         }
         scheduledThroughBeat = max(scheduledThroughBeat, throughBeat)
@@ -116,10 +127,13 @@ final class Metronome {
     /// Schedules `clickBeats` count-in clicks player-relative from time 0 —
     /// the count-in bar pattern is position-independent (the first click of
     /// each count-in bar is the downbeat), unlike scheduleClicks' absolute
-    /// transport-beat pattern. Does NOT enable top-up: a count-in-only run
-    /// (metronome disabled) simply ends after the last click.
-    func scheduleCountIn(clickBeats: Int, tempoBPM: Double, beatsPerBar: Int) {
-        let secondsPerBeat = 60.0 / tempoBPM
+    /// transport-beat pattern. Click spacing uses the record-beat segment's
+    /// tempo (the countInPlan LOOKUP policy, m12-b design row 44). Does NOT
+    /// enable top-up: a count-in-only run (metronome disabled) simply ends
+    /// after the last click.
+    func scheduleCountIn(clickBeats: Int, tempoMap: TempoMap, atBeat recordBeat: Double,
+                         beatsPerBar: Int) {
+        let secondsPerBeat = tempoMap.secondsPerBeat(atBeat: recordBeat)
         let bar = max(1, beatsPerBar)
         for beat in 0..<max(0, clickBeats) {
             schedule(downbeat: beat % bar == 0, atSeconds: Double(beat) * secondsPerBeat)
@@ -136,7 +150,7 @@ final class Metronome {
         scheduleClicks(
             fromBeat: scheduledThroughBeat,
             throughBeat: scheduledThroughBeat + Self.topUpChunkBeats,
-            tempoBPM: tempoBPM, beatsPerBar: beatsPerBar, playerStartBeat: playerStartBeat
+            tempoMap: tempoMap, meterMap: meterMap, playerStartBeat: playerStartBeat
         )
     }
 

@@ -52,7 +52,7 @@ extension ProjectStore {
         }
         guard !clip.isMIDI else { throw ProjectError.clipFixRequiresAudioClip(clipId) }
 
-        let tempo = transport.tempoBPM
+        let tempoMap = transport.tempoMap
 
         // 3. Resolve the target flavor, its span, and the clips that go into the
         //    bounce (D1). Plain clip → just that clip with fades STRIPPED (so the
@@ -99,7 +99,7 @@ extension ProjectStore {
                 "fix region [\(startBeat), \(endBeat)] beats lies outside the target span "
                 + "[\(spanStart), \(spanEnd)] — pick a region inside the clip")
         }
-        let regionSeconds = (endBeat - startBeat) * 60.0 / tempo
+        let regionSeconds = tempoMap.seconds(from: startBeat, to: endBeat)
         guard regionSeconds >= 0.1 else {
             throw ProjectError.invalidClipEdit(
                 "fix region is only \(String(format: "%.3f", regionSeconds)) s — too short to "
@@ -108,15 +108,17 @@ extension ProjectStore {
 
         // 5. Clamp context and compute the window + file-domain seconds (D3).
         let context = contextSeconds.clamped(to: 1...60)
-        let contextBeats = context * tempo / 60.0
+        // Inverse integral anchored at the region start (m12-b, design row
+        // 28) — the context pad is a wall-clock quantity.
+        let contextBeats = tempoMap.beat(from: startBeat, elapsedSeconds: context) - startBeat
         let window = ClipFixPlanner.window(
             regionStart: startBeat, regionEnd: endBeat,
             spanStart: spanStart, spanEnd: spanEnd, contextBeats: contextBeats)
         let windowStartBeat = window.start
         let windowEndBeat = window.end
-        let bounceSeconds = (windowEndBeat - windowStartBeat) * 60.0 / tempo
-        let repaintStartSeconds = (startBeat - windowStartBeat) * 60.0 / tempo
-        let repaintEndSeconds = (endBeat - windowStartBeat) * 60.0 / tempo
+        let bounceSeconds = tempoMap.seconds(from: windowStartBeat, to: windowEndBeat)
+        let repaintStartSeconds = tempoMap.seconds(from: windowStartBeat, to: startBeat)
+        let repaintEndSeconds = tempoMap.seconds(from: windowStartBeat, to: endBeat)
 
         // 6. Render the DRY window into a SYNTHETIC single track (D1): unity
         //    volume/pan, no inserts/sends/automation (zero-latency plan), master
@@ -126,7 +128,7 @@ extension ProjectStore {
         //    copy, v-a behavior).
         let syntheticTrack = Track(name: "AI Fix Bounce", kind: .audio, clips: bounceClips)
         let rendered = try await engine.renderOffline(
-            tracks: [syntheticTrack], tempoBPM: tempo, masterVolume: 1,
+            tracks: [syntheticTrack], tempoMap: tempoMap, masterVolume: 1,
             fromBeat: windowStartBeat, durationSeconds: bounceSeconds,
             forcedCompensationTargets: nil)
         let bounceURL = Self.fixBounceDestination()
@@ -148,7 +150,7 @@ extension ProjectStore {
             windowStartBeat: windowStartBeat,
             windowLengthBeats: windowEndBeat - windowStartBeat,
             regionStartBeat: startBeat, regionEndBeat: endBeat,
-            tempoBPM: tempo, submittedAt: Date())
+            tempoMap: tempoMap, submittedAt: Date())
 
         return ClipFixSubmission(
             jobID: receipt.jobID, state: "queued", queuePosition: receipt.queuePosition,
@@ -191,9 +193,15 @@ extension ProjectStore {
             throw ProjectError.clipFixStale(
                 "the track for this fix no longer exists — submit again with ai.fixClipRegion")
         }
-        guard transport.tempoBPM == pending.tempoBPM else {
+        // Map compare (m12-b, design row 29): Phase A freezes the whole map
+        // value; Phase C swaps this for the cheaper `mapRevision` integer
+        // when real map mutations (and a revision producer) exist. The error
+        // text keeps the bpm-at-region numbers agents already parse.
+        guard transport.tempoMap == pending.tempoMap else {
+            let was = pending.tempoMap.bpm(atBeat: pending.regionStartBeat)
+            let now = transport.tempoMap.bpm(atBeat: pending.regionStartBeat)
             throw ProjectError.clipFixStale(
-                "the project tempo changed (\(pending.tempoBPM) → \(transport.tempoBPM) BPM) since this "
+                "the project tempo changed (\(was) → \(now) BPM) since this "
                 + "fix was requested — the bounced material no longer lines up; submit again with ai.fixClipRegion")
         }
         let plan = try resolveClipFixPlan(pending, trackIndex: t)

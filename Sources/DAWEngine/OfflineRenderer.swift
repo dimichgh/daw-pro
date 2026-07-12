@@ -82,12 +82,17 @@ public final class OfflineRenderer {
     }
 
     /// Instantiates and prepares a hosted instrument for every `.audioUnit`
-    /// track, at the renderer's sample rate. MUST run (and complete) before
-    /// `render`/`renderToWAV` for those tracks to sound — an AU track without
-    /// this pre-step renders the silent placeholder with a stderr warning.
+    /// and `.soundBank` track (m10-n — the bank loads AGAIN into this
+    /// renderer's own registry: fresh AU instances per render, a second
+    /// transient RAM copy during a bounce; trivial for GM, documented for
+    /// GB-scale SF2s — R9), at the renderer's sample rate. MUST run (and
+    /// complete) before `render`/`renderToWAV` for those tracks to sound — a
+    /// hosted track without this pre-step renders the silent placeholder with
+    /// a stderr warning.
     public func prepareAudioUnits(tracks: [Track]) async {
         for track in tracks
-        where track.kind == .instrument && (track.instrument ?? .default).kind == .audioUnit {
+        where track.kind == .instrument
+            && [.audioUnit, .soundBank].contains((track.instrument ?? .default).kind) {
             await auRegistry.prepare(track: track, sampleRate: sampleRate)
         }
         // Hosted insert effects too (M4 v) — every strip kind can carry them.
@@ -105,7 +110,9 @@ public final class OfflineRenderer {
     /// `metronomeEnabled` attaches a Metronome to the offline engine and
     /// schedules clicks across the whole render range (`beatsPerBar` shapes
     /// the downbeat pattern) — headless, assertion-checkable click output.
-    public func render(tracks: [Track], tempoBPM: Double,
+    /// m12-b (design row 53): the render window maps through `tempoMap`;
+    /// Phase A callers always pass a trivial single-segment map.
+    public func render(tracks: [Track], tempoMap: TempoMap,
                        fromBeat: Double = 0,
                        durationSeconds: Double,
                        masterVolume: Double = 1,
@@ -169,10 +176,10 @@ public final class OfflineRenderer {
         }
         for track in tracks
         where track.kind == .instrument
-            && (track.instrument ?? .default).kind == .audioUnit
+            && [.audioUnit, .soundBank].contains((track.instrument ?? .default).kind)
             && auRegistry.preparedInstrument(forTrack: track.id) == nil {
             FileHandle.standardError.write(Data(
-                "OfflineRenderer: Audio Unit for track '\(track.name)' is not prepared — rendering silence (await prepareAudioUnits(tracks:) first)\n".utf8))
+                "OfflineRenderer: hosted instrument for track '\(track.name)' is not prepared — rendering silence (await prepareAudioUnits(tracks:) first)\n".utf8))
         }
         // Non-nil seam suppresses the automatic plan for this graph; the
         // parameter passes below then force the given targets each pass.
@@ -202,19 +209,21 @@ public final class OfflineRenderer {
         // volume-lane strip pins its mixer to (gated ? 0 : 1) pre-start —
         // in place from frame 0, no ramp — and the render stage owns the
         // lane gain for the whole bounce (.offline first-pull epoch).
-        graph.armOfflineAutomation(fromBeat: fromBeat, tempoBPM: tempoBPM)
+        graph.armOfflineAutomation(fromBeat: fromBeat, tempoMap: tempoMap)
         graph.applyParameters(tracks: tracks, playheadBeat: fromBeat)
         try engine.start()
         graph.applyParameters(tracks: tracks, playheadBeat: fromBeat)
-        graph.scheduleAll(fromBeat: fromBeat, tempoBPM: tempoBPM)
+        graph.scheduleAll(fromBeat: fromBeat, tempoMap: tempoMap)
         if let metronome {
-            // One click per integer beat across the render range; nil anchor =
-            // player time 0 ≡ rendered sample 0, same as the clip players.
+            // One click per integer beat across the render range (the window
+            // end is the inverse integral of the render duration — m12-b,
+            // design row 52); nil anchor = player time 0 ≡ rendered sample 0,
+            // same as the clip players.
             metronome.scheduleClicks(
                 fromBeat: fromBeat,
-                throughBeat: fromBeat + durationSeconds * tempoBPM / 60.0,
-                tempoBPM: tempoBPM,
-                beatsPerBar: beatsPerBar,
+                throughBeat: tempoMap.beat(from: fromBeat, elapsedSeconds: durationSeconds),
+                tempoMap: tempoMap,
+                meterMap: MeterMap(constant: TimeSignature(beatsPerBar: beatsPerBar, beatUnit: 4)),
                 playerStartBeat: fromBeat
             )
             metronome.start(at: nil)
@@ -296,11 +305,11 @@ public final class OfflineRenderer {
     /// WAV (parent directories are created recursively). Returns the facts of
     /// the written file. The write is frame-exact: the file holds exactly the
     /// samples `render` produced, bit for bit.
-    public func renderToWAV(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    public func renderToWAV(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                             fromBeat: Double, durationSeconds: Double,
                             to url: URL) throws -> AudioFileInfo {
         let audio = try render(
-            tracks: tracks, tempoBPM: tempoBPM, fromBeat: fromBeat,
+            tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
             durationSeconds: durationSeconds, masterVolume: masterVolume
         )
         return try Self.writeWAV(audio, to: url)

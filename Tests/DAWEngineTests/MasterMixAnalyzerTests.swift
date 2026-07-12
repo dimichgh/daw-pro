@@ -214,7 +214,7 @@ struct MasterMixAnalyzerTests {
         var rightCopy = right
         leftCopy.withUnsafeMutableBufferPointer { leftBuffer in
             rightCopy.withUnsafeMutableBufferPointer { rightBuffer in
-                var channels = [leftBuffer.baseAddress!, rightBuffer.baseAddress!]
+                let channels = [leftBuffer.baseAddress!, rightBuffer.baseAddress!]
                 channels.withUnsafeBufferPointer { pointers in
                     stereoAnalyzer.processMix(
                         channels: pointers.baseAddress!,

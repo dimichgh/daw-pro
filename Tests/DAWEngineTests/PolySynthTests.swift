@@ -308,13 +308,13 @@ struct PolySynthTests {
         let viaDescriptor = try OfflineRenderer().render(
             tracks: [Track(name: "Keys", kind: .instrument, clips: [midiClip()],
                            instrument: InstrumentDescriptor(kind: .testTone))],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.5
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.5
         )
         let injected = OfflineRenderer()
         injected.instrumentFactory = { _ in TestToneInstrument() }
         let viaInjection = try injected.render(
             tracks: [Track(name: "Keys", kind: .instrument, clips: [midiClip()])],
-            tempoBPM: 120, fromBeat: 0, durationSeconds: 1.5
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.5
         )
         let difference = maxDifference(viaDescriptor, viaInjection)
         let peak = TestSignals.peak(viaDescriptor.channelData[0],
@@ -330,7 +330,7 @@ struct PolySynthTests {
             try OfflineRenderer().render(
                 tracks: [Track(name: "Keys", kind: .instrument, clips: [midiClip()],
                                instrument: descriptor)],
-                tempoBPM: 120, fromBeat: 0, durationSeconds: 1.5
+                tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.5
             )
         }
         let nilRender = try render(nil)
@@ -357,7 +357,7 @@ struct PolySynthTests {
                                        waveform: .saw, attack: 0.005, decay: 0.05,
                                        sustain: 1.0, release: 0.1, cutoffHz: cutoffHz,
                                        resonance: 0, gain: 0.8)))],
-                tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+                tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
             )
             return TestSignals.rms(audio.channelData[0], in: 12_000..<48_000)
         }
@@ -378,9 +378,9 @@ struct PolySynthTests {
                 MIDINote(pitch: 67, velocity: 110, startBeat: 1, lengthBeats: 1),
             ]),
         ])
-        let a = try OfflineRenderer().render(tracks: [track], tempoBPM: 120,
+        let a = try OfflineRenderer().render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
                                              fromBeat: 0, durationSeconds: 2.0)
-        let b = try OfflineRenderer().render(tracks: [track], tempoBPM: 120,
+        let b = try OfflineRenderer().render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
                                              fromBeat: 0, durationSeconds: 2.0)
         let difference = maxDifference(a, b)
         print("[measured] determinism null: \(difference)")

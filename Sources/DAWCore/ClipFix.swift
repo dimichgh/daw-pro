@@ -163,9 +163,11 @@ public struct PendingClipFix: Sendable, Equatable, Identifiable {
     public var windowLengthBeats: Double
     public var regionStartBeat: Double
     public var regionEndBeat: Double
-    /// Tempo frozen at submit — a mid-job change breaks the bounced material's
-    /// beats↔seconds mapping (no safe rebase).
-    public var tempoBPM: Double
+    /// Tempo map frozen at submit — a mid-job change breaks the bounced
+    /// material's beats↔seconds mapping (no safe rebase). m12-b freezes the
+    /// whole map VALUE; Phase C replaces the equality check with the design's
+    /// `mapRevision` integer once real map mutations exist (design row 29).
+    public var tempoMap: TempoMap
     public var submittedAt: Date
 
     public init(
@@ -176,7 +178,7 @@ public struct PendingClipFix: Sendable, Equatable, Identifiable {
         windowLengthBeats: Double,
         regionStartBeat: Double,
         regionEndBeat: Double,
-        tempoBPM: Double,
+        tempoMap: TempoMap,
         submittedAt: Date
     ) {
         self.jobID = jobID
@@ -186,7 +188,7 @@ public struct PendingClipFix: Sendable, Equatable, Identifiable {
         self.windowLengthBeats = windowLengthBeats
         self.regionStartBeat = regionStartBeat
         self.regionEndBeat = regionEndBeat
-        self.tempoBPM = tempoBPM
+        self.tempoMap = tempoMap
         self.submittedAt = submittedAt
     }
 }

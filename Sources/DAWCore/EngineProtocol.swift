@@ -129,10 +129,12 @@ public protocol AudioEngineControlling: AnyObject {
     /// render thread.
     func detectTransients(inFileAt url: URL, sensitivity: Double) async throws -> [TransientMarker]
 
-    /// Begin playback from transport.positionBeats at transport.tempoBPM.
-    /// transport.isMetronomeEnabled is read HERE (and on every seek/restart) —
-    /// there is no dedicated metronome intent; toggling the click while
-    /// playing goes through seek (v0 restart seam, see ProjectStore.setMetronome).
+    /// Begin playback from transport.positionBeats under transport.tempoMap
+    /// (m12-b: the map is derived from transport.tempoBPM — trivial until
+    /// Phase C). transport.isMetronomeEnabled is read HERE (and on every
+    /// seek/restart) — there is no dedicated metronome intent; toggling the
+    /// click while playing goes through seek (v0 restart seam, see
+    /// ProjectStore.setMetronome).
     func startPlayback(_ transport: TransportState)
 
     /// Halt sound; keep the engine hot. Pushes one final render-derived
@@ -146,7 +148,8 @@ public protocol AudioEngineControlling: AnyObject {
 
     /// Tempo changed. If playing, the engine re-anchors from its OWN derived
     /// current beat position (transport.positionBeats may be ~33 ms
-    /// display-stale) and resumes at transport.tempoBPM.
+    /// display-stale) and resumes under transport.tempoMap (m12-b; any future
+    /// map edit fires this same restart seam — design row 49).
     func setTempo(_ transport: TransportState)
 
     /// Loop settings changed; engine updates its cached loop state. Never interrupts audio.
@@ -159,7 +162,7 @@ public protocol AudioEngineControlling: AnyObject {
     /// Async so hosted Audio Unit instruments can be instantiated/prepared for
     /// the offline graph first; the render itself still stalls the main actor
     /// for its duration (v0-accepted for typical song lengths).
-    func renderMixdown(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo
 
@@ -172,7 +175,7 @@ public protocol AudioEngineControlling: AnyObject {
     /// sample-aligned with the mix — spec §1.1); nil = the automatic plan
     /// (mix behavior). Memory: one `RenderedAudio` alive per call (~230 MB for
     /// a 10-min stereo 48 k render) — accepted v0.
-    func renderOffline(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                        fromBeat: Double, durationSeconds: Double,
                        forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio
 
@@ -396,7 +399,7 @@ extension AudioEngineControlling {
     /// Buffer-out offline rendering is optional capability (M5 iv-b):
     /// engines without it (fakes, headless) refuse readably instead of
     /// pretending a silent render happened.
-    public func renderOffline(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    public func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                               fromBeat: Double, durationSeconds: Double,
                               forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         throw ProjectError.engineUnavailable

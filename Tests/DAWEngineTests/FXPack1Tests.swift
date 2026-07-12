@@ -372,9 +372,9 @@ struct FXPack1Tests {
                           clips: [Clip(name: "clip", startBeat: 0, lengthBeats: 4,
                                        audioFileURL: fixtures.cos1k48)],
                           effects: effects)
-        let first = try OfflineRenderer().render(tracks: [track], tempoBPM: 120,
+        let first = try OfflineRenderer().render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
                                                  fromBeat: 0, durationSeconds: 1.0)
-        let second = try OfflineRenderer().render(tracks: [track], tempoBPM: 120,
+        let second = try OfflineRenderer().render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
                                                   fromBeat: 0, durationSeconds: 1.0)
         var maxDiff: Float = 0
         var peak: Float = 0

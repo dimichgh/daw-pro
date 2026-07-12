@@ -89,7 +89,7 @@ private final class FakeAnalysisEngine: AudioEngineControlling {
     func setTempo(_ transport: TransportState) {}
     func loopChanged(_ transport: TransportState) {}
     func masterVolumeChanged(_ volume: Double) {}
-    func renderMixdown(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         throw ProjectError.engineUnavailable

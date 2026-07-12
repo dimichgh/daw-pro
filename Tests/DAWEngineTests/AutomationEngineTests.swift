@@ -138,7 +138,7 @@ struct AutomationEngineTests {
         // Anchored at beat 1: the beat-0 point keeps its NEGATIVE time so a
         // straddling segment interpolates instead of snapping.
         let anchored = AutomationSchedule.buildBreakpoints(
-            points: points, fromBeat: 1, tempoBPM: 120, sampleRate: 48_000)
+            points: points, fromBeat: 1, tempoMap: TempoMap(constantBPM: 120), sampleRate: 48_000)
         #expect(anchored.map(\.sampleTime) == [-24_000, 24_000, 72_000])
         #expect(anchored.map(\.value) == [0.2, 0.8, 0.4])
         #expect(anchored.map(\.holdsSegment) == [true, false, false])
@@ -146,7 +146,7 @@ struct AutomationEngineTests {
         // From beat 0 at 90 BPM: beat 3 → 3 × (60/90) × 48 000 = 96 000.
         let ninety = AutomationSchedule.buildBreakpoints(
             points: [AutomationPoint(beat: 3, value: 1)],
-            fromBeat: 0, tempoBPM: 90, sampleRate: 48_000)
+            fromBeat: 0, tempoMap: TempoMap(constantBPM: 90), sampleRate: 48_000)
         #expect(ninety.map(\.sampleTime) == [96_000])
 
         // Two beats that round onto the SAME sample dedupe last-wins, so
@@ -156,7 +156,7 @@ struct AutomationEngineTests {
                 AutomationPoint(beat: 1, value: 0.1, curve: .hold),
                 AutomationPoint(beat: 1 + 1e-9, value: 0.9),
             ],
-            fromBeat: 0, tempoBPM: 120, sampleRate: 48_000)
+            fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: 48_000)
         #expect(deduped.count == 1)
         #expect(deduped[0].sampleTime == 24_000)
         #expect(deduped[0].value == 0.9)          // last wins
@@ -172,7 +172,7 @@ struct AutomationEngineTests {
         #expect(inert.activeLane(for: .volume) == nil)
         #expect(inert.activeLane(for: .pan) == nil)
         #expect(AutomationSchedule.build(
-            volumeLane: nil, panLane: nil, fromBeat: 0, tempoBPM: 120,
+            volumeLane: nil, panLane: nil, fromBeat: 0, tempoMap: TempoMap(constantBPM: 120),
             sampleRate: 48_000, generation: 1, mode: .offline) == nil)
     }
 
@@ -229,7 +229,7 @@ struct AutomationEngineTests {
                 AutomationPoint(beat: 4, value: 1),
             ])])
         let audio = try OfflineRenderer(sampleRate: Self.sampleRate).render(
-            tracks: [track], tempoBPM: 120, fromBeat: 0, durationSeconds: 2.0)
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 2.0)
         #expect(audio.frameCount == 96_000)
         var maxDiff = 0.0
         for channel in audio.channelData {
@@ -259,9 +259,9 @@ struct AutomationEngineTests {
             AutomationPoint(beat: 4, value: 0),
         ])]
         let a = try OfflineRenderer(sampleRate: Self.sampleRate).render(
-            tracks: [plain], tempoBPM: 120, durationSeconds: 1.0)
+            tracks: [plain], tempoMap: TempoMap(constantBPM: 120), durationSeconds: 1.0)
         let b = try OfflineRenderer(sampleRate: Self.sampleRate).render(
-            tracks: [automated], tempoBPM: 120, durationSeconds: 1.0)
+            tracks: [automated], tempoMap: TempoMap(constantBPM: 120), durationSeconds: 1.0)
         #expect(a.frameCount == b.frameCount)
         let diffs = bitDiffCount(a, b)
         let peak = a.channelData.flatMap { $0 }.map(abs).max() ?? 0
@@ -290,7 +290,7 @@ struct AutomationEngineTests {
         let mutedMixer = try #require(graph.stripMixer(forTrack: muted.id))
         #expect(abs(mixer.outputVolume - 0.6) < 1e-6)  // lane @ beat 2, not the 0.25 fader
         #expect(mutedMixer.outputVolume == 0)          // mute wins while stopped too
-        graph.scheduleAll(fromBeat: 0, tempoBPM: 120)
+        graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
         graph.startAllPlayers(at: nil)
         #expect(mixer.outputVolume == 1)               // pinned — lane gain is render-side
         #expect(mutedMixer.outputVolume == 0)          // gated pin
@@ -317,9 +317,9 @@ struct AutomationEngineTests {
         let mutedLane = Track(name: "Mut", kind: .audio, volume: 0.8, isMuted: true,
                               clips: [clip], automation: [unityLane])
         let renderer = OfflineRenderer(sampleRate: Self.sampleRate)
-        let ref = try renderer.render(tracks: [reference], tempoBPM: 120, durationSeconds: 0.5)
-        let ovr = try renderer.render(tracks: [overridden], tempoBPM: 120, durationSeconds: 0.5)
-        let mut = try renderer.render(tracks: [mutedLane], tempoBPM: 120, durationSeconds: 0.5)
+        let ref = try renderer.render(tracks: [reference], tempoMap: TempoMap(constantBPM: 120), durationSeconds: 0.5)
+        let ovr = try renderer.render(tracks: [overridden], tempoMap: TempoMap(constantBPM: 120), durationSeconds: 0.5)
+        let mut = try renderer.render(tracks: [mutedLane], tempoMap: TempoMap(constantBPM: 120), durationSeconds: 0.5)
         let overrideDiffs = bitDiffCount(ref, ovr)
         let mutedPeak = mut.channelData.flatMap { $0 }.map(abs).max() ?? -1
         print("[measured] fader override: fader-0.25+lane-1 vs fader-1-no-lane → "
@@ -415,7 +415,7 @@ struct AutomationEngineTests {
             ]),
         ])
         let (_, graph) = try makeGraph(tracks: [track])
-        graph.scheduleAll(fromBeat: 0, tempoBPM: 120)
+        graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
         graph.startAllPlayers(at: AVAudioTime(hostTime: hostAnchor))
         let head = try #require(graph.automationRenderer(forTrack: track.id))
         let before = try #require(head.currentSchedule)
@@ -465,7 +465,7 @@ struct AutomationEngineTests {
         let (engine, graph) = try makeGraph(tracks: [audio, inst])
         try engine.start()
         graph.applyParameters(tracks: [audio, inst])   // post-start pass, AudioEngine order
-        graph.scheduleAll(fromBeat: 0, tempoBPM: 120)
+        graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
         graph.startAllPlayers(at: nil)
         let midiRenderer = try #require(graph.instrumentRenderer(forTrack: inst.id))
         let midiBefore = try #require(midiRenderer.currentSchedule)

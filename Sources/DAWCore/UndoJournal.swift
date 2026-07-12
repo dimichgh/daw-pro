@@ -1,5 +1,35 @@
 import Foundation
 
+/// A read-only projection of the undo/redo journal's LABELS for the history panel
+/// and the `edit.history` wire command (m11-b). LABELS ONLY — the internal
+/// `UndoEntry` values (each captured `EditState`) never cross this boundary, and
+/// nothing here mutates the journal (stepping still goes only through
+/// `ProjectStore.undo()`/`redo()`).
+///
+/// Both lists are NEWEST-FIRST (the ordering contract the wire command states
+/// verbatim):
+///   - `undo[0]` is the label `ProjectStore.undo()` reverses NEXT (the undo
+///     stack's top); `undo` then descends into progressively OLDER edits.
+///   - `redo[0]` is the label `ProjectStore.redo()` reapplies NEXT (the redo
+///     stack's top); `redo` then descends into edits undone EARLIER.
+/// Empty arrays mean nothing to undo / redo — `canUndo`/`canRedo` mirror
+/// `ProjectStore.canUndo`/`canRedo` exactly.
+public struct UndoHistory: Equatable, Sendable {
+    /// Undo labels, newest-first (`[0]` = next undo).
+    public let undo: [String]
+    /// Redo labels, newest-first (`[0]` = next redo).
+    public let redo: [String]
+    /// True when there is at least one undoable edit.
+    public var canUndo: Bool { !undo.isEmpty }
+    /// True when there is at least one redoable edit.
+    public var canRedo: Bool { !redo.isEmpty }
+
+    public init(undo: [String], redo: [String]) {
+        self.undo = undo
+        self.redo = redo
+    }
+}
+
 /// A normalized snapshot of everything undo/redo restores: the track list, the
 /// master gain, and the persistable transport fields. Transport TRANSIENCE
 /// (`isPlaying`, `isRecording`, `positionBeats`) is normalized OUT here so that
@@ -15,6 +45,10 @@ struct EditState: Equatable {
     /// add/remove. Defaults to `[]` so entries captured before this field existed
     /// still compare equal.
     var grooveTemplates: [GrooveTemplate] = []
+    /// Session markers (m11-c). Additive — undo covers marker add/remove/rename/
+    /// move. Defaults to `[]` so entries captured before this field existed still
+    /// compare equal.
+    var markers: [Marker] = []
 }
 
 /// One undo (or redo) record: the state captured BEFORE an edit, a
@@ -58,6 +92,16 @@ struct UndoJournal {
     var undoLabel: String? { undoStack.last?.label }
     /// Label of the operation `redo()` would reapply; nil when redo is empty.
     var redoLabel: String? { redoStack.last?.label }
+
+    /// The undo stack's labels NEWEST-FIRST (m11-b): `[0]` is the label `popUndo`
+    /// would reverse next — the stack TOP — descending into progressively OLDER
+    /// edits. Labels only; the entries' captured `EditState`s stay private. A pure
+    /// read — no mutation. The undo history panel + `edit.history` project this.
+    var undoLabels: [String] { undoStack.reversed().map(\.label) }
+    /// The redo stack's labels NEWEST-FIRST (m11-b): `[0]` is the label `popRedo`
+    /// would reapply next — the stack TOP — descending into edits undone EARLIER.
+    /// Mirror of `undoLabels`; pure read.
+    var redoLabels: [String] { redoStack.reversed().map(\.label) }
 
     /// Records a fresh edit. Any pending redo is discarded (a new edit forks
     /// history). The edit coalesces onto the current undo top IFF no barrier is

@@ -22,7 +22,7 @@ struct PlaybackRenderTests {
         let fixtures = try TestSignals.fixtures()
         let track = audioTrack(clip: fixtures.cos1k48, startBeat: 2, lengthBeats: 4)
         let audio = try OfflineRenderer().render(
-            tracks: [track], tempoBPM: 120, fromBeat: 0, durationSeconds: 2.0
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 2.0
         )
         let left = audio.channelData[0]
 
@@ -40,7 +40,7 @@ struct PlaybackRenderTests {
         let fixtures = try TestSignals.fixtures()
         let track = audioTrack(clip: fixtures.cos1k48, startBeat: 2, lengthBeats: 4)
         let audio = try OfflineRenderer().render(
-            tracks: [track], tempoBPM: 120, fromBeat: 0, durationSeconds: 2.0
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 2.0
         )
         for channel in audio.channelData {
             let rms = TestSignals.rms(channel, in: 60_000..<90_000)
@@ -54,7 +54,7 @@ struct PlaybackRenderTests {
         let fixtures = try TestSignals.fixtures()
         let track = audioTrack(clip: fixtures.cos1k48, startBeat: 2, lengthBeats: 4)
         let audio = try OfflineRenderer().render(
-            tracks: [track], tempoBPM: 120, fromBeat: 1, durationSeconds: 1.5
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), fromBeat: 1, durationSeconds: 1.5
         )
         let left = audio.channelData[0]
 
@@ -72,10 +72,10 @@ struct PlaybackRenderTests {
         let two = audioTrack(clip: fixtures.cos1k48Quarter, startBeat: 0, lengthBeats: 4)
 
         let dual = try OfflineRenderer().render(
-            tracks: [one, two], tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tracks: [one, two], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
         let single = try OfflineRenderer().render(
-            tracks: [one], tempoBPM: 120, fromBeat: 0, durationSeconds: 1.0
+            tracks: [one], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
         )
 
         let window = 0..<48_000
@@ -93,7 +93,7 @@ struct PlaybackRenderTests {
         let fixtures = try TestSignals.fixtures()
         let track = audioTrack(clip: fixtures.cos1k48, startBeat: 0, lengthBeats: 4)
         let audio = try OfflineRenderer().render(
-            tracks: [track], tempoBPM: 120, fromBeat: 2, durationSeconds: 0.5
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), fromBeat: 2, durationSeconds: 0.5
         )
         let rendered = audio.channelData[0]
         let source = try TestSignals.readFile(fixtures.cos1k48)[0]
@@ -111,7 +111,7 @@ struct PlaybackRenderTests {
         let fixtures = try TestSignals.fixtures()
         let track = audioTrack(clip: fixtures.sine440_44k1, startBeat: 1, lengthBeats: 4)
         let audio = try OfflineRenderer().render(
-            tracks: [track], tempoBPM: 120, fromBeat: 0, durationSeconds: 1.5
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.5
         )
         let left = audio.channelData[0]
 
@@ -134,7 +134,7 @@ struct PlaybackRenderTests {
         // File is 4 beats at 120 BPM; region only 2 beats → ends at 1.0 s.
         let track = audioTrack(clip: fixtures.cos1k48, startBeat: 0, lengthBeats: 2)
         let audio = try OfflineRenderer().render(
-            tracks: [track], tempoBPM: 120, fromBeat: 0, durationSeconds: 1.5
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.5
         )
         let left = audio.channelData[0]
         #expect(TestSignals.peak(left, in: 48_008..<72_000) < 1e-4)
@@ -144,7 +144,7 @@ struct PlaybackRenderTests {
     @Test("empty project renders exact silence")
     func emptyProject() throws {
         let audio = try OfflineRenderer().render(
-            tracks: [], tempoBPM: 120, fromBeat: 0, durationSeconds: 0.5
+            tracks: [], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 0.5
         )
         #expect(audio.frameCount == 24_000)
         for channel in audio.channelData {
@@ -166,7 +166,7 @@ struct PlaybackRenderTests {
         }
 
         _ = try renderer.render(
-            tracks: [signalTrack, silentTrack], tempoBPM: 120,
+            tracks: [signalTrack, silentTrack], tempoMap: TempoMap(constantBPM: 120),
             fromBeat: 0, durationSeconds: 1.0
         )
         // Tap frames hop to the main actor as queued Tasks; the pulls are

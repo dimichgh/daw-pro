@@ -310,11 +310,15 @@ import AIServices
                                    importer: { _ in SketchpadImportResult(trackID: UUID(), trackName: "x") })
         model.prompt = "warm pads"
         model.updateSidecar(SidecarStatus(state: .installedNotRunning,
-                                          message: "The AI generator is installed but not running."))
+                                          message: "ACE-Step is installed but not running — call ai.sidecarStart."))
         #expect(model.canGenerate == false)
         let banner = model.banner
         #expect(banner?.canStartSidecar == true)
         #expect(banner?.tone == .warning)
+        // The banner translates to user-speak; the wire message (agent-facing
+        // "call ai.sidecarStart") must never reach this surface.
+        #expect(banner?.message == "The AI generator is installed but not running — press Start to launch it.")
+        #expect(banner?.message.contains("ai.sidecarStart") == false)
     }
 
     @Test func notInstalledAndErrorBannersDoNotOfferStart() {

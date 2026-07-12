@@ -155,6 +155,71 @@ struct CopilotCommandTests {
         #expect(engine.status == .idle) // neither call should have started a turn
     }
 
+    // MARK: - Configurable round budget (beta m10-m)
+
+    @Test("ai.copilotSend honors a per-turn maxRounds override end-to-end")
+    func sendMaxRoundsOverrideHonored() async throws {
+        // A reply that always wants another tool, so the turn only ends by hitting
+        // the round cap — `project_snapshot` is a mutation-free catalog tool.
+        let alwaysTool = CopilotReply(
+            blocks: [.toolUse(id: "t1", name: "project_snapshot", inputJSON: Data("{}".utf8))],
+            stopReason: .toolUse, provider: "fake")
+        let (router, _, engine) = makeWiredRouter(scripted: [alwaysTool, alwaysTool, alwaysTool])
+
+        let send = await router.handle(ControlRequest(
+            id: "1", command: "ai.copilotSend",
+            params: ["message": .string("go"), "maxRounds": .number(1)]))
+        #expect(send.ok)
+        #expect(send.result?["status"]?.stringValue == "running")   // shape unchanged
+        await engine.waitForTurn()
+
+        let state = await router.handle(ControlRequest(id: "2", command: "ai.copilotState"))
+        let transcript = try #require(state.result?["transcript"]?.arrayValue)
+        let hitLimitAtOne = transcript.contains { entry in
+            entry["kind"]?.stringValue == "failure"
+                && (entry["text"]?.stringValue?.contains("tool-round limit (1)") ?? false)
+        }
+        #expect(hitLimitAtOne)
+    }
+
+    @Test("ai.copilotSend clamps an out-of-range maxRounds (0 → 1) rather than erroring")
+    func sendMaxRoundsClamps() async throws {
+        let alwaysTool = CopilotReply(
+            blocks: [.toolUse(id: "t1", name: "project_snapshot", inputJSON: Data("{}".utf8))],
+            stopReason: .toolUse, provider: "fake")
+        let (router, _, engine) = makeWiredRouter(scripted: [alwaysTool, alwaysTool])
+
+        let send = await router.handle(ControlRequest(
+            id: "1", command: "ai.copilotSend",
+            params: ["message": .string("go"), "maxRounds": .number(0)]))
+        #expect(send.ok)   // clamped, never an error
+        await engine.waitForTurn()
+
+        let state = await router.handle(ControlRequest(id: "2", command: "ai.copilotState"))
+        let transcript = try #require(state.result?["transcript"]?.arrayValue)
+        let hitLimitAtOne = transcript.contains { entry in
+            entry["kind"]?.stringValue == "failure"
+                && (entry["text"]?.stringValue?.contains("tool-round limit (1)") ?? false)
+        }
+        #expect(hitLimitAtOne)
+    }
+
+    @Test("ai.copilotState carries an additive limits object (maxRounds + policy bounds)")
+    func stateCarriesLimits() async throws {
+        // A bare wired engine uses the default resolver, so maxRounds echoes 8.
+        // `router.copilotEngine` is weak (the two-phase DAWProApp pattern) — the
+        // `engine` binding must be kept alive for the router to see it.
+        let (router, _, engine) = makeWiredRouter()
+        let state = await router.handle(ControlRequest(id: "1", command: "ai.copilotState"))
+        #expect(state.ok)
+        let limits = try #require(state.result?["limits"]?.objectValue)
+        #expect(limits["maxRounds"]?.doubleValue == 8)
+        #expect(limits["defaultMaxRounds"]?.doubleValue == 8)
+        #expect(limits["validMin"]?.doubleValue == 1)
+        #expect(limits["validMax"]?.doubleValue == 32)
+        #expect(engine.status == .idle)   // keeps the weakly-held engine alive
+    }
+
     @Test("no configured AI provider surfaces the actionable Settings (⌘,) error over the wire")
     func noProviderSurfacesActionableError() async {
         let store = ProjectStore()

@@ -49,7 +49,7 @@ struct AUHostingTests {
         let renderer = OfflineRenderer()
         await renderer.prepareAudioUnits(tracks: [track])
         #expect(renderer.auRegistry.status[track.id] == .ready)
-        let audio = try renderer.render(tracks: [track], tempoBPM: 120,
+        let audio = try renderer.render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
                                         fromBeat: 0, durationSeconds: 3.0)
         let left = audio.channelData[0]
 
@@ -82,7 +82,7 @@ struct AUHostingTests {
                                 clips: [noteClip(lengthBeats: noteLengthBeats)])
             let renderer = OfflineRenderer()
             await renderer.prepareAudioUnits(tracks: [track])
-            let audio = try renderer.render(tracks: [track], tempoBPM: 120,
+            let audio = try renderer.render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
                                             fromBeat: 0, durationSeconds: 4.0)
             return audio.channelData[0]
         }
@@ -145,7 +145,7 @@ struct AUHostingTests {
         let renderer = OfflineRenderer()
         await renderer.prepareAudioUnits(tracks: [track])
         #expect(renderer.auRegistry.status[track.id] == .missing)
-        let audio = try renderer.render(tracks: [track], tempoBPM: 120,
+        let audio = try renderer.render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
                                         fromBeat: 0, durationSeconds: 1.0)
         for channel in audio.channelData {
             #expect(TestSignals.peak(channel, in: 0..<channel.count) == 0)  // exact zeros

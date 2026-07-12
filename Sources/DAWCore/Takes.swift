@@ -161,11 +161,11 @@ public enum CompFlattener {
         var originalLength: Double { memberEnd - memberStart }
     }
 
-    /// Flattens `group` at `tempoBPM` into ordinary member clips (each with
-    /// `takeGroupID == group.id`).
-    public static func flatten(_ group: TakeGroup, tempoBPM: Double) -> [Clip] {
-        guard tempoBPM > 0 else { return [] }
-        let secPerBeat = 60.0 / tempoBPM
+    /// Flattens `group` under `tempoMap` into ordinary member clips (each with
+    /// `takeGroupID == group.id`). Source-window offsets integrate over each
+    /// member's timeline span (m12-b; trivial-map arithmetic identical to the
+    /// old fixed `secPerBeat` by the map's same-segment fast path).
+    public static func flatten(_ group: TakeGroup, tempoMap: TempoMap) -> [Clip] {
         let laneByID = Dictionary(group.lanes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let sortedComp = group.comp.sorted { $0.startBeat < $1.startBeat }
 
@@ -183,10 +183,11 @@ public enum CompFlattener {
             let memberLength = memberEnd - memberStart
             let ratio = source.stretchRatio > 0 ? source.stretchRatio : 1
             // Windowing = the splitClip math, generalized for stretch (spec §2):
-            // the source-domain offset advances by the timeline delta scaled by
-            // seconds-per-beat and the lane's ratio.
+            // the source-domain offset advances by the timeline span
+            // [laneStart, memberStart] integrated through the map, scaled by
+            // the lane's ratio.
             let memberOffset = source.startOffsetSeconds
-                + (memberStart - laneStart) * secPerBeat / ratio
+                + tempoMap.seconds(from: laneStart, to: memberStart) / ratio
 
             let isAudio = source.notes == nil
             let windowedNotes = source.notes.map {
@@ -221,13 +222,13 @@ public enum CompFlattener {
                 laneStartOffsetSeconds: source.startOffsetSeconds, stretchRatio: ratio))
         }
 
-        applyCrossfades(&members, group: group, secPerBeat: secPerBeat, tempoBPM: tempoBPM)
+        applyCrossfades(&members, group: group, tempoMap: tempoMap)
         return members.map(\.clip)
     }
 
     /// Applies representational equal-power crossfades at abutting audio joins.
     private static func applyCrossfades(_ members: inout [Member], group: TakeGroup,
-                                        secPerBeat: Double, tempoBPM: Double) {
+                                        tempoMap: TempoMap) {
         guard members.count >= 2, group.crossfadeSeconds > 0 else { return }
         for i in 1..<members.count {
             let left = members[i - 1]
@@ -240,7 +241,11 @@ public enum CompFlattener {
             // Both members must actually reach the boundary (no missing material).
             guard left.memberEnd == boundary, right.memberStart == boundary else { continue }
 
-            var xfBeats = group.crossfadeSeconds * tempoBPM / 60.0
+            // Stored SECONDS → beats via the inverse integral AT the join
+            // beat (design row 6): the crossfade stays the same wall-clock
+            // width wherever the join sits on the map.
+            var xfBeats = tempoMap.beat(from: boundary, elapsedSeconds: group.crossfadeSeconds)
+                - boundary
             // Fit the join: never wider than half the shorter member.
             xfBeats = min(xfBeats, min(left.originalLength, right.originalLength) / 2)
             // Left tail extension (xf/2 past b) must not read past the left lane's
@@ -258,8 +263,10 @@ public enum CompFlattener {
             members[i - 1].clip.fadeOutCurve = .equalPower
 
             // Right member starts xf/2 before the boundary (offset reduced by the
-            // source-domain equivalent), equal-power fade-in.
-            let offsetReduction = half * secPerBeat / right.stretchRatio
+            // source-domain equivalent — the integral over the head-extension
+            // span), equal-power fade-in.
+            let offsetReduction = tempoMap.seconds(from: boundary - half, to: boundary)
+                / right.stretchRatio
             members[i].clip.startBeat = right.clip.startBeat - half
             members[i].clip.lengthBeats = right.clip.lengthBeats + half
             members[i].clip.startOffsetSeconds = max(0, right.clip.startOffsetSeconds - offsetReduction)

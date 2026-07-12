@@ -29,6 +29,34 @@ public struct ControlResponse: Codable, Sendable {
     }
 }
 
+/// Read-only description of the live control endpoint (beta m10-l), threaded into
+/// the router at construction. The `ControlServer` OWNS the router, so the router
+/// can't ask the server for its port — the app resolves the port once
+/// (`ControlPortConfig` in DAWAppKit) and hands the answer in here (the value-type
+/// equivalent of the `copilotEngine` weak-backref: information in, no cycle). Powers
+/// `app.connectionInfo` so an agent can introspect the URL/port it reached the app
+/// on and whether an operator has customized it. Endpoint description ONLY — never
+/// any key material.
+public struct ControlConnectionInfo: Sendable, Equatable {
+    /// The live bound port (env override > in-app setting > default 17600).
+    public var port: UInt16
+    /// Where `port` came from: "environment" | "settings" | "default" (the
+    /// `ControlPortSource` raw value).
+    public var source: String
+    /// The built-in default port (17600) — so a client can tell whether the
+    /// endpoint has been customized.
+    public var defaultPort: UInt16
+
+    public init(port: UInt16 = 17600, source: String = "default", defaultPort: UInt16 = 17600) {
+        self.port = port
+        self.source = source
+        self.defaultPort = defaultPort
+    }
+
+    /// The loopback WebSocket URL agents connect to.
+    public var url: String { "ws://127.0.0.1:\(port)" }
+}
+
 /// Routes control-protocol commands onto ProjectStore. This is the canonical
 /// command list — mcp-server/src/index.ts must expose a matching tool for every
 /// entry in `allCommands` (see /mcp-verify skill).
@@ -60,6 +88,12 @@ public final class CommandRouter {
     /// The environment consulted for env-provided keys when reporting status
     /// (env wins over Keychain). Injectable for tests/captures.
     private let keyEnvironment: [String: String]
+
+    /// Read-only description of the live control endpoint (beta m10-l), for
+    /// `app.connectionInfo`. Threaded in at construction because the server owns
+    /// the router (see `ControlConnectionInfo`); defaults to the built-in
+    /// default-port description so a bare/headless router still answers honestly.
+    private let connectionInfo: ControlConnectionInfo
 
     /// Yields a configured lyrics writer for `ai.writeLyrics`, or THROWS the
     /// actionable no-provider error. Defaults to `resolveLyricsWriter` over the
@@ -106,6 +140,11 @@ public final class CommandRouter {
         "transport.setLoop",
         "transport.setPunch",
         "transport.setMetronome",
+        "marker.add",
+        "marker.remove",
+        "marker.rename",
+        "marker.move",
+        "marker.list",
         "track.add",
         "track.remove",
         "track.rename",
@@ -118,6 +157,7 @@ public final class CommandRouter {
         "track.setSend",
         "track.removeSend",
         "track.setInstrument",
+        "track.bounceInPlace",
         "fx.add",
         "fx.remove",
         "fx.reorder",
@@ -126,6 +166,9 @@ public final class CommandRouter {
         "fx.describe",
         "fx.listAudioUnits",
         "instrument.listAudioUnits",
+        "instrument.listSoundBanks",
+        "instrument.listSoundBankPrograms",
+        "instrument.importSoundBank",
         "mixer.setMasterVolume",
         "mixer.applyPreset",
         "mixer.masterAnalysis",
@@ -145,8 +188,11 @@ public final class CommandRouter {
         "clip.move",
         "clip.setGain",
         "clip.setFades",
+        "clip.crossfade",
         "clip.setStretch",
         "clip.stretchToLength",
+        "clip.deleteTimeRange",
+        "clip.insertTimeRange",
         "clip.quantize",
         "clip.humanize",
         "clip.detectTransients",
@@ -194,10 +240,12 @@ public final class CommandRouter {
         "project.recover",
         "edit.undo",
         "edit.redo",
+        "edit.history",
         "ai.copilotSend",
         "ai.copilotState",
         "ai.copilotReset",
         "app.feedbackBundle",
+        "app.connectionInfo",
         "plugin.openUI",
         "plugin.closeUI",
         "plugin.listOpenUIs",
@@ -209,6 +257,7 @@ public final class CommandRouter {
         songGenerator: SongGenerating = ACEStepClient(),
         keyStore: APIKeyStoring = KeychainKeyStore(),
         keyEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        connectionInfo: ControlConnectionInfo = ControlConnectionInfo(),
         lyricsWriter: (@MainActor () throws -> any LyricsGenerating)? = nil
     ) {
         self.store = store
@@ -216,6 +265,7 @@ public final class CommandRouter {
         self.songGenerator = songGenerator
         self.keyStore = keyStore
         self.keyEnvironment = keyEnvironment
+        self.connectionInfo = connectionInfo
         // Default: resolve a writer from the shared key chain on each call.
         // `ai.writeLyrics` uses the APP's keys + live project context — the MCP
         // server's own legacy `generate_lyrics` calls a provider directly with its
@@ -258,10 +308,66 @@ public final class CommandRouter {
             return .success(request.id)
 
         case "transport.seek":
+            // Two ways to name the destination (m11-c): the absolute `beats`
+            // (original behavior, unchanged) OR a `marker` — a marker id OR its
+            // exact name — that resolves to that marker's beat. PRECEDENCE: passing
+            // BOTH is rejected (ambiguous intent), so a caller states one clearly;
+            // an unknown/ambiguous marker is a field-named error. `beats` stays
+            // required whenever `marker` is absent.
+            if let marker = params["marker"]?.stringValue {
+                if params["beats"] != nil {
+                    throw ControlError("pass either 'beats' or 'marker', not both — they name the seek destination two different ways")
+                }
+                let beat = try resolveMarkerBeat(marker)
+                try store.seek(toBeats: beat)
+                return .success(request.id)
+            }
             let beats = try params.require("beats", \.doubleValue)
             // transportBusy while recording surfaces via LocalizedError mapping.
             try store.seek(toBeats: beats)
             return .success(request.id)
+
+        case "marker.add":
+            // params: name (optional — empty/absent auto-names "Marker N"),
+            // beat (required, >= 0). Returns the created marker {id,name,beat}.
+            let beat = try params.require("beat", \.doubleValue)
+            guard beat >= 0 else { throw ControlError("'beat' must be >= 0") }
+            let name = params["name"]?.stringValue
+            let marker = store.addMarker(name: name, beat: beat)
+            return .success(request.id, Self.markerJSON(marker))
+
+        case "marker.remove":
+            // params: markerId (required). markerNotFound surfaces via the
+            // LocalizedError mapping. Returns {removed: true}.
+            let markerID = try params.requireMarkerID()
+            try store.removeMarker(id: markerID)
+            return .success(request.id, .object(["removed": .bool(true)]))
+
+        case "marker.rename":
+            // params: markerId (required), name (required, non-empty). A trimmed,
+            // changed name commits one undo step; empty/unchanged is a no-op.
+            // Returns the resulting marker.
+            let markerID = try params.requireMarkerID()
+            let name = try params.require("name", \.stringValue)
+            guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ControlError("'name' must not be empty")
+            }
+            let marker = try store.renameMarker(id: markerID, name: name)
+            return .success(request.id, Self.markerJSON(marker))
+
+        case "marker.move":
+            // params: markerId (required), beat (required, >= 0). Coalesces a live
+            // scrub into one undo step. Returns the moved marker.
+            let markerID = try params.requireMarkerID()
+            let beat = try params.require("beat", \.doubleValue)
+            guard beat >= 0 else { throw ControlError("'beat' must be >= 0") }
+            let marker = try store.moveMarker(id: markerID, beat: beat)
+            return .success(request.id, Self.markerJSON(marker))
+
+        case "marker.list":
+            // No params. Returns {markers: [{id,name,beat}]} sorted by beat.
+            let markers = store.markers.map(Self.markerJSON)
+            return .success(request.id, .object(["markers": .array(markers)]))
 
         case "transport.setTempo":
             let bpm = try params.require("bpm", \.doubleValue)
@@ -446,6 +552,13 @@ public final class CommandRouter {
             // installed list, unknown components error readably. Providing it
             // implies kind audioUnit when kind is omitted.
             let audioUnit = try parseAudioUnit(params["audioUnit"])
+            // Optional `soundBank: {source, program?, bankMSB?, bankLSB?}`
+            // (m10-n §6.1): STRICT source (like parseAudioUnit), defaults
+            // program 0 / bankMSB 121 / bankLSB 0 clamped through the model, a
+            // SERVER-derived displayName. Providing it implies kind soundBank
+            // when kind is omitted; soundBank + audioUnit in one call throws
+            // ambiguousInstrumentSelection at the store boundary.
+            let soundBank = try parseSoundBank(params["soundBank"])
             guard let descriptor = try store.setInstrument(
                 id: instTrackID,
                 kind: kind,
@@ -458,9 +571,56 @@ public final class CommandRouter {
                 resonance: params["resonance"]?.doubleValue,
                 gain: params["gain"]?.doubleValue,
                 sampler: sampler,
-                audioUnit: audioUnit
+                audioUnit: audioUnit,
+                soundBank: soundBank
             ) else { throw ControlError.noTrack(instTrackID) }
             return .success(request.id, instrumentJSON(descriptor, trackID: instTrackID))
+
+        case "track.bounceInPlace":
+            // Renders ONE track offline and lands the result as a new audio
+            // track + clip in ONE undo step (m11-e) — the render-and-land
+            // pattern, reusing render.stems' render machinery. params: trackId
+            // (required), fromBeat >= 0 (default 0), durationSeconds > 0 (same
+            // broader default as render.stems: whole-session extent + a 2 s
+            // tail, computed once), muteSource? (default TRUE — silences the
+            // source so the bounce replaces it in the mix), name? (overrides
+            // the default "<source> (Bounced)" track/clip name).
+            //
+            // Eligibility is IDENTICAL to render.stems for one track: the
+            // target must be a master input (a direct-to-master audio/
+            // instrument track, or a bus). A bus-ROUTED source track rejects
+            // stemNotMasterInput verbatim (its signal is part of the
+            // destination bus's stem); an unknown id → trackNotFound; a session
+            // with no clips in the window → nothingToRender — all via the
+            // LocalizedError mapping. The bounced audio is NEVER normalized and
+            // is byte-identical to render.stems {trackIds:[trackId]} for the
+            // same window (same forced full-session PDC plan, same post-fader
+            // pass).
+            //
+            // UNDO CONTRACT: one "Bounce in Place" edit — undo removes the new
+            // track+clip AND restores the source's prior mute together. The
+            // rendered FILE stays on disk after undo (import semantics: undo
+            // un-references media but never deletes it — a redo or a later save
+            // fold still needs it). Response: the model's own BounceInPlaceResult
+            // Codable — {track, clip, file, sourceTrackId, sourceMuted,
+            // measurement} where measurement is the same un-normalized
+            // LoudnessMeasurement a render.stems stem file carries.
+            let bounceTrackID = try params.requireTrackID()
+            let bounceFromBeat = params["fromBeat"]?.doubleValue ?? 0
+            guard bounceFromBeat >= 0 else {
+                throw ControlError("'fromBeat' must be >= 0")
+            }
+            let bounceDurationSeconds = params["durationSeconds"]?.doubleValue
+            if let bounceDurationSeconds, bounceDurationSeconds <= 0 {
+                throw ControlError("'durationSeconds' must be > 0")
+            }
+            let bounceMuteSource = params["muteSource"]?.boolValue ?? true
+            let bounceName = params["name"]?.stringValue
+            let bounceInPlaceResult = try await store.bounceTrackInPlace(
+                trackId: bounceTrackID, fromBeat: bounceFromBeat,
+                durationSeconds: bounceDurationSeconds,
+                muteSource: bounceMuteSource, name: bounceName)
+            return .success(request.id, try JSONValue(encoding: bounceInPlaceResult))
 
         case "instrument.listAudioUnits":
             // No params. Every installed Audio Unit music device ('aumu'),
@@ -478,6 +638,42 @@ public final class CommandRouter {
                     ])
                 }),
             ]))
+
+        case "instrument.listSoundBanks":
+            // No params. GM first, then each scanned dir's *.sf2/*.dls (§6.2).
+            // Never errors — an unreadable scan dir is skipped silently. Pure
+            // file discovery through the store's injected SoundBankLibrary.
+            return .success(request.id, .object([
+                "banks": .array(store.availableSoundBanks().map(soundBankInfoJSON)),
+            ]))
+
+        case "instrument.listSoundBankPrograms":
+            // params: source (required, "gm" or an absolute .sf2/.dls path —
+            // STRICTLY validated, naming instrument.listSoundBanks). Response
+            // {source, namesParsed, programs:[{program, bankMSB, bankLSB, name,
+            // category}]}: the GM table for "gm", parsed SF2 names for a .sf2,
+            // generic 0…127 (namesParsed:false) otherwise (§6.3).
+            let programsSource = try parseSoundBankSource(params["source"])
+            let listing = try store.soundBankPrograms(source: programsSource)
+            return .success(request.id, .object([
+                "source": .string(programsSource.rawString),
+                "namesParsed": .bool(listing.namesParsed),
+                "programs": .array(listing.programs.map(soundBankProgramJSON)),
+            ]))
+
+        case "instrument.importSoundBank":
+            // params: path (required, absolute .sf2/.dls). Copies into the
+            // central library (collision-uniquified), NEVER moving/deleting the
+            // source; the project is untouched. Response {bank: <SoundBankInfo>}
+            // (§6.4). Extension/existence/readability errors surface in the
+            // MediaImporting "Audio import failed: …" tone.
+            let importRawPath = try params.require("path", \.stringValue)
+            guard importRawPath.hasPrefix("/") else {
+                throw ControlError("'path' must be an absolute path")
+            }
+            let importedBank = try store.importSoundBank(
+                from: URL(fileURLWithPath: importRawPath))
+            return .success(request.id, .object(["bank": soundBankInfoJSON(importedBank)]))
 
         case "fx.add":
             // params: trackId (required), kind (required, one of the effect
@@ -867,14 +1063,64 @@ public final class CommandRouter {
             // params: trackId (required), clipId (required), toStartBeat
             // (required, clamped >= 0). Same-track only in v0. Coalesces
             // under clip.move:<clipId> so a drag is one undo step.
-            // trackNotFound/clipNotFound surface via the LocalizedError
-            // mapping. Response: the updated clip.
+            //
+            // OVERLAP POLICY (m11-d — the settled "no SILENT overlap of ordinary
+            // same-track clips" invariant): when the moved clip lands over an
+            // ordinary same-track clip, the STATIONARY clip yields the covered
+            // region (trim-window semantics — audio source offset advances, MIDI
+            // notes drop/truncate; a move landing strictly inside trims the
+            // stationary clip's tail; a fully-covered or sub-minimum remnant is
+            // REMOVED). Take-group / comp members are exempt. A
+            // previously-crossfaded clip carries NO special bookkeeping — the
+            // trim runs against current boundaries and any surviving fades stay
+            // as plain per-clip fades. All of it rides the move's single undo
+            // step. trackNotFound/clipNotFound surface via the LocalizedError
+            // mapping. Response: the updated clip's fields PLUS additive
+            // `trimmed:[clipId…]` and `removed:[clipId…]` arrays naming the
+            // stationary clips the policy edited (empty when the move hit free
+            // space).
             let moveTrackID = try params.requireTrackID()
             let moveClipID = try params.requireClipID()
             let moveToStartBeat = try params.require("toStartBeat", \.doubleValue)
-            let movedClip = try store.moveClip(
+            let moveResult = try store.moveClip(
                 trackId: moveTrackID, clipId: moveClipID, toStartBeat: moveToStartBeat)
-            return .success(request.id, try JSONValue(encoding: movedClip))
+            var moveObject = try JSONValue(encoding: moveResult.clip).objectValue ?? [:]
+            moveObject["trimmed"] = .array(moveResult.trimmedClipIDs.map { .string($0.uuidString) })
+            moveObject["removed"] = .array(moveResult.removedClipIDs.map { .string($0.uuidString) })
+            return .success(request.id, .object(moveObject))
+
+        case "clip.crossfade":
+            // params: trackId (required), clipId (required), otherClipId
+            // (required), lengthBeats (required, > 0). Crossfades two AUDIO clips
+            // on ONE track — the explicit tool that SANCTIONS a same-track
+            // overlap (every other path upholds clip.move's no-silent-overlap
+            // invariant). The two ids may be given in either order; the
+            // earlier-starting clip is the left (fade-OUT) side, the later is the
+            // right (fade-IN) side. The clips must be ADJACENT (right.start ==
+            // left.end) OR already overlapping by ≤ lengthBeats (an eligibility
+            // error names why otherwise). ADJACENT → the overlap is created of
+            // exactly lengthBeats, split symmetrically by extending the left
+            // clip's tail and the right clip's head into their surrounding source
+            // audio (time-aligned, so the equal-power sum reconstructs the
+            // original); if either side lacks material, crossfadeNeedsMaterial
+            // names that clip/side. ALREADY OVERLAPPING → the existing overlap is
+            // KEPT and only the fades are applied (legacy-overlap normalization).
+            // Both fades are FadeCurve.equalPower (summing to unit power) spanning
+            // EXACTLY the final overlap; each clip's OTHER fade is preserved. ONE
+            // undo step ("Crossfade Clips"). Audio only, comp members rejected.
+            // Response: {left: clip, right: clip, overlapBeats: Number}.
+            let xfTrackID = try params.requireTrackID()
+            let xfClipID = try params.requireClipID()
+            let xfOtherClipID = try params.requireUUID("otherClipId")
+            let xfLengthBeats = try params.require("lengthBeats", \.doubleValue)
+            let xfResult = try store.crossfadeClips(
+                trackId: xfTrackID, clipId: xfClipID,
+                otherClipId: xfOtherClipID, lengthBeats: xfLengthBeats)
+            return .success(request.id, .object([
+                "left": try JSONValue(encoding: xfResult.left),
+                "right": try JSONValue(encoding: xfResult.right),
+                "overlapBeats": .number(xfResult.overlapBeats),
+            ]))
 
         case "clip.setGain":
             // params: trackId (required), clipId (required), gainDb
@@ -950,6 +1196,42 @@ public final class CommandRouter {
                 trackId: stretchLenTrackID, clipId: stretchLenClipID,
                 toLengthBeats: stretchToLength)
             return .success(request.id, try JSONValue(encoding: stretchedToLenClip))
+
+        case "clip.deleteTimeRange":
+            // params: clipId (required), startBeat (required), lengthBeats
+            // (required). CLIP-LOCAL beats (note space, consistent with
+            // clip.setNotes) — NOT timeline beats. Excises [startBeat,
+            // startBeat+lengthBeats) from a MIDI clip and closes the gap: notes
+            // after shift left, notes whose onset is inside are dropped, a note
+            // crossing in from before keeps its head (its overlap spliced out).
+            // The clip's lengthBeats shrinks by the excised amount (floored at one
+            // beat / the last remaining note's extent). ONE undo step. MIDI clips
+            // only. clipNotFound/notAMIDIClip/invalidClipEdit (non-positive length
+            // or startBeat outside [0, lengthBeats)) surface via the LocalizedError
+            // mapping. Response: the updated clip.
+            let delRangeClipID = try params.requireClipID()
+            let delRangeStart = try params.require("startBeat", \.doubleValue)
+            let delRangeLength = try params.require("lengthBeats", \.doubleValue)
+            let delRangeClip = try store.deleteTimeRange(
+                clipID: delRangeClipID, startBeat: delRangeStart, lengthBeats: delRangeLength)
+            return .success(request.id, try JSONValue(encoding: delRangeClip))
+
+        case "clip.insertTimeRange":
+            // params: clipId (required), atBeat (required), lengthBeats (required).
+            // CLIP-LOCAL beats (note space, consistent with clip.setNotes) — NOT
+            // timeline beats. Inserts `lengthBeats` of silence at `atBeat` in a
+            // MIDI clip: notes at/after atBeat shift right; a note crossing atBeat
+            // keeps its start and length (silence lands after its onset). The clip
+            // grows by lengthBeats. ONE undo step. MIDI clips only. clipNotFound/
+            // notAMIDIClip/invalidClipEdit (non-positive length or atBeat outside
+            // [0, lengthBeats]) surface via the LocalizedError mapping. Response:
+            // the updated clip.
+            let insRangeClipID = try params.requireClipID()
+            let insRangeAt = try params.require("atBeat", \.doubleValue)
+            let insRangeLength = try params.require("lengthBeats", \.doubleValue)
+            let insRangeClip = try store.insertTimeRange(
+                clipID: insRangeClipID, atBeat: insRangeAt, lengthBeats: insRangeLength)
+            return .success(request.id, try JSONValue(encoding: insRangeClip))
 
         case "clip.quantize":
             // params: clipId (required), gridBeats (required, > 0 — grid in beats:
@@ -1253,6 +1535,14 @@ public final class CommandRouter {
             // no params. Lists the project's SAVED groove templates plus the
             // built-in MPC swing presets (computed on demand, never persisted).
             // Response: {"templates": [...saved...], "builtins": [...swing8/16...]}.
+            // Built-in ids are deterministic (a pure function of the preset name,
+            // stable across calls and processes) and every built-in id is DISTINCT.
+            // NOTE (m11-g): the built-in id derivation changed ONCE — the old fold
+            // collided the whole swing8 family onto a single id; the current ids
+            // differ from any cached before that fix. This is safe: built-in ids
+            // are derived and NEVER persisted in a project (only saved-template ids
+            // are stored, and those are untouched), so nothing on disk references
+            // them — resolve a built-in by NAME ("swing8:66") for a stable handle.
             let builtins = GrooveTemplate.builtinNames.compactMap { GrooveTemplate.builtin(named: $0) }
             return .success(request.id, .object([
                 "templates": try JSONValue(encoding: store.grooveTemplates),
@@ -1993,6 +2283,24 @@ public final class CommandRouter {
             return .success(request.id,
                             try JSONValue(encoding: store.writeFeedbackBundle(includeProject: includeProject)))
 
+        case "app.connectionInfo":
+            // No params. Read-only description of THIS control endpoint (beta
+            // m10-l): the loopback WebSocket URL + bound port the agent reached the
+            // app on, where the port came from ("environment" = the
+            // DAW_CONTROL_PORT override, "settings" = the in-app port field,
+            // "default" = the built-in 17600), and that built-in default for
+            // reference. Endpoint description ONLY — no key material. The port is
+            // deliberately READ-only on the wire: changing it can sever the caller's
+            // own connection, so it stays a human decision in Settings (the
+            // API-key-entry split precedent). Never throws. Response: {url, port,
+            // source, defaultPort}.
+            return .success(request.id, .object([
+                "url": .string(connectionInfo.url),
+                "port": .number(Double(connectionInfo.port)),
+                "source": .string(connectionInfo.source),
+                "defaultPort": .number(Double(connectionInfo.defaultPort)),
+            ]))
+
         case "ai.copilotSend":
             // Starts a new in-app Copilot turn (M6 rail-c) — the copilot drives
             // the SAME command surface as this router, in-process, through its
@@ -2004,6 +2312,12 @@ public final class CommandRouter {
             // Throws if a turn is already running (poll/reset first), if no AI
             // provider is configured (actionable Settings ⌘, message — never a
             // key value), or if the engine isn't wired yet.
+            //
+            // Optional param `maxRounds` (number, beta m10-m): a per-turn override of
+            // the tool-round budget, outranking the app setting for THIS turn only. It
+            // is clamped into CopilotLimits.validRange (1–32) — 0 → 1, 99 → 32 — so it
+            // never errors; omit it to honor the app's configured value. Existing
+            // callers that don't pass it behave exactly as before.
             guard let copilotEngine else {
                 throw ControlError("copilot engine not wired — app startup incomplete")
             }
@@ -2011,7 +2325,8 @@ public final class CommandRouter {
             guard !copilotMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw ControlError("'message' must not be empty")
             }
-            let copilotTurnID = try copilotEngine.send(copilotMessage)
+            let copilotMaxRoundsOverride = params["maxRounds"]?.doubleValue.map { Int($0) }
+            let copilotTurnID = try copilotEngine.send(copilotMessage, maxRoundsOverride: copilotMaxRoundsOverride)
             return .success(request.id, .object([
                 "turnId": .string(copilotTurnID),
                 "status": .string("running"),
@@ -2022,9 +2337,12 @@ public final class CommandRouter {
             // ai.generationStatus poll precedent). params: turnId (optional —
             // filters the transcript to one turn; omit for the whole session).
             // Response: {status, currentTurnId?, transcript: [{id, turnId, kind,
-            // text?, command?, ok?, summary?}]}. An UNKNOWN turnId is not an
-            // error: it returns the engine's current status with an empty
-            // filtered transcript (poller-friendly).
+            // text?, command?, ok?, summary?}], limits: {maxRounds,
+            // defaultMaxRounds, validMin, validMax}}. The `limits` object (beta
+            // m10-m) echoes the effective per-turn round budget + fixed policy so a
+            // client can surface/respect it. An UNKNOWN turnId is not an error: it
+            // returns the engine's current status with an empty filtered transcript
+            // (poller-friendly).
             guard let copilotEngine else {
                 throw ControlError("copilot engine not wired — app startup incomplete")
             }
@@ -2056,6 +2374,26 @@ public final class CommandRouter {
             return .success(request.id, .object([
                 "redone": .string(label),
                 "snapshot": try snapshotJSON(),
+            ]))
+
+        case "edit.history":
+            // Read-only projection of the labeled undo/redo stacks (m11-b) — the
+            // backing for the history panel. Adds NO mutation surface: stepping
+            // through history is still repeated edit.undo/edit.redo (which keep the
+            // coalescing barrier + mid-take transportBusy guard). No params.
+            //
+            // Result: {undo: [String], redo: [String], canUndo: Bool, canRedo:
+            // Bool}. Both lists are NEWEST-FIRST: undo[0] is the label edit.undo
+            // reverses NEXT (then progressively OLDER edits); redo[0] is the label
+            // edit.redo reapplies NEXT (then edits undone EARLIER). Empty lists
+            // mirror canUndo/canRedo == false, matching project.snapshot's
+            // undoLabel/redoLabel top-of-stack fields.
+            let history = store.undoHistory()
+            return .success(request.id, .object([
+                "undo": .array(history.undo.map { JSONValue.string($0) }),
+                "redo": .array(history.redo.map { JSONValue.string($0) }),
+                "canUndo": .bool(history.canUndo),
+                "canRedo": .bool(history.canRedo),
             ]))
 
         case "plugin.openUI":
@@ -2212,6 +2550,33 @@ public final class CommandRouter {
     /// and either the named effect is an Audio Unit insert, or the track hosts
     /// an Audio Unit instrument. A built-in kind is rejected readably — plugin
     /// windows apply only to Audio Units (built-ins have in-app panels).
+    /// The wire shape of one marker: `{id, name, beat}`. Shared by `marker.add/
+    /// rename/move` (single) and `marker.list` (array), so the shape never drifts.
+    private static func markerJSON(_ marker: Marker) -> JSONValue {
+        .object([
+            "id": .string(marker.id.uuidString),
+            "name": .string(marker.name),
+            "beat": .number(marker.beat),
+        ])
+    }
+
+    /// Resolves a `transport.seek {marker}` token to its beat (m11-c). The token
+    /// is a marker id (UUID string) OR its EXACT name. An id wins when it parses
+    /// and matches; otherwise an exact-name match is used, and a name shared by
+    /// more than one marker is `markerAmbiguous` (seek by id instead). Nothing
+    /// matched → `markerNotFound`-shaped error naming the field.
+    private func resolveMarkerBeat(_ token: String) throws -> Double {
+        if let id = UUID(uuidString: token), let m = store.markers.first(where: { $0.id == id }) {
+            return m.beat
+        }
+        let named = store.markers.filter { $0.name == token }
+        if named.count > 1 { throw ProjectError.markerAmbiguous(token) }
+        guard let m = named.first else {
+            throw ControlError("no marker matching 'marker' value '\(token)' — pass a marker id or exact name (marker.list has both)")
+        }
+        return m.beat
+    }
+
     private func requirePluginTarget(_ params: [String: JSONValue]) throws -> PluginUITarget {
         let trackID = try params.requireTrackID()
         guard let track = store.tracks.first(where: { $0.id == trackID }) else {
@@ -2234,6 +2599,10 @@ public final class CommandRouter {
         }
         let instrumentKind = (track.instrument ?? .default).kind
         guard instrumentKind == .audioUnit else {
+            if instrumentKind == .soundBank {
+                throw ControlError(
+                    "track '\(trackID.uuidString)' uses a sound-bank instrument — sound banks have no plugin window; choose programs with instrument.listSoundBankPrograms + track.setInstrument, or the in-app instrument picker. Plugin windows apply only to Audio Unit instruments")
+            }
             throw ControlError(
                 "track '\(trackID.uuidString)' uses the built-in \(instrumentKind.rawValue) instrument — plugin windows apply only to Audio Unit instruments")
         }
@@ -3031,6 +3400,102 @@ public final class CommandRouter {
                                manufacturerName: match.manufacturerName, stateData: nil)
     }
 
+    // MARK: - Sound banks (m10-n)
+
+    /// Resolves a REQUIRED sound-bank `source` string to `SoundBankSource`,
+    /// STRICTLY validating a `.file` source (existing, `.sf2`/`.dls`) BEFORE any
+    /// store edit — the `parseAudioUnit` discipline (§6.1/§6.3). Every error
+    /// names `instrument.listSoundBanks` so an agent knows where to discover a
+    /// valid source. `"gm"` is always accepted (resolved to the system bank at
+    /// use time).
+    private func parseSoundBankSource(_ value: JSONValue?) throws -> SoundBankSource {
+        guard let raw = value?.stringValue else {
+            throw ControlError("'source' is required (\"gm\" or an absolute .sf2/.dls path)")
+        }
+        if raw == "gm" { return .generalMIDI }
+        guard raw.hasPrefix("/") else {
+            throw ControlError(
+                "sound bank source must be \"gm\" or an absolute path — see instrument.listSoundBanks")
+        }
+        let url = URL(fileURLWithPath: raw)
+        guard FileManager.default.fileExists(atPath: raw) else {
+            throw ControlError("no sound bank file at \(raw) — see instrument.listSoundBanks")
+        }
+        let ext = url.pathExtension.lowercased()
+        guard ext == "sf2" || ext == "dls" else {
+            throw ControlError(
+                "sound bank must be a .sf2 or .dls file — got \(url.lastPathComponent) (see instrument.listSoundBanks)")
+        }
+        return .file(path: raw)
+    }
+
+    /// Parses the optional `soundBank` object on `track.setInstrument` into a
+    /// `SoundBankConfig` (§6.1). Absent → nil (keep the current descriptor). The
+    /// `source` is STRICT (`parseSoundBankSource`); `program`/`bankMSB`/`bankLSB`
+    /// default 0/121/0 and re-clamp through the model init (the
+    /// `track.setVolume` silent-clamp convention); `displayName` is
+    /// SERVER-derived, never a wire input.
+    private func parseSoundBank(_ value: JSONValue?) throws -> SoundBankConfig? {
+        guard let value else { return nil }
+        guard case .object(let obj) = value else {
+            throw ControlError("soundBank must be an object {source, program?, bankMSB?, bankLSB?}")
+        }
+        let source = try parseSoundBankSource(obj["source"])
+        let program = obj["program"]?.doubleValue.map { Int($0) } ?? 0
+        let bankMSB = obj["bankMSB"]?.doubleValue.map { Int($0) } ?? 121
+        let bankLSB = obj["bankLSB"]?.doubleValue.map { Int($0) } ?? 0
+        let displayName = deriveSoundBankName(
+            source: source, program: program, bankMSB: bankMSB, bankLSB: bankLSB)
+        return SoundBankConfig(source: source, program: program,
+                               bankMSB: bankMSB, bankLSB: bankLSB, displayName: displayName)
+    }
+
+    /// Derives the display name captured in a `SoundBankConfig` (§6.1): a named
+    /// program from the source's own program list ("<name> — <suffix>", e.g.
+    /// "Trumpet — General MIDI") when the address matches a parsed name, else
+    /// the honest "<suffix> · P<n>" fallback (odd address, or an unparsed .dls).
+    /// The suffix is "General MIDI" for `"gm"`, the file stem for a `.file`.
+    private func deriveSoundBankName(source: SoundBankSource, program: Int,
+                                     bankMSB: Int, bankLSB: Int) -> String {
+        let suffix: String
+        switch source {
+        case .generalMIDI:
+            suffix = "General MIDI"
+        case .file(let path):
+            suffix = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+        }
+        if let listing = try? store.soundBankPrograms(source: source), listing.namesParsed,
+           let match = listing.programs.first(where: {
+               $0.program == program && $0.bankMSB == bankMSB && $0.bankLSB == bankLSB
+           }), !match.name.isEmpty {
+            return "\(match.name) — \(suffix)"
+        }
+        return "\(suffix) · P\(program)"
+    }
+
+    /// Wire JSON for a `SoundBankInfo` (§6.2/§6.4 shape).
+    private func soundBankInfoJSON(_ info: SoundBankInfo) -> JSONValue {
+        .object([
+            "source": .string(info.source.rawString),
+            "name": .string(info.name),
+            "path": .string(info.path),
+            "format": .string(info.format),
+            "builtin": .bool(info.builtin),
+            "sizeBytes": .number(Double(info.sizeBytes)),
+        ])
+    }
+
+    /// Wire JSON for a `SoundBankProgram` (§6.3 shape).
+    private func soundBankProgramJSON(_ program: SoundBankProgram) -> JSONValue {
+        .object([
+            "program": .number(Double(program.program)),
+            "bankMSB": .number(Double(program.bankMSB)),
+            "bankLSB": .number(Double(program.bankLSB)),
+            "name": .string(program.name),
+            "category": .string(program.category),
+        ])
+    }
+
     /// Encodes the whole snapshot for the wire, replacing each instrument track's
     /// `instrument` with its resolved wire form so sampler zones carry `path`
     /// (a filesystem path string) instead of the model's URL, and attaching every
@@ -3111,27 +3576,51 @@ public final class CommandRouter {
     /// status}. `status` comes from the store's engine forwarder ("pending"
     /// until the engine reports); stateData NEVER travels on the wire.
     private func instrumentJSON(_ d: InstrumentDescriptor, trackID: UUID) -> JSONValue {
-        guard d.kind == .audioUnit, let config = d.audioUnit,
-              case .object(var obj) = Self.instrumentJSON(d) else {
+        guard case .object(var obj) = Self.instrumentJSON(d) else {
             return Self.instrumentJSON(d)
         }
-        let status = store.audioUnitStatus(forTrack: trackID) ?? .pending
-        let statusString: String
-        switch status {
-        case .pending: statusString = "pending"
-        case .ready: statusString = "ready"
-        case .missing: statusString = "missing"
-        case .failed(let reason): statusString = "failed: \(reason)"
+        if d.kind == .audioUnit, let config = d.audioUnit {
+            obj["audioUnit"] = .object([
+                "type": .string(config.component.type),
+                "subType": .string(config.component.subType),
+                "manufacturer": .string(config.component.manufacturer),
+                "name": .string(config.name),
+                "manufacturerName": .string(config.manufacturerName),
+                "status": .string(instrumentStatusString(trackID)),
+            ])
+        } else if d.kind == .soundBank, let config = d.soundBank {
+            // The `path` is the RESOLVED transparency field; `source` is the
+            // persistable sentinel/path (LAW L4). `status` reads the SAME
+            // registry slot as plain AU hosting (§6.1 — pending in headless).
+            let resolvedPath: String
+            switch config.source {
+            case .generalMIDI: resolvedPath = SoundBankLibrary.systemGMBankPath
+            case .file(let path): resolvedPath = path
+            }
+            obj["soundBank"] = .object([
+                "source": .string(config.source.rawString),
+                "path": .string(resolvedPath),
+                "program": .number(Double(config.program)),
+                "bankMSB": .number(Double(config.bankMSB)),
+                "bankLSB": .number(Double(config.bankLSB)),
+                "name": .string(config.displayName),
+                "status": .string(instrumentStatusString(trackID)),
+            ])
         }
-        obj["audioUnit"] = .object([
-            "type": .string(config.component.type),
-            "subType": .string(config.component.subType),
-            "manufacturer": .string(config.component.manufacturer),
-            "name": .string(config.name),
-            "manufacturerName": .string(config.manufacturerName),
-            "status": .string(statusString),
-        ])
         return .object(obj)
+    }
+
+    /// The hosted-instrument lifecycle status string, SHARED by the `.audioUnit`
+    /// and `.soundBank` instrument objects (both ride the same registry slot,
+    /// §6.1): "pending" until the engine reports (the headless default),
+    /// "ready", "missing", or "failed: <reason>".
+    private func instrumentStatusString(_ trackID: UUID) -> String {
+        switch store.audioUnitStatus(forTrack: trackID) ?? .pending {
+        case .pending: return "pending"
+        case .ready: return "ready"
+        case .missing: return "missing"
+        case .failed(let reason): return "failed: \(reason)"
+        }
     }
 
     /// Wire JSON for a resolved instrument descriptor: `polySynth` verbatim plus
@@ -3209,6 +3698,16 @@ extension [String: JSONValue] {
         return id
     }
 
+    /// Requires a UUID-valued param under an arbitrary key (e.g. clip.crossfade's
+    /// `otherClipId`), naming the offending field on a bad value.
+    func requireUUID(_ key: String) throws -> UUID {
+        let raw = try require(key, \.stringValue)
+        guard let id = UUID(uuidString: raw) else {
+            throw ControlError("'\(key)' is not a valid UUID: \(raw)")
+        }
+        return id
+    }
+
     func requireSendID() throws -> UUID {
         let raw = try require("sendId", \.stringValue)
         guard let id = UUID(uuidString: raw) else {
@@ -3245,6 +3744,14 @@ extension [String: JSONValue] {
         let raw = try require("grooveId", \.stringValue)
         guard let id = UUID(uuidString: raw) else {
             throw ControlError("'grooveId' is not a valid UUID: \(raw)")
+        }
+        return id
+    }
+
+    func requireMarkerID() throws -> UUID {
+        let raw = try require("markerId", \.stringValue)
+        guard let id = UUID(uuidString: raw) else {
+            throw ControlError("'markerId' is not a valid UUID: \(raw)")
         }
         return id
     }

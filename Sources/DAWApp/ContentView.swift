@@ -80,12 +80,62 @@ struct ContentView: View {
             .frame(width: geo.size.width, height: geo.size.height)
         }
         .background(DAWTheme.background)
+        // Instrument picker (m10-n-3): a centered dark-glass modal over a scrim
+        // (the Settings-overlay idiom) — rendered INSIDE the main window content so
+        // `debug.captureUI` can snapshot it headlessly (a popover can't be). Opened
+        // by the track-header / mixer instrument chips and `debug.instrumentPicker`.
+        .overlay {
+            if model.instrumentPickerTrackID != nil {
+                InstrumentPickerOverlay(
+                    model: model.instrumentPicker,
+                    densityStore: model.panelDensity,
+                    onChoose: { model.applyInstrumentChoice($0) },
+                    onImport: { model.importSoundBankViaPanel() },
+                    onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeInstrumentPicker() } }
+                )
+            }
+        }
+        // Quantize & groove panel (m11-a): a centered dark-glass modal over a scrim
+        // (the instrument-picker idiom) — rendered INSIDE the window so
+        // `debug.captureUI` can snapshot it. Opened by the piano-roll QUANTIZE chip,
+        // the arrange clip context menu, and `debug.quantizePanel`. UI-only: Apply
+        // and Extract route through the SAME store methods the wire uses.
+        .overlay {
+            if model.quantizePanelClipID != nil {
+                QuantizePanel(
+                    model: model.quantizeModel,
+                    densityStore: model.panelDensity,
+                    onApply: { withAnimation(.easeOut(duration: 0.15)) { model.applyQuantize() } },
+                    onRemoveGroove: { model.removeGroove(id: $0) },
+                    onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeQuantizePanel() } }
+                )
+            }
+        }
+        // Undo-history panel (m11-b): a centered dark-glass modal over a scrim (the
+        // Quantize idiom) — rendered INSIDE the window so `debug.captureUI` can
+        // snapshot it. Opened by the arrange-toolbar HISTORY chip and
+        // `debug.undoHistory`. UI-only: clicking a row re-drives the SAME
+        // `store.undo()`/`redo()` the wire and Cmd-Z use (no new mutation surface).
+        .overlay {
+            if model.showUndoHistory {
+                UndoHistoryPanel(
+                    model: model.undoHistoryModel,
+                    onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeUndoHistory() } }
+                )
+            }
+        }
         .overlay {
             if model.showSettings {
                 SettingsOverlay(
                     model: model.settings,
                     store: store,
                     revealBeta: model.settingsRevealBeta,
+                    revealConnection: model.settingsRevealConnection,
+                    // The ACTUAL bound port (m10-l) — what agents connect to, not
+                    // whatever's pending in the setting field.
+                    controlPort: model.controlServer.port,
+                    portStore: model.controlPortStore,
+                    copilotLimits: model.copilotLimitsStore,
                     onReplayTour: { withAnimation(.easeOut(duration: 0.2)) { model.replayTour() } },
                     onClose: { withAnimation(.easeOut(duration: 0.15)) { model.showSettings = false } }
                 )
@@ -134,18 +184,42 @@ struct ContentView: View {
                 )
             }
         }
+        // m10-s: the offer can also be resolved WITHOUT the sheet — `project.recover`
+        // over the control wire, or a `project.new`/`project.open` that supersedes the
+        // snapshot. Those flip `store.recoveryOfferAvailable` false without touching the
+        // one-shot `recoveryOffer` snapshot, so the sheet used to linger. Mirror the
+        // buttons' dismissal on the available→unavailable transition. Transition-based
+        // (not a derived `if available` gate) so `debug.recoveryOffer` staging — which
+        // sets `recoveryOffer` while the store flag stays false — still shows for
+        // captures. The double-clear when the sheet's OWN buttons resolve is harmless:
+        // both paths set `recoveryOffer = nil` with the same animation.
+        .onChange(of: store.recoveryOfferAvailable) { _, available in
+            if !available, model.recoveryOffer != nil {
+                withAnimation(.easeOut(duration: 0.18)) { model.recoveryOffer = nil }
+            }
+        }
         .background { explainEscHandler }
         .onChange(of: model.explain.isActive) { _, active in
             if !active { explainCoordinator.reset() }
         }
         .preferredColorScheme(.dark)
-        .frame(minWidth: 1080, minHeight: 640)
+        // The MEASURED window floor (m10-j): the smallest window at which all fixed
+        // chrome (header, arrange toolbar, transport, a timeline sliver, the editor
+        // at its max fraction) stays visible; the arrange track area SCROLLS past it.
+        // Also enforced on the NSWindow via `applyWindowFloor()` (belt-and-suspenders).
+        .frame(minWidth: WindowFloor.minWidth, minHeight: WindowFloor.minHeight)
         // Window title tracks the session; " — Edited" marks unsaved changes.
         .navigationTitle(store.projectName + (store.isDirty ? " — Edited" : ""))
         .onAppear(perform: maybeAutoOpen)
         // First-launch offer: the welcome card IS the offer (Skip tour dismisses
         // forever). Idempotent — no-ops once active or terminal.
         .onAppear { model.offerTourIfEligible() }
+        // m10-t: resolve the API-key rows via the NON-BLOCKING presence probe only
+        // AFTER the window exists — never in `AppModel.init`, where a stored key on
+        // a rebuilt/foreign-identity binary used to hang startup on the Keychain
+        // consent dialog before any UI (or the control server) came up. The probe
+        // runs off the main actor inside `refresh()`.
+        .task { await model.settings.refresh() }
         .onChange(of: firstMIDIClipID) { _, _ in maybeAutoOpen() }
         // Any clip stretch/pitch/formant change (from a drag OR the control port)
         // kicks the engine-status poll, so the timeline shimmers a clip while its
@@ -175,66 +249,134 @@ struct ContentView: View {
     private func arrangeWorkspace(_ geo: GeometryProxy) -> some View {
         arrangeToolbar
         HStack(spacing: 10) {
-            TrackListView()
-                .frame(width: model.panelLayout.sidebarWidth)
-            // Draggable sidebar↔timeline splitter (beta m10-d). Drag right widens
-            // the track list; the store clamps to 250–420 pt (250 = the header row's
-            // measured intrinsic floor — narrower needs m10-j priority-shrink).
-            sidebarSplitter
-            TimelineLanesView(
-                tracks: store.tracks,
-                positionBeats: store.transport.positionBeats,
-                beatsPerBar: store.transport.timeSignature.beatsPerBar,
-                selectedClipID: selectedClipID,
-                onSelectClip: selectClip,
-                expandedTrackIDs: model.expandedAutomationTrackIDs,
-                selectedLaneByTrack: model.automationLaneSelection,
-                onCommitPoints: { trackID, laneID, points in
-                    _ = try? store.setAutomationPoints(trackID: trackID, laneID: laneID, points: points)
-                },
-                snap: model.clipSnap,
-                secondsPerBeat: 60.0 / store.transport.tempoBPM,
-                waveformStore: model.waveformStore,
-                densityStore: model.panelDensity,
-                // Global track-row height (beta m10-d) — the SAME store value the
-                // sidebar rows use, so lanes and headers stay pixel-aligned.
-                rowHeight: model.panelLayout.rowHeight,
-                onMoveClip: { trackID, clip, toStart in
-                    _ = try? store.moveClip(trackId: trackID, clipId: clip.id, toStartBeat: toStart)
-                },
-                onTrimClip: { trackID, clip, newStart, newLength in
-                    _ = try? store.trimClip(trackId: trackID, clipId: clip.id,
-                                            newStartBeat: newStart, newLengthBeats: newLength)
-                },
-                onSplitClip: { trackID, clip, atBeat in
-                    _ = try? store.splitClip(trackId: trackID, clipId: clip.id, atBeat: atBeat)
-                },
-                onSetClipFades: { trackID, clip, fadeIn, fadeOut, inCurve, outCurve in
-                    _ = try? store.setClipFades(trackId: trackID, clipId: clip.id,
-                                                fadeInBeats: fadeIn, fadeOutBeats: fadeOut,
-                                                fadeInCurve: inCurve, fadeOutCurve: outCurve)
-                },
-                onSetClipGain: { trackID, clip, gainDb in
-                    _ = try? store.setClipGain(trackId: trackID, clipId: clip.id, gainDb: gainDb)
-                },
-                onStretchClip: { trackID, clip, toLength in
-                    _ = try? store.stretchClip(trackId: trackID, clipId: clip.id, toLengthBeats: toLength)
-                },
-                stretchStatus: { clip in model.stretchStatus(for: clip.id) },
-                expandedTakeTrackIDs: model.expandedTakeTrackIDs,
-                onSetTakeComp: { trackID, groupID, segments in
-                    _ = try? store.setCompSegments(trackId: trackID, groupId: groupID, segments: segments)
-                },
-                onSelectTake: { trackID, groupID, laneID in
-                    _ = try? store.selectTake(trackId: trackID, groupId: groupID, laneId: laneID)
-                },
-                onFlattenTakeGroup: { trackID, groupID in
-                    _ = try? store.flattenTakeGroup(trackId: trackID, groupId: groupID)
-                },
-                onRemoveTakeLane: { trackID, groupID, laneID in
-                    _ = try? store.removeTakeLane(trackId: trackID, groupId: groupID, laneId: laneID)
+            // Shared-scroll arrange (m10-j): ONE vertical ScrollView owns BOTH
+            // columns (the sidebar track rows + the timeline lanes) as a single
+            // HStack, so there is exactly one scroll position and the two columns can
+            // never desync — the structurally safer choice over synchronizing two
+            // offsets. When the content is taller than the viewport the whole track
+            // area scrolls together (rows stay pixel-locked to lanes); when it's
+            // shorter, `minHeight` fills the viewport so the glass panels don't shrink
+            // to their content. The Sketchpad/ClipFix side panels stay OUTSIDE this
+            // scroll at full height. On macOS, wheel-driven scrolling doesn't conflict
+            // with the click-drag splitters inside (the existing row-height grabber
+            // already lives inside a scroll). The ruler + TRACKS header sit at the top
+            // of the shared content — their HORIZONTAL behavior is unchanged (the
+            // ruler still h-scrolls with the lanes); vertically they ride the scroll.
+            GeometryReader { trackGeo in
+                ScrollView(.vertical) {
+                    HStack(spacing: 10) {
+                        TrackListView()
+                            .frame(width: model.panelLayout.sidebarWidth)
+                        // Draggable sidebar↔timeline splitter (beta m10-d). Drag right
+                        // widens the track list; the store clamps to 250–420 pt.
+                        sidebarSplitter
+                        TimelineLanesView(
+                            tracks: store.tracks,
+                            positionBeats: store.transport.positionBeats,
+                            beatsPerBar: store.transport.timeSignature.beatsPerBar,
+                            selectedClipID: selectedClipID,
+                            onSelectClip: selectClip,
+                            expandedTrackIDs: model.expandedAutomationTrackIDs,
+                            selectedLaneByTrack: model.automationLaneSelection,
+                            onCommitPoints: { trackID, laneID, points in
+                                _ = try? store.setAutomationPoints(trackID: trackID, laneID: laneID, points: points)
+                            },
+                            snap: model.clipSnap,
+                            secondsPerBeat: 60.0 / store.transport.tempoBPM,
+                            waveformStore: model.waveformStore,
+                            densityStore: model.panelDensity,
+                            // Global track-row height (beta m10-d) — the SAME store value
+                            // the sidebar rows use, so lanes and headers stay pixel-aligned.
+                            rowHeight: model.panelLayout.rowHeight,
+                            // The shared-scroll viewport height (m10-j): the timeline fills
+                            // it when content is short and reports its natural (content)
+                            // height when tall, so the outer scroll drives the overflow.
+                            availableHeight: trackGeo.size.height,
+                            onMoveClip: { trackID, clip, toStart in
+                                _ = try? store.moveClip(trackId: trackID, clipId: clip.id, toStartBeat: toStart)
+                            },
+                            onTrimClip: { trackID, clip, newStart, newLength in
+                                _ = try? store.trimClip(trackId: trackID, clipId: clip.id,
+                                                        newStartBeat: newStart, newLengthBeats: newLength)
+                            },
+                            onSplitClip: { trackID, clip, atBeat in
+                                _ = try? store.splitClip(trackId: trackID, clipId: clip.id, atBeat: atBeat)
+                            },
+                            onSetClipFades: { trackID, clip, fadeIn, fadeOut, inCurve, outCurve in
+                                _ = try? store.setClipFades(trackId: trackID, clipId: clip.id,
+                                                            fadeInBeats: fadeIn, fadeOutBeats: fadeOut,
+                                                            fadeInCurve: inCurve, fadeOutCurve: outCurve)
+                            },
+                            onSetClipGain: { trackID, clip, gainDb in
+                                _ = try? store.setClipGain(trackId: trackID, clipId: clip.id, gainDb: gainDb)
+                            },
+                            onStretchClip: { trackID, clip, toLength in
+                                _ = try? store.stretchClip(trackId: trackID, clipId: clip.id, toLengthBeats: toLength)
+                            },
+                            // Quantize & groove (m11-a): the arrange clip context menu
+                            // (Pro, sp-c) opens the SAME panel the piano roll does.
+                            // "Extract Groove…" jumps straight to the extract field.
+                            onOpenQuantize: { clip in model.openQuantizePanel(clipID: clip.id) },
+                            onExtractGroove: { clip in
+                                model.openQuantizePanel(clipID: clip.id, startExtract: true)
+                            },
+                            // Crossfade two adjacent/overlapping audio clips (m11-d,
+                            // Pro clip menu) — routes through the store's crossfade
+                            // method (one undo step; the sanctioned-overlap tool).
+                            onCrossfadeClips: { trackID, clipID, otherClipID, length in
+                                _ = try? store.crossfadeClips(trackId: trackID, clipId: clipID,
+                                                              otherClipId: otherClipID, lengthBeats: length)
+                            },
+                            stretchStatus: { clip in model.stretchStatus(for: clip.id) },
+                            expandedTakeTrackIDs: model.expandedTakeTrackIDs,
+                            onSetTakeComp: { trackID, groupID, segments in
+                                _ = try? store.setCompSegments(trackId: trackID, groupId: groupID, segments: segments)
+                            },
+                            onSelectTake: { trackID, groupID, laneID in
+                                _ = try? store.selectTake(trackId: trackID, groupId: groupID, laneId: laneID)
+                            },
+                            onFlattenTakeGroup: { trackID, groupID in
+                                _ = try? store.flattenTakeGroup(trackId: trackID, groupId: groupID)
+                            },
+                            onRemoveTakeLane: { trackID, groupID, laneID in
+                                _ = try? store.removeTakeLane(trackId: trackID, groupId: groupID, laneId: laneID)
+                            },
+                            // Loop region ruler (beta m10-g): loop state flows in by value
+                            // so an agent's `transport.setLoop` over the wire updates the
+                            // band live; the callbacks route through the pre-existing store
+                            // methods (no new wire command — the m10-c/e pure-view precedent).
+                            isLoopEnabled: store.transport.isLoopEnabled,
+                            loopStartBeat: store.transport.loopStartBeat,
+                            loopEndBeat: store.transport.loopEndBeat,
+                            onSetLoop: { enabled, start, end in
+                                _ = try? store.setLoop(enabled: enabled, startBeat: start, endBeat: end)
+                            },
+                            onSeek: { beat in _ = try? store.seek(toBeats: beat) },
+                            // Session markers (m11-c): markers flow in by value from the
+                            // store (already beat-sorted) so an agent's marker.* over the
+                            // wire updates the lane live; callbacks route through the store
+                            // marker methods (undo/coalescing free).
+                            markers: store.markers,
+                            onAddMarker: { beat in _ = store.addMarker(beat: beat) },
+                            onMoveMarker: { markerID, beat in _ = try? store.moveMarker(id: markerID, beat: beat) },
+                            onRenameMarker: { markerID, name in _ = try? store.renameMarker(id: markerID, name: name) },
+                            onRemoveMarker: { markerID in try? store.removeMarker(id: markerID) },
+                            stageRenameMarkerID: model.stagedMarkerRenameID,
+                            // Audio import via drag-drop (beta m10-k): dropped file URLs
+                            // run through the SAME shared plan pipeline the File→Import
+                            // menu uses; the target lane + drop beat come from the drop
+                            // location, routing/fan-out/naming decided by AudioImportPlan.
+                            onImportAudio: { urls, targetTrackID, atBeatRaw in
+                                model.importAudioFiles(urls: urls, targetTrackID: targetTrackID,
+                                                       atBeatRaw: atBeatRaw)
+                            }
+                        )
+                    }
+                    // Fill the viewport when content is short (glass panels stay full
+                    // height); grow past it when tall (the shared scroll takes over).
+                    .frame(minHeight: trackGeo.size.height, alignment: .top)
                 }
-            )
+            }
 
             if model.showSketchpad {
                 SketchpadView(model: model.sketchpad)
@@ -271,6 +413,15 @@ struct ContentView: View {
                 // Scrub seeks through the app's store seek (the existing transport.seek
                 // path), NOT the WebSocket. Refused mid-record → try? swallows it.
                 onSeek: { beats in _ = try? store.seek(toBeats: beats) },
+                // Bar ops (m10-h) route through the store's time-range primitives and
+                // return the updated clip so the piano roll can reseed its edit model.
+                onDeleteTimeRange: { start, len in
+                    try? store.deleteTimeRange(clipID: clip.id, startBeat: start, lengthBeats: len)
+                },
+                onInsertTimeRange: { at, len in
+                    try? store.insertTimeRange(clipID: clip.id, atBeat: at, lengthBeats: len)
+                },
+                onOpenQuantize: { model.openQuantizePanel(clipID: clip.id) },
                 onClose: { selectedClipID = nil }
             )
             .id(clip.id)
@@ -334,6 +485,8 @@ struct ContentView: View {
                 snapPicker
                     .explainable(.arrangeSnap)
             }
+            historyToggle
+                .explainable(.editHistory)
             SimpleProToggle(
                 store: model.panelDensity,
                 panelID: TimelineLanesView.panelID,
@@ -342,6 +495,34 @@ struct ContentView: View {
             .explainable(.panelDensity)   // shared density id (ex-b)
         }
         .padding(.horizontal, 4)
+    }
+
+    /// HISTORY chip: opens the Undo-history panel. Shown in BOTH densities — undo
+    /// history is a universal beginner action (everyone reaches for Cmd-Z), not a
+    /// Pro-only power tool. Standard editing chrome, so NEUTRAL, never violet
+    /// (docs/DESIGN-LANGUAGE.md Rule 3); lit cyan only as the earned active state
+    /// while the panel is open.
+    private var historyToggle: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.18)) {
+                if model.showUndoHistory { model.closeUndoHistory() } else { model.openUndoHistory() }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 9, weight: .bold))
+                Text("HISTORY")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+            }
+            .foregroundStyle(model.showUndoHistory ? DAWTheme.playback : DAWTheme.textDim)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(model.showUndoHistory ? DAWTheme.playback.opacity(0.14) : DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+        .help("Show the list of edits you can step back to or redo")
     }
 
     /// The arrange workspace's live density — drives the Pro-only snap picker.

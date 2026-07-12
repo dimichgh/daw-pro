@@ -161,11 +161,13 @@ density-exempt with this rationale. No control hiding is required.
 
 ## Density adoption status (sp-d close-out, 2026-07-10)
 
-With sp-d landed, density coverage is **uniform** across `Sources/DAWApp`. Four
+With sp-d landed, density coverage is **uniform** across `Sources/DAWApp`. Six
 surfaces carry a live `SimpleProToggle` (a real Simple/Pro delta); every other
 user-facing surface's Simple and Pro modes **COINCIDE** by design — nothing a
 beginner shouldn't see, nothing Pro would add — so they stay chip-free. A toggle
-that changes nothing is worse than none.
+that changes nothing is worse than none. (m10-n-3 added the fifth: the instrument
+picker, whose Simple "Instrument Sets" and Pro full browser genuinely differ;
+m11-a added the sixth: the Quantize panel — see below.)
 
 | Surface | Panel ID | Status | Rationale |
 |---|---|---|---|
@@ -173,6 +175,30 @@ that changes nothing is worse than none.
 | Mixer console | `mixer` | **LIVE CHIP** | Simple = name/kind + pan + fader/meter/dB + M-S-A; Pro adds inserts, sends, and output routing (sp-b). |
 | Arrange timeline | `arrange` | **LIVE CHIP** | Simple = move + play on a Bar grid; Pro adds trim/fade/split/gain/stretch + the snap-resolution picker (sp-c). |
 | Transport bar | `transport` | **LIVE CHIP** | Simple = transport + LOOP/CLICK + Position/Time + tempo + master; Pro adds PUNCH and the test-tone verify affordance (sp-d). |
+| Instrument picker | `instrumentPicker` | **LIVE CHIP** | Simple = curated "Instrument Sets" (16 GM families one-click) + Poly Synth/Sampler + a flat AU list; Pro = the full bank/program browser with raw program/MSB/LSB + Test Tone (m10-n-3). |
+| Quantize panel | `quantize` | **LIVE CHIP** (MIDI target) | Simple = grid + strength (tighten timing, this hard); Pro adds swing, snap-note-ends, and the groove picker (built-in swings + saved templates + extract) (m11-a). |
+
+### Quantize panel — HAS-MODES (m11-a, DECISION)
+
+**The decision (labeled):** the Quantize & Groove panel earns a **live chip for a MIDI
+target** because Simple and Pro genuinely differ. Quantize is a real beginner tool
+("line my part up to the grid"), so Simple is a **trimmed flow** — the grid picker +
+the strength slider + APPLY — NOT a Pro-only lockout. Pro reveals the swing slider,
+the snap-note-ends toggle, and the whole groove picker (built-in MPC swings + saved
+templates + the extract-from-clip affordance). This is a substantial, real delta —
+the "20% used 80% of the time" is exactly grid + strength.
+
+For an **audio target** (the arrange "Extract Groove…" menu on an audio clip) the
+panel is extract-only (note quantize is MIDI-only, matching
+`ProjectStore.quantizeClipNotes`), so its two modes coincide and **the chip is
+hidden** — never a do-nothing toggle (the master-strip precedent). The chip appears
+only when there are note-quantize controls to gate.
+
+The **groove-wins** contract is surfaced HONESTLY, not as a silent ignore: selecting
+a groove disables the grid picker (shown "set by the groove") AND the swing slider
+(shown "groove sets the feel"), because the groove governs both — the model reports
+`gridIsGrooveLocked`/`swingIsInert` and `buildSettings` uses the groove's own grid.
+Strength stays live (it still controls how far notes move toward the groove targets).
 | Mixer master strip | — | **COINCIDENT-EXEMPT** | Already just fader + stereo meter + dB; nothing to hide. |
 | Track row | — | **COINCIDENT-EXEMPT** | Already the Simple set (name/meter/M-S-R); advanced density lives in its disclosure sub-panels. |
 | Automation lane editor | — | **COINCIDENT-EXEMPT** | Disclosure-gated; once open it's VOL/PAN + ON/OFF + draw — already the 20 %. |
@@ -182,3 +208,5 @@ that changes nothing is worse than none.
 | Lyrics Workshop | — | **COINCIDENT-EXEMPT** | Nested disclosure; THEME/STYLE/STRUCTURE/WRITE is already focused and plain-language. |
 | Copilot rail | — | **COINCIDENT-EXEMPT** | A chat box (transcript + input) has no advanced controls to hide. |
 | Settings / API keys | — | **COINCIDENT-EXEMPT** | App chrome (no violet by design); rows + Save/Clear are already minimal. |
+| Undo-history panel | — | **COINCIDENT-EXEMPT** (m11-b) | A single chronological list of edit labels around a "you are here" marker; clicking a row steps there via repeated undo/redo. There is no advanced sub-control to reveal — Simple and Pro would render identically, so **no do-nothing SIMPLE/PRO chip** (the master-strip precedent). Undo history is a universal beginner action (Cmd-Z), so the HISTORY affordance shows in BOTH arrange densities; the panel is NOT an AI surface — zero violet (cyan marks only the current-position marker). |
+| Session-marker lane | — | **COINCIDENT-EXEMPT** (m11-c) | Named song-section flags on the arrange ruler: add (context menu), drag to move, click to jump, double-click/menu to rename, menu to delete. Naming and jumping to sections is a **beginner-friendly** action ("go to the chorus"), so markers render in BOTH arrange densities with the SAME affordances — there is no advanced marker sub-control to hide (no colors/types/categories in v0), so Simple and Pro would render identically and grow **no do-nothing chip** (the loop-ruler / master-strip precedent). The ONE density-sensitive knob is the drag/add SNAP, which the lane already inherits from the arrange panel's shared `ClipSnap.effective` (Bar-locked in Simple, the picked grid in Pro) — so the density behavior it does have is coincident with the surrounding surface, not a second toggle. NOT an AI surface — zero violet; the flags are neutral glass (no cyan either — cyan stays earned-active). |

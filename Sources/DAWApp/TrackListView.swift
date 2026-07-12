@@ -13,47 +13,104 @@ struct TrackListView: View {
                     .tracking(1.4)
                     .foregroundStyle(DAWTheme.textDim)
                 Spacer()
-                Button {
-                    store.addTrack()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(DAWTheme.textPrimary)
-                        .frame(width: 22, height: 22)
-                        .background(DAWTheme.panelRaised)
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                // A LABELED add-track affordance so a human never has to wonder
+                // whether tracks are AI-only (beta m10-i): a compact "+ ADD" chip
+                // that drops a kind menu. Neutral chrome — textPrimary on the
+                // raised chip, no accent at rest (Rule 3: a create "+" earns no
+                // accent).
+                addTrackMenu {
+                    HStack(spacing: 3) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("ADD")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .tracking(0.8)
+                    }
+                    .foregroundStyle(DAWTheme.textPrimary)
+                    .padding(.horizontal, 8)
+                    .frame(height: 22)
+                    .background(DAWTheme.panelRaised)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
                 }
-                .buttonStyle(.plain)
-                .help("Add track")
-                .explainable(.arrangeAddTrack)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
 
             if store.tracks.isEmpty {
-                VStack(spacing: 6) {
-                    Text("No tracks yet")
-                        .font(.system(size: 12))
-                        .foregroundStyle(DAWTheme.textDim)
-                    Text("Add one, or let an agent do it over MCP")
-                        .font(.system(size: 10))
-                        .foregroundStyle(DAWTheme.textFaint)
+                VStack(spacing: 10) {
+                    VStack(spacing: 6) {
+                        Text("No tracks yet")
+                            .font(.system(size: 12))
+                            .foregroundStyle(DAWTheme.textDim)
+                        Text("Add one below, or let an agent do it over MCP")
+                            .font(.system(size: 10))
+                            .foregroundStyle(DAWTheme.textFaint)
+                    }
+                    // The empty state gets a REAL, obvious add button (not just the
+                    // tucked-away header chip) so a first-time human has a clear
+                    // starting move (beta m10-i).
+                    addTrackMenu {
+                        HStack(spacing: 5) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("ADD TRACK")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .tracking(0.8)
+                        }
+                        .foregroundStyle(DAWTheme.textPrimary)
+                        .padding(.horizontal, 12)
+                        .frame(height: 28)
+                        .background(DAWTheme.panelRaised)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(DAWTheme.hairline, lineWidth: 1))
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    VStack(spacing: 6) {
-                        ForEach(store.tracks) { track in
-                            TrackRow(track: track)
-                        }
+                // No inner ScrollView (m10-j): the shared outer vertical ScrollView
+                // in ContentView scrolls the sidebar rows and the timeline lanes
+                // TOGETHER as one unit, so they stay pixel-locked. This is a plain
+                // VStack; the TRACKS header above rides the shared scroll at the top.
+                VStack(spacing: 6) {
+                    ForEach(store.tracks) { track in
+                        TrackRow(track: track)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 8)
                 }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
         .glassPanel()
+    }
+
+    /// The discoverable add-track control (beta m10-i): a themed chip menu (the
+    /// piano-roll snap-picker idiom, never a stock gray control — Rule 2) offering
+    /// the three track kinds a human can create. Each routes to `store.addTrack`,
+    /// which supplies a sensible default name ("Inst 3", "Audio 2", "Bus 1"). One
+    /// helper backs both the header chip and the empty-state button so they stay
+    /// in sync. Carries the shared `.arrangeAddTrack` Explain entry.
+    private func addTrackMenu<ChipLabel: View>(@ViewBuilder label: () -> ChipLabel) -> some View {
+        Menu {
+            Button {
+                store.addTrack(kind: .instrument)
+            } label: { Label("Instrument Track", systemImage: "pianokeys") }
+            Button {
+                store.addTrack(kind: .audio)
+            } label: { Label("Audio Track", systemImage: "waveform") }
+            Button {
+                store.addTrack(kind: .bus)
+            } label: { Label("Bus Track", systemImage: "arrow.triangle.merge") }
+        } label: {
+            label()
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Add a track — instrument, audio, or bus")
+        .explainable(.arrangeAddTrack)
     }
 }
 
@@ -62,10 +119,24 @@ struct TrackRow: View {
     @Environment(AppModel.self) private var model
     var track: Track
 
+    /// The live sidebar width (beta m10-i round 2) — read from the SAME m10-d
+    /// layout store the splitter drives, so the row's width-budget decisions
+    /// (does the clip badge fold?) track the sidebar deterministically without a
+    /// GeometryReader inside the ScrollView.
+    private var sidebarWidth: CGFloat { model.panelLayout.sidebarWidth }
+
     /// Drag origin for the row-height grabber (beta m10-d), captured on the first
     /// tick and cleared on end — only one row is dragged at a time. Adjusts the
     /// GLOBAL `panelLayout.rowHeight`, not this track.
     @State private var rowDragOrigin: CGFloat?
+
+    /// Inline rename state (beta m10-i): double-click the identity swaps the name
+    /// Text for a TextField seeded here; Return / focus-loss commits, Escape
+    /// cancels. `isEditingName` gates both the swap and the focus-loss commit so
+    /// a Return or Escape that removes the field can't double-fire the commit.
+    @State private var isEditingName = false
+    @State private var nameDraft = ""
+    @FocusState private var nameFieldFocused: Bool
 
     /// The live global row height — the SAME value the timeline lanes read, so the
     /// sidebar header and its lane stay pixel-aligned at every size (beta m10-d).
@@ -84,6 +155,14 @@ struct TrackRow: View {
     /// the timeline's `isTakesExpanded`).
     private var isTakesExpanded: Bool {
         model.expandedTakeTrackIDs.contains(track.id) && !track.takeGroups.isEmpty
+    }
+
+    /// Whether the automation disclosure rides inline (m10-j). It folds into the
+    /// context menu on a take-group row at a narrow sidebar so the soft name keeps
+    /// its readable share — the pure rule lives in `TrackHeaderLayout`.
+    private var showsInlineAutomation: Bool {
+        TrackHeaderLayout.showsInlineAutomationDisclosure(
+            sidebarWidth: sidebarWidth, hasTakeGroups: TakeLaneSelection.hasTakeGroups(track))
     }
 
     var body: some View {
@@ -105,6 +184,27 @@ struct TrackRow: View {
             )
         )
         .contextMenu {
+            // Discoverability twin of the double-click rename (beta m10-i).
+            Button("Rename Track") { beginEditing() }
+            // When the inline automation disclosure has folded away (a take-group row
+            // at a narrow sidebar, m10-j), it stays reachable here so automation is
+            // never lost — just relocated.
+            if !showsInlineAutomation {
+                Button(isExpanded ? "Hide Automation" : "Show Automation") {
+                    model.toggleAutomation(track.id)
+                }
+            }
+            // Bounce in Place (m11-e): render this track and land it as a new
+            // audio track + clip in one undo step. Offered only for master
+            // inputs (a direct-to-master track or a bus) — the SAME eligibility
+            // render.stems / bounceTrackInPlace enforce; a bus-routed source
+            // has no stem of its own, so the item hides rather than fail. Both
+            // densities (a plain action, no advanced-control split).
+            if track.kind == .bus || track.outputBusID == nil {
+                Button("Bounce in Place") {
+                    Task { try? await store.bounceTrackInPlace(trackId: track.id) }
+                }
+            }
             Button("Remove Track", role: .destructive) {
                 store.removeTrack(id: track.id)
             }
@@ -112,34 +212,58 @@ struct TrackRow: View {
     }
 
     private var row: some View {
-        HStack(spacing: 8) {
-            // Kind icon + name = the track's identity (one shared "Track" card).
-            HStack(spacing: 8) {
-                Image(systemName: kindIcon)
-                    .font(.system(size: 11))
-                    .foregroundStyle(track.isAIGenerated ? DAWTheme.ai : DAWTheme.textDim)
-                    .frame(width: 16)
+        // Tight top-level spacing (5 pt) so a fully-loaded row still fits inside
+        // the sidebar's narrow end (250 pt) WITHOUT the name giving up its readable
+        // share; the Spacer restores generous separation at wider widths.
+        HStack(spacing: 5) {
+            identityCluster
 
-                Text(track.name)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(DAWTheme.textPrimary)
-                    .lineLimit(1)
+            // The instrument chip (m10-n-3): the current sound + the picker opener,
+            // on instrument tracks only. COMPACT + SOFT (truncating, default layout
+            // priority below the name's `.layoutPriority(1)` cluster) so it yields
+            // the name its readable share and carries no hard minimum — it can never
+            // inflate the sidebar past its 250 pt floor (the m10-i soft-label rule).
+            // It folds toward a glyph at the narrow end.
+            if track.kind == .instrument {
+                InstrumentChip(
+                    descriptor: track.instrument,
+                    status: store.audioUnitStatus(forTrack: track.id),
+                    compact: true,
+                    onOpen: { model.openInstrumentPicker(trackID: track.id) }
+                )
+                .layoutPriority(0)
             }
-            .explainable(.trackRowIdentity)
 
-            Spacer()
+            Spacer(minLength: 0)
 
-            MiniLevelBar(meter: store.trackMeters[track.id] ?? .silence)
+            // The level bar yields FIRST when the header is crowded (beta m10-i):
+            // it compresses from its ideal 44 pt down to a 22 pt floor (a slimmer
+            // bar, never hidden) so the identity keeps its readable share.
+            MiniLevelBar(meter: store.trackMeters[track.id] ?? .silence,
+                         minWidth: 22, maxWidth: 44)
 
-            if track.clips.count > 0 {
+            // The clip-count badge is the LEAST load-bearing chip, so it folds into
+            // the identity tooltip at the narrow end (beta m10-i round 2) rather
+            // than steal the name's room. The decision is the pure, tested
+            // `TrackHeaderLayout.showsClipBadge`.
+            if TrackHeaderLayout.showsClipBadge(sidebarWidth: sidebarWidth,
+                                                clipCount: track.clips.count) {
                 Text("\(track.clips.count) ♪")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(DAWTheme.textDim)
+                    .fixedSize()
             }
 
             takesDisclosure
 
-            automationDisclosure
+            // The automation disclosure folds into the context menu on a HEAVY row
+            // (one that also carries a take-group disclosure) at a narrow sidebar, so
+            // the two disclosures don't squeeze the soft name below its readable floor
+            // (m10-j — the deferred m10-i "~36 pt name at 250" edge). The pure rule is
+            // `TrackHeaderLayout.showsInlineAutomationDisclosure`.
+            if showsInlineAutomation {
+                automationDisclosure
+            }
 
             // M/S/A reuse the mixer strip's ExplainIDs — the copy reads
             // context-neutral, so one entry serves both surfaces (ex-b shared-id rule).
@@ -169,6 +293,111 @@ struct TrackRow: View {
         // the macOS glyph for a height adjustment; see DESIGN-LANGUAGE "Panel
         // splitters"). Idle-invisible so N rows don't grow N rest lines.
         .overlay(alignment: .bottom) { rowHeightHandle }
+    }
+
+    /// The kind icon + name = the track's identity (one shared "Track" card).
+    /// The name wins the layout fight against the crowded right side (beta m10-i)
+    /// via LAYOUT PRIORITY, NOT a hard minimum width — a bare truncating Text has
+    /// a tiny intrinsic minimum (an ellipsis), so it never inflates the sidebar's
+    /// (and thus the window's) minimum width (the round-2 clip bug), yet priority
+    /// hands it the surplus so it stays readable (≳ 60 pt even at sidebar 250 once
+    /// the clip badge folds away). A long name truncates at the TAIL (the app's
+    /// `lineLimit(1)` convention); the full name + clip count live in the tooltip.
+    /// Double-click swaps in the inline rename field.
+    private var identityCluster: some View {
+        HStack(spacing: 5) {
+            Image(systemName: kindIcon)
+                .font(.system(size: 11))
+                .foregroundStyle(track.isAIGenerated ? DAWTheme.ai : DAWTheme.textDim)
+                .frame(width: 16)
+
+            if isEditingName {
+                nameField
+            } else {
+                // A BARE truncating Text — finite ideal (the full string), tiny
+                // minimum (an ellipsis). The cluster's `layoutPriority` below hands
+                // it the surplus so it reads; its small minimum keeps the sidebar
+                // from inflating. The Spacer (not this) soaks up wide-width slack,
+                // so the level bar can still grow to its full 44 pt.
+                Text(track.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(DAWTheme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .contentShape(Rectangle())
+                    // Double-click the identity to rename (the discoverability twin
+                    // is the "Rename Track" context-menu item).
+                    .onTapGesture(count: 2) { beginEditing() }
+                    // Full name + clip count on hover — a truncated title (and a
+                    // folded-away clip badge) stay discoverable.
+                    .help(TrackHeaderLayout.identityTooltip(name: track.name,
+                                                            clipCount: track.clips.count))
+            }
+        }
+        // Priority on the CLUSTER (one unit): it wins the top-level surplus over
+        // the Spacer/level bar so the name stays readable, WITHOUT a hard minimum
+        // width — so the row never inflates the sidebar past its 250 pt floor and
+        // slides the whole panel off-screen (the m10-i round-2 clip bug).
+        .layoutPriority(1)
+        .explainable(.trackRowIdentity)
+    }
+
+    /// The inline rename TextField (beta m10-i): SF Pro to match the name Text it
+    /// replaces (a track name is prose, not a numeric readout — so not SF Mono),
+    /// styled to the dark-glass field idiom (the Copilot input / ClipFix beat
+    /// field). Like the display name it is soft (priority-won, no hard minimum) so
+    /// entering edit mode never inflates the sidebar. Commit on Return (`onSubmit`)
+    /// and on focus loss; Escape cancels.
+    private var nameField: some View {
+        TextField("", text: $nameDraft)
+            .textFieldStyle(.plain)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(DAWTheme.textPrimary)
+            .focused($nameFieldFocused)
+            // Fill the cluster while editing (its priority is on the cluster); the
+            // field's own minimum stays small, so edit mode never inflates the row.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(DAWTheme.background)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(DAWTheme.playback.opacity(0.5), lineWidth: 1))
+            // Focus the field the moment it enters the tree (belt-and-suspenders
+            // with the set in `beginEditing`) so the caret lands without a click.
+            .onAppear { nameFieldFocused = true }
+            .onSubmit { commitRename() }
+            // Escape cancels (drops the draft) BEFORE the focus-loss commit runs —
+            // `isEditingName` is cleared first, so the onChange below no-ops.
+            .onKeyPress(.escape) { cancelRename(); return .handled }
+            // Focus loss (click elsewhere) commits; guarded so a Return/Escape that
+            // already tore down the field can't commit a second time.
+            .onChange(of: nameFieldFocused) { _, focused in
+                if !focused && isEditingName { commitRename() }
+            }
+    }
+
+    /// Enter rename mode: seed the draft from the live name and focus the field.
+    private func beginEditing() {
+        nameDraft = track.name
+        isEditingName = true
+        nameFieldFocused = true
+    }
+
+    /// Commit the draft through the store's rename (which journals one undo step),
+    /// but only when the pure resolver says it's a real change — empty input and an
+    /// unchanged re-type both drop back to the plain name with no edit.
+    private func commitRename() {
+        guard isEditingName else { return }
+        isEditingName = false
+        if let name = TrackRename.committedName(draft: nameDraft, current: track.name) {
+            store.renameTrack(id: track.id, name: name)
+        }
+    }
+
+    /// Cancel: discard the draft, restore the plain name, and disarm the focus-loss
+    /// commit (so tearing down the field doesn't re-commit).
+    private func cancelRename() {
+        isEditingName = false
+        nameFieldFocused = false
     }
 
     /// The bottom-edge grabber that adjusts the global track-row height (beta m10-d).

@@ -63,15 +63,19 @@ extension ProjectStore {
         let adoptedBPM: Double? = (wantsTempo ? result.bpm : nil)
             .map { $0.clamped(to: TransportState.tempoRange) }
 
-        // 6. Clip length in beats is measured at the FINAL tempo (adopted or
-        //    current) so the clip's beat span matches how it will play.
-        let finalTempo = adoptedBPM ?? transport.tempoBPM
-        let lengthBeats = info.durationSeconds * finalTempo / 60.0
+        // 6. Clip length in beats is measured under the FINAL map (adopted or
+        //    current) so the clip's beat span matches how it will play. Tempo
+        //    adoption is a segment-0 edit folded into the same performEdit
+        //    (m12-b, design row 30), so the map is synthesized from the final
+        //    scalar at this boundary — not from the not-yet-mutated transport.
+        let finalTempoMap = adoptedBPM.map(TempoMap.init(constantBPM:)) ?? transport.tempoMap
 
         let resolvedName = trackName?.isEmpty == false
             ? trackName!
             : Self.defaultGenerationTrackName(prompt: result.prompt)
         let startBeat = max(0, atBeat ?? 0)
+        let lengthBeats = finalTempoMap.beat(
+            from: startBeat, elapsedSeconds: info.durationSeconds) - startBeat
 
         // The track AND its clip are flagged AI-generated (violet in the UI —
         // "violet always means AI-generated", DESIGN-LANGUAGE.md).
@@ -211,9 +215,9 @@ extension ProjectStore {
         let adoptedBPM: Double? = (wantsTempo ? candidateBPM : nil)
             .map { $0.clamped(to: TransportState.tempoRange) }
 
-        // 5. Every clip's length in beats is measured at the FINAL tempo
-        //    (adopted or current), same as importGeneration.
-        let finalTempo = adoptedBPM ?? transport.tempoBPM
+        // 5. Every clip's length in beats is measured under the FINAL map
+        //    (adopted or current), same as importGeneration (m12-b, row 31).
+        let finalTempoMap = adoptedBPM.map(TempoMap.init(constantBPM:)) ?? transport.tempoMap
         let startBeat = max(0, atBeat ?? 0)
 
         var newTracks: [Track] = []
@@ -221,7 +225,8 @@ extension ProjectStore {
         newTracks.reserveCapacity(staged.count)
         newTrackClipNames.reserveCapacity(staged.count)
         for stem in staged {
-            let lengthBeats = stem.durationSeconds * finalTempo / 60.0
+            let lengthBeats = finalTempoMap.beat(
+                from: startBeat, elapsedSeconds: stem.durationSeconds) - startBeat
             let resolvedName = Self.defaultStemTrackName(trackName: stem.trackName)
             // The track AND its clip are flagged AI-generated (violet in the
             // UI — "violet always means AI-generated", DESIGN-LANGUAGE.md).

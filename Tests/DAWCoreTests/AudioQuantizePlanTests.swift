@@ -42,7 +42,7 @@ struct AudioQuantizePlanGeometryTests {
         let onsets = [0.55, 0.95, 1.55]
         let s = AudioQuantizeSettings(gridBeats: 1.0, strength: 1)
         let slices = try AudioQuantizePlan.compute(
-            clip: clip, transientsSourceSeconds: onsets, tempoBPM: 120, settings: s)
+            clip: clip, transientsSourceSeconds: onsets, tempoMap: TempoMap(constantBPM: 120), settings: s)
 
         // head + 3 onsets = 4 clips.
         #expect(slices.count == 4)
@@ -95,7 +95,7 @@ struct AudioQuantizePlanGeometryTests {
         let onsets = [0.55, 0.95, 1.55]   // beats 1.1, 1.9, 3.1
         let s = AudioQuantizeSettings(gridBeats: 1.0, strength: 0.5, crossfadeSeconds: 0)
         let slices = try AudioQuantizePlan.compute(
-            clip: clip, transientsSourceSeconds: onsets, tempoBPM: 120, settings: s)
+            clip: clip, transientsSourceSeconds: onsets, tempoMap: TempoMap(constantBPM: 120), settings: s)
         #expect(slices.count == 4)
         let spb = 0.5
         // Halfway: 1.1→1.05, 1.9→1.95, 3.1→3.05. No crossfade (0) so base geometry.
@@ -117,7 +117,7 @@ struct AudioQuantizePlanGeometryTests {
         let s = AudioQuantizeSettings(gridBeats: 1.0, strength: 1,
                                       crossfadeSeconds: 0, minSliceSeconds: 0.05)
         let slices = try AudioQuantizePlan.compute(
-            clip: clip, transientsSourceSeconds: onsets, tempoBPM: 120, settings: s)
+            clip: clip, transientsSourceSeconds: onsets, tempoMap: TempoMap(constantBPM: 120), settings: s)
         #expect(slices.count == 3)  // head + 2
         // minSliceBeats = 0.05/0.5 = 0.1. First → 1.0, second clamped to 1.1.
         #expect(approx(slices[1].startBeat, 1.0))
@@ -136,7 +136,7 @@ struct AudioQuantizePlanGeometryTests {
         let onsets = [0.55, 0.95, 1.55]
         let s = AudioQuantizeSettings(gridBeats: 1.0, strength: 1)
         let slices = try AudioQuantizePlan.compute(
-            clip: clip, transientsSourceSeconds: onsets, tempoBPM: 120, settings: s)
+            clip: clip, transientsSourceSeconds: onsets, tempoMap: TempoMap(constantBPM: 120), settings: s)
         for sl in slices { #expect(approx(sl.gainDb, 3)) }
         // Head keeps the clip's fade-in (linear), and gets the join fade-out (eq).
         #expect(approx(slices[0].fadeInBeats, 0.5))
@@ -158,7 +158,7 @@ struct AudioQuantizePlanRejectionTests {
         let midi = Clip(name: "m", startBeat: 0, lengthBeats: 4, notes: [])
         #expect(throws: ProjectError.self) {
             _ = try AudioQuantizePlan.compute(
-                clip: midi, transientsSourceSeconds: [0.5, 1.0], tempoBPM: 120,
+                clip: midi, transientsSourceSeconds: [0.5, 1.0], tempoMap: TempoMap(constantBPM: 120),
                 settings: AudioQuantizeSettings(gridBeats: 1))
         }
     }
@@ -169,13 +169,39 @@ struct AudioQuantizePlanRejectionTests {
         var thrown: ProjectError?
         do {
             _ = try AudioQuantizePlan.compute(
-                clip: stretched, transientsSourceSeconds: [0.5, 1.0], tempoBPM: 120,
+                clip: stretched, transientsSourceSeconds: [0.5, 1.0], tempoMap: TempoMap(constantBPM: 120),
                 settings: AudioQuantizeSettings(gridBeats: 1))
         } catch let e as ProjectError { thrown = e } catch {}
         guard case .audioQuantizeStretchUnsupported = thrown else {
             Issue.record("expected audioQuantizeStretchUnsupported, got \(String(describing: thrown))")
             return
         }
+    }
+
+    @Test("clip spanning a tempo boundary → audioQuantizeTempoBoundaryUnsupported (m12-c)")
+    func tempoBoundaryRejected() throws {
+        // 120→90 at beat 2 — the clip [0, 4) crosses it. The plan's constant
+        // spb assumption cannot hold, so compute rejects with the teaching
+        // error (split at the boundary first).
+        let map = try TempoMap(segments: [
+            .init(startBeat: 0, bpm: 120), .init(startBeat: 2, bpm: 90),
+        ])
+        var thrown: ProjectError?
+        do {
+            _ = try AudioQuantizePlan.compute(
+                clip: audioClip(), transientsSourceSeconds: [0.55, 0.95],
+                tempoMap: map, settings: AudioQuantizeSettings(gridBeats: 1))
+        } catch let e as ProjectError { thrown = e } catch {}
+        guard case .audioQuantizeTempoBoundaryUnsupported = thrown else {
+            Issue.record("expected audioQuantizeTempoBoundaryUnsupported, got \(String(describing: thrown))")
+            return
+        }
+        // A clip fully inside ONE segment of the same map still computes.
+        let inside = audioClip(startBeat: 2, length: 2)
+        let slices = try AudioQuantizePlan.compute(
+            clip: inside, transientsSourceSeconds: [0.55, 0.95],
+            tempoMap: map, settings: AudioQuantizeSettings(gridBeats: 1))
+        #expect(!slices.isEmpty)
     }
 
     @Test("fewer than 2 usable transients → audioQuantizeNoTransients")
@@ -185,7 +211,7 @@ struct AudioQuantizePlanRejectionTests {
         var thrown: ProjectError?
         do {
             _ = try AudioQuantizePlan.compute(
-                clip: clip, transientsSourceSeconds: [0.9], tempoBPM: 120,
+                clip: clip, transientsSourceSeconds: [0.9], tempoMap: TempoMap(constantBPM: 120),
                 settings: AudioQuantizeSettings(gridBeats: 1))
         } catch let e as ProjectError { thrown = e } catch {}
         guard case .audioQuantizeNoTransients = thrown else {
@@ -201,13 +227,13 @@ struct AudioQuantizePlanRejectionTests {
         #expect(throws: Never.self) {
             _ = try AudioQuantizePlan.compute(
                 clip: clip, transientsSourceSeconds: [-1.0, 0.5, 1.5, 3.0],
-                tempoBPM: 120, settings: AudioQuantizeSettings(gridBeats: 1))
+                tempoMap: TempoMap(constantBPM: 120), settings: AudioQuantizeSettings(gridBeats: 1))
         }
         // With only one in-window onset, it rejects.
         #expect(throws: ProjectError.self) {
             _ = try AudioQuantizePlan.compute(
                 clip: clip, transientsSourceSeconds: [0.5, 3.0, 5.0],
-                tempoBPM: 120, settings: AudioQuantizeSettings(gridBeats: 1))
+                tempoMap: TempoMap(constantBPM: 120), settings: AudioQuantizeSettings(gridBeats: 1))
         }
     }
 }

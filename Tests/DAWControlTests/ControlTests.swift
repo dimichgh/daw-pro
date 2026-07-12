@@ -69,7 +69,7 @@ final class FakeEngine: AudioEngineControlling {
 
     func stopRecording() { stopRecordingCount += 1 }
 
-    func renderMixdown(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         lastMixdownURL = url
@@ -82,7 +82,7 @@ final class FakeEngine: AudioEngineControlling {
     // precedent above) — real audio correctness is proven by
     // OfflineBufferRenderTests/StemNullTests (iv-b/iv-c) and RenderCommandTests'
     // dedicated fake.
-    func renderOffline(tracks: [Track], tempoBPM: Double, masterVolume: Double,
+    func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                        fromBeat: Double, durationSeconds: Double,
                        forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         let frameCount = Int(durationSeconds * 48_000)
@@ -480,7 +480,9 @@ struct CommandRouterTests {
             params: ["trackId": .string(instID), "kind": .string("fmSynth")]
         ))
         #expect(!badKind.ok)
-        #expect(badKind.error == "kind must be one of testTone|polySynth|sampler|audioUnit")
+        // soundBank joined the list in m10-n-1 (wire-valid via Kind.allCases;
+        // the bank param itself is the m10-n-2 wire delta).
+        #expect(badKind.error == "kind must be one of testTone|polySynth|sampler|audioUnit|soundBank")
 
         let badWave = await router.handle(ControlRequest(
             id: "2", command: "track.setInstrument",
@@ -1326,8 +1328,18 @@ struct CommandRouterTests {
         // transport.record iterates before track.setArm — arm up front so the
         // record route succeeds when its turn comes.
         try store.setTrackArm(id: track.id, armed: true)
+        // Markers (m11-c): allCommands order is add, remove, rename, move, list —
+        // remove runs before rename/move, so give each mutation its OWN pre-made
+        // marker (one target can't be shared: remove would delete it first).
+        let removableMarkerID = store.addMarker(name: "Rm", beat: 0).id.uuidString
+        let renamableMarkerID = store.addMarker(name: "Rn", beat: 4).id.uuidString
+        let movableMarkerID = store.addMarker(name: "Mv", beat: 8).id.uuidString
         let paramsByCommand: [String: [String: JSONValue]] = [
             "transport.seek": ["beats": .number(0)],
+            "marker.add": ["beat": .number(0)],
+            "marker.remove": ["markerId": .string(removableMarkerID)],
+            "marker.rename": ["markerId": .string(renamableMarkerID), "name": .string("X")],
+            "marker.move": ["markerId": .string(movableMarkerID), "beat": .number(0)],
             "transport.setTempo": ["bpm": .number(120)],
             "transport.setLoop": ["enabled": .bool(true), "startBeat": .number(0), "endBeat": .number(8)],
             // Runs before transport.record in allCommands; the record route
@@ -1352,6 +1364,12 @@ struct CommandRouterTests {
             "track.removeSend": ["trackId": .string(trackID), "sendId": .string(preSendID)],
             // Instrument-only; use the instrument track (the shared trackID is audio).
             "track.setInstrument": ["trackId": .string(instTrackID), "waveform": .string("saw")],
+            // Bounce the instrument track (a master input that survives the loop —
+            // track.remove targets the audio trackID). Explicit duration so the
+            // route succeeds before any clip exists (the render.stems precedent);
+            // it mutes the source and inserts an audio track, both harmless to the
+            // remaining routes. Full coverage in BounceInPlaceCommandTests.
+            "track.bounceInPlace": ["trackId": .string(instTrackID), "durationSeconds": .number(0.1)],
             // fx.add creates an effect on the shared audio track; the effect-id-
             // dependent fx routes (remove/reorder/setBypass/setParam) are excluded
             // below and proven by FXCommandTests. fx.describe needs no params.
@@ -1389,13 +1407,19 @@ struct CommandRouterTests {
             "input.listDevices": [:],
             // uid omitted = system default, always valid.
             "input.setDevice": [:],
+            // Sound-bank program listing (m10-n): "gm" is present on every macOS,
+            // so it routes with no filesystem setup. instrument.listSoundBanks
+            // (no params) also stays IN the loop — a scan never errors.
+            // instrument.importSoundBank is excluded above (real-FS copy).
+            "instrument.listSoundBankPrograms": ["source": .string("gm")],
         ]
         for command in CommandRouter.allCommands {
             // track.remove deletes the shared track; the project.* routes need
             // real filesystem setup (or a stopped transport — this loop is mid-
             // record by now); edit.undo/edit.redo are refused mid-take and need
             // real history; clip.setNotes/clip.remove/clip.split/clip.trim/
-            // clip.move/clip.setGain/clip.setFades/clip.quantize/clip.humanize/
+            // clip.move/clip.setGain/clip.setFades/clip.deleteTimeRange/
+            // clip.insertTimeRange/clip.quantize/clip.humanize/
             // clip.detectTransients/clip.quantizeAudio need a clip id that only
             // exists after clip.addMIDI runs; take.* need a group id that only
             // exists after take.group runs on >= 2 overlapping clips;
@@ -1422,12 +1446,23 @@ struct CommandRouterTests {
                 "project.recover",
                 "edit.undo", "edit.redo", "clip.setNotes", "clip.remove",
                 "clip.split", "clip.trim", "clip.move", "clip.setGain", "clip.setFades",
-                "clip.setStretch", "clip.stretchToLength", "clip.quantize",
+                // clip.crossfade (m11-d) needs TWO adjacent audio clips with source
+                // material on each side of the seam — a fixture this shared, single-
+                // clip project doesn't have. Proven by ClipCrossfadeCommandTests
+                // (import + split + crossfade) and DAWCore ClipCrossfadeTests.
+                "clip.crossfade",
+                "clip.setStretch", "clip.stretchToLength",
+                "clip.deleteTimeRange", "clip.insertTimeRange", "clip.quantize",
                 "clip.humanize", "clip.detectTransients", "clip.quantizeAudio",
                 "fx.remove", "fx.reorder", "fx.setBypass", "fx.setParam",
                 "take.group", "take.setComp", "take.select", "take.removeLane",
                 "take.flatten", "take.move", "take.setCrossfade", "take.autoAlign",
                 "groove.extract", "groove.remove",
+                // instrument.importSoundBank (m10-n) copies a real file into the
+                // central library (~/Library/Application Support/DAWPro/SoundBanks)
+                // — excluded here to avoid that real-FS side effect; proven by
+                // SoundBankCommandTests with injected temp dirs.
+                "instrument.importSoundBank",
                 "ai.sidecarStart", "ai.sidecarStop",
                 "ai.generateSong", "ai.generationStatus",
                 // ai.importGeneration (M6 iii-a) needs a succeeded jobId from a

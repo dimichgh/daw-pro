@@ -109,6 +109,10 @@ public struct ProjectOverview: Codable, Sendable, Equatable {
     public var transport: Transport
     public var master: Master
     public var tracks: [Track]
+    /// How many session markers exist (m11-c) — a COUNT, not the list (the
+    /// overview's count-not-lists rule). Additive; the full id/name/beat set
+    /// rides `project.snapshot` and `marker.list`. Zero when there are none.
+    public var markerCount: Int
 }
 
 extension ProjectStore {
@@ -138,7 +142,8 @@ extension ProjectStore {
                 )
             ),
             master: ProjectOverview.Master(volume: masterVolume),
-            tracks: tracks.map(Self.overviewTrack)
+            tracks: tracks.map(Self.overviewTrack),
+            markerCount: markers.count
         )
     }
 

@@ -268,6 +268,12 @@ public struct SongSkeletonResult: Sendable, Equatable {
 extension ProjectStore {
     /// Bars per section in v1 (4/4 assumed everywhere): a section's timeline
     /// length in beats is `bars × beatsPerSkeletonBar`.
+    /// m12-b (design row 35): skeletons stay DELIBERATELY meter-map-free —
+    /// the catalog's section shapes are authored against 4/4 regardless of
+    /// the project's time signature (today's behavior, preserved exactly);
+    /// routing this constant through `MeterMap.beatsPerBar(atBeat:)` would
+    /// silently reshape skeletons on non-4/4 projects. Revisit in Phase D if
+    /// meter-aware skeletons are ever wanted.
     private static let beatsPerSkeletonBar = 4.0
     /// Section-count bounds for a custom `sections` override.
     static let songSkeletonSectionCountRange: ClosedRange<Int> = 1...16

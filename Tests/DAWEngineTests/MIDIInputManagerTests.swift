@@ -68,7 +68,7 @@ struct MIDIInputManagerTests {
         // (2) Receive path: UMP words → parser → capture ring → session.
         let session = MIDICaptureSession(
             anchorHostTime: mach_absolute_time(), anchorBeats: 0,
-            tempoBPM: 120, ticksToSeconds: 1e-9)
+            tempoMap: TempoMap(constantBPM: 120), ticksToSeconds: 1e-9)
         manager.captureSession = session
         let countBefore = manager.eventCount
         send(words: [noteWord(on: true, pitch: 60, velocity: 100)], from: source)

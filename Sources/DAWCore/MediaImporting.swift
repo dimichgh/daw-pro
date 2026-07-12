@@ -34,6 +34,9 @@ public enum ProjectError: Error, LocalizedError {
     case automationLaneNotFound(UUID)
     case midiClipsRequireInstrumentTrack(TrackKind)
     case instrumentRequiresInstrumentTrack(TrackKind)
+    // Sound-bank instrument identity (m10-n): audioUnit and soundBank are
+    // mutually exclusive selections in one setInstrument call.
+    case ambiguousInstrumentSelection
     case notAMIDIClip(UUID)
     case mediaServiceUnavailable
     case importFailed(String)
@@ -72,8 +75,13 @@ public enum ProjectError: Error, LocalizedError {
     case quantizeRequiresAudioClip(UUID)
     case audioQuantizeStretchUnsupported(UUID)
     case audioQuantizeNoTransients(UUID)
+    // Audio quantize under a multi-segment tempo map (m12-c).
+    case audioQuantizeTempoBoundaryUnsupported(UUID)
     // Groove templates (M5 iii-g).
     case grooveNotFound(UUID)
+    // Session markers (m11-c).
+    case markerNotFound(UUID)
+    case markerAmbiguous(String)     // a transport.seek name matched >1 marker
     // Loudness-normalized bounce (M5 iv-b).
     case bounceSilent
     // Stem export (M5 iv-c): a bus-routed source track has no stem of its own
@@ -91,6 +99,9 @@ public enum ProjectError: Error, LocalizedError {
     // Take micro-alignment (M6 v-d).
     case alignmentInconclusive(String) // message built at throw time (onset counts)
     case alignmentWouldCrossTimelineStart(String) // built at throw time (offset + headroom)
+    // Arrange-level crossfade (m11-d): messages built at throw time (field-named).
+    case crossfadeNotEligible(String)   // clips not same-track / not audio / gap / over-overlap
+    case crossfadeNeedsMaterial(String) // names WHICH clip/side lacks source material to extend
 
     public var errorDescription: String? {
         switch self {
@@ -161,6 +172,9 @@ public enum ProjectError: Error, LocalizedError {
         case .instrumentRequiresInstrumentTrack(let kind):
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "track kind '\(kind.rawValue)' cannot host an instrument — only instrument tracks carry an instrument (add one with track.add kind=instrument)"
+        case .ambiguousInstrumentSelection:
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "provide either audioUnit or soundBank, not both"
         case .notAMIDIClip(let id):
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "clip \(id.uuidString) is an audio clip — clip.setNotes applies only to MIDI clips (created via clip.addMIDI)"
@@ -254,10 +268,23 @@ public enum ProjectError: Error, LocalizedError {
             // Exact wording is contract (control protocol + MCP surface it
             // verbatim).
             return "clip \(id.uuidString) has fewer than 2 usable transients in its window — nothing to quantize (raise sensitivity, or pick a clip with more distinct onsets)"
+        case .audioQuantizeTempoBoundaryUnsupported(let id):
+            // Exact wording is contract (control protocol + MCP surface it
+            // verbatim). m12-c cut: slice-and-nudge assumes one constant
+            // tempo across the clip (AudioQuantizePlan.compute).
+            return "clip \(id.uuidString) spans a tempo change — audio quantize needs one constant tempo across the clip; split the clip at the tempo boundary (clip.split) and quantize each part"
         case .grooveNotFound(let id):
             // Exact wording is contract (control protocol + MCP surface it
             // verbatim). Groove ids come from groove.list / groove.extract.
             return "no groove template with id \(id.uuidString) — use groove.list to see saved templates and built-in swings"
+        case .markerNotFound(let id):
+            // Exact wording is contract (control protocol + MCP surface it
+            // verbatim). Marker ids come from marker.list / project.snapshot.
+            return "no marker with id \(id.uuidString) — use marker.list to see the session's markers"
+        case .markerAmbiguous(let name):
+            // Exact wording is contract: a transport.seek by NAME matched more
+            // than one marker — the caller must disambiguate by id.
+            return "more than one marker is named '\(name)' — seek by markerId instead (marker.list has the ids)"
         case .bounceSilent:
             // Exact wording is contract (control protocol + MCP surface it
             // verbatim). Thrown ONLY when a lufsTarget was requested; a silent
@@ -295,6 +322,17 @@ public enum ProjectError: Error, LocalizedError {
             // available headroom, take.move advice); surfaced verbatim — the
             // invalidClipEdit precedent. Thrown instead of silently clamping
             // an apply at beat 0: `applied` must never lie.
+            return message
+        case .crossfadeNotEligible(let message):
+            // The store builds the message at throw time (which precondition
+            // failed — different tracks, a MIDI clip, a gap between them, or an
+            // existing overlap larger than the requested crossfade); surfaced
+            // verbatim — the invalidClipEdit precedent.
+            return message
+        case .crossfadeNeedsMaterial(let message):
+            // The store builds the message at throw time (which clip and which
+            // edge has no source audio left to extend into the overlap);
+            // surfaced verbatim — the invalidClipEdit precedent.
             return message
         }
     }

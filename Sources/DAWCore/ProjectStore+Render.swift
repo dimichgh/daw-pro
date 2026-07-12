@@ -25,7 +25,7 @@ extension ProjectStore {
         let startBeat = max(0, fromBeat)
         let duration = try renderWindowSeconds(fromBeat: startBeat, requested: durationSeconds)
         let audio = try await engine.renderOffline(
-            tracks: tracks, tempoBPM: transport.tempoBPM, masterVolume: masterVolume,
+            tracks: tracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
             fromBeat: startBeat, durationSeconds: duration,
             forcedCompensationTargets: nil
         )
@@ -64,7 +64,7 @@ extension ProjectStore {
         let startBeat = max(0, fromBeat)
         let duration = try renderWindowSeconds(fromBeat: startBeat, requested: durationSeconds)
         var audio = try await engine.renderOffline(
-            tracks: tracks, tempoBPM: transport.tempoBPM, masterVolume: masterVolume,
+            tracks: tracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
             fromBeat: startBeat, durationSeconds: duration,
             forcedCompensationTargets: nil
         )
@@ -165,7 +165,7 @@ extension ProjectStore {
         for descriptor in descriptors {
             let audio = try await engine.renderOffline(
                 tracks: StemPlan.passTracks(for: descriptor, session: tracks),
-                tempoBPM: transport.tempoBPM, masterVolume: masterVolume,
+                tempoMap: transport.tempoMap, masterVolume: masterVolume,
                 fromBeat: startBeat, durationSeconds: duration,
                 forcedCompensationTargets: targets
             )
@@ -185,7 +185,7 @@ extension ProjectStore {
         var mixdown: MixdownFile?
         if includeMixdown {
             let audio = try await engine.renderOffline(
-                tracks: tracks, tempoBPM: transport.tempoBPM, masterVolume: masterVolume,
+                tracks: tracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
                 fromBeat: startBeat, durationSeconds: duration,
                 forcedCompensationTargets: targets
             )
@@ -207,14 +207,19 @@ extension ProjectStore {
     /// current tempo, plus a 2.0 s tail (bus reverb/release). Computed ONCE
     /// per call so every file of a multi-pass export (iv-c stems) has
     /// identical length.
-    private func renderWindowSeconds(fromBeat startBeat: Double,
-                                     requested: Double?) throws -> Double {
+    /// Internal (not private) so `bounceTrackInPlace` (m11-e) shares the SAME
+    /// default window as `render.stems` — a one-track bounce must land the same
+    /// length a direct stem render of that track would.
+    func renderWindowSeconds(fromBeat startBeat: Double,
+                             requested: Double?) throws -> Double {
         if let requested { return requested }
         let clipEnds = tracks.flatMap(\.clips).map { $0.startBeat + $0.lengthBeats }
         guard let lastEndBeat = clipEnds.max() else {
             throw ProjectError.nothingToRender
         }
-        let contentSeconds = (lastEndBeat - startBeat) * 60.0 / transport.tempoBPM
+        // The integral over [startBeat, lastEndBeat] (m12-b, design row 20) —
+        // ONE conversion site shared by stems / bounce / bounce-in-place.
+        let contentSeconds = transport.tempoMap.seconds(from: startBeat, to: lastEndBeat)
         guard contentSeconds > 0 else { throw ProjectError.nothingToRender }
         return contentSeconds + 2.0
     }

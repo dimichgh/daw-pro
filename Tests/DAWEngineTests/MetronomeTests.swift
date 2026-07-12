@@ -15,7 +15,7 @@ struct MetronomeTests {
     @Test("2 s @120 BPM: click energy at 0/0.5/1.0/1.5 s, near-silence between")
     func clickPlacement() throws {
         let audio = try OfflineRenderer().render(
-            tracks: [], tempoBPM: 120, fromBeat: 0, durationSeconds: 2.0,
+            tracks: [], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 2.0,
             metronomeEnabled: true
         )
         let left = audio.channelData[0]
@@ -59,7 +59,7 @@ struct MetronomeTests {
     @Test("downbeat clicks at 1600 Hz, other beats at 1000 Hz")
     func downbeatPitch() throws {
         let audio = try OfflineRenderer().render(
-            tracks: [], tempoBPM: 120, fromBeat: 0, durationSeconds: 2.0,
+            tracks: [], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 2.0,
             metronomeEnabled: true
         )
         let left = audio.channelData[0]
@@ -83,7 +83,7 @@ struct MetronomeTests {
     @Test("3/4 time: downbeats every 3 beats")
     func threeFourDownbeats() throws {
         let audio = try OfflineRenderer().render(
-            tracks: [], tempoBPM: 120, fromBeat: 0, durationSeconds: 2.5,
+            tracks: [], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 2.5,
             metronomeEnabled: true, beatsPerBar: 3
         )
         let left = audio.channelData[0]
@@ -128,20 +128,20 @@ struct MetronomeTests {
     /// writer anchor + audible pre-roll) is covered by live E2E.
     @Test("countInPlan: delay = bars × beatsPerBar × 60/tempo, one click per beat")
     func countInPlan() {
-        let two44 = Metronome.countInPlan(countInBars: 2, beatsPerBar: 4, tempoBPM: 120)
+        let two44 = Metronome.countInPlan(countInBars: 2, beatsPerBar: 4, tempoMap: TempoMap(constantBPM: 120), atBeat: 0)
         #expect(two44.delaySeconds == 4.0)  // 8 beats × 0.5 s
         #expect(two44.clickBeats == 8)
 
-        let one34 = Metronome.countInPlan(countInBars: 1, beatsPerBar: 3, tempoBPM: 90)
+        let one34 = Metronome.countInPlan(countInBars: 1, beatsPerBar: 3, tempoMap: TempoMap(constantBPM: 90), atBeat: 0)
         #expect(abs(one34.delaySeconds - 2.0) < 1e-12)  // 3 beats × ⅔ s
         #expect(one34.clickBeats == 3)
 
-        let zero = Metronome.countInPlan(countInBars: 0, beatsPerBar: 4, tempoBPM: 120)
+        let zero = Metronome.countInPlan(countInBars: 0, beatsPerBar: 4, tempoMap: TempoMap(constantBPM: 120), atBeat: 0)
         #expect(zero.delaySeconds == 0)
         #expect(zero.clickBeats == 0)
 
         // Defensive: nonsense inputs never produce a negative delay.
-        let negative = Metronome.countInPlan(countInBars: -2, beatsPerBar: 4, tempoBPM: 120)
+        let negative = Metronome.countInPlan(countInBars: -2, beatsPerBar: 4, tempoMap: TempoMap(constantBPM: 120), atBeat: 0)
         #expect(negative.delaySeconds == 0)
         #expect(negative.clickBeats == 0)
     }

@@ -113,4 +113,21 @@ extension CursorAffordance {
             return dragging ? CursorAffordance.noteBody.dragCursor : CursorAffordance.noteBody.restCursor
         }
     }
+
+    /// Cursor an arrange loop-ruler zone advertises (beta m10-g; mirrors
+    /// `LoopRulerGeometry.classify`). The region's edges resize horizontally; its
+    /// body is a movable grab that closes the hand on drag; the empty ruler is a
+    /// horizontal position surface (drag to sketch a loop, or click to seek), so it
+    /// reads as `resizeLeftRight` — the piano-roll scrub-strip family (a horizontal
+    /// position drag), rest == drag.
+    public static func forLoopZone(_ zone: LoopRulerZone, dragging: Bool = false) -> CursorKind {
+        switch zone {
+        case .edgeStart, .edgeEnd:
+            return dragging ? CursorAffordance.trimEdge.dragCursor : CursorAffordance.trimEdge.restCursor
+        case .body:
+            return dragging ? CursorAffordance.clipBody.dragCursor : CursorAffordance.clipBody.restCursor
+        case .empty:
+            return .resizeLeftRight
+        }
+    }
 }

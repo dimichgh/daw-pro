@@ -118,6 +118,64 @@ struct GrooveBuiltinTests {
         // swing 75 reaches exactly grid/2 (the closed-bound ASSUMPTION).
         #expect(gApprox(GrooveTemplate.builtin(named: "swing8:75")!.offsets[1], 0.25))
     }
+
+    // The full resolvable built-in range (`swing8:54…75` + `swing16:54…75`, 44
+    // names), computed via `builtin(named:)`.
+    private static var allBuiltinNames: [String] {
+        (54...75).map { "swing8:\($0)" } + (54...75).map { "swing16:\($0)" }
+    }
+
+    // m11-g: every resolvable built-in id is DISTINCT. The original single-pass
+    // FNV byte fold collapsed the whole `swing8:54…75` family onto ONE id
+    // (`48C63252-293C-B111-D60F-9903BFCCE689`), so `groove.list` served duplicate
+    // ids and an agent selecting a built-in by id could land on the wrong swing.
+    @Test("m11-g: all 44 resolvable built-in ids are pairwise distinct")
+    func builtinIDsUnique() {
+        let names = Self.allBuiltinNames
+        #expect(names.count == 44)
+        let ids = names.compactMap { GrooveTemplate.builtin(named: $0)?.id }
+        #expect(ids.count == 44)                 // all resolve
+        #expect(Set(ids).count == 44)            // no collisions
+    }
+
+    // m11-g: the id is a pure function of the name — two independent computations
+    // of the same name yield an identical id (the doc-comment contract: stable
+    // across calls and processes, no RNG).
+    @Test("m11-g: built-in ids are deterministic across computations")
+    func builtinIDsDeterministic() {
+        for name in Self.allBuiltinNames {
+            let a = GrooveTemplate.builtin(named: name)!.id
+            let b = GrooveTemplate.builtin(named: name)!.id
+            #expect(a == b, "\(name) id changed between computations")
+        }
+    }
+
+    // m11-g: a stability pin so a future refactor of `builtinID` can't silently
+    // change the wire-visible ids again. The id is derived (not persisted), but it
+    // must stay CONSTANT once fixed. If this fails, the derivation changed — that
+    // is a wire-visible change requiring a deliberate note (as m11-g itself was).
+    @Test("m11-g: swing8:66 has a pinned, stable id")
+    func builtinIDStabilityPin() {
+        #expect(GrooveTemplate.builtin(named: "swing8:66")!.id
+                == UUID(uuidString: "0C5B2E4D-148B-4FA9-B8A1-31A0C07182EF"))
+    }
+
+    // m11-g: the pairs that COLLIDED under the old fold now differ. All four
+    // canonical `swing8` presets shared one id before the fix; assert every
+    // distinct pair among them (and a same-first-digit neighbour pair) is now
+    // distinct — the concrete regression the bug demonstration surfaced.
+    @Test("m11-g: previously-colliding swing8 built-ins now have distinct ids")
+    func builtinIDPreviouslyCollidingPairsDiffer() {
+        let previouslyColliding = ["swing8:54", "swing8:58", "swing8:62", "swing8:66"]
+        let ids = previouslyColliding.map { GrooveTemplate.builtin(named: $0)!.id }
+        #expect(Set(ids).count == previouslyColliding.count)
+        // A same-first-digit neighbour pair (54 vs 58) — the tightest case, since
+        // they differ only in the last digit — is also distinct.
+        #expect(GrooveTemplate.builtin(named: "swing8:54")!.id
+                != GrooveTemplate.builtin(named: "swing8:58")!.id)
+        // Built-in ids never collide with a saved-template's random UUID either,
+        // but that's covered by resolveGroove precedence — here we pin the family.
+    }
 }
 
 // MARK: - Target application (both quantize paths)
@@ -171,7 +229,7 @@ struct GrooveTargetTests {
         let settings = AudioQuantizeSettings(gridBeats: 0.5, strength: 1, groove: g)
         let slices = try AudioQuantizePlan.compute(
             clip: clip, transientsSourceSeconds: [0.25, 0.5, 0.75],
-            tempoBPM: 120, settings: settings)
+            tempoMap: TempoMap(constantBPM: 120), settings: settings)
         #expect(slices.count == 4)   // head + 3 onset slices
         let spb = 0.5
         // Each onset slice's onset lands on the groove target (the AudioQuantize

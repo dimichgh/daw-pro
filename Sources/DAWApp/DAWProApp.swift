@@ -21,8 +21,15 @@ struct DAWProApp: App {
                     // foreground app so the window shows and takes focus.
                     NSApplication.shared.setActivationPolicy(.regular)
                     NSApplication.shared.activate(ignoringOtherApps: true)
+                    // Enforce the MEASURED window floor (m10-j) directly on the
+                    // NSWindow too — belt-and-suspenders with the root
+                    // `.frame(minWidth:minHeight:)` — so a user drag can never shrink
+                    // the window below the point where chrome would leave the frame.
+                    model.applyWindowFloor()
                 }
         }
+        // Open at a comfortable size well above the floor (m10-j).
+        .defaultSize(width: WindowFloor.defaultWidth, height: WindowFloor.defaultHeight)
         .commands {
             // Native ⌘, wired to the in-window glass Settings overlay (not a
             // stock preferences window — glass-cockpit chrome, docs/DESIGN-LANGUAGE).
@@ -30,7 +37,7 @@ struct DAWProApp: App {
                 Button("Settings…") { model.showSettings = true }
                     .keyboardShortcut(",", modifiers: .command)
             }
-            FileCommands(store: model.store)
+            FileCommands(store: model.store, model: model)
             EditCommands(store: model.store)
         }
     }
@@ -90,6 +97,52 @@ final class AppModel {
     /// the clip-selection affordance and the `ui.showClipFix` debug command.
     var showClipFix = false
 
+    /// The instrument picker's headless model (m10-n-3): the three-section browser
+    /// + GM program browser + Simple "Instrument Sets" + `InstrumentChoice`
+    /// construction. Owned here (like `clipFix`) so the `debug.instrumentPicker`
+    /// capture command can drive it and `debug.captureUI` renders the same
+    /// instance the live overlay shows. Data flows in through store-backed
+    /// providers; selection converges on `ProjectStore.setInstrument` — the SAME
+    /// one-command surface the wire uses.
+    let instrumentPicker: InstrumentPickerModel
+
+    /// The track the instrument picker is open for (nil = closed). Set by the
+    /// track-header / mixer instrument chip and the `debug.instrumentPicker`
+    /// command; the picker renders as a centered overlay over the workspace.
+    var instrumentPickerTrackID: UUID?
+
+    /// The Quantize & Groove panel's headless model (m11-a): the grid/strength/
+    /// swing/ends state, the groove picker (built-in swings + saved templates), and
+    /// the extract affordance. Owned here (like `instrumentPicker`) so the
+    /// `debug.quantizePanel` capture command drives it and `debug.captureUI` renders
+    /// the same instance the live overlay shows. Data flows in through store-backed
+    /// providers; Apply converges on `ProjectStore.quantizeClipNotes` — the SAME
+    /// method the `clip.quantize` wire uses (UI-only; no new wire surface).
+    let quantizeModel: QuantizeModel
+
+    /// The clip the Quantize panel is open for (nil = closed). Set by the
+    /// piano-roll header QUANTIZE chip, the arrange clip context menu, and the
+    /// `debug.quantizePanel` command; the panel renders as a centered overlay.
+    var quantizePanelClipID: UUID?
+
+    /// Staging seam for the arrange marker-lane inline rename (m11-c): when set to
+    /// a marker id, the timeline opens that flag's rename field. Driven ONLY by the
+    /// `debug.markerRename` capture command (the live UI uses double-click / the
+    /// context menu); nil at rest. Not persisted — a capture-only view override.
+    var stagedMarkerRenameID: UUID?
+
+    /// The Undo-history panel's headless model (m11-b): projects the store's
+    /// labeled undo/redo stacks into a clickable step plan and jumps to any point
+    /// by REPEATING `ProjectStore.undo()`/`redo()` (no new mutation surface). Owned
+    /// here (like `quantizeModel`) so the `debug.undoHistory` capture command drives
+    /// it and `debug.captureUI` renders the same instance the live overlay shows.
+    let undoHistoryModel: UndoHistoryModel
+
+    /// Whether the Undo-history panel is open. Driven by the arrange-toolbar HISTORY
+    /// chip and the `debug.undoHistory` staging command; the panel renders as a
+    /// centered overlay over the workspace.
+    var showUndoHistory = false
+
     /// The in-app AI Copilot (M6 rail-c): a chat rail that drives the project
     /// through the SAME control-command surface as the WebSocket, in-process.
     /// Owned here (retained) so `router.copilotEngine`'s weak reference stays
@@ -123,6 +176,13 @@ final class AppModel {
     /// `ui.showSettings {reveal:"beta"}` so a headless capture can frame the row;
     /// false in normal use (the panel opens at the top, on the API keys).
     var settingsRevealBeta = false
+
+    /// Deep-link the Settings modal to its "Agent Connection" section (beta m10-l) —
+    /// the panel's `ScrollViewReader` scrolls to it when true. Set by
+    /// `ui.showSettings {reveal:"connection"}` so a headless capture (or a beginner
+    /// following the guide) can jump straight to the control-URL / port surface;
+    /// false in normal use (the panel opens at the top, on the API keys).
+    var settingsRevealConnection = false
 
     /// UI selection: the clip whose piano roll is open (nil = closed). Hoisted
     /// out of ContentView's @State so `debug.captureUI` renders with the same
@@ -173,6 +233,23 @@ final class AppModel {
     /// precedent).
     let panelLayout = PanelLayoutStore(backing: UserDefaultsPanelLayoutBacking())
 
+    /// The in-app control-server port SETTING (beta m10-l). Like `panelLayout` it's
+    /// an app-side sticky PREFERENCE (never project data) — the UserDefaults backing
+    /// persists it under `controlServer.port`. The bootstrap reads it (below) to
+    /// resolve the bind port (env override > this setting > default 17600); the
+    /// Settings → Agent Connection section edits it. Changing it takes effect on the
+    /// NEXT launch — the running server is never live-rebound (that would sever the
+    /// live agent session and the transport broadcaster).
+    let controlPortStore = ControlPortStore(backing: UserDefaultsControlPortBacking())
+
+    /// The in-app Copilot round-budget SETTING (beta m10-m). Like `controlPortStore`
+    /// it's an app-side sticky PREFERENCE (never project data) — the UserDefaults
+    /// backing persists it under `copilot.maxRounds`. The CopilotEngine reads its
+    /// `maxRounds` FRESH at the start of each turn (via the injected resolver below),
+    /// so a change takes effect on the Copilot's next reply — no restart, unlike the
+    /// control-server port. The Settings → Copilot section edits it.
+    let copilotLimitsStore = CopilotLimitsStore(backing: UserDefaultsCopilotLimitsBacking())
+
     /// Explain-mode state (M8 ex-a): the transient violet "?" EXPLAIN overlay's
     /// on/off flag + an optional capture focus. Owned here (like `panelDensity`) so
     /// the `debug.explainMode` staging command can drive it. NOT persisted — unlike
@@ -194,9 +271,17 @@ final class AppModel {
     /// Launch-time crash-recovery offer (M9 crash-b): non-nil when the last session
     /// ended unexpectedly AND a restorable autosave snapshot is present, so
     /// `RecoveryOfferView` floats over the workspace. Set in `init` from
-    /// `store.recoveryStatus()`; cleared once the user restores or discards (and
-    /// stageable for captures via `debug.recoveryOffer`). The sheet drives the SAME
+    /// `store.recoveryStatus()`; the sheet's own buttons clear it, and it is
+    /// stageable for captures via `debug.recoveryOffer`. The sheet drives the SAME
     /// `ProjectStore.recoverFromAutosave` path the `project.recover` command uses.
+    ///
+    /// Because this is a one-shot snapshot, it does NOT by itself notice when the
+    /// offer is resolved by a path OTHER than the sheet — `project.recover` over the
+    /// wire, or a `project.new`/`project.open` transition. ContentView bridges that
+    /// gap (m10-s): it observes `store.recoveryOfferAvailable` and clears this on the
+    /// available→unavailable transition, mirroring the buttons' dismissal. That
+    /// observer is transition-based, so `debug.recoveryOffer` staging (which sets
+    /// this while the store flag stays false) keeps working for captures.
     var recoveryOffer: AutosaveRecoveryStatus?
 
     /// Retains the `NSApplication.willTerminateNotification` observer so the
@@ -368,6 +453,56 @@ final class AppModel {
                 return try await store.importClipFix(jobID: jobID)
             })
 
+        // The instrument picker model (m10-n-3): all data flows in through
+        // store-backed providers so the headless model stays off the engine
+        // bridge; a missing bank's throw is swallowed to an honest empty listing
+        // (the picker never errors on a resolvable-but-empty bank). Selection is
+        // applied by the view via `applyInstrumentChoice` → `store.setInstrument`.
+        self.instrumentPicker = InstrumentPickerModel(
+            soundBanks: { [weak store] in store?.availableSoundBanks() ?? [] },
+            programs: { [weak store] source in
+                guard let store else { return ([], false) }
+                return (try? store.soundBankPrograms(source: source)) ?? ([], false)
+            },
+            audioUnits: { [weak store] in store?.availableAudioUnits() ?? [] },
+            importer: { [weak store] url in
+                guard let store else { throw DebugError("project store unavailable") }
+                return try store.importSoundBank(from: url)
+            })
+
+        // The Quantize & Groove model (m11-a): the built-in MPC swings are computed
+        // once; the saved-template list, Apply, and Extract all route through the
+        // store methods the wire uses (`quantizeClipNotes` = ONE undo step via its
+        // `clip.quantize:<id>` coalescing key; `extractGroove` for both MIDI onsets
+        // and audio transients). UI-only — no parallel mutation path.
+        self.quantizeModel = QuantizeModel(
+            builtinGrooves: GrooveTemplate.builtinNames.compactMap { GrooveTemplate.builtin(named: $0) },
+            savedGrooves: { [weak store] in store?.grooveTemplates ?? [] },
+            apply: { [weak store] clipID, settings in
+                _ = try? store?.quantizeClipNotes(clipId: clipID, settings: settings)
+            },
+            extract: { [weak store] clipID, name, grid, cycle in
+                guard let store else { throw DebugError("project store unavailable") }
+                return try await store.extractGroove(
+                    fromClipId: clipID, name: name, gridBeats: grid, cycleBeats: cycle)
+            })
+
+        // The Undo-history model (m11-b): reads the store's label projection and
+        // steps through history by RE-DRIVING the same `undo()`/`redo()` the wire
+        // and Cmd-Z use — so the coalescing barrier + mid-take guard apply and no
+        // parallel mutation path exists. Each step closure returns whether it
+        // actually happened, so a multi-step jump stops early if a guard refuses.
+        self.undoHistoryModel = UndoHistoryModel(
+            history: { [weak store] in store?.undoHistory() ?? UndoHistory(undo: [], redo: []) },
+            undoStep: { [weak store] in
+                guard let store else { return false }
+                return (try? store.undo()) != nil
+            },
+            redoStep: { [weak store] in
+                guard let store else { return false }
+                return (try? store.redo()) != nil
+            })
+
         // API-key management over the system Keychain (M6). Env vars still win
         // (highest precedence); the Keychain is the in-app fallback. Key VALUES
         // never leave this Mac and never cross the control plane — the wire gets
@@ -398,16 +533,35 @@ final class AppModel {
                 sketchpad?.lyrics = lyrics
             })
 
-        let port = ProcessInfo.processInfo.environment["DAW_CONTROL_PORT"]
-            .flatMap(UInt16.init) ?? 17600
-        let router = CommandRouter(store: store, sidecarManager: sidecarManager,
-                                   songGenerator: songGenerator, keyStore: keyStore)
+        // Resolve the bind port through the m10-l resolver: env override > the
+        // persisted in-app setting > default 17600. With no env AND no setting this
+        // is byte-identical to the pre-m10-l inline read (17600). THE ENV OVERRIDE
+        // IS SACRED — a persisted setting can never outrank DAW_CONTROL_PORT (the
+        // staging harness relies on this).
+        let portResolution = controlPortStore.resolution()
+        let port = portResolution.port
+        let router = CommandRouter(
+            store: store, sidecarManager: sidecarManager,
+            songGenerator: songGenerator, keyStore: keyStore,
+            // Hand the resolved endpoint to the router so `app.connectionInfo` can
+            // report it (the server owns the router, so it can't ask back). Value
+            // in, no cycle.
+            connectionInfo: ControlConnectionInfo(
+                port: port, source: portResolution.source.rawValue,
+                defaultPort: ControlPortConfig.defaultPort))
         let server = ControlServer(router: router, port: port)
         self.router = router
         // Two-phase, no-retain-cycle wiring (the appCommandHandler precedent):
         // the engine strongly captures `router` via the dispatch closure; the
         // router only holds the engine back weakly (`copilotEngine`).
-        let copilotEngine = CopilotEngine(store: store, dispatch: { await router.handle($0) })
+        // Inject the round-budget resolver (beta m10-m): the engine reads
+        // `copilotLimitsStore.maxRounds` FRESH at the start of each turn, so a
+        // Settings change takes effect on the next reply. Capture the store instance
+        // (not self) so the engine's held closure never retains the app model.
+        let copilotEngine = CopilotEngine(
+            store: store,
+            dispatch: { await router.handle($0) },
+            maxToolRounds: { [copilotLimitsStore] in copilotLimitsStore.maxRounds })
         self.copilotEngine = copilotEngine
         router.copilotEngine = copilotEngine
         // Plugin windows (M3 vi-b): the app owns the manager; the router holds it
@@ -533,6 +687,8 @@ final class AppModel {
                 return try self.setPanelDensity(params)
             case "debug.panelLayout":
                 return self.setPanelLayout(params)
+            case "debug.windowFrame":
+                return self.setWindowFrame(params)
             case "debug.explainMode":
                 return try self.setExplainMode(params)
             case "debug.vibeSeed":
@@ -541,6 +697,10 @@ final class AppModel {
                 return try self.setOnboardingState(params)
             case "debug.recoveryOffer":
                 return self.setRecoveryOffer(params)
+            case "debug.importAudio":
+                return try self.importAudioDebug(params)
+            case "debug.tempoMap":
+                return try self.tempoMapDebug(params)
             case "ui.showAutomation":
                 return try self.showAutomation(params)
             case "ui.showTakes":
@@ -565,6 +725,14 @@ final class AppModel {
                 return self.clipFixSeed(params)
             case "debug.clipFixState":
                 return self.clipFixStateResponse()
+            case "debug.instrumentPicker":
+                return self.instrumentPickerDebug(params)
+            case "debug.quantizePanel":
+                return self.quantizePanelDebug(params)
+            case "debug.undoHistory":
+                return self.undoHistoryDebug(params)
+            case "debug.markerRename":
+                return self.markerRenameDebug(params)
             case "ui.showCopilot":
                 return self.showCopilotCommand(params)
             case "debug.copilotSeed":
@@ -650,6 +818,62 @@ final class AppModel {
             "sidebarWidth": .number(Double(panelLayout.sidebarWidth)),
             "editorFraction": .number(Double(panelLayout.editorFraction)),
             "rowHeight": .number(Double(panelLayout.rowHeight)),
+        ])
+    }
+
+    /// Applies the MEASURED window floor (m10-j) to the live NSWindow's
+    /// `contentMinSize`, so a user drag can never shrink the window below the point
+    /// where the transport / title row / TRACKS header would leave the frame. Called
+    /// once the window exists (ContentView's onAppear); a no-op headless.
+    func applyWindowFloor() {
+        mainCaptureWindow?.contentMinSize = CGSize(width: WindowFloor.minWidth,
+                                                   height: WindowFloor.minHeight)
+    }
+
+    /// `debug.windowFrame {width?, height?}` — stages the main window's CONTENT size
+    /// for captures/E2E (the `debug.panelLayout` precedent: app-level handler, debug
+    /// tier ONLY — off `allCommands`/MCP, since window size is a chrome/verification
+    /// affordance, not an invokable capability). Called with NO size params it just
+    /// echoes the current frame. A requested `width`/`height` is CLAMPED to the
+    /// measured `WindowFloor` (min 1208×640) and applied keeping the window's TOP-LEFT
+    /// fixed (so a shrink reveals the floor without walking the title bar off-screen).
+    /// The result echoes the resulting content size + origin + the floor, so a gate
+    /// can assert it landed exactly on the enforced minimum.
+    private func setWindowFrame(_ params: [String: JSONValue]) -> JSONValue {
+        guard let window = mainCaptureWindow else {
+            // Headless / no window yet: still report the floor so a caller learns it.
+            return .object([
+                "error": .string("no window"),
+                "minWidth": .number(Double(WindowFloor.minWidth)),
+                "minHeight": .number(Double(WindowFloor.minHeight)),
+            ])
+        }
+        // The floor is also enforced on the NSWindow itself; re-assert here so a
+        // frame set can't outrun a not-yet-applied contentMinSize.
+        window.contentMinSize = CGSize(width: WindowFloor.minWidth, height: WindowFloor.minHeight)
+        if params["width"] != nil || params["height"] != nil {
+            let content = window.contentRect(forFrameRect: window.frame)
+            let reqW = params["width"]?.doubleValue.map { CGFloat($0) } ?? content.width
+            let reqH = params["height"]?.doubleValue.map { CGFloat($0) } ?? content.height
+            let clamped = WindowFloor.clamp(width: reqW, height: reqH)
+            let newFrame = window.frameRect(forContentRect: CGRect(
+                x: content.minX, y: content.minY, width: clamped.width, height: clamped.height))
+            // Keep the top-left corner stationary: AppKit origins are bottom-left, so
+            // hold the current top (maxY) and drop the origin by the new height.
+            let top = window.frame.maxY
+            var framed = newFrame
+            framed.origin.x = window.frame.minX
+            framed.origin.y = top - framed.height
+            window.setFrame(framed, display: true)
+        }
+        let content = window.contentRect(forFrameRect: window.frame)
+        return .object([
+            "width": .number(Double(content.width)),
+            "height": .number(Double(content.height)),
+            "x": .number(Double(window.frame.minX)),
+            "y": .number(Double(window.frame.minY)),
+            "minWidth": .number(Double(WindowFloor.minWidth)),
+            "minHeight": .number(Double(WindowFloor.minHeight)),
         ])
     }
 
@@ -803,6 +1027,152 @@ final class AppModel {
             recoveryOffer = nil
         }
         return .object(["visible": .bool(recoveryOffer != nil)])
+    }
+
+    // MARK: - Audio import (beta m10-k) — File→Import + drag-drop shared pipeline
+
+    /// The ONE execution path behind BOTH human import affordances (the File→Import
+    /// menu and the arrange drag-drop) and the `debug.importAudio` staging command.
+    /// Builds the headless `AudioImportPlan` from the live grid + the given context,
+    /// maps its actions onto `store.importAudioBatch` (ONE undo step), and returns
+    /// per-file results (imported clip/track, or a readable error) in input order.
+    ///
+    /// `targetTrackID` is the hovered/target track (its KIND is resolved here from
+    /// the store, so callers pass only the id); a nil / non-audio target routes to
+    /// new tracks, and multiple files always fan out — all decided by the plan.
+    /// `atBeatRaw` is the unsnapped landing beat (drop-x or the playhead); the plan
+    /// snaps it with the arrange EFFECTIVE snap (Bar in Simple).
+    @discardableResult
+    func importAudioFiles(urls: [URL], targetTrackID: UUID?,
+                          atBeatRaw: Double) -> [AudioImportFileResult] {
+        let targetKind = targetTrackID.flatMap { id in
+            store.tracks.first(where: { $0.id == id })?.kind
+        }
+        let snap = ClipSnap.effective(
+            density: panelDensity.density(forPanel: TimelineLanesView.panelID),
+            picked: clipSnap)
+        let context = AudioImportContext(
+            targetTrackID: targetTrackID, targetTrackKind: targetKind,
+            atBeatRaw: atBeatRaw, snap: snap,
+            beatsPerBar: store.transport.timeSignature.beatsPerBar)
+        let plan = AudioImportPlan(urls: urls, context: context)
+
+        let requests: [AudioImportRequest] = plan.actions.map { action in
+            switch action {
+            case .existingTrack(let trackID, let startBeat, let url):
+                return AudioImportRequest(url: url, destination: .existingTrack(trackID),
+                                          startBeat: startBeat)
+            case .newTrack(let name, let startBeat, let url):
+                return AudioImportRequest(url: url, destination: .newTrack(name: name),
+                                          startBeat: startBeat)
+            }
+        }
+
+        var outcomeByURL: [URL: AudioImportOutcome] = [:]
+        var batchError: String?
+        do {
+            for outcome in try store.importAudioBatch(requests) { outcomeByURL[outcome.url] = outcome }
+        } catch {
+            batchError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+
+        var rejectedByURL: [URL: String] = [:]
+        for rejection in plan.rejected { rejectedByURL[rejection.url] = rejection.reason }
+
+        // Preserve the caller's input order for a readable per-file report.
+        return urls.map { url in
+            if let reason = rejectedByURL[url] {
+                return AudioImportFileResult(path: url.path, error: reason)
+            }
+            if let outcome = outcomeByURL[url] {
+                return AudioImportFileResult(path: url.path, clipID: outcome.clip?.id,
+                                             trackID: outcome.trackID,
+                                             trackName: outcome.trackName, error: outcome.error)
+            }
+            // An action file with no outcome only happens when the whole batch
+            // threw its hard precondition (no media service).
+            return AudioImportFileResult(path: url.path,
+                                         error: batchError ?? "import did not run")
+        }
+    }
+
+    /// `debug.importAudio {paths: [string], trackId?, atBeat?}` — runs the SAME
+    /// human-import pipeline (`AudioImportPlan` → `store.importAudioBatch`) the
+    /// File→Import menu and the arrange drag-drop use, but from explicit file paths,
+    /// because NSOpenPanel and OS drag can't be wire-driven (the shared execution
+    /// function is the bridge). App-level, debug tier ONLY — off `allCommands`/MCP
+    /// (audio import is already agent-invokable via `clip.addAudio`; this stages the
+    /// exact HUMAN plan pipeline for gating with real files — the `debug.panelLayout`
+    /// precedent). `trackId` targets a track (a non-audio/absent target routes to new
+    /// tracks, per the plan); `atBeat` overrides the playhead landing beat (snapped
+    /// by the plan). Returns `{results: [{path, clipId?, trackId?, trackName?, error?}]}`.
+    private func importAudioDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        guard let rawPaths = params["paths"]?.arrayValue, !rawPaths.isEmpty else {
+            throw DebugError("debug.importAudio requires a non-empty 'paths' array of file paths")
+        }
+        let urls: [URL] = rawPaths.compactMap { $0.stringValue }.map {
+            URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)
+        }
+        guard urls.count == rawPaths.count else {
+            throw DebugError("debug.importAudio 'paths' must all be strings")
+        }
+        let targetTrackID = params["trackId"]?.stringValue.flatMap { UUID(uuidString: $0) }
+        let atBeat = params["atBeat"]?.doubleValue ?? store.transport.positionBeats
+        let results = importAudioFiles(urls: urls, targetTrackID: targetTrackID, atBeatRaw: atBeat)
+        return .object(["results": .array(results.map { result in
+            var object: [String: JSONValue] = ["path": .string(result.path)]
+            if let clipID = result.clipID { object["clipId"] = .string(clipID.uuidString) }
+            if let trackID = result.trackID { object["trackId"] = .string(trackID.uuidString) }
+            if let trackName = result.trackName { object["trackName"] = .string(trackName) }
+            if let error = result.error { object["error"] = .string(error) }
+            return .object(object)
+        })])
+    }
+
+    /// `debug.tempoMap {segments?: [{beat, bpm}], clear?}` — Phase-B staging
+    /// seam — replaced by tempo.setMap in Phase C. Installs a session-only
+    /// multi-segment tempo map through `store.installSessionTempoMap` (the
+    /// same engine `setTempo` restart seam a scalar change uses; mid-play the
+    /// engine re-anchors from its own derived beats). `clear: true` (or an
+    /// omitted/empty `segments`) reverts to the scalar-derived trivial map.
+    /// App-level, debug tier ONLY — off `allCommands`/MCP (the
+    /// `debug.importAudio` precedent): never persisted, never snapshotted,
+    /// never undoable, reset by project open/new. Returns
+    /// `{installed, segments: [{beat, bpm}]}` (the EFFECTIVE map).
+    private func tempoMapDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        func effectiveMapResponse(installed: Bool) -> JSONValue {
+            .object([
+                "installed": .bool(installed),
+                "segments": .array(store.transport.tempoMap.segments.map { segment in
+                    .object(["beat": .number(segment.startBeat),
+                             "bpm": .number(segment.bpm)])
+                }),
+            ])
+        }
+        let clear = params["clear"]?.boolValue ?? false
+        let rawSegments = params["segments"]?.arrayValue ?? []
+        if clear || rawSegments.isEmpty {
+            try store.installSessionTempoMap(nil)
+            return effectiveMapResponse(installed: false)
+        }
+        var segments: [TempoMap.Segment] = []
+        for (index, raw) in rawSegments.enumerated() {
+            guard let object = raw.objectValue,
+                  let beat = object["beat"]?.doubleValue,
+                  let bpm = object["bpm"]?.doubleValue else {
+                throw DebugError(
+                    "debug.tempoMap segments[\(index)] must be {beat: number, bpm: number}")
+            }
+            segments.append(TempoMap.Segment(startBeat: beat, bpm: bpm))
+        }
+        let map: TempoMap
+        do {
+            map = try TempoMap(segments: segments)
+        } catch {
+            throw DebugError("debug.tempoMap invalid segments: \(error)")
+        }
+        try store.installSessionTempoMap(map)
+        return effectiveMapResponse(installed: true)
     }
 
     /// Opens a track's arrange automation row (Arrange workspace, disclosure
@@ -1163,6 +1533,318 @@ final class AppModel {
         return .object(obj)
     }
 
+    // MARK: - Instrument picker (m10-n-3)
+
+    /// Opens the instrument picker for a track: seeds the model with its current
+    /// instrument (highlight + chip name) + status, and syncs the picker's density
+    /// from the shared store. Called by the track-header / mixer instrument chips.
+    func openInstrumentPicker(trackID: UUID) {
+        let track = store.tracks.first { $0.id == trackID }
+        instrumentPicker.prepare(trackID: trackID, descriptor: track?.instrument,
+                                 status: store.audioUnitStatus(forTrack: trackID))
+        instrumentPicker.density = panelDensity.density(forPanel: InstrumentPickerOverlay.panelID)
+        instrumentPickerTrackID = trackID
+    }
+
+    /// Closes the instrument picker.
+    func closeInstrumentPicker() {
+        instrumentPickerTrackID = nil
+    }
+
+    /// Applies a picker `InstrumentChoice` to the open track through the SAME store
+    /// method the wire uses (`setInstrument`), then re-reads the descriptor + status
+    /// so the picker highlight and the chip update live. The picker STAYS OPEN so
+    /// the user can compare instruments (the design's audition rule); a failed
+    /// selection surfaces through the chip's status, never a silent swap.
+    func applyInstrumentChoice(_ choice: InstrumentChoice) {
+        guard let trackID = instrumentPickerTrackID else { return }
+        switch choice {
+        case .builtIn(let kind):
+            _ = try? store.setInstrument(id: trackID, kind: kind)
+        case .soundBank(let config):
+            _ = try? store.setInstrument(id: trackID, soundBank: config)
+        case .audioUnit(let config):
+            _ = try? store.setInstrument(id: trackID, audioUnit: config)
+        }
+        let descriptor = store.tracks.first { $0.id == trackID }?.instrument
+        instrumentPicker.updateCurrent(descriptor: descriptor,
+                                       status: store.audioUnitStatus(forTrack: trackID))
+    }
+
+    /// Imports a SoundFont/DLS via NSOpenPanel (not headless — the app view drives
+    /// it), then refreshes the picker's bank list. Errors surface inline in the
+    /// Sound Banks section (`model.importError`). A cancelled panel is a no-op.
+    func importSoundBankViaPanel() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes =
+            [UTType(filenameExtension: "sf2"), UTType(filenameExtension: "dls")].compactMap { $0 }
+        panel.prompt = "Add"
+        panel.message = "Choose a SoundFont (.sf2) or DLS bank file to add to your library."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        instrumentPicker.importBank(from: url)
+    }
+
+    /// `debug.instrumentPicker {trackId?, mode?, search?, bank?}` — stages the
+    /// picker for a capture that the wire alone can't reach (the picker is UI
+    /// chrome, off `allCommands`/MCP — the `debug.clipFixSeed` precedent). Opens
+    /// the picker on an instrument track (the given one, else the first, else a
+    /// freshly-added one); `mode` sets Simple/Pro density; `search` presets the
+    /// filter; `bank:"gm"` drills straight into the GM program browser. Returns the
+    /// resulting picker state so a capture flow can poll for what it wants.
+    private func instrumentPickerDebug(_ params: [String: JSONValue]) -> JSONValue {
+        // `close:true` dismisses the picker so a capture can frame the track-header
+        // / mixer chip underneath after a selection lands.
+        if params["close"]?.boolValue == true {
+            closeInstrumentPicker()
+            return instrumentPickerStateResponse()
+        }
+        // Resolve a target instrument track.
+        let trackID: UUID
+        if let raw = params["trackId"]?.stringValue, let id = UUID(uuidString: raw) {
+            trackID = id
+        } else if let inst = store.tracks.first(where: { $0.kind == .instrument }) {
+            trackID = inst.id
+        } else {
+            trackID = store.addTrack(kind: .instrument).id
+        }
+        workspaceMode = .arrange
+        if let modeRaw = params["mode"]?.stringValue, let density = PanelDensity(rawValue: modeRaw) {
+            panelDensity.setDensity(density, forPanel: InstrumentPickerOverlay.panelID)
+        }
+        openInstrumentPicker(trackID: trackID)
+        if let bank = params["bank"]?.stringValue, bank == "gm" {
+            if let gm = instrumentPicker.banks.first(where: { $0.source == .generalMIDI }) {
+                instrumentPicker.drillInto(gm)
+            }
+        }
+        if let search = params["search"]?.stringValue {
+            instrumentPicker.searchText = search
+        }
+        return instrumentPickerStateResponse()
+    }
+
+    // MARK: - Quantize & groove panel (m11-a)
+
+    /// Opens the Quantize panel for a clip: seeds the model with the clip's name +
+    /// kind (MIDI → note-quantize controls; audio → extract-only) and syncs the
+    /// panel density from the shared store. Called by the piano-roll header chip and
+    /// the arrange clip context menu. `startExtract` reveals the extract field
+    /// straight away (the "Extract Groove…" menu entry's entry point).
+    func openQuantizePanel(clipID: UUID, startExtract: Bool = false) {
+        guard let clip = store.tracks.flatMap(\.clips).first(where: { $0.id == clipID }) else { return }
+        quantizeModel.prepare(clipID: clipID, clipName: clip.name, isMIDI: clip.isMIDI)
+        quantizeModel.density = panelDensity.density(forPanel: QuantizePanel.panelID)
+        if startExtract { quantizeModel.beginExtract() }
+        quantizePanelClipID = clipID
+    }
+
+    /// Closes the Quantize panel.
+    func closeQuantizePanel() {
+        quantizePanelClipID = nil
+    }
+
+    /// Applies the model's built settings to the clip through the SAME store method
+    /// the wire uses (`quantizeClipNotes`, ONE undo step), then closes the panel — a
+    /// single decisive action (re-quantizing partial-strength notes compounds, so
+    /// the panel doesn't linger inviting an accidental re-apply).
+    func applyQuantize() {
+        quantizeModel.apply()
+        closeQuantizePanel()
+    }
+
+    /// Removes a saved groove template through the store (`removeGrooveTemplate`,
+    /// one undo step; the wire's `groove.remove` method). Built-ins aren't stored,
+    /// so they're never passed here.
+    func removeGroove(id: UUID) {
+        _ = try? store.removeGrooveTemplate(id: id)
+    }
+
+    /// `debug.quantizePanel {clipId?, open?, mode?, grid?, strength?, swing?,
+    /// quantizeEnds?, groove?, extract?, extractName?, apply?, close?}` — stages the
+    /// panel for a capture/E2E the wire alone can't reach (the panel is UI chrome,
+    /// off `allCommands`/MCP — the `debug.instrumentPicker` precedent). Opens the
+    /// panel on a clip (the given one, else the first MIDI clip), sets density +
+    /// each setting, optionally selects a groove (resolved via `store.resolveGroove`,
+    /// which auto-forces Pro so the groove is honoured), optionally triggers the UI
+    /// extract or apply path, and echoes the resulting panel state to poll.
+    private func quantizePanelDebug(_ params: [String: JSONValue]) -> JSONValue {
+        if params["close"]?.boolValue == true {
+            closeQuantizePanel()
+            return quantizePanelStateResponse()
+        }
+        // Resolve a target clip: the given id, else the first MIDI clip, else the
+        // first clip of any kind (extract works on audio too).
+        let clip: Clip?
+        if let raw = params["clipId"]?.stringValue, let id = UUID(uuidString: raw) {
+            clip = store.tracks.flatMap(\.clips).first { $0.id == id }
+        } else if let midi = store.tracks.flatMap(\.clips).first(where: { $0.isMIDI }) {
+            clip = midi
+        } else {
+            clip = store.tracks.flatMap(\.clips).first
+        }
+        guard let clip else { return quantizePanelStateResponse() }
+        workspaceMode = .arrange
+        if let modeRaw = params["mode"]?.stringValue, let density = PanelDensity(rawValue: modeRaw) {
+            panelDensity.setDensity(density, forPanel: QuantizePanel.panelID)
+        }
+        openQuantizePanel(clipID: clip.id)
+        // Settings staging.
+        if let gridRaw = params["grid"]?.stringValue,
+           let index = QuantizeModel.grids.firstIndex(where: { $0.label == gridRaw }) {
+            quantizeModel.gridIndex = index
+        } else if let gridBeats = params["gridBeats"]?.doubleValue,
+                  let index = QuantizeModel.grids.firstIndex(where: { abs($0.beats - gridBeats) < 1e-6 }) {
+            quantizeModel.gridIndex = index
+        }
+        if let strength = params["strength"]?.doubleValue {
+            quantizeModel.strength = strength.clamped(to: 0...1)
+        }
+        if let swing = params["swing"]?.doubleValue {
+            quantizeModel.swingPercent = swing.clamped(to: 50...75)
+        }
+        if let ends = params["quantizeEnds"]?.boolValue { quantizeModel.quantizeEnds = ends }
+        // A groove ref forces Pro (Simple builds no groove — the density gate) then
+        // selects the resolved template BY VALUE, matching the wire's resolution.
+        if let ref = params["groove"]?.stringValue {
+            panelDensity.setDensity(.pro, forPanel: QuantizePanel.panelID)
+            quantizeModel.density = .pro
+            quantizeModel.selectGroove(store.resolveGroove(ref))
+        }
+        // Reveal the extract composer WITHOUT firing (for a capture of the field).
+        if params["expandExtract"]?.boolValue == true {
+            if let name = params["extractName"]?.stringValue { quantizeModel.extractName = name }
+            quantizeModel.beginExtract()
+            if let name = params["extractName"]?.stringValue { quantizeModel.extractName = name }
+        }
+        // Extract via the UI path (async on the main actor; MIDI completes on the
+        // next turn, so a follow-up `groove.list` sees it — the capture flow polls).
+        if params["extract"]?.boolValue == true {
+            if let name = params["extractName"]?.stringValue { quantizeModel.extractName = name }
+            quantizeModel.beginExtract()
+            if let name = params["extractName"]?.stringValue { quantizeModel.extractName = name }
+            Task { @MainActor in await self.quantizeModel.extract() }
+        }
+        // Apply via the UI path (sync; `quantizeClipNotes` = one undo step). Leaves
+        // the panel OPEN under debug so a capture can still frame the applied state.
+        if params["apply"]?.boolValue == true {
+            quantizeModel.apply()
+        }
+        return quantizePanelStateResponse()
+    }
+
+    /// Read-only snapshot of the Quantize panel so a capture flow can poll.
+    private func quantizePanelStateResponse() -> JSONValue {
+        .object([
+            "visible": .bool(quantizePanelClipID != nil),
+            "clipId": quantizePanelClipID.map { JSONValue.string($0.uuidString) } ?? .null,
+            "isMIDI": .bool(quantizeModel.targetIsMIDI),
+            "mode": .string(panelDensity.density(forPanel: QuantizePanel.panelID).rawValue),
+            "grid": .string(quantizeModel.effectiveGridLabel),
+            "strength": .number(quantizeModel.strength),
+            "swing": .number(quantizeModel.swingPercent),
+            "quantizeEnds": .bool(quantizeModel.quantizeEnds),
+            "groove": quantizeModel.selectedGroove.map { JSONValue.string($0.name) } ?? .null,
+            "grooveLocked": .bool(quantizeModel.gridIsGrooveLocked),
+            "savedGrooveCount": .number(Double(quantizeModel.savedGrooves.count)),
+            "extractExpanded": .bool(quantizeModel.isExtractExpanded),
+        ])
+    }
+
+    // MARK: - Undo-history panel (m11-b)
+
+    /// Opens the Undo-history panel (the arrange-toolbar HISTORY chip). The panel is
+    /// a live projection of the store's journal — no per-open seeding needed.
+    func openUndoHistory() {
+        showUndoHistory = true
+    }
+
+    /// Closes the Undo-history panel.
+    func closeUndoHistory() {
+        showUndoHistory = false
+    }
+
+    /// `debug.undoHistory {open?, close?, undoTo?, redoTo?}` — stages the panel for a
+    /// capture/E2E the wire alone can't reach (the panel is UI chrome, off
+    /// `allCommands`/MCP — the `debug.quantizePanel` precedent). `open:true` shows it,
+    /// `close:true` hides it; `undoTo:i` clicks the i-th undo row (i+1 undos through
+    /// the SAME `store.undo()` the wire uses), `redoTo:j` clicks the j-th redo row.
+    /// A BARE call (no acting param) is READ-ONLY — it echoes state without opening or
+    /// stepping (the m11-a persistence trap: the panel's open flag survives across
+    /// debug calls, so the echo must never re-open it implicitly). Returns the panel
+    /// state to poll.
+    private func undoHistoryDebug(_ params: [String: JSONValue]) -> JSONValue {
+        if params["close"]?.boolValue == true {
+            closeUndoHistory()
+            return undoHistoryStateResponse()
+        }
+        if params["open"]?.boolValue == true {
+            workspaceMode = .arrange
+            openUndoHistory()
+        }
+        // Step through history via the UI model's plan (repeated store.undo/redo).
+        if let i = params["undoTo"]?.doubleValue {
+            undoHistoryModel.stepToUndoIndex(Int(i))
+        }
+        if let j = params["redoTo"]?.doubleValue {
+            undoHistoryModel.stepToRedoIndex(Int(j))
+        }
+        return undoHistoryStateResponse()
+    }
+
+    /// Staging for the arrange marker-lane inline rename capture (m11-c): opens the
+    /// rename field on `markerId` (or the first marker when omitted), or clears it
+    /// with `{clear:true}`. Capture-only — the live UI reaches rename by double-
+    /// click / context menu. READ-ONLY beyond the view override (never mutates the
+    /// project), the `debug.undoHistory` precedent.
+    private func markerRenameDebug(_ params: [String: JSONValue]) -> JSONValue {
+        workspaceMode = .arrange
+        if params["clear"]?.boolValue == true {
+            stagedMarkerRenameID = nil
+        } else if let raw = params["markerId"]?.stringValue, let id = UUID(uuidString: raw) {
+            stagedMarkerRenameID = id
+        } else {
+            stagedMarkerRenameID = store.markers.first?.id
+        }
+        return .object(["renamingMarkerId": stagedMarkerRenameID.map { .string($0.uuidString) } ?? .null])
+    }
+
+    /// Read-only snapshot of the Undo-history panel so a capture flow can poll — the
+    /// visibility plus the model's live step plan (labels + step counts), matching
+    /// what `edit.history` returns over the wire (newest-first both directions).
+    private func undoHistoryStateResponse() -> JSONValue {
+        let history = undoHistoryModel.history
+        return .object([
+            "visible": .bool(showUndoHistory),
+            "undo": .array(history.undo.map { JSONValue.string($0) }),
+            "redo": .array(history.redo.map { JSONValue.string($0) }),
+            "canUndo": .bool(history.canUndo),
+            "canRedo": .bool(history.canRedo),
+            "undoRows": .array(undoHistoryModel.undoRows.map { row in
+                .object(["label": .string(row.label), "steps": .number(Double(row.stepCount))])
+            }),
+            "redoRows": .array(undoHistoryModel.redoRows.map { row in
+                .object(["label": .string(row.label), "steps": .number(Double(row.stepCount))])
+            }),
+        ])
+    }
+
+    /// Read-only snapshot of the instrument picker (visibility + target + density +
+    /// drilled bank + search + current display name), so a capture flow can poll.
+    private func instrumentPickerStateResponse() -> JSONValue {
+        .object([
+            "visible": .bool(instrumentPickerTrackID != nil),
+            "trackId": instrumentPickerTrackID.map { JSONValue.string($0.uuidString) } ?? .null,
+            "mode": .string(panelDensity.density(forPanel: InstrumentPickerOverlay.panelID).rawValue),
+            "search": .string(instrumentPicker.searchText),
+            "drilledBank": instrumentPicker.drilledBank.map { JSONValue.string($0.name) } ?? .null,
+            "current": .string(instrumentPicker.currentDisplayName),
+            "bankCount": .number(Double(instrumentPicker.banks.count)),
+            "audioUnitCount": .number(Double(instrumentPicker.audioUnits.count)),
+        ])
+    }
+
     // MARK: - Copilot rail (M6 rail-d)
 
     /// Opens/closes the Copilot chat rail (the header COPILOT chip). App-level —
@@ -1340,9 +2022,12 @@ final class AppModel {
         let show = params["show"]?.boolValue ?? true
         workspaceMode = .arrange
         showSettings = show
-        // Optional `reveal:"beta"` deep-links the modal to its Beta utility row
-        // (a below-the-fold capture affordance); anything else opens at the top.
-        settingsRevealBeta = show && params["reveal"]?.stringValue == "beta"
+        // Optional `reveal` deep-links the modal to a below-the-fold section (a
+        // capture / follow-the-guide affordance); anything else opens at the top.
+        // "beta" → the Beta utility row; "connection" → the Agent Connection section.
+        let reveal = params["reveal"]?.stringValue
+        settingsRevealBeta = show && reveal == "beta"
+        settingsRevealConnection = show && reveal == "connection"
         return settingsStateResponse()
     }
 
@@ -1370,6 +2055,11 @@ final class AppModel {
             environment = ["ANTHROPIC_API_KEY": "sk-ant-env-DEMO5678"]
         }
         let seeded = SettingsModel(store: store, environment: environment)
+        // Captures drive an InMemoryKeyStore (never the real Keychain), so the
+        // presence probe is trivially non-blocking — resolve synchronously here so
+        // the captured rows are truthful immediately (the launch path uses the
+        // async, off-main `refresh()`).
+        seeded.resolveForCapture()
         if mode != "empty" {
             // Show the session "just saved" mask on the keychain row too (last 4
             // of the seeded demo key, matching SettingsModel.mask output).
@@ -1386,6 +2076,9 @@ final class AppModel {
     private func settingsReset() -> JSONValue {
         settings = SettingsModel(store: KeychainKeyStore())
         showSettings = false
+        // Restore the real, presence-probed rows off the main actor (m10-t) — the
+        // model starts `.checking`; this resolves it without blocking.
+        Task { [settings] in await settings.refresh() }
         return settingsStateResponse()
     }
 
@@ -1401,6 +2094,11 @@ final class AppModel {
                     "configured": .bool(row.configured),
                     "source": .string(row.source.rawValue),
                     "locked": .bool(row.isLocked),
+                    // m10-t additive: whether the row is still awaiting its presence
+                    // probe, and whether a stored key is consent-gated — so a gate
+                    // can assert the row resolved truthfully after the async refresh.
+                    "checking": .bool(row.isChecking),
+                    "consentRequired": .bool(row.consentRequired),
                 ])
             }),
         ])

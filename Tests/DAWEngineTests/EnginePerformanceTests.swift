@@ -225,7 +225,7 @@ struct EnginePerformanceTests {
                   instrument: InstrumentDescriptor(kind: .testTone)),
         ]
         let audio = try await engine.renderOffline(
-            tracks: tracks, tempoBPM: 120, masterVolume: 1,
+            tracks: tracks, tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 1.0, forcedCompensationTargets: nil)
         #expect(audio.frameCount == 48_000)
 
@@ -264,7 +264,7 @@ struct EnginePerformanceTests {
 
         // A second render lands entirely in the new window.
         _ = try await engine.renderOffline(
-            tracks: tracks, tempoBPM: 120, masterVolume: 1,
+            tracks: tracks, tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 0.25, forcedCompensationTargets: nil)
         let second = engine.performanceStats(reset: false)
         #expect(second.callbackCount > 0)
@@ -281,10 +281,10 @@ struct EnginePerformanceTests {
         // Two fresh engines, two fresh contexts, same input: byte-identical
         // output proves the counters never touch the audio path.
         let first = try await AudioEngine().renderOffline(
-            tracks: [track], tempoBPM: 120, masterVolume: 1,
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 0.5, forcedCompensationTargets: nil)
         let second = try await AudioEngine().renderOffline(
-            tracks: [track], tempoBPM: 120, masterVolume: 1,
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 0.5, forcedCompensationTargets: nil)
         #expect(first.channelData == second.channelData)
         #expect(TestSignals.rms(first.channelData[0], in: 0..<12_000) > 0.2)

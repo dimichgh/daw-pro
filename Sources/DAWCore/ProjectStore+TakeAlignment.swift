@@ -101,21 +101,23 @@ extension ProjectStore {
             throw ProjectError.laneNotFound
         }
         let candClip = tracks[t2].takeGroups[g2].lanes[l2].clip
-        let tempo = transport.tempoBPM
-        let secPerBeat = 60.0 / tempo
+        let tempoMap = transport.tempoMap
 
-        // Overlap of the two lanes' spans, in timeline seconds (half-open).
-        let overlapStart = max(refClip.startBeat, candClip.startBeat) * secPerBeat
-        let overlapEnd = min(refClip.startBeat + refClip.lengthBeats,
-                             candClip.startBeat + candClip.lengthBeats) * secPerBeat
+        // Overlap of the two lanes' spans, in timeline seconds (half-open) —
+        // the integral from beat 0 (m12-b, design row 25).
+        let overlapStart = tempoMap.seconds(
+            fromBeatZeroTo: max(refClip.startBeat, candClip.startBeat))
+        let overlapEnd = tempoMap.seconds(
+            fromBeatZeroTo: min(refClip.startBeat + refClip.lengthBeats,
+                                candClip.startBeat + candClip.lengthBeats))
         guard overlapEnd > overlapStart else {
             throw ProjectError.alignmentInconclusive(
                 "the take and the reference lane do not overlap on the timeline — nothing to "
                 + "align; move the take into range with take.move, then align again")
         }
-        let refOnsets = timelineOnsetSeconds(clip: refClip, markers: refMarkers, tempoBPM: tempo)
+        let refOnsets = timelineOnsetSeconds(clip: refClip, markers: refMarkers, tempoMap: tempoMap)
             .filter { $0 >= overlapStart && $0 < overlapEnd }
-        let candOnsets = timelineOnsetSeconds(clip: candClip, markers: candMarkers, tempoBPM: tempo)
+        let candOnsets = timelineOnsetSeconds(clip: candClip, markers: candMarkers, tempoMap: tempoMap)
             .filter { $0 >= overlapStart && $0 < overlapEnd }
 
         // 4. Align. nil = inconclusive — never guess (v-d rule).
@@ -129,9 +131,12 @@ extension ProjectStore {
                 + "take manually with take.move")
         }
 
-        // 5. Apply (or preview). Seconds → beats at the current tempo; the
-        //    lane moves by MINUS the measured offset, take.move-style.
-        let offsetBeats = result.offsetSeconds * tempo / 60.0
+        // 5. Apply (or preview). Seconds → beats via the inverse integral AT
+        //    the lane's start beat (m12-b, design row 26); the lane moves by
+        //    MINUS the measured offset, take.move-style.
+        let offsetBeats = tempoMap.beat(from: candClip.startBeat,
+                                        elapsedSeconds: result.offsetSeconds)
+            - candClip.startBeat
         if apply, offsetBeats != 0 {
             let currentStart = tracks[t2].takeGroups[g2].lanes[l2].clip.startBeat
             let newStart = currentStart - offsetBeats
@@ -148,7 +153,7 @@ extension ProjectStore {
                     + "\(String(format: "%.1f", result.offsetSeconds * 1000)) ms "
                     + "(\(String(format: "%.4f", offsetBeats)) beats) earlier, but it starts at beat "
                     + "\(String(format: "%.4f", currentStart)) — only "
-                    + "\(String(format: "%.1f", currentStart * secPerBeat * 1000)) ms of headroom "
+                    + "\(String(format: "%.1f", tempoMap.seconds(fromBeatZeroTo: currentStart) * 1000)) ms of headroom "
                     + "before the timeline start; move the group to a later position first "
                     + "(take.move), then align again")
             }
@@ -207,15 +212,16 @@ extension ProjectStore {
     }
 
     /// Maps a lane clip's source-file onset markers to TIMELINE seconds
-    /// through the clip's window at `tempoBPM` — the `detectClipTransients`
-    /// mapping (`beat = startBeat + (t − windowStart) · stretchRatio ·
-    /// tempo/60`) restated in seconds. Half-open window filter (an onset at
-    /// the clip's end boundary belongs to the material after it).
+    /// through the clip's window under `tempoMap` — the
+    /// `detectClipTransients` mapping restated in seconds; the clip start
+    /// converts via the integral from beat 0 (m12-b, design row 27).
+    /// Half-open window filter (an onset at the clip's end boundary belongs
+    /// to the material after it).
     private func timelineOnsetSeconds(clip: Clip, markers: [TransientMarker],
-                                      tempoBPM: Double) -> [Double] {
+                                      tempoMap: TempoMap) -> [Double] {
         let windowStart = clip.startOffsetSeconds
-        let windowEnd = windowStart + clip.sourceWindowSeconds(tempoBPM: tempoBPM)
-        let clipStartSeconds = clip.startBeat * 60.0 / tempoBPM
+        let windowEnd = windowStart + clip.sourceWindowSeconds(tempoMap: tempoMap)
+        let clipStartSeconds = tempoMap.seconds(fromBeatZeroTo: clip.startBeat)
         return markers
             .filter { $0.timeSeconds >= windowStart && $0.timeSeconds < windowEnd }
             .map { clipStartSeconds + ($0.timeSeconds - windowStart) * clip.stretchRatio }

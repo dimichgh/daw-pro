@@ -66,18 +66,21 @@ extension ProjectStore {
             throw ProjectError.clipNotFound(clipId)
         }
         let current = tracks[t2].clips[c2]
-        let tempo = transport.tempoBPM
+        let tempoMap = transport.tempoMap
         let windowStart = current.startOffsetSeconds
-        let windowEnd = windowStart + current.sourceWindowSeconds(tempoBPM: tempo)
+        let windowEnd = windowStart + current.sourceWindowSeconds(tempoMap: tempoMap)
         // Half-open window: an onset exactly at the clip's end boundary
         // belongs to the material after it (the splitClip partition rule).
+        // Beat projection = inverse integral from the clip start of the
+        // stretch-scaled source offset (m12-b, design row 22).
         return markers
             .filter { $0.timeSeconds >= windowStart && $0.timeSeconds < windowEnd }
             .map { marker in
                 ClipTransient(
                     sourceSeconds: marker.timeSeconds,
-                    beat: current.startBeat + (marker.timeSeconds - windowStart)
-                        * current.stretchRatio * tempo / 60.0,
+                    beat: tempoMap.beat(
+                        from: current.startBeat,
+                        elapsedSeconds: (marker.timeSeconds - windowStart) * current.stretchRatio),
                     strength: marker.strength)
             }
     }
@@ -144,7 +147,7 @@ extension ProjectStore {
         let slices = try AudioQuantizePlan.compute(
             clip: clip,
             transientsSourceSeconds: transientsSourceSeconds,
-            tempoBPM: transport.tempoBPM,
+            tempoMap: transport.tempoMap,
             settings: settings)
         performEdit("Quantize Audio") {
             tracks[t].clips.remove(at: c)

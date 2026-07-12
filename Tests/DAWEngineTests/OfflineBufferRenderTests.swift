@@ -37,12 +37,12 @@ struct OfflineBufferRenderTests {
         let engine = AudioEngine()
 
         let buffer = try await engine.renderOffline(
-            tracks: [track], tempoBPM: 120, masterVolume: 1,
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 1.0, forcedCompensationTargets: nil)
 
         let out = try makeTempDir("mix").appendingPathComponent("mix.wav")
         _ = try await engine.renderMixdown(
-            tracks: [track], tempoBPM: 120, masterVolume: 1,
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 1.0, to: out)
         let written = try TestSignals.readFile(out)
 
@@ -107,10 +107,10 @@ struct OfflineBufferRenderTests {
         // No effects anywhere: the automatic plan is all-zero, so any shift
         // in the forced pass is the forced ring target and nothing else.
         let reference = try await engine.renderOffline(
-            tracks: [track], tempoBPM: 120, masterVolume: 1,
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 0.5, forcedCompensationTargets: nil)
         let forced = try await engine.renderOffline(
-            tracks: [track], tempoBPM: 120, masterVolume: 1,
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 0.5, forcedCompensationTargets: [track.id: 480])
 
         // The cosine peaks at frame 0 — the unforced render is loud

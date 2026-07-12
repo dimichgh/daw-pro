@@ -36,6 +36,8 @@ Click the violet **EXPLAIN** chip in the header to turn on "Explain this" mode. 
 
 A violet **COPILOT** chip in the top-right opens the AI agent sidebar on the far right. Type what you want in plain language — *"add a drum track at 120 BPM"*, *"tighten the timing on the piano"* — and the Copilot uses the same control surface the UI uses to make it happen. Each step is undoable. Requires an API key (Anthropic preferred, OpenAI fallback).
 
+The Copilot works in **rounds**: each round it reads your project, thinks, then makes a batch of changes. One reply is capped at a set number of rounds (8 by default) so a single request can't run away. Change the cap in **Settings → Copilot** ("Max rounds", 1–32); a new value applies to the Copilot's next reply, no restart needed. Raise it for big, multi-step jobs, or lower it to keep replies short and quick. Over the wire, `ai.copilotSend` accepts an optional `maxRounds` number to override the cap for a single turn (clamped to 1–32), and `ai.copilotState` reports the current policy under a `limits` object.
+
 ## Tracks & Clips
 
 ### Adding a track
@@ -47,6 +49,15 @@ Click the **+** in the Arrange track header area or use the menu. Choose a **kin
 - **Bus**: a mix destination. No clips — just receives sends from audio/instrument tracks for group mixing.
 
 A track is stereo by default.
+
+### Importing your own audio
+
+Bring in your own recordings, samples, loops, or stems two ways:
+
+- **File → Import Audio…** (⌘I): pick one or more audio files. They land at the playhead. A single file makes a new audio track; **multiple files each get their own new audio track** (drop a folder of stems and they arrange side by side), named from the filenames.
+- **Drag from Finder** onto the Arrange timeline: drop audio files straight onto the lanes. Dropping a single file onto an existing **audio** track adds it there at the drop position (a cyan highlight shows the target lane and a cyan line marks where it will start, snapped to the grid). Dropping on empty space — or dropping several files — creates a new audio track per file. (MIDI/instrument lanes aren't audio targets, so a drop there makes a new track instead.)
+
+Non-audio files are ignored. The whole import is a single undo step.
 
 ### Naming a track
 
@@ -92,17 +103,39 @@ Double-click a MIDI clip in Arrange to open the piano-roll editor. The grid show
 
 The **SNAP** chip (in Pro mode) sets the grid resolution — Off, Bar, Beat, 1/8, 1/16 (default Beat). In Simple mode, the grid is locked to Beat and you see only add/move/delete.
 
+### Quantizing & groove
+
+If a part was played a little loose, **quantize** nudges the notes onto a tidy timing grid. Open the **QUANTIZE** panel from the piano-roll header (the "QUANTIZE" chip), or right-click a clip in Arrange (in Pro) and choose **Quantize…**.
+
+- **Grid** — the timing grid to snap to, in musical names: 1/4, 1/8, 1/16, 1/32, and triplets (1/8 triplet, …). Pick the smallest division your part actually uses.
+- **Strength** — how far each note is pulled toward the grid. 100% tightens completely; part way keeps some of the human feel of the take while still cleaning it up.
+- **Apply** — press **APPLY QUANTIZE** to commit. It's one undo step, so ⌘Z restores the original timing.
+
+Flip the panel to **Pro** for more:
+
+- **Swing** — adds a relaxed shuffle by nudging the in-between notes a touch late (50% is straight, up to 75% for a strong bounce).
+- **Also snap note ends** — lines up where notes stop, not just where they start.
+- **Groove** — instead of the plain grid, apply a **feel** borrowed from elsewhere. Pick a built-in swing preset, or one you've extracted. When a groove is chosen it sets the grid and swing for you (both controls dim to show the groove is in charge); the Strength slider still controls how strongly it's applied.
+
+**Extract a groove.** In the Groove section, **+ Extract from clip** captures the timing feel of the current part as a reusable groove — name it, press **EXTRACT GROOVE**, and it joins the list to stamp onto other parts. You can also right-click any clip in Arrange (in Pro) and choose **Extract Groove…** (this works on audio clips too, using their detected hits).
+
 ### Choosing an instrument
 
-Click a track's instrument selector (the chip showing the current instrument name) or use the wire command `track.setInstrument`. Options:
+Every instrument track carries an **instrument chip** — a small button in the track header (in Arrange) and a wider one in the mixer strip (in Mix) that shows the track's current sound. Click it (or use the wire command `track.setInstrument`) to open the **instrument picker**, a dark-glass panel with a search box and three sections:
 
-- **Poly Synth** (default): a 16-voice subtractive synth with standard oscillators and a low-pass filter. Play it and tweak in the synth editor.
-- **Sampler**: map audio files to keyboard ranges (zones). Each zone plays at different pitches and rates.
-- **Audio Unit instruments**: any AU instrument on your Mac (e.g., DLSMusicDevice, third-party instruments). The generic AU editor opens by default; vendor-specific UIs may appear if the AU provides them.
+- **Built-in** — **Poly Synth** (a warm, tunable synthesizer, the default), **Sampler** (plays your own audio files across the keys), and, in Pro, **Test Tone** (a reference note for checking your setup).
+- **Sound Banks** — ready-to-play instruments with **no downloads**. **General MIDI** is built in and gives you **128 classic instruments** (piano, strings, brass, drums, and more) plus a Standard Drum Kit. Click a bank to browse its programs, grouped by family (Piano, Brass, …) with search-as-you-type; the drum kit lives in its own group.
+- **Audio Units** — any AU instrument plugin installed on your Mac (Apple's DLSMusicDevice, third-party instruments). Search across the name and maker; a v3 badge marks newer plugins.
+
+**Simple vs Pro.** Flip the SIMPLE / PRO chip in the picker header. **Simple** shows curated **Instrument Sets** — the 16 General MIDI families as one-click choices (Piano, Guitar, Brass, Drums, …), each picking a sensible default sound. **Pro** opens the full browser with program numbers and bank details.
+
+**Zero setup.** General MIDI needs nothing installed — pick a family in Simple or an exact program in Pro and you're playing. When you pick a sound-bank instrument it may say **loading** for a moment (a small dot on the chip) while it prepares; if a bank can't be found the chip shows a warning and the reason, and the track stays silent rather than playing the wrong sound.
+
+**Importing SoundFonts.** In the Sound Banks section, **Add SoundFont…** lets you import a `.sf2` or `.dls` bank file. It's copied into your library and added to the list, ready to select on any instrument track. (Projects reference banks by location, so a project moved to another Mac needs the same bank there — General MIDI, being built in, always works.)
 
 ### Opening a plugin window
 
-Some AUs (virtual instruments or effect plugins) have custom UIs. If one is available, an **open UI** button (a window glyph) appears next to its name. Click it to open the vendor's editor in a floating glass-chrome window.
+Some AUs (virtual instruments or effect plugins) have custom UIs. If one is available, an **open UI** button (a window glyph) appears next to its name. Click it to open the vendor's editor in a floating glass-chrome window. Built-in and sound-bank instruments have no plugin window — the instrument picker (and the synth/sampler editors) is where you shape them.
 
 ## Mixing
 
@@ -257,11 +290,17 @@ If you're using the DAW with an AI agent (Claude Code, Claude Desktop, etc.), he
 
 ### Control protocol
 
-The DAW runs a WebSocket command server on `ws://127.0.0.1:17600` (loopback-only, local network off by design). To change the port, launch the app with the environment variable:
+The DAW runs a WebSocket command server on `ws://127.0.0.1:17600` (loopback-only, local network off by design).
+
+You can see and copy the live address in the app: open **Settings** (the gear, top-right) and find the **Agent Connection** section. It shows the exact `ws://…` URL agents connect to, with a **Copy** button, and a **Port** field to change the port without a terminal — the new port takes effect the next time you launch DAW Pro. Agents can also read the current URL/port over the wire with the `app.connectionInfo` command.
+
+To override the port for a single session (this always wins over the in-app setting), launch the app with the environment variable:
 
 ```bash
 DAW_CONTROL_PORT=9999 swift run DAWApp
 ```
+
+When that variable is set, the Settings section shows an "Overridden by DAW_CONTROL_PORT for this session" note so it's clear which port is actually in effect.
 
 ### MCP server
 
@@ -289,7 +328,7 @@ The MCP server bridges agents to the control protocol. Set it up:
 
 3. **Start the app first**, then connect your agent.
 
-The server exposes 105 tools — one for every control-protocol command. The agent sees the entire DAW state and can compose, arrange, mix, and master like a human operator.
+The server exposes 111 tools — one for every control-protocol command. The agent sees the entire DAW state and can compose, arrange, mix, and master like a human operator.
 
 ## Troubleshooting
 

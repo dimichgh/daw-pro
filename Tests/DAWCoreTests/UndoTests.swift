@@ -646,4 +646,133 @@ struct UndoJournalTests {
         journal.recordEdit(label: "Vol2", key: "k1", before: state(3))  // same key, in window, BUT barrier → append
         #expect(journal.undoStack.count == 2)
     }
+
+    // MARK: - Label projection (m11-b)
+
+    @Test("undoLabels / redoLabels project both stacks NEWEST-FIRST")
+    func labelProjectionOrder() {
+        var journal = UndoJournal()
+        journal.recordEdit(label: "A", key: nil, before: state(1))   // oldest
+        journal.recordEdit(label: "B", key: nil, before: state(2))
+        journal.recordEdit(label: "C", key: nil, before: state(3))   // newest (top)
+        // Newest-first: [0] is the top of the stack (what popUndo reverses next).
+        #expect(journal.undoLabels == ["C", "B", "A"])
+        #expect(journal.redoLabels == [])
+
+        // Undo twice: C then B move to redo; redo top is B (last popped) → newest-first.
+        _ = journal.popUndo(current: state(4))   // pops C
+        _ = journal.popUndo(current: state(5))   // pops B
+        #expect(journal.undoLabels == ["A"])
+        #expect(journal.redoLabels == ["B", "C"])  // redo[0] = next redo = B (the top)
+    }
+}
+
+/// The `ProjectStore.undoHistory()` projection (m11-b): the read-only façade the
+/// history panel + `edit.history` wire read. Pins the ordering CONTRACT
+/// (newest-first, undo[0]/redo[0] = what undo()/redo() act on next), that
+/// coalescing folds to one entry, movement between stacks on undo/redo, cap
+/// eviction, and the load-boundary clear — WITHOUT any journal mutation surface.
+@MainActor
+@Suite("Undo history — projection (m11-b)")
+struct UndoHistoryProjectionTests {
+
+    @Test("undoHistory is newest-first and undo[0] is what undo() reverses next")
+    func newestFirstContract() {
+        let store = ProjectStore()
+        store.addTrack(name: "A")   // "Add Track 'A'"
+        store.addTrack(name: "B")
+        store.addTrack(name: "C")   // newest edit
+        let h = store.undoHistory()
+        #expect(h.undo == ["Add Track 'C'", "Add Track 'B'", "Add Track 'A'"])
+        #expect(h.redo == [])
+        #expect(h.canUndo && !h.canRedo)
+        // undo[0] is exactly the label undo() reverses (mirrors undoLabel).
+        #expect(h.undo.first == store.undoLabel)
+    }
+
+    @Test("empty history projects empty lists mirroring canUndo/canRedo")
+    func emptyProjection() {
+        let store = ProjectStore()
+        let h = store.undoHistory()
+        #expect(h.undo.isEmpty && h.redo.isEmpty)
+        #expect(!h.canUndo && !h.canRedo)
+    }
+
+    @Test("coalesced same-key edits fold to ONE history entry")
+    func coalescingFoldsToOne() {
+        let store = ProjectStore()
+        var clock = ContinuousClock.now
+        store.journal.now = { clock }
+        store.setMasterVolume(0.5)
+        clock = clock.advanced(by: .milliseconds(200))
+        store.setMasterVolume(0.7)
+        clock = clock.advanced(by: .milliseconds(200))
+        store.setMasterVolume(0.9)
+        // Three rapid same-key scrubs = one undo step = one history label.
+        #expect(store.undoHistory().undo == ["Set Master Volume"])
+    }
+
+    @Test("undo/redo move a label between the two projected stacks in order")
+    func movementBetweenStacks() throws {
+        let store = ProjectStore()
+        store.addTrack(name: "A")
+        try store.setTempo(140)   // newest
+        #expect(store.undoHistory().undo == ["Set Tempo", "Add Track 'A'"])
+
+        try store.undo()   // reverses "Set Tempo"
+        var h = store.undoHistory()
+        #expect(h.undo == ["Add Track 'A'"])
+        #expect(h.redo == ["Set Tempo"])   // redo[0] = what redo() reapplies next
+
+        try store.redo()   // reapplies "Set Tempo"
+        h = store.undoHistory()
+        #expect(h.undo == ["Set Tempo", "Add Track 'A'"])
+        #expect(h.redo == [])
+    }
+
+    @Test("undo TWICE moves both labels to redo newest-first")
+    func undoTwiceOrder() throws {
+        let store = ProjectStore()
+        store.addTrack(name: "A")
+        store.addTrack(name: "B")
+        store.addTrack(name: "C")
+        try store.undo()   // reverses C
+        try store.undo()   // reverses B
+        let h = store.undoHistory()
+        #expect(h.undo == ["Add Track 'A'"])
+        // redo[0] is the NEXT redo (B, the most recently undone); C sits below it.
+        #expect(h.redo == ["Add Track 'B'", "Add Track 'C'"])
+    }
+
+    @Test("cap eviction is reflected in the projection (oldest labels drop)")
+    func capEvictionProjected() {
+        let store = ProjectStore()
+        store.journal.cap = 2
+        store.addTrack(name: "A")
+        store.addTrack(name: "B")
+        store.addTrack(name: "C")   // evicts A
+        #expect(store.undoHistory().undo == ["Add Track 'C'", "Add Track 'B'"])
+    }
+
+    @Test("a fresh edit clears the redo projection (history forks)")
+    func freshEditClearsRedoProjection() throws {
+        let store = ProjectStore()
+        store.addTrack(name: "A")
+        try store.setTempo(140)
+        try store.undo()
+        #expect(store.undoHistory().redo == ["Set Tempo"])
+        store.setMasterVolume(0.5)   // forks — redo is discarded
+        #expect(store.undoHistory().redo == [])
+    }
+
+    @Test("a load boundary (newProject) clears the projected history")
+    func loadBoundaryClearsProjection() throws {
+        let store = ProjectStore()
+        store.addTrack(name: "A")
+        try store.undo()
+        #expect(store.undoHistory().canRedo)   // both stacks populated
+        try store.newProject(discardChanges: true)
+        let h = store.undoHistory()
+        #expect(h.undo.isEmpty && h.redo.isEmpty)
+    }
 }

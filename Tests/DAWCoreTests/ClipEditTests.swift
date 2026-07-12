@@ -285,8 +285,8 @@ struct ProjectStoreClipEditTests {
     @Test("moveClip: clamps the new start to >= 0")
     func moveClamp() throws {
         let (store, trackID, clip) = try storeWithAudioClip()
-        #expect(try store.moveClip(trackId: trackID, clipId: clip.id, toStartBeat: -5).startBeat == 0)
-        #expect(try store.moveClip(trackId: trackID, clipId: clip.id, toStartBeat: 12).startBeat == 12)
+        #expect(try store.moveClip(trackId: trackID, clipId: clip.id, toStartBeat: -5).clip.startBeat == 0)
+        #expect(try store.moveClip(trackId: trackID, clipId: clip.id, toStartBeat: 12).clip.startBeat == 12)
     }
 
     // 14.

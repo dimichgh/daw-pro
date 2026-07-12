@@ -114,17 +114,14 @@ public enum AudioQuantizePlan {
     /// Computes the slice layout. Throws (all `ProjectError`, engine-free):
     ///  - `quantizeRequiresAudioClip` for a MIDI clip,
     ///  - `audioQuantizeStretchUnsupported` for a non-identity stretch (v0 cut),
+    ///  - `audioQuantizeTempoBoundaryUnsupported` when the clip's span crosses
+    ///    a tempo-map segment boundary (m12-c cut — see below),
     ///  - `audioQuantizeNoTransients` when fewer than 2 usable onsets fall inside
-    ///    the clip's source window,
-    ///  - `invalidClipEdit` for a non-positive tempo.
+    ///    the clip's source window.
     public static func compute(clip: Clip,
                                transientsSourceSeconds: [Double],
-                               tempoBPM: Double,
+                               tempoMap: TempoMap,
                                settings: AudioQuantizeSettings) throws -> [Clip] {
-        guard tempoBPM > 0 else {
-            throw ProjectError.invalidClipEdit(
-                "cannot quantize audio at tempo \(tempoBPM) BPM")
-        }
         guard !clip.isMIDI else {
             throw ProjectError.quantizeRequiresAudioClip(clip.id)
         }
@@ -134,12 +131,25 @@ public enum AudioQuantizePlan {
         guard clip.isStretchIdentity else {
             throw ProjectError.audioQuantizeStretchUnsupported(clip.id)
         }
+        // m12-c cut (design row 24, settled): the slice algorithm assumes ONE
+        // constant source↔timeline factor across the whole clip (`spb` below
+        // scales onsets, minimum widths, AND crossfade extents uniformly — a
+        // per-transient integral would leave slice widths/joins internally
+        // inconsistent), so a clip crossing a tempo boundary is REJECTED with
+        // a teaching error, the `audioQuantizeStretchUnsupported` precedent.
+        // Split the clip at the boundary first; each side then quantizes.
+        guard tempoMap.isConstant(from: clip.startBeat,
+                                  to: clip.startBeat + clip.lengthBeats) else {
+            throw ProjectError.audioQuantizeTempoBoundaryUnsupported(clip.id)
+        }
 
-        let spb = 60.0 / tempoBPM
+        // Clip-local seconds-per-beat from the map at the clip's position —
+        // exact across the whole clip (constant-tempo span guarded above).
+        let spb = tempoMap.secondsPerBeat(atBeat: clip.startBeat)
         let clipStart = clip.startBeat
         let clipEnd = clip.startBeat + clip.lengthBeats
         let windowStart = clip.startOffsetSeconds
-        let windowEnd = windowStart + clip.sourceWindowSeconds(tempoBPM: tempoBPM)
+        let windowEnd = windowStart + clip.sourceWindowSeconds(tempoMap: tempoMap)
         let minSlice = settings.minSliceSeconds
         // minSliceSeconds mapped to beats (ratio 1 → 1:1 source↔timeline).
         let minSliceBeats = minSlice / spb

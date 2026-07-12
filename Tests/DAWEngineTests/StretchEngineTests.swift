@@ -112,7 +112,7 @@ struct StretchEngineTests {
         let track = audioTrack(clip)
 
         let plain = try OfflineRenderer().render(
-            tracks: [track], tempoBPM: 120, fromBeat: 0,
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0,
             durationSeconds: 1.5, masterVolume: 1)
 
         let spied = OfflineRenderer()
@@ -122,7 +122,7 @@ struct StretchEngineTests {
             return nil  // would silence the clip if ever consulted
         }
         let withSpy = try spied.render(
-            tracks: [track], tempoBPM: 120, fromBeat: 0,
+            tracks: [track], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0,
             durationSeconds: 1.5, masterVolume: 1)
 
         #expect(resolves == 0)  // identity clips bypass the resolver entirely
@@ -152,7 +152,7 @@ struct StretchEngineTests {
                         audioFileURL: fixtures.cos1k48)
         let out = try makeTempDir("id-mix").appendingPathComponent("mix.wav")
         _ = try await engine.renderMixdown(
-            tracks: [audioTrack(clip)], tempoBPM: 120, masterVolume: 1,
+            tracks: [audioTrack(clip)], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 1.0, to: out)
 
         // The cache directory was never even created — no render, no entry.
@@ -225,7 +225,7 @@ struct StretchEngineTests {
         // Immediate mixdown with a COLD cache — this is the WYSIWYG wait:
         // without it the bounce would be silence.
         let info = try await engine.renderMixdown(
-            tracks: [audioTrack(clip)], tempoBPM: 120, masterVolume: 1,
+            tracks: [audioTrack(clip)], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 3.5, to: out)
         #expect(abs(info.durationSeconds - 3.5) < 0.001)
 
@@ -270,7 +270,7 @@ struct StretchEngineTests {
                         stretchRatio: 2.0)
         let out = try makeTempDir("offset-out").appendingPathComponent("mix.wav")
         _ = try await engine.renderMixdown(
-            tracks: [audioTrack(clip)], tempoBPM: 120, masterVolume: 1,
+            tracks: [audioTrack(clip)], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 1.0, to: out)
 
         let written = try TestSignals.readFile(out)
@@ -313,7 +313,7 @@ struct StretchEngineTests {
                         stretchRatio: 1.5)
         let out = try makeTempDir("fade-out").appendingPathComponent("mix.wav")
         _ = try await engine.renderMixdown(
-            tracks: [audioTrack(clip)], tempoBPM: 120, masterVolume: 1,
+            tracks: [audioTrack(clip)], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
             fromBeat: 0, durationSeconds: 2.0, to: out)
 
         let written = try TestSignals.readFile(out)
@@ -376,7 +376,7 @@ struct StretchEngineTests {
                         audioFileURL: fixtures.cos1k48, stretchRatio: 1.5)
         // No stretchedFileProvider wired → resolver answers .pending.
         let rendered = try OfflineRenderer().render(
-            tracks: [audioTrack(clip)], tempoBPM: 120, fromBeat: 0,
+            tracks: [audioTrack(clip)], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0,
             durationSeconds: 1.0, masterVolume: 1)
         #expect(TestSignals.peak(rendered.channelData[0], in: 0..<48_000) == 0)
     }

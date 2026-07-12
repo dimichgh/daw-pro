@@ -419,9 +419,9 @@ struct SamplerTests {
                 sampler: SamplerParams(
                     zones: [SamplerZone(audioFileURL: fixtures.sine440Mono, rootPitch: 69)],
                     attack: 0.001, release: 0.05, gain: 0.8)))
-        let a = try OfflineRenderer().render(tracks: [track], tempoBPM: 120,
+        let a = try OfflineRenderer().render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
                                              fromBeat: 0, durationSeconds: 1.5)
-        let b = try OfflineRenderer().render(tracks: [track], tempoBPM: 120,
+        let b = try OfflineRenderer().render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
                                              fromBeat: 0, durationSeconds: 1.5)
         let difference = maxDifference(a, b)
         let peak = TestSignals.peak(a.channelData[0], in: 0..<a.frameCount)
