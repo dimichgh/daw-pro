@@ -192,6 +192,8 @@ public final class CommandRouter {
         "clip.duplicate",
         "clip.setGain",
         "clip.setGainEnvelope",
+        "clip.setControllerLane",
+        "clip.removeControllerLane",
         "clip.setFades",
         "clip.crossfade",
         "clip.setStretch",
@@ -1376,6 +1378,46 @@ public final class CommandRouter {
             let envelopedClip = try store.setClipGainEnvelope(
                 trackId: envTrackID, clipId: envClipID, points: envPoints)
             return .success(request.id, try JSONValue(encoding: envelopedClip))
+
+        // TODO(m16-b2 phase 3, mcp-integration-engineer): expose these two verbs
+        // as MCP tools `clip_set_controller_lane` + `clip_remove_controller_lane`
+        // (flat zod schema, no unions — the m15-c prose-sentinel law; teach
+        // stepwise semantics, bend center 8192, built-ins honour bend+sustain
+        // only, chase behaviour, poly-aftertouch deferred). See design-m16b §10.
+        case "clip.setControllerLane":
+            // params: clipId (required), type ("cc"|"pitchBend"|"channelPressure",
+            // required), controller (required integer 0-127 IFF type=="cc"),
+            // points (required non-empty array of {beat, value}). Creates or
+            // REPLACES the clip's lane of that type WHOLESALE. `value` is RAW MIDI
+            // — 0-16383 for pitchBend (8192 = center), 0-127 otherwise; STEPWISE
+            // (a value holds until the next point, a ramp is a dense point run).
+            // Pass an empty array is REJECTED (use clip.removeControllerLane to
+            // delete a lane). Caps: <= 16384 points/lane, <= 16 lanes/clip (the
+            // store's teaching errors). rejectUnknownKeys from day one (a creation
+            // verb). MIDI clips only — an audio clip surfaces notAMIDIClip.
+            // Coalesces under clip.controllerLane:<clipId>:<typeKey>. Response: the
+            // updated clip (its stored lanes echo back in controllerLanes).
+            try params.rejectUnknownKeys(
+                ["clipId", "type", "controller", "points"], verb: "clip.setControllerLane")
+            let laneClipID = try params.requireClipID()
+            let laneType = try parseControllerType(params, requireController: true)
+            let lanePoints = try parseControllerPoints(params["points"], type: laneType)
+            let lanedClip = try store.setControllerLane(
+                clipID: laneClipID, type: laneType, points: lanePoints)
+            return .success(request.id, try JSONValue(encoding: lanedClip))
+
+        case "clip.removeControllerLane":
+            // params: clipId (required), type ("cc"|"pitchBend"|"channelPressure",
+            // required), controller (required integer 0-127 IFF type=="cc").
+            // Removes the clip's lane of that type; an unknown lane surfaces a
+            // teaching error listing the clip's existing lanes. rejectUnknownKeys
+            // from day one. MIDI clips only. Response: the updated clip.
+            try params.rejectUnknownKeys(
+                ["clipId", "type", "controller"], verb: "clip.removeControllerLane")
+            let rmClipID = try params.requireClipID()
+            let rmType = try parseControllerType(params, requireController: true)
+            let rmClip = try store.removeControllerLane(clipID: rmClipID, type: rmType)
+            return .success(request.id, try JSONValue(encoding: rmClip))
 
         case "clip.setFades":
             // params: trackId (required), clipId (required), fadeInBeats
@@ -3316,6 +3358,71 @@ public final class CommandRouter {
     /// integer check for pitch and velocity, since JSON carries them as doubles.
     private static func isInteger(_ value: Double) -> Bool {
         value.isFinite && value.rounded() == value
+    }
+
+    /// Parses the `type` (+ `controller` for cc) params into a
+    /// `MIDIControllerType` for clip.setControllerLane / clip.removeControllerLane
+    /// (m16-b). A bad `type` string names the valid types; `type=="cc"` REQUIRES
+    /// an integer `controller` 0-127 (the teaching error names the mod/sustain
+    /// hints). `requireController` is always true here — both verbs address a
+    /// specific lane — but kept explicit for the contract.
+    private func parseControllerType(_ params: [String: JSONValue],
+                                     requireController: Bool) throws -> MIDIControllerType {
+        guard let raw = params["type"]?.stringValue else {
+            throw ControlError("'type' must be one of \"cc\", \"pitchBend\", \"channelPressure\"")
+        }
+        switch raw {
+        case "pitchBend": return .pitchBend
+        case "channelPressure": return .channelPressure
+        case "cc":
+            guard let controllerValue = params["controller"]?.doubleValue,
+                  Self.isInteger(controllerValue), controllerValue >= 0, controllerValue <= 127 else {
+                throw ControlError(
+                    "'controller' is required when type is \"cc\" — an integer 0-127 (1 = mod wheel, 64 = sustain)")
+            }
+            return .cc(controller: Int(controllerValue))
+        default:
+            throw ControlError(
+                "'type' must be one of \"cc\", \"pitchBend\", \"channelPressure\" — got \"\(raw)\"")
+        }
+    }
+
+    /// Parses a `points` param into `[MIDIControllerPoint]` for
+    /// clip.setControllerLane (m16-b). REQUIRED and NON-EMPTY (an empty lane is
+    /// deleted via clip.removeControllerLane, not set). Each element is
+    /// `{beat, value}`; `beat` must be a number >= 0; `value` must be an integer
+    /// in the type's RAW MIDI domain — 0-16383 for pitchBend (8192 = center),
+    /// 0-127 otherwise — with a per-index teaching error naming the domain. The
+    /// store applies the 16384-point cap and canonicalizes; this shapes + domain-
+    /// checks the array.
+    private func parseControllerPoints(_ value: JSONValue?,
+                                       type: MIDIControllerType) throws -> [MIDIControllerPoint] {
+        guard let value, let array = value.arrayValue else {
+            throw ControlError("'points' must be an array of {beat, value}")
+        }
+        guard !array.isEmpty else {
+            throw ControlError(
+                "'points' must be non-empty — use clip.removeControllerLane to delete a lane")
+        }
+        let range = type.valueRange
+        var points: [MIDIControllerPoint] = []
+        points.reserveCapacity(array.count)
+        for (i, element) in array.enumerated() {
+            guard let beat = element["beat"]?.doubleValue, beat >= 0 else {
+                throw ControlError("points[\(i)].beat must be a number >= 0 (beats, relative to the clip start)")
+            }
+            guard let value = element["value"]?.doubleValue, Self.isInteger(value),
+                  Int(value) >= range.lowerBound, Int(value) <= range.upperBound else {
+                switch type {
+                case .pitchBend:
+                    throw ControlError("points[\(i)].value must be 0-16383 for pitchBend (8192 = center)")
+                default:
+                    throw ControlError("points[\(i)].value must be 0-127")
+                }
+            }
+            points.append(MIDIControllerPoint(beat: beat, value: Int(value)))
+        }
+        return points
     }
 
     /// Parses a `target` param into `AutomationTarget` by round-tripping

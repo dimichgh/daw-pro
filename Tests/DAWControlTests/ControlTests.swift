@@ -1475,7 +1475,13 @@ struct CommandRouterTests {
                 // clip.setGainEnvelope (m13-e) needs a clip id like the other
                 // per-clip edits; proven by DAWCore ClipGainEnvelopeStoreTests +
                 // the live wire gate. Audio-only (a MIDI clip is rejected).
-                "clip.setGainEnvelope", "clip.setFades",
+                "clip.setGainEnvelope",
+                // clip.setControllerLane / clip.removeControllerLane (m16-b2) need
+                // a MIDI clip id like the other per-clip edits; proven by
+                // ControllerLaneCommandTests (round-trip + teaching errors) and
+                // DAWCore ControllerLaneStoreTests.
+                "clip.setControllerLane", "clip.removeControllerLane",
+                "clip.setFades",
                 // clip.crossfade (m11-d) needs TWO adjacent audio clips with source
                 // material on each side of the seam — a fixture this shared, single-
                 // clip project doesn't have. Proven by ClipCrossfadeCommandTests

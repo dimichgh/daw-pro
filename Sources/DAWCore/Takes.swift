@@ -225,6 +225,15 @@ public enum CompFlattener {
                 gainEnvelope: Clip.windowedGainEnvelope(
                     source.gainEnvelope,
                     delta: memberStart - laneStart,
+                    newLength: memberLength),
+                // Controller lanes (m16-b, design-m16b §11 take-comping row):
+                // window with the same split/trim discipline so a comp window
+                // carries honest lane state (the new head opens with the value in
+                // effect there). A MIDI lane source windows to real lanes; an
+                // audio lane source has none, so this stays [].
+                controllerLanes: Clip.windowedControllerLanes(
+                    source.controllerLanes,
+                    delta: memberStart - laneStart,
                     newLength: memberLength)
             )
             member.takeGroupID = group.id

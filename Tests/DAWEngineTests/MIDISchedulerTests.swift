@@ -22,7 +22,7 @@ struct MIDISchedulerTests {
             MIDINote(pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 1),
         ])
         let events = MIDIEventSchedule.buildEvents(
-            clips: [clip], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate)
+            clips: [clip], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate).events
         let expected = [
             ScheduledMIDIEvent(sampleTime: 24_000, noteID: 0, kind: 0, pitch: 60, velocity: 100),
             ScheduledMIDIEvent(sampleTime: 48_000, noteID: 0, kind: 1, pitch: 60, velocity: 0),
@@ -38,7 +38,7 @@ struct MIDISchedulerTests {
             MIDINote(pitch: 64, velocity: 90, startBeat: 1.5, lengthBeats: 0.5),
         ])
         let events = MIDIEventSchedule.buildEvents(
-            clips: [clip], fromBeat: 2, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate)
+            clips: [clip], fromBeat: 2, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate).events
         // p60 (absolute onset 1.0 < 2) contributes ZERO events — its on AND
         // off are both suppressed. p64: on at beat 2.5, off at beat 3.0.
         #expect(events.count == 2)
@@ -57,7 +57,7 @@ struct MIDISchedulerTests {
             MIDINote(pitch: 60, velocity: 100, startBeat: 1.5, lengthBeats: 4),
         ])
         let events = MIDIEventSchedule.buildEvents(
-            clips: [spilling], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate)
+            clips: [spilling], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate).events
         #expect(events.count == 2)
         #expect(events[1].sampleTime - events[0].sampleTime == 12_000)  // off at clip end
 
@@ -65,13 +65,13 @@ struct MIDISchedulerTests {
             MIDINote(pitch: 60, velocity: 100, startBeat: 2.0, lengthBeats: 1),
         ])
         #expect(MIDIEventSchedule.buildEvents(
-            clips: [atEnd], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate).isEmpty)
+            clips: [atEnd], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate).events.isEmpty)
 
         let pastEnd = midiClip(startBeat: 0, lengthBeats: 2, notes: [
             MIDINote(pitch: 60, velocity: 100, startBeat: 2.5, lengthBeats: 1),
         ])
         #expect(MIDIEventSchedule.buildEvents(
-            clips: [pastEnd], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate).isEmpty)
+            clips: [pastEnd], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate).events.isEmpty)
     }
 
     // D. Same-pitch overlap → distinct paired noteIDs.
@@ -82,7 +82,7 @@ struct MIDISchedulerTests {
             MIDINote(pitch: 60, velocity: 100, startBeat: 1, lengthBeats: 2),
         ])
         let events = MIDIEventSchedule.buildEvents(
-            clips: [clip], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate)
+            clips: [clip], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate).events
         #expect(events.count == 4)
         #expect(events[0].sampleTime == 0 && events[0].kind == 0)
         #expect(events[1].sampleTime == 24_000 && events[1].kind == 0)
@@ -104,7 +104,7 @@ struct MIDISchedulerTests {
             MIDINote(pitch: 60, velocity: 100, startBeat: 1, lengthBeats: 1),
         ])
         let events = MIDIEventSchedule.buildEvents(
-            clips: [clip], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate)
+            clips: [clip], fromBeat: 0, tempoMap: TempoMap(constantBPM: 120), sampleRate: rate).events
         #expect(events.count == 4)
         let shared = events.filter { $0.sampleTime == 24_000 }
         #expect(shared.count == 2)
@@ -121,7 +121,7 @@ struct MIDISchedulerTests {
             MIDINote(pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 0.001),
         ])
         let events = MIDIEventSchedule.buildEvents(
-            clips: [clip], fromBeat: 0, tempoMap: TempoMap(constantBPM: 400), sampleRate: rate)
+            clips: [clip], fromBeat: 0, tempoMap: TempoMap(constantBPM: 400), sampleRate: rate).events
         #expect(events.count == 2)
         let width = events[1].sampleTime - events[0].sampleTime
         #expect(width >= 1)

@@ -2151,13 +2151,19 @@ final class PlaybackGraph {
         // pre-m14 (`onsetEndBeat: nil`).
         let onsetWindowEnd = loopUnroll != nil ? loop?.endBeat : nil
         for (trackID, node) in instrumentNodes {
-            node.pendingEvents = MIDIEventSchedule.buildEvents(
+            let build = MIDIEventSchedule.buildEvents(
                 clips: node.clips, fromBeat: startBeats, tempoMap: tempoMap,
                 sampleRate: node.renderer.sampleRate,
                 onsetEndBeat: onsetWindowEnd
             )
+            node.pendingEvents = build.events
             if onsetWindowEnd != nil {
-                loopUnroll?.midiNoteIDBase[trackID] = UInt64(node.pendingEvents.count / 2)
+                // m16-b2 (design-m16b §4.2, C5): the next noteID comes from
+                // the build itself. The old `count / 2` derivation assumed
+                // every event is half of an on/off pair — controller events
+                // (kinds 2/3/4, chase prefixes included) break that and would
+                // double-book IDs across appended cycle blocks.
+                loopUnroll?.midiNoteIDBase[trackID] = build.nextNoteID
             }
         }
     }
@@ -2448,8 +2454,14 @@ final class PlaybackGraph {
     private func extendLoopMIDI(fromCycle: Int, throughCycle: Int) {
         guard let state = loopUnroll else { return }
         for (trackID, node) in instrumentNodes {
+            // m16-b2 (C5): the base is the build-returned counter staged by
+            // `scheduleAll` and advanced by each block below — never derived
+            // from event counts (mixed kinds broke the old `/ 2` pair
+            // assumption). The fallback — a node with no staged base, which
+            // scheduleAll makes unreachable under a loop — is max-ID + 1:
+            // honest even after §8.6 pruning removed early (low-ID) events.
             var base = state.midiNoteIDBase[trackID]
-                ?? UInt64(node.pendingEvents.count / 2)
+                ?? ((node.pendingEvents.lazy.map(\.noteID).max().map { $0 + 1 }) ?? 0)
             for cycle in stride(from: fromCycle, through: throughCycle, by: 1) {
                 // THE ANCHOR LAW (design §8.2, C3): every cycle offset is the
                 // absolute integral from the state constants — never
@@ -2464,8 +2476,9 @@ final class PlaybackGraph {
                     offsetSeconds: cycleStartSec,
                     noteIDBase: base
                 )
-                base += UInt64(block.count / 2)
-                node.pendingEvents = MIDIEventSchedule.mergeSorted(node.pendingEvents, block)
+                base = block.nextNoteID
+                node.pendingEvents = MIDIEventSchedule.mergeSorted(node.pendingEvents,
+                                                                   block.events)
             }
             loopUnroll?.midiNoteIDBase[trackID] = base
             if let roll = midiRollContext {

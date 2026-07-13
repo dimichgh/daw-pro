@@ -288,6 +288,21 @@ The shared pure helper (`windowedControllerLanes` + the lane-state-at-beat scan)
 
 ## 14. Phased landing plan, routing, and C-conditions
 
+> **IMPLEMENTATION AMENDMENTS (2026-07-13, b2 model/store/wire landing — the deviation law):**
+> **(A1) Take-lane DTO reconstruction drops lanes on load — a PRE-EXISTING gainEnvelope gap this design inherited.**
+> `ProjectDocument.takeGroup(bundleURL:)` (~:1002) reconstructs take-lane `Clip`s without `gainEnvelope` today; per
+> §3's "gainEnvelope mechanism byte-for-byte" b2 likewise did not thread `controllerLanes` there. Consequence: a
+> MIDI take in a take LANE loses controller lanes (and has always lost its gain envelope) across a disk round-trip.
+> **b3 MUST thread both** (one-line additive fix) when it lands captured take lanes — promoted to a b3 condition
+> (C13a): take-lane round-trip preserves controllerLanes AND gainEnvelope.
+> **(A2) The non-MIDI rejection surfaces `notAMIDIClip`, whose string names `clip.setNotes`** — doc-compliant reuse;
+> if a controller-specific string is ever wanted it is an m16-g-class copy edit, not a b2 defect.
+> **(A3) The 16384-point cap is enforced at the STORE** (LocalizedError naming the count), not the wire parse;
+> value-domain/controller-required/empty/bad-type stay at the parse. Same agent-visible behavior, cleaner layering.
+> **(A4) Clip-local `deleteTimeRange`/`insertTimeRange` (piano-roll bar edits) leave lanes untouched** — in-place
+> note mutation, no Clip reconstruction, no silent-drop risk; §11's table covers only the session-wide arrange verbs
+> by design. Reviewed and accepted.
+
 ### Phase b2 — model + schedule playback
 **Route: swift-app-engineer** (DAWCore model + store ops + §11 helper + wire/MCP/catalog) **then audio-dsp-engineer** (MIDISchedule kinds/sort/build/chase, PlaybackGraph base fix, instruments, reset). Files: `Sources/DAWCore/Model.swift`, `ProjectStore.swift` (+ a `ProjectStore+ControllerLanes.swift` if it runs long), `Sources/DAWEngine/MIDISchedule.swift`, `PlaybackGraph.swift` (:2114-2124, :2410-2444), `Instruments/PolySynthInstrument.swift`, `Instruments/SamplerInstrument.swift`, `AudioUnits/HostedAUInstrument.swift`, `Sources/DAWControl/Commands.swift`, `mcp-server/src/`, tests in `Tests/DAWCoreTests` + `Tests/DAWEngineTests` + `Tests/DAWControlTests` + npm.
 

@@ -395,9 +395,10 @@ struct SoundBankCommandTests {
         // track.bounceInPlace took it 115 → 116; m12-d's tempo.map + tempo.setMap
         // took it 116 → 118; m12-g's fx.setSidechain took it 118 → 119; m13-e's
         // clip.setGainEnvelope took it 119 → 120. m15-d's clip.duplicate +
-        // arrange.insertBars + arrange.deleteBars took it 120 → 123. The three
-        // instrument commands must stay.
-        #expect(CommandRouter.allCommands.count == 123)
+        // arrange.insertBars + arrange.deleteBars took it 120 → 123. m16-b2's
+        // clip.setControllerLane + clip.removeControllerLane took it 123 → 125.
+        // The three instrument commands must stay.
+        #expect(CommandRouter.allCommands.count == 125)
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBanks"))
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBankPrograms"))
         #expect(CommandRouter.allCommands.contains("instrument.importSoundBank"))

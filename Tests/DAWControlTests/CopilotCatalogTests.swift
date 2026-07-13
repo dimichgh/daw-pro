@@ -37,20 +37,24 @@ struct CopilotCatalogTests {
         #expect(Set(commands).count == commands.count)
     }
 
-    @Test("catalog carries the m15-d arrangement verbs; count now 55")
+    @Test("catalog carries the m16-b2 controller-lane verb; count now 56")
     func catalogCountPin() {
         // m12-g seeded the fx section with fx.setSidechain alone (47). m13-d
         // added fx.add / fx.remove / fx.setParam / fx.setBypass — each teaching
         // the trackId:"master" sentinel + built-ins-only on master — taking the
         // surface 47 → 51. m13-e's clip.setGainEnvelope took it 51 → 52. m15-d's
         // clip.duplicate + arrange.insertBars + arrange.deleteBars took it
-        // 52 → 55. A silent add/drop fails here.
-        #expect(CopilotToolCatalog.v1.count == 55)
+        // 52 → 55. m16-b2's clip.setControllerLane took it 55 → 56 (the paired
+        // clip.removeControllerLane is wire+MCP only, not a Copilot catalog row).
+        // A silent add/drop fails here.
+        #expect(CopilotToolCatalog.v1.count == 56)
         for command in ["fx.add", "fx.remove", "fx.setParam", "fx.setBypass", "fx.setSidechain"] {
             #expect(CopilotToolCatalog.tool(command: command) != nil, "\(command) missing from the catalog")
         }
         #expect(CopilotToolCatalog.tool(command: "clip.setGainEnvelope") != nil,
                 "clip.setGainEnvelope missing from the catalog")
+        #expect(CopilotToolCatalog.tool(command: "clip.setControllerLane") != nil,
+                "clip.setControllerLane missing from the catalog")
         for command in ["clip.duplicate", "arrange.insertBars", "arrange.deleteBars"] {
             #expect(CopilotToolCatalog.tool(command: command) != nil, "\(command) missing from the catalog")
         }

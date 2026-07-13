@@ -472,10 +472,10 @@ struct GaplessLoopMIDITests {
         ])]
         let head = MIDIEventSchedule.buildEvents(
             clips: straddle, fromBeat: 0, tempoMap: map, sampleRate: l2Rate,
-            onsetEndBeat: 2)
+            onsetEndBeat: 2).events
         let block = MIDIEventSchedule.buildEvents(
             clips: straddle, fromBeat: 0, tempoMap: map, sampleRate: l2Rate,
-            onsetEndBeat: 2, offsetSeconds: 1.0, noteIDBase: 1)
+            onsetEndBeat: 2, offsetSeconds: 1.0, noteIDBase: 1).events
         let merged = MIDIEventSchedule.mergeSorted(head, block)
         #expect(head.map(\.sampleTime) == [24_000, 84_000])
         #expect(block.map(\.sampleTime) == [72_000, 132_000])
@@ -494,10 +494,11 @@ struct GaplessLoopMIDITests {
             MIDINote(pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 2),
         ])]
         let seamHead = MIDIEventSchedule.buildEvents(
-            clips: seam, fromBeat: 0, tempoMap: map, sampleRate: l2Rate, onsetEndBeat: 2)
+            clips: seam, fromBeat: 0, tempoMap: map, sampleRate: l2Rate,
+            onsetEndBeat: 2).events
         let seamBlock = MIDIEventSchedule.buildEvents(
             clips: seam, fromBeat: 0, tempoMap: map, sampleRate: l2Rate,
-            onsetEndBeat: 2, offsetSeconds: 1.0, noteIDBase: 1)
+            onsetEndBeat: 2, offsetSeconds: 1.0, noteIDBase: 1).events
         let seamMerged = MIDIEventSchedule.mergeSorted(seamHead, seamBlock)
         #expect(seamMerged.map(\.sampleTime) == [0, 48_000, 48_000, 96_000])
         #expect(seamMerged[1].kind == ScheduledMIDIEvent.noteOff)   // off(0) first

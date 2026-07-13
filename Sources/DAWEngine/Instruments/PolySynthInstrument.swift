@@ -7,6 +7,11 @@ import Foundation
 /// stolen when full (same policy as `TestToneInstrument`); noteOff — paired
 /// by noteID — enters the release stage instead of hard-stopping.
 ///
+/// m16-b2 controllers (design-m16b §4.3): honors PITCH BEND (±2 st GM range,
+/// frequency factor 2^(semitones/12) on every voice) and SUSTAIN (CC64 ≥ 64:
+/// noteOffs defer until pedal-up). All other CCs and channel pressure are
+/// safely ignored (documented); `reset()` re-centers bend and lifts the pedal.
+///
 /// Per-voice signal path:
 ///
 ///     oscillator (polyBLEP saw/square · naive triangle/sine)
@@ -58,7 +63,9 @@ final class PolySynthInstrument: InstrumentRendering, @unchecked Sendable {
         var noteID: UInt64 = 0
         var serial: UInt64 = 0       // steal order: lowest serial = oldest voice
         var phase = 0.0              // normalized [0, 1)
-        var phaseIncrement = 0.0     // frequency / sampleRate
+        var phaseIncrement = 0.0     // baseIncrement × bendFactor
+        var baseIncrement = 0.0      // unbent frequency / sampleRate (m16-b2)
+        var sustained = false        // noteOff deferred by the pedal (m16-b2, CC64)
         var velocityAmp: Float = 0   // velocity / 127
         var stage: UInt8 = 0
         var level: Float = 0         // envelope level, 0...1
@@ -79,6 +86,14 @@ final class PolySynthInstrument: InstrumentRendering, @unchecked Sendable {
     private var sampleRate: Double = 48_000
     private var nextSerial: UInt64 = 0
     private var lastParamsGeneration = UInt64.max  // .max forces first-quantum adoption
+    // Controller state (m16-b2, design-m16b §4.3): plain render-thread
+    // scalars, mutated only by applied schedule events. Bend range is the GM
+    // default ±2 semitones; `bendFactor` = 2^(semitones/12) multiplies every
+    // voice's phase increment (recomputed per applied bend event — one exp2,
+    // no allocation).
+    private var bendFactor = 1.0
+    private var pedalDown = false
+    private static let bendRangeSemitones = 2.0
     // Coefficients derived from the adopted snapshot — recomputed per
     // GENERATION change, never per sample.
     private var waveformCode: UInt8 = 0            // 0 saw · 1 square · 2 triangle · 3 sine
@@ -201,10 +216,15 @@ final class PolySynthInstrument: InstrumentRendering, @unchecked Sendable {
 
     /// All-notes-off NOW (flush contract): hard silence, envelopes and filter
     /// state cleared. Output is true zeros until the next noteOn.
+    /// m16-b2: controller state neutralizes with the voice wipe — bend to
+    /// center, pedal up (design-m16b §4.3): a ring-overflow reset can no more
+    /// stick the pedal than a dropped note-off can stick a voice.
     func reset() {
         for index in 0..<Self.voiceCount {
             voices[index] = Voice()
         }
+        bendFactor = 1.0
+        pedalDown = false
     }
 
     // MARK: - Per-sample synthesis (render thread)
@@ -342,7 +362,8 @@ final class PolySynthInstrument: InstrumentRendering, @unchecked Sendable {
             voice.active = true
             voice.noteID = event.noteID
             voice.serial = nextSerial
-            voice.phaseIncrement = frequency / sampleRate
+            voice.baseIncrement = frequency / sampleRate
+            voice.phaseIncrement = voice.baseIncrement * bendFactor  // bend applies now
             voice.velocityAmp = Float(event.velocity) / 127.0
             voice.stage = Stage.attack
             voices[slot] = voice
@@ -350,13 +371,51 @@ final class PolySynthInstrument: InstrumentRendering, @unchecked Sendable {
         } else if event.kind == ScheduledMIDIEvent.noteOff {
             for index in 0..<Self.voiceCount
             where voices[index].active && voices[index].noteID == event.noteID {
-                if voices[index].level <= 0 {
+                if pedalDown {
+                    // Sustain (m16-b2): the pedal DEFERS the release — the
+                    // voice keeps sounding, marked for the pedal-up sweep.
+                    voices[index].sustained = true
+                } else if voices[index].level <= 0 {
                     voices[index] = Voice()  // off before the first audible sample
                 } else {
                     voices[index].stage = Stage.release
                     voices[index].releaseFrom = voices[index].level
                 }
             }
+        } else if event.kind == ScheduledMIDIEvent.controlChange {
+            // m16-b2 (design-m16b §4.3): the built-in honors CC64 (sustain)
+            // only; every other CC is deliberately ignored here (documented —
+            // hosted AUs receive them all).
+            if event.pitch == 64 {
+                let down = event.velocity >= 64
+                if pedalDown, !down {
+                    // Pedal up: release every pedal-held voice — the deferred
+                    // noteOffs, delivered now.
+                    for index in 0..<Self.voiceCount
+                    where voices[index].active && voices[index].sustained {
+                        voices[index].sustained = false
+                        if voices[index].level <= 0 {
+                            voices[index] = Voice()
+                        } else {
+                            voices[index].stage = Stage.release
+                            voices[index].releaseFrom = voices[index].level
+                        }
+                    }
+                }
+                pedalDown = down
+            }
+        } else if event.kind == ScheduledMIDIEvent.pitchBend {
+            // m16-b2: data1 = LSB, data2 = MSB (THE ONE DATA RULE); center
+            // 8192 → factor 1. Applied to every sounding voice in place —
+            // releasing tails bend too, like a real synth.
+            let raw = Int(event.pitch & 0x7F) | (Int(event.velocity & 0x7F) << 7)
+            bendFactor = exp2(Double(raw - 8_192) / 8_192.0
+                              * Self.bendRangeSemitones / 12.0)
+            for index in 0..<Self.voiceCount where voices[index].active {
+                voices[index].phaseIncrement = voices[index].baseIncrement * bendFactor
+            }
         }
+        // Channel pressure (kind 4) and any future kind fall through
+        // silently — the C4 unknown-kind contract.
     }
 }

@@ -194,6 +194,10 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                     // Gain envelope (m13-e): absent reads as no envelope; the
                     // points re-clamp and re-canonicalize through `Clip.init`.
                     gainEnvelope: cd.gainEnvelope ?? [],
+                    // Controller lanes (m16-b): absent reads as no lanes; the
+                    // lanes re-canonicalize (and force [] on an audio clip)
+                    // through `Clip.init`.
+                    controllerLanes: cd.controllerLanes ?? [],
                     // Take-group marker (M5 iii-a): restores comp members as
                     // store-managed clips; nil for ordinary clips.
                     takeGroupID: cd.takeGroupId
@@ -868,6 +872,13 @@ public struct ClipDocument: Codable, Sendable, Equatable {
     /// through `init(from clip:)`, encode, decode, AND `runtimeState`, or every
     /// envelope silently vanishes on reopen.
     public var gainEnvelope: [ClipGainPoint]?
+    /// MIDI controller lanes (m16-b) — additive optional, same omit-when-empty
+    /// rule as `gainEnvelope`: stored ONLY when the clip carries a non-empty lane
+    /// set, so a pre-m16-b project stays byte-identical across a round trip.
+    /// `nil`/absent reads as no lanes on load. Same m12-f mirror-DTO lesson: this
+    /// field must be threaded through `init(from clip:)`, encode, decode, AND
+    /// `runtimeState`, or every controller lane silently vanishes on reopen.
+    public var controllerLanes: [MIDIControllerLane]?
     /// Take-group marker (M5 iii-a) — additive optional, same omit-when-nil rule.
     /// Set only on comp member clips; a pre-take clip has no key and stays
     /// byte-identical across a round trip.
@@ -876,7 +887,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, name, startBeat, lengthBeats, media, notes, isAIGenerated
         case startOffsetSeconds, gainDb, fadeInBeats, fadeOutBeats, fadeInCurve, fadeOutCurve
-        case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, takeGroupId
+        case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, controllerLanes, takeGroupId
     }
 
     init(from clip: Clip, media: String?) {
@@ -899,6 +910,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         pitchShiftSemitones = clip.pitchShiftSemitones != 0 ? clip.pitchShiftSemitones : nil
         formantPreserve = clip.formantPreserve ? true : nil
         gainEnvelope = clip.gainEnvelope.isEmpty ? nil : clip.gainEnvelope
+        controllerLanes = clip.controllerLanes.isEmpty ? nil : clip.controllerLanes
         takeGroupId = clip.takeGroupID
     }
 
@@ -921,6 +933,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         pitchShiftSemitones = try c.decodeIfPresent(Double.self, forKey: .pitchShiftSemitones)
         formantPreserve = try c.decodeIfPresent(Bool.self, forKey: .formantPreserve)
         gainEnvelope = try c.decodeIfPresent([ClipGainPoint].self, forKey: .gainEnvelope)
+        controllerLanes = try c.decodeIfPresent([MIDIControllerLane].self, forKey: .controllerLanes)
         takeGroupId = try c.decodeIfPresent(UUID.self, forKey: .takeGroupId)
     }
 
@@ -952,6 +965,9 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         // Gain envelope (m13-e): omitted when nil/absent (the clip had none), so
         // a pre-m13-e clip never grows a key.
         try c.encodeIfPresent(gainEnvelope, forKey: .gainEnvelope)
+        // Controller lanes (m16-b): omitted when nil/absent (the clip had none),
+        // so a pre-m16-b clip never grows a key.
+        try c.encodeIfPresent(controllerLanes, forKey: .controllerLanes)
         try c.encodeIfPresent(takeGroupId, forKey: .takeGroupId)
     }
 }

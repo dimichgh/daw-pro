@@ -56,15 +56,21 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
     /// Sample rate the AU's render resources are currently allocated at.
     private var preparedSampleRate: Double
 
+    /// `scheduleMIDIOverride` is a TEST SEAM (m16-b2): it replaces the AU's
+    /// captured schedule block so the exact bytes `render()`/`reset()` emit
+    /// (kind translation, the 2-byte channel-pressure length, the reset
+    /// controller sequence) can be pinned without an interceptable AU. nil in
+    /// production — the registry never passes it.
     @MainActor
-    init(au: AUAudioUnit, sampleRate: Double) throws {
+    init(au: AUAudioUnit, sampleRate: Double,
+         scheduleMIDIOverride: AUScheduleMIDIEventBlock? = nil) throws {
         // Called AFTER allocateRenderResources — renderBlock is only valid then.
         guard let schedule = au.scheduleMIDIEventBlock else {
             throw HostingError.notAMusicDevice
         }
         auAudioUnit = au
         renderBlock = au.renderBlock
-        scheduleMIDI = schedule
+        scheduleMIDI = scheduleMIDIOverride ?? schedule
         preparedSampleRate = sampleRate
         shadowABL = AudioBufferList.allocate(maximumBuffers: 2)
         midiBytes = .allocate(capacity: 3)
@@ -128,20 +134,46 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
                 frameCount: Int,
                 output: UnsafeMutableAudioBufferListPointer) {
         // 1. Deliver every event BEFORE the render call, at its in-quantum
-        // offset. Events arrive sorted with off-before-on ties; the schedule
-        // block's FIFO preserves that ordering at equal offsets.
+        // offset. Events arrive sorted with off < cc/bend/pressure < on ties
+        // (m16-b2); the schedule block's FIFO preserves that ordering at
+        // equal offsets. Byte translation is THE ONE DATA RULE (design-m16b
+        // §4.1): pitch ≡ data1, velocity ≡ data2 — channel 0 status bytes.
+        // Channel pressure is a TWO-byte message (the length-3 habit would be
+        // a real bug: a trailing garbage byte after 0xD0). Unknown future
+        // kinds emit nothing.
         for event in events {
             let offset = max(0, Int(event.sampleTime - renderStart))
-            if event.kind == ScheduledMIDIEvent.noteOn {
+            let length: Int
+            switch event.kind {
+            case ScheduledMIDIEvent.noteOn:
                 midiBytes[0] = 0x90
                 midiBytes[1] = event.pitch
                 midiBytes[2] = event.velocity
-            } else {
+                length = 3
+            case ScheduledMIDIEvent.noteOff:
                 midiBytes[0] = 0x80
                 midiBytes[1] = event.pitch
                 midiBytes[2] = 0
+                length = 3
+            case ScheduledMIDIEvent.controlChange:
+                midiBytes[0] = 0xB0
+                midiBytes[1] = event.pitch      // controller#
+                midiBytes[2] = event.velocity   // value
+                length = 3
+            case ScheduledMIDIEvent.pitchBend:
+                midiBytes[0] = 0xE0
+                midiBytes[1] = event.pitch      // LSB
+                midiBytes[2] = event.velocity   // MSB
+                length = 3
+            case ScheduledMIDIEvent.channelPressure:
+                midiBytes[0] = 0xD0
+                midiBytes[1] = event.pitch      // pressure value — 2 bytes total
+                length = 2
+            default:
+                continue                        // never hand the AU garbage bytes
             }
-            scheduleMIDI(AUEventSampleTimeImmediate + AUEventSampleTime(offset), 0, 3, midiBytes)
+            scheduleMIDI(AUEventSampleTimeImmediate + AUEventSampleTime(offset), 0,
+                         length, midiBytes)
         }
 
         // 2. Point the preallocated shadow ABL at the caller's output buffers.
@@ -186,17 +218,31 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
         }
     }
 
-    /// All-notes-off: CC 123 (all notes off) then CC 120 (all sound off) on
-    /// channel 0, scheduled immediately. Do NOT call `AUAudioUnit.reset()`
-    /// here — that is an ObjC main-actor call; external silence is already
-    /// enforced by `InstrumentRenderer.renderQuantum`, and the CCs kill
-    /// internal voices before the next schedule renders.
+    /// All-notes-off + controller neutralization (m16-b2, design-m16b §4.3):
+    /// CC 123 (all notes off), CC 120 (all sound off), CC 121 (reset all
+    /// controllers), pitch bend to center (0xE0 00 40), and CC 64 = 0
+    /// (sustain pedal up) on channel 0, scheduled immediately — stale-state
+    /// defense-in-depth behind the schedule chase prefix, for AUs that ignore
+    /// CC 121. Do NOT call `AUAudioUnit.reset()` here — that is an ObjC
+    /// main-actor call; external silence is already enforced by
+    /// `InstrumentRenderer.renderQuantum`, and these messages kill internal
+    /// voices and controller state before the next schedule renders.
     func reset() {
         midiBytes[0] = 0xB0
         midiBytes[1] = 123
         midiBytes[2] = 0
         scheduleMIDI(AUEventSampleTimeImmediate, 0, 3, midiBytes)
         midiBytes[1] = 120
+        scheduleMIDI(AUEventSampleTimeImmediate, 0, 3, midiBytes)
+        midiBytes[1] = 121
+        scheduleMIDI(AUEventSampleTimeImmediate, 0, 3, midiBytes)
+        midiBytes[0] = 0xE0
+        midiBytes[1] = 0x00
+        midiBytes[2] = 0x40   // bend center 8192
+        scheduleMIDI(AUEventSampleTimeImmediate, 0, 3, midiBytes)
+        midiBytes[0] = 0xB0
+        midiBytes[1] = 64
+        midiBytes[2] = 0      // sustain pedal up
         scheduleMIDI(AUEventSampleTimeImmediate, 0, 3, midiBytes)
     }
 }

@@ -34,7 +34,7 @@ struct TempoMapPhaseBTests {
             MIDINote(pitch: 67, startBeat: 3.5, lengthBeats: 1.0),    // CROSSES the boundary
         ])
         let events = MIDIEventSchedule.buildEvents(
-            clips: [clip], fromBeat: 0, tempoMap: map, sampleRate: rate)
+            clips: [clip], fromBeat: 0, tempoMap: map, sampleRate: rate).events
         #expect(events.count == 6)
 
         // Closed-form expectations, computed HERE (not read back from the map).
@@ -64,7 +64,7 @@ struct TempoMapPhaseBTests {
         // No-chase (beat-domain guard, untouched by the map): scheduling from
         // beat 4 drops BOTH events of every note whose onset is < 4.
         let chased = MIDIEventSchedule.buildEvents(
-            clips: [clip], fromBeat: 4.0, tempoMap: map, sampleRate: rate)
+            clips: [clip], fromBeat: 4.0, tempoMap: map, sampleRate: rate).events
         #expect(chased.count == 2)
         let onFrom4 = Int64((rate * (0.1 * (60.0 / 90.0))).rounded())
         #expect(onFrom4 == 3_200)

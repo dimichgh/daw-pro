@@ -2883,6 +2883,15 @@ public final class ProjectStore {
         let firstEnv = Clip.windowedGainEnvelope(clip.gainEnvelope, delta: 0, newLength: firstLength)
         let secondEnv = Clip.windowedGainEnvelope(clip.gainEnvelope, delta: relBeat, newLength: secondLength)
 
+        // Controller lanes (m16-b): the two halves are the windows [0, relBeat]
+        // and [relBeat, length] (design-m16b §11 split row). The left half keeps
+        // its points < the split verbatim; the RIGHT half opens with an injected
+        // beat-0 point carrying the value in effect at the split (step semantics,
+        // the chase scan reused) so the shared seam value is identical to the
+        // pre-split curve by construction. Empty → empty (audio clips have none).
+        let firstLanes = Clip.windowedControllerLanes(clip.controllerLanes, delta: 0, newLength: firstLength)
+        let secondLanes = Clip.windowedControllerLanes(clip.controllerLanes, delta: relBeat, newLength: secondLength)
+
         // Stretch params (M5 ii-c) copy verbatim to BOTH halves: the engine's
         // render (ii-d) covers the WHOLE source file, so both halves read the
         // same stretched material — the split junction is seamless by
@@ -2897,7 +2906,8 @@ public final class ProjectStore {
             fadeInBeats: firstIn, fadeOutBeats: firstOut,
             fadeInCurve: clip.fadeInCurve, fadeOutCurve: .linear,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
-            formantPreserve: clip.formantPreserve, gainEnvelope: firstEnv)
+            formantPreserve: clip.formantPreserve, gainEnvelope: firstEnv,
+            controllerLanes: firstLanes)
         let second = Clip(
             id: UUID(), name: clip.name,
             startBeat: clip.startBeat + firstLength, lengthBeats: secondLength,
@@ -2907,7 +2917,8 @@ public final class ProjectStore {
             fadeInBeats: secondIn, fadeOutBeats: secondOut,
             fadeInCurve: .linear, fadeOutCurve: clip.fadeOutCurve,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
-            formantPreserve: clip.formantPreserve, gainEnvelope: secondEnv)
+            formantPreserve: clip.formantPreserve, gainEnvelope: secondEnv,
+            controllerLanes: secondLanes)
 
         performEdit("Split Clip '\(clip.name)'") {
             tracks[t].clips[c] = first
@@ -2967,6 +2978,11 @@ public final class ProjectStore {
         // the new visible span drop, edge boundaries are pinned interpolated so
         // the audible gain is continuous with the pre-trim curve. Empty → empty.
         let newEnv = Clip.windowedGainEnvelope(clip.gainEnvelope, delta: delta, newLength: newLength)
+        // Controller lanes (m16-b): re-window for the moved head with step
+        // semantics — the new leading edge opens with the value in effect there,
+        // points outside the window drop, so a trimmed MIDI clip keeps honest
+        // lane state. Empty → empty (audio clips have none).
+        let newLanes = Clip.windowedControllerLanes(clip.controllerLanes, delta: delta, newLength: newLength)
         let rebuilt = Clip(
             id: clip.id, name: clip.name,
             startBeat: newStart, lengthBeats: newLength,
@@ -2978,7 +2994,8 @@ public final class ProjectStore {
             // Trim is geometry-free w.r.t. stretch (spec §1): the ratio/pitch/
             // formant carry through unchanged — only the visible window moves.
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
-            formantPreserve: clip.formantPreserve, gainEnvelope: newEnv)
+            formantPreserve: clip.formantPreserve, gainEnvelope: newEnv,
+            controllerLanes: newLanes)
 
         performEdit("Trim Clip '\(clip.name)'", key: "clip.trim:\(clipId.uuidString)") {
             tracks[t].clips[c] = rebuilt
@@ -3046,7 +3063,8 @@ public final class ProjectStore {
 
     /// Rebuilds `clip` under a FRESH identity/position, VALUE-COPYING every
     /// content field (media/notes, gain, fades + their curves, gain envelope,
-    /// stretch/pitch/formant, AI flag) but never the `takeGroupID` — a
+    /// controller lanes, stretch/pitch/formant, AI flag) but never the
+    /// `takeGroupID` — a
     /// duplicated / split-off piece is always an ORDINARY clip (a comp member's
     /// geometry is store-managed and would be overwritten). Pure, no journaling;
     /// `Clip.init` re-heals notes + envelope to their canonical form. Shared by
@@ -3063,6 +3081,10 @@ public final class ProjectStore {
             fadeInCurve: clip.fadeInCurve, fadeOutCurve: clip.fadeOutCurve,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
             formantPreserve: clip.formantPreserve, gainEnvelope: clip.gainEnvelope,
+            // Controller lanes (m16-b): copy verbatim — points are identity-free,
+            // so a duplicated / split-off piece carries the same lanes with
+            // nothing to re-mint (design-m16b §11 duplicate row).
+            controllerLanes: clip.controllerLanes,
             takeGroupID: nil)
     }
 
@@ -3169,6 +3191,11 @@ public final class ProjectStore {
         // an overlap-trimmed resident keeps its (continuous) envelope instead of
         // silently losing it. Empty → empty.
         let newEnv = Clip.windowedGainEnvelope(clip.gainEnvelope, delta: delta, newLength: newLength)
+        // Controller lanes (m16-b): same trim-window semantics — the right/new
+        // edge opens with the value in effect at the trim point (step semantics),
+        // so an overlap-trimmed / inserted-tail MIDI clip keeps honest lane state
+        // instead of silently dropping it. Empty → empty (audio clips have none).
+        let newLanes = Clip.windowedControllerLanes(clip.controllerLanes, delta: delta, newLength: newLength)
         return Clip(
             id: clip.id, name: clip.name,
             startBeat: start, lengthBeats: newLength,
@@ -3178,7 +3205,8 @@ public final class ProjectStore {
             fadeInBeats: fin, fadeOutBeats: fout,
             fadeInCurve: clip.fadeInCurve, fadeOutCurve: clip.fadeOutCurve,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
-            formantPreserve: clip.formantPreserve, gainEnvelope: newEnv)
+            formantPreserve: clip.formantPreserve, gainEnvelope: newEnv,
+            controllerLanes: newLanes)
     }
 
     /// Resolves how one STATIONARY same-track clip must change so it no longer
@@ -3862,6 +3890,102 @@ public final class ProjectStore {
             // buffers, so the engine must re-schedule (re-bake) — the fade-edit
             // seam (stop-reschedule-resume). tracksDidChange triggers reconcile,
             // and gainEnvelope is in the ClipKey signature so it reschedules.
+            engine?.tracksDidChange(tracks)
+        }
+        return tracks[t].clips[c]
+    }
+
+    // MARK: - MIDI controller lanes (m16-b)
+
+    /// A clip may carry at most this many controller lanes (design-m16b §7): one
+    /// per distinct controller stream, capped so an adversarial project can't
+    /// mint unbounded lanes. Enforced when ADDING a new lane type.
+    public static let maxControllerLanesPerClip = 16
+    /// A controller lane may carry at most this many points (design-m16b §7): a
+    /// thinned ~200 Hz capture of an ~80 s continuous gesture still round-trips.
+    /// Enforced at the store edit boundary (the notes-cap idiom, but store-side).
+    public static let maxControllerPointsPerLane = 16384
+
+    /// Creates or REPLACES the clip's controller lane of `type` WHOLESALE (the
+    /// `setAutomationPoints` / `setClipNotes` precedent) with `points` (m16-b).
+    /// Points are canonicalized through `MIDIControllerLane` (values clamped to
+    /// the type's raw MIDI range, sorted ascending by beat, equal-beat duplicates
+    /// deduped last-wins). An EMPTY (or all-out-of-window) point set REMOVES the
+    /// lane (the `setClipGainEnvelope` empty-clears precedent); the WIRE steers
+    /// callers to `clip.removeControllerLane` for an explicit delete.
+    ///
+    /// MIDI clips only — controller data feeds the instrument, so an audio clip
+    /// throws `notAMIDIClip` (the `setClipNotes`/time-range family). Caps
+    /// (design-m16b §7): a lane may hold at most `maxControllerPointsPerLane`
+    /// points (over-cap throws, naming the count) and a clip at most
+    /// `maxControllerLanesPerClip` lanes (adding a new type past the cap throws).
+    /// Coalesces under `clip.controllerLane:<clipId>:<typeKey>` so a strip draw
+    /// gesture is one undo step (the automation.points precedent, per-lane).
+    /// A ClipKey-affecting edit (lanes ride the schedule): `tracksDidChange`
+    /// reschedules. Returns the updated clip.
+    @discardableResult
+    public func setControllerLane(clipID: UUID, type: MIDIControllerType,
+                                  points: [MIDIControllerPoint]) throws -> Clip {
+        guard let (t, c) = locateClip(clipID) else {
+            throw ProjectError.clipNotFound(clipID)
+        }
+        try requireNotCompMember(trackIndex: t, clipIndex: c)
+        let clip = tracks[t].clips[c]
+        guard clip.isMIDI else {
+            throw ProjectError.notAMIDIClip(clipID)
+        }
+        guard points.count <= Self.maxControllerPointsPerLane else {
+            throw ProjectError.invalidClipEdit(
+                "controller lane exceeds the \(Self.maxControllerPointsPerLane)-points-per-lane limit (got \(points.count))")
+        }
+        // Canonicalize the incoming lane; an empty/all-out-of-window result
+        // clears the lane rather than storing an empty one.
+        let lane = MIDIControllerLane(type: type, points: points)
+        let existing = clip.controllerLanes
+        let hasType = existing.contains { $0.type == type }
+        // Adding a NEW type past the lane cap is refused (a replace of an existing
+        // type is always allowed, even at the cap).
+        if !lane.points.isEmpty, !hasType, existing.count >= Self.maxControllerLanesPerClip {
+            throw ProjectError.invalidClipEdit(
+                "clip '\(clip.name)' already has \(Self.maxControllerLanesPerClip) controller lanes — remove one first")
+        }
+        var rebuilt = existing.filter { $0.type != type }
+        if !lane.points.isEmpty { rebuilt.append(lane) }
+        let canon = Clip.canonicalControllerLanes(rebuilt)
+        performEdit("Set Controller Lane",
+                    key: "clip.controllerLane:\(clipID.uuidString):\(type.wireKey)") {
+            tracks[t].clips[c].controllerLanes = canon
+            // A ClipKey-affecting edit (the lanes ride the schedule build): the
+            // engine must re-schedule — tracksDidChange triggers reconcile.
+            engine?.tracksDidChange(tracks)
+        }
+        return tracks[t].clips[c]
+    }
+
+    /// Removes the clip's controller lane of `type` (m16-b). MIDI clips only
+    /// (`notAMIDIClip` otherwise). If the clip has no lane of that type, throws
+    /// `invalidClipEdit` LISTING the clip's existing lanes (the m13-c listing
+    /// idiom) so an agent can correct the type. One undo step. Returns the
+    /// updated clip.
+    @discardableResult
+    public func removeControllerLane(clipID: UUID, type: MIDIControllerType) throws -> Clip {
+        guard let (t, c) = locateClip(clipID) else {
+            throw ProjectError.clipNotFound(clipID)
+        }
+        try requireNotCompMember(trackIndex: t, clipIndex: c)
+        let clip = tracks[t].clips[c]
+        guard clip.isMIDI else {
+            throw ProjectError.notAMIDIClip(clipID)
+        }
+        guard clip.controllerLanes.contains(where: { $0.type == type }) else {
+            let existing = clip.controllerLanes.map(\.type.wireKey)
+            let list = existing.isEmpty ? "none" : existing.joined(separator: ", ")
+            throw ProjectError.invalidClipEdit(
+                "clip '\(clip.name)' has no \(type.wireKey) controller lane — existing lanes: \(list)")
+        }
+        let remaining = clip.controllerLanes.filter { $0.type != type }
+        performEdit("Remove Controller Lane") {
+            tracks[t].clips[c].controllerLanes = remaining
             engine?.tracksDidChange(tracks)
         }
         return tracks[t].clips[c]

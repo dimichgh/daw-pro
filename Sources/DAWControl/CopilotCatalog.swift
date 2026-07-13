@@ -488,6 +488,29 @@ public enum CopilotToolCatalog {
             ], required: ["trackId", "clipId"])
         ),
         CopilotTool(
+            command: "clip.setControllerLane",
+            description: "Add MIDI controller moves — mod wheel, sustain pedal, pitch bend, expression, channel pressure — to a MIDI clip's performance, on top of its notes. Creates or REPLACES the clip's lane of one controller type wholesale. Points are STEPWISE: each value holds until the next point, so two points make a STEP, not a ramp — a ramp is a dense run of points. Values are RAW MIDI: pitchBend is 0-16383 (8192 = center, ±2 semitones on built-in instruments); everything else is 0-127 (CC 64 >= 64 = sustain pedal down). Built-in instruments honor pitch bend and sustain (CC 64); every other CC affects Audio Unit instruments only. Controller values chase at play/seek (a value set earlier keeps its effect). quantize/humanize/groove move only NOTES, never these lanes. Per-note (poly) aftertouch is not supported yet. MIDI clips only.",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the MIDI clip to edit, from project.snapshot.")),
+                ("type", stringSchema(
+                    "Which controller stream this lane carries.",
+                    enumValues: ["cc", "pitchBend", "channelPressure"])),
+                ("controller", integerSchema(
+                    "The CC number 0-127, REQUIRED when type is \"cc\" (1 = mod wheel, 7 = volume, 10 = pan, 11 = expression, 64 = sustain). Ignored for pitchBend / channelPressure.",
+                    minimum: 0, maximum: 127)),
+                ("points", arraySchema(
+                    "The lane's complete new point list (replaces this type's existing lane), non-empty, up to 16384 entries. To DELETE a lane use clip.removeControllerLane.",
+                    items: schemaObject([
+                        ("beat", numberSchema(
+                            "Point position in beats, RELATIVE TO THE CLIP'S START (not the timeline). Clamped to >= 0.",
+                            minimum: 0)),
+                        ("value", integerSchema(
+                            "Raw MIDI value at this point. 0-16383 for pitchBend (8192 = center); 0-127 for cc / channelPressure.",
+                            minimum: 0, maximum: 16383)),
+                    ], required: ["beat", "value"]))),
+            ], required: ["clipId", "type", "points"])
+        ),
+        CopilotTool(
             command: "clip.crossfade",
             description: "Crossfade two ADJACENT (or already-overlapping) audio clips on one track: creates a sanctioned overlap of the given beats with complementary equal-power fades so one clip fades out as the next fades in, with no click or volume bump. Pass the two clip ids in any order.",
             schema: schemaObject([

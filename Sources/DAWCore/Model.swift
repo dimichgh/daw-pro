@@ -224,6 +224,235 @@ public struct ClipGainPoint: Codable, Sendable, Equatable {
     }
 }
 
+/// Which controller stream a lane carries (m16-b). Flat Codable `{type,
+/// controller?}` — the `AutomationTarget` discriminator precedent
+/// (`Automation.swift:18-70`): a String raw discriminator so an unknown `type`
+/// on decode is a HARD error (not a silent misread), and `controller` rides
+/// only for `.cc`. Unlike `AutomationTarget` (the mixer/effect OUTPUT plane),
+/// this is the instrument INPUT plane — it drives `ScheduledMIDIEvent` kinds
+/// 2/3/4, never `AutomationLane` (design-m16b §1).
+public enum MIDIControllerType: Hashable, Sendable, Codable {
+    /// A Control Change stream; `controller` is the CC number 0...127
+    /// (1 = mod wheel, 7 = channel volume, 10 = pan, 11 = expression,
+    /// 64 = sustain pedal…). Built-in instruments honour CC 64 (sustain); every
+    /// other CC is forwarded to hosted Audio Units (design-m16b §4.3).
+    case cc(controller: Int)
+    /// Pitch bend; value 0...16383, center 8192 (±2 semitones on built-ins).
+    case pitchBend
+    /// Channel (mono) aftertouch; value 0...127. Per-note (poly) aftertouch is a
+    /// different model shape, deferred past v1 (design-m16b §3).
+    case channelPressure
+
+    /// The raw MIDI value domain a point on this lane occupies — the schedule
+    /// path emits these as MIDI data bytes, so they are stored RAW (a normalized
+    /// float would round-trip lossily and obscure teaching copy). `MIDIController-
+    /// Lane` clamps every point's value into this range at canonicalization.
+    public var valueRange: ClosedRange<Int> {
+        switch self {
+        case .cc, .channelPressure: return 0...127
+        case .pitchBend: return 0...16383
+        }
+    }
+
+    /// The neutral value a chase snapshot falls back to when NO scheduled point
+    /// precedes a block's start beat (design-m16b §5): bend center, no pressure,
+    /// and a small GM/RP-015-informed CC table (7 = channel volume 100,
+    /// 10 = pan center 64, 11 = expression full, else 0). Consumed by the
+    /// phase-2 schedule chase; defined here so "the neutral default" has ONE
+    /// definition in DAWCore.
+    public var neutralDefault: Int {
+        switch self {
+        case .pitchBend: return 8192
+        case .channelPressure: return 0
+        case .cc(let controller):
+            switch controller {
+            case 7: return 100    // channel volume
+            case 10: return 64    // pan (center)
+            case 11: return 127   // expression (full)
+            default: return 0
+            }
+        }
+    }
+
+    /// Stable canonical order key (design-m16b §3): CC ascending BY CONTROLLER,
+    /// then pitchBend, then channelPressure. A CC controller is clamp-bounded to
+    /// 0...127, so it never collides with the 1000/1001 sentinels.
+    var sortKey: Int {
+        switch self {
+        case .cc(let controller): return controller
+        case .pitchBend: return 1000
+        case .channelPressure: return 1001
+        }
+    }
+
+    /// The wire/undo key form: "cc11", "pitchBend", "channelPressure". Used for
+    /// the per-lane undo-coalescing key and the "existing lanes" teaching list.
+    public var wireKey: String {
+        switch self {
+        case .cc(let controller): return "cc\(controller)"
+        case .pitchBend: return "pitchBend"
+        case .channelPressure: return "channelPressure"
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey { case type, controller }
+
+    /// A String raw enum so an unknown `type` on decode is a hard error.
+    private enum Discriminator: String, Codable { case cc, pitchBend, channelPressure }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .cc(let controller):
+            try c.encode(Discriminator.cc, forKey: .type)
+            try c.encode(controller, forKey: .controller)
+        case .pitchBend:
+            try c.encode(Discriminator.pitchBend, forKey: .type)
+        case .channelPressure:
+            try c.encode(Discriminator.channelPressure, forKey: .type)
+        }
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(Discriminator.self, forKey: .type) {
+        case .cc:
+            // Controller number re-clamps into 0...127 on decode (defensive; the
+            // wire validates first) — the `MIDINote` self-healing discipline.
+            let raw = try c.decode(Int.self, forKey: .controller)
+            self = .cc(controller: raw.clamped(to: 0...127))
+        case .pitchBend:
+            self = .pitchBend
+        case .channelPressure:
+            self = .channelPressure
+        }
+    }
+}
+
+/// One controller point (m16-b): a clip-relative `beat` and a RAW MIDI `value`.
+/// Deliberately NO id and NO curve — points are identity-free value data (the
+/// `AutomationPoint` precedent) with STEPWISE semantics: a value holds until the
+/// next point steps it; a ramp is a DENSE run of points (exactly what capture
+/// produces). `beat` floors at 0 through `init` (the only construction path, and
+/// where Codable routes); `value` is stored raw and clamped to the OWNING lane's
+/// type range at `MIDIControllerLane` canonicalization (the point itself is
+/// type-agnostic, so it can't clamp its own value).
+public struct MIDIControllerPoint: Codable, Sendable, Equatable {
+    /// Clip-relative position in beats (>= 0).
+    public var beat: Double
+    /// Raw MIDI value; range depends on the owning lane's type (see
+    /// `MIDIControllerType.valueRange`).
+    public var value: Int
+
+    public init(beat: Double, value: Int) {
+        self.beat = max(0, beat)
+        self.value = value
+    }
+
+    private enum CodingKeys: String, CodingKey { case beat, value }
+
+    /// Decoding routes through the flooring `init`, so a hand-authored payload
+    /// can't smuggle in a negative beat (the `AutomationPoint`/`MIDINote`
+    /// precedent). Both keys are required.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            beat: try c.decode(Double.self, forKey: .beat),
+            value: try c.decode(Int.self, forKey: .value))
+    }
+
+    /// Writes both keys explicitly (the full point shape on wire and disk).
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(beat, forKey: .beat)
+        try c.encode(value, forKey: .value)
+    }
+}
+
+/// One controller lane (m16-b): a controller stream (`type`) plus its
+/// canonically-ordered points. AT MOST ONE lane per type per clip (store- and
+/// canonicalization-enforced, the automation at-most-one-per-target rule). No
+/// lane UUID — the `type` IS the identity (one identity per thing, so nothing to
+/// re-mint on duplicate — the identity-free-points design sidesteps the F8d
+/// note-id trap). Every construction path routes points through
+/// `canonicalPoints` (sorted by beat, equal-beat last-wins dedupe, values
+/// clamped to the type range), so the stored invariant always holds.
+public struct MIDIControllerLane: Codable, Sendable, Equatable {
+    public var type: MIDIControllerType
+    /// Canonically ordered: ascending by beat, distinct beats, values clamped to
+    /// `type.valueRange`.
+    public var points: [MIDIControllerPoint]
+
+    public init(type: MIDIControllerType, points: [MIDIControllerPoint]) {
+        self.type = type
+        self.points = Self.canonicalPoints(points, type: type)
+    }
+
+    /// The value IN EFFECT at clip-relative `beat` (design-m16b §5): the value of
+    /// the latest point with `point.beat <= beat`, else nil (no state established
+    /// yet — the caller applies `type.neutralDefault`). Stepwise: a value holds
+    /// until the next point. Points are canonical (ascending), so this is the
+    /// last point at or before `beat`. THE ONE definition of "the value in effect
+    /// at beat B" — reused by `windowedControllerLanes` (split/trim/take) and the
+    /// phase-2 schedule chase.
+    public func value(atBeat beat: Double) -> Int? {
+        var result: Int?
+        for p in points {
+            if p.beat <= beat { result = p.value } else { break }
+        }
+        return result
+    }
+
+    /// Canonical point order: values clamped to `type.valueRange`, beats floored
+    /// at 0 (through `MIDIControllerPoint.init`), sorted ascending by beat with
+    /// equal-beat duplicates deduped LAST-WINS (the `AutomationLane.canonicalize`
+    /// / gain-envelope contract). Empty stays empty. NO size cap here — the
+    /// 16384-points-per-lane policy is a store/wire teaching boundary
+    /// (design-m16b §7), the notes-cap precedent, so canonicalization never
+    /// silently drops captured data.
+    public static func canonicalPoints(_ points: [MIDIControllerPoint],
+                                       type: MIDIControllerType) -> [MIDIControllerPoint] {
+        guard !points.isEmpty else { return [] }
+        let range = type.valueRange
+        // Clamp values, then stable-sort by beat (preserving input order for
+        // equal beats so the LAST wins the dedupe below).
+        let clamped = points.enumerated().map { (offset, p) in
+            (offset, MIDIControllerPoint(beat: p.beat, value: p.value.clamped(to: range)))
+        }
+        let sorted = clamped.sorted {
+            $0.1.beat != $1.1.beat ? $0.1.beat < $1.1.beat : $0.0 < $1.0
+        }.map(\.1)
+        var out: [MIDIControllerPoint] = []
+        out.reserveCapacity(sorted.count)
+        for p in sorted {
+            if let last = out.last, last.beat == p.beat {
+                out[out.count - 1] = p          // equal beat → last wins
+            } else {
+                out.append(p)
+            }
+        }
+        return out
+    }
+
+    private enum CodingKeys: String, CodingKey { case type, points }
+
+    /// Decoding routes points through the canonicalizing `init` (so a
+    /// hand-authored lane heals to its invariant); `type` is required (an
+    /// unknown discriminator is a hard error via `MIDIControllerType`).
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            type: try c.decode(MIDIControllerType.self, forKey: .type),
+            points: try c.decodeIfPresent([MIDIControllerPoint].self, forKey: .points) ?? [])
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type, forKey: .type)
+        try c.encode(points, forKey: .points)
+    }
+}
+
 public struct Clip: Identifiable, Codable, Sendable, Equatable {
     public let id: UUID
     public var name: String
@@ -295,6 +524,22 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     /// fade-bake (ClipFadeBake) — MIDI clips have no per-clip player to bake
     /// onto, so `setClipGainEnvelope` rejects them.
     public var gainEnvelope: [ClipGainPoint]
+    /// Per-clip MIDI controller lanes (m16-b): mod wheel, sustain, pitch bend,
+    /// channel pressure — the instrument INPUT plane, delivered interleaved with
+    /// notes on the schedule path (design-m16b §1/§3), NOT the mixer automation
+    /// plane. Empty == ABSENT == today's behavior EXACTLY; encoded ONLY when
+    /// non-empty (a pre-m16-b clip stays byte-identical — the `gainEnvelope`
+    /// mechanism byte-for-byte, encode `:568`). MIDI clips only: a non-MIDI clip
+    /// forces `[]` in `init` (the notes-wins invariant cousin, `:366`), so a
+    /// non-empty `controllerLanes` always implies `isMIDI`. A CC-only clip is
+    /// legal as `notes: []` + lanes. Stored CANONICALLY ordered (at most one lane
+    /// per type, sorted by type key, points canonical per lane) — `Clip.init`
+    /// heals any input through `canonicalControllerLanes`, and the store's
+    /// `setControllerLane`/`removeControllerLane` are the edit boundary. NOTE (the
+    /// m12-f MIRROR-DTO lesson, as `gainEnvelope` warns): the disk path is
+    /// `ClipDocument`, not this Codable — the field is threaded through
+    /// `ClipDocument` init/encode/decode AND `runtimeState`.
+    public var controllerLanes: [MIDIControllerLane]
 
     /// Per-clip gain bounds: a generous studio range, matching the fader's
     /// mental model (a clip can be pulled 72 dB down toward silence or pushed
@@ -354,6 +599,7 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         pitchShiftSemitones: Double = 0,
         formantPreserve: Bool = false,
         gainEnvelope: [ClipGainPoint] = [],
+        controllerLanes: [MIDIControllerLane] = [],
         takeGroupID: UUID? = nil
     ) {
         self.id = id
@@ -378,6 +624,11 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         // split/trim, overlap trim): beats clamped into the clip, sorted, and
         // deduped last-wins. Empty stays empty.
         self.gainEnvelope = Self.canonicalGainEnvelope(gainEnvelope, lengthBeats: self.lengthBeats)
+        // Controller lanes (m16-b) require MIDI: an audio clip has no instrument
+        // to feed, so its lanes force to [] (the notes-wins invariant cousin
+        // above). A MIDI clip heals its lanes to canonical form (at most one lane
+        // per type, sorted, points canonical). Empty stays empty.
+        self.controllerLanes = notes == nil ? [] : Self.canonicalControllerLanes(controllerLanes)
     }
 
     /// Linear playback gain at `beat` (measured from the clip start): the static
@@ -496,6 +747,70 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         return out
     }
 
+    /// Canonical order for a clip's controller lanes (m16-b, design-m16b §3): at
+    /// most ONE lane per type — duplicate-type lanes MERGE last-wins (their
+    /// points concatenate in input order, so a later lane's point overrides at an
+    /// equal beat through `canonicalPoints`) — each lane's points canonicalized,
+    /// empty lanes dropped, and the result sorted by a stable type key (cc
+    /// ascending by controller, then pitchBend, then channelPressure). `Clip.init`
+    /// and the store's `setControllerLane`/`removeControllerLane` both route
+    /// through this so the stored invariant holds no matter how lanes were built.
+    public static func canonicalControllerLanes(_ lanes: [MIDIControllerLane]) -> [MIDIControllerLane] {
+        guard !lanes.isEmpty else { return [] }
+        var byType: [MIDIControllerType: [MIDIControllerPoint]] = [:]
+        var order: [MIDIControllerType] = []
+        for lane in lanes {
+            if byType[lane.type] == nil { order.append(lane.type) }
+            byType[lane.type, default: []].append(contentsOf: lane.points)
+        }
+        var merged: [MIDIControllerLane] = []
+        for type in order {
+            let lane = MIDIControllerLane(type: type, points: byType[type] ?? [])
+            if !lane.points.isEmpty { merged.append(lane) }
+        }
+        return merged.sorted { $0.type.sortKey < $1.type.sortKey }
+    }
+
+    /// Re-windows a clip's controller lanes for a trim / split / take-comp / (in
+    /// phase 2) schedule-build edit that shifts the window head by `delta` beats
+    /// (new clip-relative beat = old − `delta`) into a `newLength`-beat window
+    /// (design-m16b §11). STEP semantics — the `windowedGainEnvelope` sibling
+    /// without an end point:
+    ///
+    ///  - an injected beat-0 point carries THE VALUE IN EFFECT at `delta`
+    ///    (`MIDIControllerLane.value(atBeat:)` — the §5 chase scan reused), so the
+    ///    windowed clip opens with honest controller state, but ONLY when the lane
+    ///    has established a value at/before `delta` (else the chase supplies the
+    ///    neutral default at play — no spurious point);
+    ///  - interior points STRICTLY inside `(delta, delta+newLength)` rebase by
+    ///    `−delta` (a point exactly at `delta` is absorbed into the beat-0
+    ///    injection, never double-counted; a point at the window END belongs to
+    ///    the next region);
+    ///  - a lane that ends up empty is dropped.
+    ///
+    /// For a split, the two halves are the windows `delta: 0, newLength:
+    /// firstLength` (the left keeps its points < the split verbatim) and
+    /// `delta: splitBeat, newLength: secondLength` (the right opens with the
+    /// value in effect at the split) — the seam value is identical to the pre-edit
+    /// curve by construction. Pure; the caller's `Clip.init` re-canonicalizes.
+    public static func windowedControllerLanes(_ lanes: [MIDIControllerLane],
+                                               delta: Double, newLength: Double) -> [MIDIControllerLane] {
+        guard !lanes.isEmpty else { return [] }
+        var out: [MIDIControllerLane] = []
+        for lane in lanes {
+            var pts: [MIDIControllerPoint] = []
+            if let v = lane.value(atBeat: delta) {
+                pts.append(MIDIControllerPoint(beat: 0, value: v))
+            }
+            for p in lane.points where p.beat > delta && p.beat < delta + newLength {
+                pts.append(MIDIControllerPoint(beat: p.beat - delta, value: p.value))
+            }
+            let windowed = MIDIControllerLane(type: lane.type, points: pts)
+            if !windowed.points.isEmpty { out.append(windowed) }
+        }
+        return out.sorted { $0.type.sortKey < $1.type.sortKey }
+    }
+
     /// Rising fade factor for `progress` (0 -> 1): 0 at progress 0, 1 at progress
     /// 1. A fade-out passes `1 - progress` to reuse this single rising shape.
     private static func fadeShape(progress: Double, curve: FadeCurve) -> Double {
@@ -509,7 +824,7 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, name, startBeat, lengthBeats, audioFileURL, notes, isAIGenerated
         case startOffsetSeconds, gainDb, fadeInBeats, fadeOutBeats, fadeInCurve, fadeOutCurve
-        case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, takeGroupID
+        case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, controllerLanes, takeGroupID
     }
 
     /// Decoding routes through the clamping `init`; every edit field tolerates
@@ -537,6 +852,7 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
             pitchShiftSemitones: try c.decodeIfPresent(Double.self, forKey: .pitchShiftSemitones) ?? 0,
             formantPreserve: try c.decodeIfPresent(Bool.self, forKey: .formantPreserve) ?? false,
             gainEnvelope: try c.decodeIfPresent([ClipGainPoint].self, forKey: .gainEnvelope) ?? [],
+            controllerLanes: try c.decodeIfPresent([MIDIControllerLane].self, forKey: .controllerLanes) ?? [],
             takeGroupID: try c.decodeIfPresent(UUID.self, forKey: .takeGroupID)
         )
     }
@@ -566,6 +882,9 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         // Gain envelope (m13-e): written ONLY when non-empty, so a clip without
         // one carries no new key (byte-identical to a pre-m13-e save).
         if !gainEnvelope.isEmpty { try c.encode(gainEnvelope, forKey: .gainEnvelope) }
+        // Controller lanes (m16-b): written ONLY when non-empty, so a clip
+        // without any carries no new key (byte-identical to a pre-m16-b save).
+        if !controllerLanes.isEmpty { try c.encode(controllerLanes, forKey: .controllerLanes) }
         // Members carry their group marker; ordinary clips (nil) omit it, so a
         // pre-take clip stays byte-identical.
         try c.encodeIfPresent(takeGroupID, forKey: .takeGroupID)

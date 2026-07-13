@@ -31,7 +31,7 @@ struct TempoMapPhaseCEngineTests {
             MIDINote(pitch: 67, startBeat: 3.5, lengthBeats: 1.0),   // crosses beat 4
         ])
         let events = MIDIEventSchedule.buildEvents(
-            clips: [clip], fromBeat: 0, tempoMap: map, sampleRate: rate)
+            clips: [clip], fromBeat: 0, tempoMap: map, sampleRate: rate).events
 
         // Closed forms (identical to the Phase-B fixture), computed HERE.
         let on39 = Int64((rate * (3.9 * (60.0 / 120.0))).rounded())
@@ -62,7 +62,7 @@ struct TempoMapPhaseCEngineTests {
         let clip = Clip(name: "n", startBeat: 0, lengthBeats: 8,
                         notes: [MIDINote(pitch: 64, startBeat: 4.1, lengthBeats: 0.4)])
         let events = MIDIEventSchedule.buildEvents(
-            clips: [clip], fromBeat: 0, tempoMap: map, sampleRate: 48_000)
+            clips: [clip], fromBeat: 0, tempoMap: map, sampleRate: 48_000).events
         let expected = Int64((48_000.0 * (4.1 * (60.0 / 120.0))).rounded())
         #expect(events.first { $0.kind == ScheduledMIDIEvent.noteOn }?.sampleTime == expected)
     }

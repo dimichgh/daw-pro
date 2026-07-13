@@ -2668,6 +2668,137 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.insertTimeRange", { clipId, atBeat, lengthBeats }))
 );
 
+/**
+ * Shared shape for a single point in a MIDI clip's controller lane, used by
+ * clip_set_controller_lane. Identity-free (no id, no curve) and STEPWISE — a
+ * value holds until the next point; a ramp is a dense run of points.
+ */
+const controllerPointSchema = z.object({
+  beat: z
+    .number()
+    .min(0)
+    .describe(
+      "Point position in beats, RELATIVE TO THE CLIP'S START (not the timeline). Must " +
+        "be >= 0."
+    ),
+  value: z
+    .number()
+    .int()
+    .min(0)
+    .max(16383)
+    .describe(
+      "Raw MIDI value at this point. 0-16383 for a pitchBend lane (8192 = center, no " +
+        "bend); 0-127 for cc / channelPressure lanes — a value outside the OWNING lane's " +
+        "domain errors readably, naming the exact range."
+    ),
+});
+
+server.registerTool(
+  "clip_set_controller_lane",
+  {
+    title: "Write a MIDI clip's controller lane (mod wheel, sustain, pitch bend, ...)",
+    description:
+      "Create or WHOLESALE-REPLACE one controller lane on a MIDI clip — mod wheel, " +
+      "sustain pedal, pitch bend, expression, channel pressure, or any other numbered " +
+      "MIDI CC — the performance data that rides ALONGSIDE a clip's notes " +
+      "(clip_set_notes), not instead of them. Points are STEPWISE: a value HOLDS until " +
+      "the next point, so two points make a flat STEP, not a ramp — draw a smooth ramp " +
+      "as a dense run of points (exactly what a live recording produces). `points` " +
+      "REPLACES the lane's entire point list wholesale — there is no add/remove-single-" +
+      "point tool: read the clip's current lanes from project_snapshot's " +
+      "`controllerLanes` array (there each lane is `{type: {type, controller?}, " +
+      "points}` — NOTE the NESTED `type` object on read-back, unlike the FLAT " +
+      "`type`/`controller` params this tool takes as input), modify the array yourself, " +
+      "then resubmit the whole thing here. Values are RAW MIDI: 0-16383 for a " +
+      "`pitchBend` lane (8192 = the center/no-bend position; built-in instruments apply " +
+      "it as +/-2 semitones), 0-127 for `cc`/`channelPressure` lanes (CC 1 = mod wheel, " +
+      "CC 64 = sustain pedal — a value >= 64 counts as pedal-down). Built-in instruments " +
+      "only honor pitch bend and CC 64 sustain today; every other CC/channelPressure " +
+      "value is forwarded to hosted Audio Unit instruments and otherwise safely ignored " +
+      "by the built-ins. Controller values CHASE at play and at seek: the latest value " +
+      "at or before the playhead stays in effect, so a pedal held or a bend applied " +
+      "earlier in the clip is still sounding after a jump — you don't need to re-state a " +
+      "value at every seek target. clip_quantize/clip_humanize move only NOTES, never " +
+      "these lanes. Per-note (poly) aftertouch is not supported yet — only channel-wide " +
+      "values. A clip may hold at most 16 controller lanes (one per type/CC number) and " +
+      "each lane at most 16384 points. MIDI clips only — an audio clip is rejected " +
+      "readably. Repeated calls to the SAME lane (e.g. while drawing) coalesce into one " +
+      "undo step. Returns the updated clip (the stored lane echoes back in its " +
+      "`controllerLanes`).",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI clip to edit, from project_snapshot."),
+      type: z
+        .enum(["cc", "pitchBend", "channelPressure"])
+        .describe(
+          "Which controller stream this lane carries: `cc` (a numbered Control Change " +
+            "— REQUIRES `controller`), `pitchBend` (0-16383, center 8192), or " +
+            "`channelPressure` (mono/channel aftertouch, 0-127 — per-note aftertouch " +
+            "isn't supported yet)."
+        ),
+      controller: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe(
+          "The CC number, 0-127 — REQUIRED when `type` is \"cc\" (1 = mod wheel, " +
+            "7 = channel volume, 10 = pan, 11 = expression, 64 = sustain pedal). Ignored " +
+            "(omit it) for `pitchBend` / `channelPressure`."
+        ),
+      points: z
+        .array(controllerPointSchema)
+        .min(1)
+        .max(16384)
+        .describe(
+          "The lane's COMPLETE new point list, replacing any existing lane of this type " +
+            "wholesale. Must be non-empty — an empty lane isn't a valid state; call " +
+            "clip_remove_controller_lane to delete a lane instead. Up to 16384 points (a " +
+            "thinned ~200Hz capture of an ~80s continuous gesture still fits)."
+        ),
+    },
+  },
+  async ({ clipId, type, controller, points }) =>
+    toToolResult(() => bridge.send("clip.setControllerLane", { clipId, type, controller, points }))
+);
+
+server.registerTool(
+  "clip_remove_controller_lane",
+  {
+    title: "Remove a MIDI clip's controller lane",
+    description:
+      "Remove one controller lane (mod wheel, sustain, pitch bend, channel pressure, or " +
+      "any other numbered CC) from a MIDI clip, identified by `type` (+ `controller` " +
+      "for `cc`) — the counterpart to clip_set_controller_lane. Removing a lane the clip " +
+      "does NOT have errors readably, LISTING the clip's existing lanes so you can " +
+      "correct the type/controller. MIDI clips only — an audio clip is rejected " +
+      "readably. One call = one undo step. Returns the updated clip: the removed lane is " +
+      "simply absent from its `controllerLanes` array, which itself disappears from the " +
+      "response once the clip has no lanes left.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI clip to edit, from project_snapshot."),
+      type: z
+        .enum(["cc", "pitchBend", "channelPressure"])
+        .describe(
+          "Which controller lane to remove: `cc` (a numbered Control Change — REQUIRES " +
+            "`controller`), `pitchBend`, or `channelPressure`."
+        ),
+      controller: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe(
+          "The CC number, 0-127 — REQUIRED when `type` is \"cc\" (e.g. 1 = mod wheel, " +
+            "64 = sustain). Ignored (omit it) for `pitchBend` / `channelPressure`."
+        ),
+    },
+  },
+  async ({ clipId, type, controller }) =>
+    toToolResult(() => bridge.send("clip.removeControllerLane", { clipId, type, controller }))
+);
+
 // ---------------------------------------------------------------------------
 // Project-wide arrangement bar edits (m15-d) — insert/delete whole bars
 // across the ENTIRE session, not just one clip. Meter-aware (a bar's length
@@ -4294,7 +4425,14 @@ server.registerTool(
       "anything sounded off. " +
       "MIDI clips (from " +
       "clip_add_midi) carry a `notes` array (pitch, velocity, startBeat relative " +
-      "to the clip, lengthBeats); audio clips do not. Also includes a " +
+      "to the clip, lengthBeats); audio clips do not. MIDI clips may also carry a " +
+      "`controllerLanes` array (m16-b) — mod wheel, sustain, pitch bend, and other " +
+      "performance controller data set via clip_set_controller_lane/clip_remove_" +
+      "controller_lane, ridden ALONGSIDE `notes` on the same clip. KEY IS ABSENT when " +
+      "the clip has no controller data. Each entry is `{type: {type: \"cc\"|" +
+      "\"pitchBend\"|\"channelPressure\", controller?}, points: [{beat, value}]}` — " +
+      "note the NESTED `type` object here, unlike the flat `type`/`controller` params " +
+      "clip_set_controller_lane/clip_remove_controller_lane take as input. Also includes a " +
       "`meters` object with live peak/RMS levels (linear 0-1) for the master bus " +
       "(`meters.master`) and each track (`meters.tracks`, keyed by track id — " +
       "bus tracks meter here too, like any other track, reflecting their " +
