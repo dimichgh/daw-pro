@@ -1,5 +1,20 @@
 # Teardown crash root cause — stopped-engine detach of once-rendered nodes (M9 crash-a)
 
+> **STATUS: SUPERSEDED (m13-a, 2026-07-12) — see `design-m13a-teardown-crash.md`.**
+> The DIAGNOSIS below (once-rendered + stopped-engine detach leaves a stale entry in
+> `AVAudioEngineGraph`'s internal node vector; `reset()` does not purge it) stands and was
+> re-confirmed by the m13-a C0 instrumented experiment. The REMEDY below (the retire bin:
+> park detaches while stopped, flush them after restart) was **falsified**: the m13-a audit
+> caught 3/3 staging sessions crashing inside `flushRetiredNodes` itself, and C0 named the
+> faulting call — the FIRST post-restart flush-detach of a parked strip mixer, with the
+> engine running (`DAWApp-2026-07-12-104059.ips`, `…-104254.ips`). "Running at detach time"
+> is NOT sufficient: a node that rendered and then sat attached across an engine
+> stop→reset→start boundary is already stale, and any later detach of it faults. §"Why
+> deferral is safe" below is therefore wrong; the M9 3× live verification was heap-reuse
+> luck. Resolution: the retire bin is deleted — once-rendered engines are never surgically
+> detached; teardown-class changes discard and rebuild the whole engine
+> (`AudioEngine.rebuildEngine(reason:)`, `projectWillReplace()`, `teardownDetach(_:)`).
+
 Fix for the crash recorded in `repro-teardown-crash.md` (played routed session → `project.new` →
 next `track.add` → SIGSEGV in `AVAudioEngineGraph::UpdateGraphAfterReconfig`). Root-caused
 2026-07-10 with a live instrumented repro on a debug build (control port 17696, driver

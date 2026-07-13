@@ -108,7 +108,7 @@ struct BusRoutingStoreTests {
         try store.setTrackOutput(id: routed.id, busID: bus.id)
         let send = try store.addSend(toTrack: sender.id, busID: bus.id, level: 0.5)
 
-        #expect(store.removeTrack(id: bus.id))
+        #expect(try store.removeTrack(id: bus.id))
         #expect(!store.tracks.contains(where: { $0.id == bus.id }))
         #expect(track(store, routed.id).outputBusID == nil)          // orphan output → master
         #expect(track(store, sender.id).sends.isEmpty)               // send dropped

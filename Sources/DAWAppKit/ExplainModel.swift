@@ -39,6 +39,11 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// The session vibe meter — the glowing orb near the master cluster (vm-b).
     /// Read-only status chrome, so it shows in both Simple and Pro transport modes.
     case vibeMeter
+    /// The engine-notices warning chip (m15-e, audit F6) — the amber warning that
+    /// appears in the transport bar when a sound played on time but not exactly as
+    /// set (a fade/envelope that couldn't be prepared in time, a stretch still
+    /// rendering). Read-only diagnostic status chrome, shown in BOTH densities.
+    case transportEngineNotices
 
     // MARK: Shared — panel density
     /// The SIMPLE / PRO density chip (`SimpleProToggle`). ONE id shared across all
@@ -63,6 +68,16 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// The master strip's fader + stereo output meter (one card) — the final mix
     /// stage. Distinct from `transportMasterFader` (the bar's mini master control).
     case mixerMaster
+    /// The master strip's Inserts section (m13-d, Pro only) — the effect chain on
+    /// the whole mix, post-fader (the last stop before the speakers). Distinct
+    /// from `mixerInserts` (a single track's chain) and `mixerMaster` (the fader).
+    case mixerMasterInserts
+    /// The master strip's Volume Automation section (m15-c, Pro only) — the drawn
+    /// fade/level-ride curve on the whole mix's master volume. Distinct from
+    /// `mixerMaster` (the manual fader) and `mixerMasterInserts` (the effect chain);
+    /// there is no track-lane counterpart to point at (track automation lives in the
+    /// arrange timeline, not the mixer, and carries no Explain card today).
+    case masterAutomation
 
     // MARK: Piano roll
     case pianoRollSnap
@@ -92,6 +107,12 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// explains a crossfade; the "Crossfade with Next…" clip menu creates it. NOT
     /// an AI surface — no violet.
     case crossfade
+    /// The per-clip GAIN ENVELOPE overlay on an audio clip (m13-e) — the line of
+    /// glowing breakpoint dots that rides the clip's volume up and down over
+    /// time. A Canvas/gesture overlay; one card summarizes its add/move/delete
+    /// affordances (the clip-body honest-scope precedent). Pro density only —
+    /// Simple hides it. NOT an AI surface — no violet.
+    case clipGainEnvelope
 
     // MARK: Instrument picker (m10-n-3)
     /// The instrument CHIP on an instrument track's header + mixer strip — shows
@@ -139,6 +160,21 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// down to a fresh audio track+clip so an instrument part becomes plain
     /// audio. One card for the action. NOT an AI surface — no violet.
     case bounceInPlace
+
+    // MARK: Tempo lane (m12-d)
+    /// The arrange ruler's TEMPO LANE (m12-d) — the strip of tempo sections and
+    /// time-signature flags you can drag, scrub, add, and remove. One card for
+    /// the whole surface (a Canvas/gesture lane; the loop-ruler honest-scope
+    /// precedent). NOT an AI surface — no violet.
+    case tempoMap
+
+    // MARK: Sidechain key (m12-g)
+    /// The KEY picker on a compressor/gate insert row (m12-g) — chooses which
+    /// other track drives this effect (the classic ducking/pump), with a lit
+    /// KEY badge showing the current source and a clear affordance. One card for
+    /// the whole picker. Mixer inserts are Pro-only, so this shows in Pro only.
+    /// NOT an AI surface — no violet.
+    case sidechain
 
     // MARK: AI panels (violet affordances — Rule 3)
     case aiCopilot
@@ -204,7 +240,7 @@ public enum ExplainCatalog {
             body: "Starts and stops playback from wherever the playhead sits. Press it to hear your song; press again to pause right where you are."),
         .transportRecord: ExplainEntry(
             title: "Record",
-            body: "Captures new sound or notes onto any armed track. Arm a track first, set the playhead, then press this to lay down a take."),
+            body: "Captures new sound or notes onto any armed track. Arm a track first, set the playhead, then press this to lay down a take. With LOOP on it jumps to the loop start and each pass stacks a fresh take to pick from."),
         .transportLoop: ExplainEntry(
             title: "Loop",
             body: "Repeats one section over and over so you can practice or refine it. Turn it on to cycle the current region until you switch it off."),
@@ -235,6 +271,9 @@ public enum ExplainCatalog {
         .vibeMeter: ExplainEntry(
             title: "Vibe Meter",
             body: "A living glow that shows the feel of your whole mix at a glance. It burns warm and low when the sound is deep and bassy, turns cool and airy when it is bright, and settles to a dim ember when things go quiet."),
+        .transportEngineNotices: ExplainEntry(
+            title: "Playback Notices",
+            body: "A warning that shows up when a sound played on time but not exactly as you set it — usually a fade or effect that could not be prepared quickly enough. Click it to see what happened; nothing in your project was changed."),
 
         // MARK: Shared — panel density
         .panelDensity: ExplainEntry(
@@ -274,6 +313,12 @@ public enum ExplainCatalog {
         .mixerMaster: ExplainEntry(
             title: "Master Strip",
             body: "The final stage every track flows into before it reaches your speakers. Watch its stereo meter while you mix — if the bars keep slamming the top, pull the master down so the sound never distorts."),
+        .mixerMasterInserts: ExplainEntry(
+            title: "Master Inserts",
+            body: "Effects that shape the whole mix at once, sitting after the master fader — the last stop before your speakers. Add gentle tone-shaping and a limiter here to polish the final sound and stop the loudest moments from distorting."),
+        .masterAutomation: ExplainEntry(
+            title: "Master Volume Automation",
+            body: "Draws the master volume as a curve over time — the way to fade the whole mix out at the end of a song or ride the level through a section. Add points and drag them: higher is louder. This fade shapes what you hear but is left out of exported stems."),
 
         // MARK: Piano roll
         .pianoRollSnap: ExplainEntry(
@@ -308,6 +353,9 @@ public enum ExplainCatalog {
         .crossfade: ExplainEntry(
             title: "Crossfade",
             body: "The blend where two audio clips overlap: the first fades out as the next fades in, so the join sounds smooth with no click or bump. Right-click a clip and choose Crossfade with Next to create one; drag either clip apart to undo it."),
+        .clipGainEnvelope: ExplainEntry(
+            title: "Clip Gain Envelope",
+            body: "A volume line you draw across an audio clip to make it swell and dip over time — ride a chorus louder, or duck one word. Click the clip body to add a dot, drag a dot to move it, double-click a dot to remove it. It stacks on top of the clip's fixed level and fades."),
 
         // MARK: Instrument picker (m10-n-3)
         .trackInstrumentChip: ExplainEntry(
@@ -354,6 +402,16 @@ public enum ExplainCatalog {
         .bounceInPlace: ExplainEntry(
             title: "Bounce in Place",
             body: "Renders this track down to one new audio track, turning a software instrument or effect-heavy part into plain recorded sound. Use it to lock in a decision, free up your computer, or share a clean copy. The original is muted, not deleted, and one undo brings it back."),
+
+        // MARK: Tempo lane (m12-d)
+        .tempoMap: ExplainEntry(
+            title: "Tempo Lane",
+            body: "Shows how the song's speed and time signature change across the timeline. Each section has its own beats-per-minute. Drag a divider to move a change, drag a section up or down to change its speed, or right-click to add one. Pro edits it; Simple just shows it."),
+
+        // MARK: Sidechain key (m12-g)
+        .sidechain: ExplainEntry(
+            title: "Sidechain Key",
+            body: "Makes this compressor or gate react to ANOTHER track instead of its own sound — pick a kick to duck a pad on every hit, the classic pump. Only compressors and gates can be keyed. Key from an audio track; to key an instrument, route it to a bus first."),
 
         // MARK: AI panels (violet affordances — Rule 3)
         .aiCopilot: ExplainEntry(

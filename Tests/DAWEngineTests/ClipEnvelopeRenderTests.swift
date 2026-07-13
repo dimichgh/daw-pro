@@ -368,4 +368,160 @@ struct ClipEnvelopeRenderTests {
         print("[measured] offset+playhead differing frames: \(diffs) of 24_000")
         #expect(diffs == 0)
     }
+
+    // MARK: - Gain envelope (m13-e) — analytic bake
+
+    @Test("gain envelope: whole-clip bake matches Clip.envelopeGain per frame within 1e-6")
+    func analyticGainEnvelope() throws {
+        let url = try dcFixture()   // DC = 1.0 → every rendered sample IS the envelope
+        // 0 dB → −12 dB over 2 beats, flat after; no fades, 0 dB static gain.
+        let clip = Clip(name: "c", startBeat: 0, lengthBeats: 4, audioFileURL: url,
+                        gainEnvelope: [ClipGainPoint(beat: 0, gainDb: 0),
+                                       ClipGainPoint(beat: 2, gainDb: -12)])
+        let rendered = try render([Track(name: "T", kind: .audio, clips: [clip])], seconds: 2.0)
+        var worst: Float = 0
+        for frame in 0..<96_000 {
+            let expected = Float(clip.envelopeGain(atBeat: Double(frame) / 24_000.0))
+            worst = max(worst, abs(rendered[frame] - expected))
+        }
+        print("[measured] gain-envelope worst per-frame error over 96k frames: \(worst)")
+        #expect(worst <= 1e-6)
+
+        // RMS in a tight window AT each envelope point matches the analytic ramp.
+        func rms(around frame: Int) -> Float {
+            let lo = max(0, frame - 200), hi = min(96_000, frame + 200)
+            var sum: Double = 0
+            for i in lo..<hi { sum += Double(rendered[i]) * Double(rendered[i]) }
+            return Float((sum / Double(hi - lo)).squareRoot())
+        }
+        // beat 0 → 0 dB (1.0); beat 1 → −6 dB (0.5012); beat 2 → −12 dB (0.2512).
+        // A coarse RMS-over-window check (the ramp is steepest near beat 0, so a
+        // ±200-frame window sits slightly below the point value) — the tight
+        // correctness proof is the per-frame ≤ 1e-6 above.
+        print("[measured] RMS at beats 0/1/2: \(rms(around: 200)) / \(rms(around: 24_000)) / \(rms(around: 47_800))")
+        #expect(abs(rms(around: 200) - 1.0) <= 1.2e-2)
+        #expect(abs(rms(around: 24_000) - Float(pow(10.0, -6.0 / 20.0))) <= 1e-2)
+        #expect(abs(rms(around: 47_800) - Float(pow(10.0, -12.0 / 20.0))) <= 1e-2)
+        // Flat tail after beat 2 holds −12 dB (the constant-extension region).
+        #expect(abs(rms(around: 72_000) - Float(pow(10.0, -12.0 / 20.0))) <= 1e-3)
+    }
+
+    @Test("gain envelope composes with static gain AND fades (== Clip.envelopeGain end to end)")
+    func envelopeComposesWithGainAndFades() throws {
+        let url = try dcFixture()
+        // −6.02 dB static gain (→0.5), a 1-beat linear fade-in, and an envelope
+        // that dips −6.02 dB across beats 2→3 then holds.
+        let clip = Clip(name: "c", startBeat: 0, lengthBeats: 4, audioFileURL: url,
+                        gainDb: -6.02, fadeInBeats: 1,
+                        gainEnvelope: [ClipGainPoint(beat: 2, gainDb: 0),
+                                       ClipGainPoint(beat: 3, gainDb: -6.02)])
+        let rendered = try render([Track(name: "T", kind: .audio, clips: [clip])], seconds: 2.0)
+        var worst: Float = 0
+        for frame in 0..<96_000 {
+            let expected = Float(clip.envelopeGain(atBeat: Double(frame) / 24_000.0))
+            worst = max(worst, abs(rendered[frame] - expected))
+        }
+        print("[measured] envelope+gain+fade worst per-frame error: \(worst)")
+        #expect(worst <= 1e-6)
+        // Past the fade, before the envelope dip (beat 1.5): pure static gain 0.5.
+        #expect(abs(rendered[36_000] - 0.5) <= 1e-4)
+        // At beat 2.5: 0.5 (gain) × 10^(−3.01/20) (envelope midpoint) ≈ 0.3536.
+        let atBeat2p5 = Float(clip.envelopeGain(atBeat: 2.5))
+        #expect(abs(rendered[60_000] - atBeat2p5) <= 1e-4)
+    }
+
+    @Test("a UNITY 0 dB envelope renders within 1e-6 of the fade-only path (whole-bake parity)")
+    func unityEnvelopeMatchesFadeOnly() throws {
+        let url = try cosineFixture()
+        let fadeOnly = Clip(name: "c", startBeat: 0, lengthBeats: 4, audioFileURL: url,
+                            gainDb: -3, fadeInBeats: 0.5, fadeOutBeats: 1.5,
+                            fadeInCurve: .equalPower)
+        // Same clip but forced down the whole-region bake via a flat 0 dB envelope.
+        var unity = fadeOnly
+        unity.gainEnvelope = [ClipGainPoint(beat: 0, gainDb: 0),
+                              ClipGainPoint(beat: 4, gainDb: 0)]
+        let a = try render([Track(name: "T", kind: .audio, clips: [fadeOnly])], seconds: 2.0)
+        let b = try render([Track(name: "T", kind: .audio, clips: [unity])], seconds: 2.0)
+        var worst: Float = 0
+        for frame in 0..<96_000 { worst = max(worst, abs(a[frame] - b[frame])) }
+        print("[measured] unity-envelope vs fade-only worst residue: \(worst)")
+        #expect(worst <= 1e-6, "a flat 0 dB envelope must not change the audible result")
+    }
+
+    @Test("no-envelope faded clip is deterministic (the null bake path is untouched)")
+    func nullEnvelopeDeterministic() throws {
+        let url = try cosineFixture()
+        let clip = Clip(name: "c", startBeat: 0, lengthBeats: 4, audioFileURL: url,
+                        gainDb: -3, fadeInBeats: 0.5, fadeOutBeats: 1.5)
+        #expect(clip.gainEnvelope.isEmpty)   // structurally the pre-m13-e path
+        let tracks = [Track(name: "T", kind: .audio, clips: [clip])]
+        let first = try OfflineRenderer().render(tracks: tracks, tempoMap: TempoMap(constantBPM: 120),
+                                                 fromBeat: 0, durationSeconds: 2.0)
+        let second = try OfflineRenderer().render(tracks: tracks, tempoMap: TempoMap(constantBPM: 120),
+                                                  fromBeat: 0, durationSeconds: 2.0)
+        #expect(first.channelData == second.channelData)
+    }
+
+    /// 4.0 s, 440 Hz sine, amp 0.5, MONO PCM16 48 kHz — the EXACT shape a wire
+    /// `debug.importAudio` tone carries (mono, integer PCM). The wire repro that
+    /// suspected D3 used this source; the render path must apply a non-constant
+    /// envelope to it exactly like the stereo Float32 fixtures.
+    private func monoSine48kFixture() throws -> URL {
+        let url = try fixtureURL("mono440.wav")
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 48_000.0,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings,
+                                   commonFormat: .pcmFormatFloat32, interleaved: false)
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000,
+                                   channels: 1, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 192_000)!
+        let ch = buffer.floatChannelData!
+        for i in 0..<192_000 {
+            ch[0][i] = Float(0.5 * sin(2.0 * Double.pi * 440.0 * Double(i) / 48_000.0))
+        }
+        buffer.frameLength = 192_000
+        try file.write(from: buffer)
+        return url
+    }
+
+    @Test("D3 regression: a non-constant envelope applies in mixdown — proven on a RE-RENDER of the same clip after a dry ref render (no stale bake), MONO source")
+    func nonConstantEnvelopeAppliesOnReRender() throws {
+        let url = try monoSine48kFixture()
+        // Coordinator's exact shape: flat 0 dB to beat 4, then linear-in-dB to
+        // −12 dB at beat 8 → −6 dB at beat 6, −10.5 dB at beat 7.5. NO fades.
+        let ramp = [ClipGainPoint(beat: 0, gainDb: 0),
+                    ClipGainPoint(beat: 4, gainDb: 0),
+                    ClipGainPoint(beat: 8, gainDb: -12)]
+        // 1. Dry render FIRST (the ordering the wire gate used — this is where a
+        //    stale envelope-blind bake cache would have poisoned render 2).
+        let dryClip = Clip(name: "c", startBeat: 0, lengthBeats: 8, audioFileURL: url)
+        let dry = try render([Track(name: "T", kind: .audio, clips: [dryClip])], seconds: 4.0)
+        // 2. SAME source, now with the ramp — a fresh clip id but identical file.
+        let envClip = Clip(name: "c", startBeat: 0, lengthBeats: 8, audioFileURL: url,
+                           gainEnvelope: ramp)
+        let enveloped = try render([Track(name: "T", kind: .audio, clips: [envClip])], seconds: 4.0)
+
+        // RMS over a beat-centred window (channelData[0] is ALREADY deinterleaved
+        // — the wire gate's flat interleaved read was what masked this). 48 kHz,
+        // 120 BPM → 24 000 frames/beat.
+        func rms(_ s: [Float], _ lo: Int, _ hi: Int) -> Double {
+            var a = 0.0; for i in lo..<hi { a += Double(s[i]) * Double(s[i]) }
+            return (a / Double(hi - lo)).squareRoot()
+        }
+        func db(_ a: [Float], vs b: [Float], _ lo: Int, _ hi: Int) -> Double {
+            20 * log10(rms(a, lo, hi) / rms(b, lo, hi))
+        }
+        // Head (beats 0–3.8): flat 0 dB → enveloped == dry.
+        #expect(abs(db(enveloped, vs: dry, 0, 91_200)) < 0.02)
+        // Beat 6 (frame 144 000): analytic −6 dB.
+        #expect(abs(db(enveloped, vs: dry, 141_600, 146_400) + 6.0) < 0.15)
+        // Beat 7.5 (frame 180 000): analytic −10.5 dB.
+        #expect(abs(db(enveloped, vs: dry, 172_800, 187_200) + 10.5) < 0.4)
+    }
 }

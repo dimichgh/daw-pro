@@ -123,7 +123,7 @@ struct ProjectStoreTests {
     }
 
     @Test("add, mutate, and remove tracks")
-    func trackLifecycle() {
+    func trackLifecycle() throws {
         let store = ProjectStore()
         let track = store.addTrack(name: "Drums", kind: .audio)
         #expect(store.tracks.count == 1)
@@ -140,9 +140,9 @@ struct ProjectStoreTests {
         #expect(store.setTrackMute(id: track.id, muted: true))
         #expect(store.tracks[0].isMuted)
 
-        #expect(store.removeTrack(id: track.id))
+        #expect(try store.removeTrack(id: track.id))
         #expect(store.tracks.isEmpty)
-        #expect(!store.removeTrack(id: track.id))
+        #expect(try !store.removeTrack(id: track.id))
     }
 
     @Test("default track names count per kind")
@@ -360,6 +360,7 @@ final class FakeEngine: AudioEngineControlling {
         case seek(beats: Double)
         case setTempo(bpm: Double)
         case loopChanged(enabled: Bool)
+        case metronomeChanged(enabled: Bool)
         case masterVolume(Double)
         case renderMixdown(fromBeat: Double, durationSeconds: Double)
         case startRecording(beats: Double)
@@ -436,11 +437,26 @@ final class FakeEngine: AudioEngineControlling {
         calls.append(.loopChanged(enabled: transport.isLoopEnabled))
     }
 
+    func metronomeChanged(_ transport: TransportState) {
+        calls.append(.metronomeChanged(enabled: transport.isMetronomeEnabled))
+    }
+
     func masterVolumeChanged(_ volume: Double) {
         calls.append(.masterVolume(volume))
     }
 
+    /// Every master-chain publish the store emitted, newest last (m13-d):
+    /// the master-chain suite asserts one push per mutation AND per
+    /// restore-funnel crossing, each carrying the full post-edit chain.
+    private(set) var masterEffectsPushes: [[EffectDescriptor]] = []
+
+    func masterEffectsChanged(_ effects: [EffectDescriptor]) {
+        masterEffectsPushes.append(effects)
+    }
+
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         calls.append(.renderMixdown(fromBeat: fromBeat, durationSeconds: durationSeconds))
@@ -580,21 +596,26 @@ struct EngineIntentTests {
         #expect(store.masterVolume == 0)
     }
 
-    @Test("setMetronome while playing restarts via seek from the current position")
-    func metronomeRestartsWhilePlaying() throws {
+    @Test("setMetronome while playing sends the click-player-local intent — never seek/restart (m14-c)")
+    func metronomeIntentWhilePlaying() throws {
         let engine = FakeEngine()
         let store = ProjectStore()
         store.engine = engine
         store.play()
-        // Engine-pushed playhead is the authoritative position while playing;
-        // the metronome restart must resume from exactly there.
         engine.playheadHandler?(3.5)
         engine.clearCalls()
 
         try store.setMetronome(enabled: true)
 
-        #expect(engine.calls == [.seek(beats: 3.5)])
+        // The retired pre-m14-c fallback was `.seek(beats: 3.5)` (a transport
+        // restart with its ~60 ms seam). The toggle is now click-player-local:
+        // exactly one metronomeChanged intent, and NO seek in the call log.
+        #expect(engine.calls == [.metronomeChanged(enabled: true)])
         #expect(store.transport.isMetronomeEnabled)
+
+        try store.setMetronome(enabled: false)
+        #expect(engine.calls == [.metronomeChanged(enabled: true),
+                                 .metronomeChanged(enabled: false)])
     }
 
     @Test("setMetronome while stopped sends no engine intent")
@@ -791,7 +812,7 @@ struct TrackMeteringTests {
     }
 
     @Test("removeTrack drops the track's meter entry")
-    func removeTrackDropsMeter() {
+    func removeTrackDropsMeter() throws {
         let engine = FakeEngine()
         let store = ProjectStore()
         store.engine = engine
@@ -799,7 +820,7 @@ struct TrackMeteringTests {
         engine.trackMeteringHandler?(track.id, MeterFrame(peak: 0.4, rms: 0.2))
         #expect(store.trackMeters[track.id] != nil)
 
-        store.removeTrack(id: track.id)
+        try store.removeTrack(id: track.id)
 
         #expect(store.trackMeters[track.id] == nil)
     }

@@ -26,6 +26,8 @@ final class StubLatencyEngine: AudioEngineControlling {
     func loopChanged(_ transport: TransportState) {}
     func masterVolumeChanged(_ volume: Double) {}
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
@@ -330,5 +332,36 @@ struct FXCommandTests {
         #expect(fx["params"]?["gainLinear"]?.doubleValue == 1)
         // Headless (no engine injected): the latency forwarder reports 0.
         #expect(fx["latencySamples"]?.doubleValue == 0)
+    }
+
+    // Regression (m12-f): the snapshot serializer never surfaced the
+    // sidechain key — an agent reading project.snapshot saw a keyed gate as
+    // unkeyed. Keyed effects carry `sidechainSourceTrackId`; unkeyed omit it.
+    @Test("snapshot surfaces sidechainSourceTrackId on keyed effects only")
+    func snapshotCarriesSidechainKey() async throws {
+        let (router, store) = makeRouter()
+        let kickID = await addTrack(router, name: "Kick", kind: "audio")
+        let padID = await addTrack(router, name: "Pad", kind: "audio")
+        let gateResponse = await router.handle(ControlRequest(
+            id: "add-gate", command: "fx.add",
+            params: ["trackId": .string(padID.uuidString), "kind": .string("gate")]
+        ))
+        let gateID = try #require(
+            UUID(uuidString: gateResponse.result?["effectId"]?.stringValue ?? ""))
+        _ = try store.setSidechain(trackID: padID, effectID: gateID, sourceTrackID: kickID)
+
+        let snapshot = await router.handle(ControlRequest(id: "1", command: "project.snapshot"))
+        let tracks = try #require(snapshot.result?["tracks"]?.arrayValue)
+        let pad = try #require(tracks.first(where: { $0["id"]?.stringValue == padID.uuidString }))
+        let keyed = try #require(pad["effects"]?.arrayValue?.first)
+        #expect(keyed["sidechainSourceTrackId"]?.stringValue == kickID.uuidString)
+
+        // Clearing the key removes the field entirely (omit-when-nil).
+        _ = try store.setSidechain(trackID: padID, effectID: gateID, sourceTrackID: nil)
+        let snapshot2 = await router.handle(ControlRequest(id: "2", command: "project.snapshot"))
+        let tracks2 = try #require(snapshot2.result?["tracks"]?.arrayValue)
+        let pad2 = try #require(tracks2.first(where: { $0["id"]?.stringValue == padID.uuidString }))
+        let cleared = try #require(pad2["effects"]?.arrayValue?.first)
+        #expect(cleared["sidechainSourceTrackId"] == nil)
     }
 }

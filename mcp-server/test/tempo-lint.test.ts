@@ -27,15 +27,17 @@
  *     frame-dt fallback: display refresh, not tempo.
  *
  * ALLOWLIST (every entry carries its removal phase; shrink-only):
- *   · Sources/DAWCore/TempoMap.swift — the sanctioned home (permanent).
+ *   · Sources/DAWCore/TempoMap.swift — the sanctioned home (permanent, and
+ *     now the LAST entry — the lint's end state per design §10 condition 2).
  *     Since m12-c this includes `framesPerBeat(atBeat:sampleRate:)`, the
  *     verbatim-op-order `rate * 60.0 / bpm` idiom ClipFadeBake's fast path
  *     uses (the former ClipFadeBake.swift entry died in Phase B as planned:
  *     fade baking is now piecewise across segment boundaries, and its
  *     constant-tempo fast path borrows the arithmetic from the map itself).
- *   · Sources/DAWApp/ContentView.swift — `60.0 / store.transport.tempoBPM`
- *     feeding a UI view. UI/wire consumers are design §5 rows 57–78,
- *     deliberately untouched until Phase D; this entry dies there.
+ *   · (m12-d Phase D removed the Sources/DAWApp/ContentView.swift entry — its
+ *     waveform `60.0 / tempoBPM` now routes through
+ *     `TempoMap.secondsPerBeat(atBeat:)`, so no UI consumer holds raw tempo
+ *     arithmetic any more.)
  */
 
 import { test } from "node:test";
@@ -83,7 +85,6 @@ function swiftFilesUnder(dir: string): string[] {
 
 const ALLOWLIST = new Set<string>([
   "Sources/DAWCore/TempoMap.swift", // the one sanctioned home (permanent)
-  "Sources/DAWApp/ContentView.swift", // UI consumer, design rows 57-78 (dies in Phase D)
 ]);
 
 /** Tempo-adjacent identifier: any identifier/member/subscript chain

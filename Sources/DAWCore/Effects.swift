@@ -47,6 +47,15 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
     /// (`ProjectStore.addEffect` rejects it) — an insert with no component
     /// would be a permanent silent passthrough.
     public var audioUnit: AudioUnitConfig?
+    /// Sidechain key source (m12-f, design-m11f-sidechain §7): the track
+    /// whose post-fader output this effect's detector listens to instead of
+    /// the strip's own signal. nil = self-keyed (all pre-sidechain behavior,
+    /// bit-exact). Additive optional with synthesized Codable, so it is
+    /// OMITTED when nil — legacy projects stay byte-identical on disk (the
+    /// `startOffsetSeconds` omission precedent). Validity (compressor/gate
+    /// kinds only, non-bus source, audio/bus destination strip, no cycles,
+    /// one per strip) is enforced at `ProjectStore.setSidechain`.
+    public var sidechainSourceTrackID: UUID?
 
     public var resolvedGain: GainParams { gain ?? GainParams() }
     public var resolvedEQ: EQParams { eq ?? EQParams() }
@@ -71,7 +80,8 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         saturator: SaturatorParams? = nil,
         gate: GateParams? = nil,
         chorus: ChorusParams? = nil,
-        audioUnit: AudioUnitConfig? = nil
+        audioUnit: AudioUnitConfig? = nil,
+        sidechainSourceTrackID: UUID? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -86,6 +96,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         self.gate = gate
         self.chorus = chorus
         self.audioUnit = audioUnit
+        self.sidechainSourceTrackID = sidechainSourceTrackID
     }
 }
 

@@ -335,6 +335,165 @@ struct LatencyCompensationRenderTests {
         }
     }
 
+    // MARK: - m16-f flush symmetry (audit F6): stale-quantum replay A/B
+
+    /// The audit-m16 B2 rig, quantum-scale: 3 840-sample target (16 stacked
+    /// limiters), so a leaked quantum replays PDC-late as an isolated blob
+    /// exactly `target` samples after the seam — maximally detectable.
+    private static let f6Target = 3_840
+    private static let f6Quantum = 512
+
+    /// Builds the F6 race deterministically (the m15-f `runEditSeam` idiom,
+    /// ChainClickPolishTests): tone fills the ring, the flush arms `passes`
+    /// resets, then ONE in-flight pre-flush quantum walks — the reset
+    /// consumes at the top of `process` and the SAME call writes the stale
+    /// tone into the just-wiped ring — then post-flush silence walks.
+    /// Returns (output, leakStart).
+    private func runPDCSeam(passes: UInt32) throws -> ([Float], Int) {
+        let state = CompensationDelayState()
+        state.setTarget(Self.f6Target)
+        state.allocate(channelCount: 1)  // snaps appliedOffset to the target
+
+        let quantum = Self.f6Quantum
+        let (buffer, data) = try makeMonoBuffer(frames: quantum)
+        var output: [Float] = []
+        func walk() {
+            state.process(bufferList: buffer.mutableAudioBufferList,
+                          frameCount: quantum)
+            output.append(contentsOf: UnsafeBufferPointer(start: data, count: quantum))
+        }
+        // 10 tone quanta: the ring holds a 3 840-sample pending tail.
+        for q in 0..<10 {
+            for frame in 0..<quantum { data[frame] = sine100(q * quantum + frame) }
+            walk()
+        }
+        // The stop/seek flush arms; ONE pre-flush tone quantum is still in
+        // flight and walks next (the sub-millisecond window B2 derived).
+        state.armReset(passes: passes)
+        for frame in 0..<quantum { data[frame] = sine100(10 * quantum + frame) }
+        walk()
+        // Post-flush input is silence (players stopped).
+        for _ in 0..<20 {
+            for frame in 0..<quantum { data[frame] = 0 }
+            walk()
+        }
+        return (output, 10 * quantum)
+    }
+
+    @Test("NEGATIVE CONTROL: a single-armed flush leaks the in-flight quantum — it replays ONCE, exactly `target` samples PDC-late (the F6 class)")
+    func pdcSeamSingleArmReplaysStaleQuantumOnce() throws {
+        let (output, leakStart) = try runPDCSeam(passes: 1)
+        let target = Self.f6Target
+        let quantum = Self.f6Quantum
+        // The seam itself cuts clean: the reset consumed at the walk top
+        // wiped the ring, and offset > quantum means the stale write is not
+        // read back within its own walk (the audit's clean-edge signature).
+        let seamPeak = TestSignals.peak(output, in: leakStart..<(leakStart + target))
+        // The blob: the leaked quantum emerges exactly `target` samples
+        // after the seam, at full tone amplitude…
+        let blobOnset = TestSignals.firstFrame(
+            in: Array(output[leakStart...]), exceeding: 1e-6)
+            .map { $0 + leakStart }
+        let blobPeak = TestSignals.peak(
+            output, in: (leakStart + target)..<(leakStart + target + quantum))
+        // …and REPLAYS ONCE — no feedback path, so it dies (the bounded
+        // blast radius that kept F6 live-unreproducible in 113 trials).
+        let postPeak = TestSignals.peak(
+            output, in: (leakStart + target + quantum)..<output.count)
+        #expect(seamPeak == 0)                        // the ring WAS wiped…
+        #expect(blobOnset == leakStart + target)      // …then re-dirtied: the
+        #expect(blobPeak > 0.3)                       // stale replay, PDC-late
+        #expect(postPeak == 0)                        // once, then gone
+        print("[measured] m16-f PDC seam NEGATIVE control (single arm): seam \(seamPeak), "
+              + "blob \(blobPeak) at \(String(describing: blobOnset)) "
+              + "(PDC spacing \(leakStart + target)), post \(postPeak)")
+    }
+
+    @Test("THE FIX: the double-armed flush wipes the leaked quantum on the next pass — post-seam output is identically silent")
+    func pdcSeamDoubleArmKillsStaleReplay() throws {
+        let (output, leakStart) = try runPDCSeam(passes: 2)
+        // Pass 1 consumed at the seam walk's top (ring wiped, stale quantum
+        // written); pass 2 consumed at the NEXT walk, wiping the leak
+        // 3 328 samples before it could emerge. Everything from the seam on
+        // is EXACT silence.
+        let postSeamPeak = TestSignals.peak(output, in: leakStart..<output.count)
+        #expect(postSeamPeak == 0)
+        print("[measured] m16-f PDC seam FIX (double arm): post-seam peak \(postSeamPeak) "
+              + "(pre-fix class: blob 0.5 at +\(Self.f6Target) samples)")
+    }
+
+    @Test("armReset countdown mechanics: clamped 1...2, consumed one pass per quantum, re-armed remainder")
+    func armResetCountdownClampsAndReArms() throws {
+        let state = CompensationDelayState()
+        state.allocate(channelCount: 1)
+        let (buffer, _) = try makeMonoBuffer(frames: 64)
+
+        #expect(state.pendingResetPasses == 0)
+        state.armReset()                       // default = the classic single
+        #expect(state.pendingResetPasses == 1)
+        state.armReset(passes: 2)
+        #expect(state.pendingResetPasses == 2)
+        state.armReset(passes: 7)              // clamped down
+        #expect(state.pendingResetPasses == 2)
+        state.armReset(passes: 0)              // clamped up: an arm always arms
+        #expect(state.pendingResetPasses == 1)
+
+        state.armReset(passes: 2)
+        state.process(bufferList: buffer.mutableAudioBufferList, frameCount: 64)
+        #expect(state.pendingResetPasses == 1)  // consumed one, re-armed one
+        state.process(bufferList: buffer.mutableAudioBufferList, frameCount: 64)
+        #expect(state.pendingResetPasses == 0)  // consumed the remainder
+    }
+
+    @Test("flush arms the PDC rings of ALL strip families with the shared chain value: double LIVE, single under manual rendering")
+    func flushArmsCompensationRingsSymmetrically() throws {
+        let busID = UUID()
+        let tracks = [
+            Track(name: "A", kind: .audio),
+            Track(name: "Keys", kind: .instrument),
+            Track(id: busID, name: "Bus", kind: .bus),
+        ]
+        let stripIDs = tracks.map(\.id)
+
+        // LIVE-mode engine (never started; no clips → no players to poke):
+        // stop AND start both arm 2 — the m15-f chain value, shared.
+        let liveEngine = AVAudioEngine()
+        let liveGraph = PlaybackGraph(engine: liveEngine)
+        liveGraph.reconcile(tracks: tracks)
+        for id in stripIDs {
+            #expect(try #require(liveGraph.compensationState(forStrip: id))
+                .pendingResetPasses == 0)
+        }
+        liveGraph.stopAllPlayers()
+        for id in stripIDs {
+            #expect(try #require(liveGraph.compensationState(forStrip: id))
+                .pendingResetPasses == 2)
+        }
+
+        // Manual-rendering engine: single arm on BOTH funnels (control and
+        // render are serialized — no in-flight quantum exists; a second
+        // offline pass would cut a legitimate quantum out of the ring).
+        let manualEngine = AVAudioEngine()
+        let format = try #require(
+            AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 2))
+        try manualEngine.enableManualRenderingMode(.offline, format: format,
+                                                   maximumFrameCount: 4_096)
+        let manualGraph = PlaybackGraph(engine: manualEngine)
+        manualGraph.reconcile(tracks: tracks)
+        manualGraph.stopAllPlayers()
+        for id in stripIDs {
+            #expect(try #require(manualGraph.compensationState(forStrip: id))
+                .pendingResetPasses == 1)
+        }
+        manualGraph.startAllPlayers(at: nil)   // the offline-render start path
+        for id in stripIDs {
+            #expect(try #require(manualGraph.compensationState(forStrip: id))
+                .pendingResetPasses == 1)
+        }
+        print("[measured] m16-f PDC flush arms (audio/instrument/bus): live stop 2, "
+              + "manual stop/start 1")
+    }
+
     // MARK: - §8.3 Determinism + instrument path
 
     @Test("two identical compensated renders are bit-identical")

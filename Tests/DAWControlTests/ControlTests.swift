@@ -70,6 +70,8 @@ final class FakeEngine: AudioEngineControlling {
     func stopRecording() { stopRecordingCount += 1 }
 
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         lastMixdownURL = url
@@ -83,6 +85,8 @@ final class FakeEngine: AudioEngineControlling {
     // OfflineBufferRenderTests/StemNullTests (iv-b/iv-c) and RenderCommandTests'
     // dedicated fake.
     func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         let frameCount = Int(durationSeconds * 48_000)
@@ -374,7 +378,9 @@ struct CommandRouterTests {
 
         let response = await router.handle(ControlRequest(id: "1", command: "render.mixdown"))
         #expect(!response.ok)
-        #expect(response.error == "nothing to render — project has no audio clips")
+        #expect(response.error
+            == "nothing to render — no clips found in the render range; "
+            + "add clips or pass an explicit durationSeconds")
         #expect(engine.lastMixdownURL == nil)
     }
 
@@ -1341,10 +1347,20 @@ struct CommandRouterTests {
             "marker.rename": ["markerId": .string(renamableMarkerID), "name": .string("X")],
             "marker.move": ["markerId": .string(movableMarkerID), "beat": .number(0)],
             "transport.setTempo": ["bpm": .number(120)],
+            // tempo.map is a read (no params); tempo.setMap needs a valid map.
+            "tempo.setMap": ["segments": .array([
+                .object(["startBeat": .number(0), "bpm": .number(120)]),
+                .object(["startBeat": .number(8), "bpm": .number(90)]),
+            ])],
             "transport.setLoop": ["enabled": .bool(true), "startBeat": .number(0), "endBeat": .number(8)],
-            // Runs before transport.record in allCommands; the record route
-            // then proves a punched record() start succeeds end-to-end.
-            "transport.setPunch": ["enabled": .bool(true), "inBeat": .number(0), "outBeat": .number(8)],
+            // enabled:false (m15-b): macro.songSkeleton re-enables a loop over
+            // the whole scaffold before transport.record's turn, and record
+            // with loop AND punch both on now refuses by design (the §7
+            // teaching error — pinned verbatim in LoopRecordCommandTests, and
+            // the punched wire start is proven there too). The record route
+            // below therefore proves the LOOP-record start end-to-end; the
+            // punch route itself is still exercised (validation + toggle).
+            "transport.setPunch": ["enabled": .bool(false), "inBeat": .number(0), "outBeat": .number(8)],
             // Runs before transport.record in allCommands — the metronome
             // route is refused mid-take, so ordering is load-bearing here.
             "transport.setMetronome": ["enabled": .bool(true), "countInBars": .number(1)],
@@ -1395,6 +1411,12 @@ struct CommandRouterTests {
             "clip.addAudio": ["trackId": .string(trackID), "path": .string("/tmp/Loop.wav")],
             // Empty notes → a 4-beat MIDI clip on the instrument track.
             "clip.addMIDI": ["trackId": .string(instTrackID)],
+            // Project-wide bar edits (m15-d) — no clip id needed; they run before
+            // transport.record in allCommands order, so the transport is not yet
+            // recording when their turn comes. bar 1 = beat 0. Full coverage in
+            // ArrangeCommandTests / DAWCore ArrangeTests.
+            "arrange.insertBars": ["atBar": .number(1), "count": .number(1)],
+            "arrange.deleteBars": ["fromBar": .number(1), "count": .number(1)],
             // Explicit duration so the route succeeds regardless of clip state.
             "render.mixdown": ["durationSeconds": .number(0.1)],
             // Explicit duration so these route regardless of clip state too
@@ -1418,7 +1440,7 @@ struct CommandRouterTests {
             // real filesystem setup (or a stopped transport — this loop is mid-
             // record by now); edit.undo/edit.redo are refused mid-take and need
             // real history; clip.setNotes/clip.remove/clip.split/clip.trim/
-            // clip.move/clip.setGain/clip.setFades/clip.deleteTimeRange/
+            // clip.move/clip.setGain/clip.setGainEnvelope/clip.setFades/clip.deleteTimeRange/
             // clip.insertTimeRange/clip.quantize/clip.humanize/
             // clip.detectTransients/clip.quantizeAudio need a clip id that only
             // exists after clip.addMIDI runs; take.* need a group id that only
@@ -1445,7 +1467,15 @@ struct CommandRouterTests {
             if ["track.remove", "project.save", "project.open", "project.new",
                 "project.recover",
                 "edit.undo", "edit.redo", "clip.setNotes", "clip.remove",
-                "clip.split", "clip.trim", "clip.move", "clip.setGain", "clip.setFades",
+                "clip.split", "clip.trim", "clip.move",
+                // clip.duplicate (m15-d) needs a clip id like the other per-clip
+                // edits; proven by ArrangeCommandTests (round-trip + overlap
+                // trimming) and DAWCore ArrangeTests.
+                "clip.duplicate", "clip.setGain",
+                // clip.setGainEnvelope (m13-e) needs a clip id like the other
+                // per-clip edits; proven by DAWCore ClipGainEnvelopeStoreTests +
+                // the live wire gate. Audio-only (a MIDI clip is rejected).
+                "clip.setGainEnvelope", "clip.setFades",
                 // clip.crossfade (m11-d) needs TWO adjacent audio clips with source
                 // material on each side of the seam — a fixture this shared, single-
                 // clip project doesn't have. Proven by ClipCrossfadeCommandTests
@@ -1455,6 +1485,11 @@ struct CommandRouterTests {
                 "clip.deleteTimeRange", "clip.insertTimeRange", "clip.quantize",
                 "clip.humanize", "clip.detectTransients", "clip.quantizeAudio",
                 "fx.remove", "fx.reorder", "fx.setBypass", "fx.setParam",
+                // fx.setSidechain (m12-g) is effect-id-dependent AND needs a
+                // compressor/gate keyed from a valid source track — the shared
+                // single gain effect can't be keyed. Proven by
+                // SidechainCommandTests (kick→pad + all four teaching errors).
+                "fx.setSidechain",
                 "take.group", "take.setComp", "take.select", "take.removeLane",
                 "take.flatten", "take.move", "take.setCrossfade", "take.autoAlign",
                 "groove.extract", "groove.remove",

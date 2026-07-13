@@ -36,7 +36,16 @@ final class CompensationDelayState: @unchecked Sendable {
 
     /// Published compensation in samples (already clamped to the cap).
     private let target: UnsafeMutablePointer<daw_atomic_u32>
+    /// COUNTDOWN of ring-reset passes, consumed one per `process` quantum
+    /// (m16-f, mirroring `ChainEffectUnit.resetFlag`, m15-f).
     /// 1 = zero the rings and snap to the target before the next quantum.
+    /// 2 = the flush-family DOUBLE-ARM: live, the render thread can deliver
+    /// one in-flight pre-flush quantum AFTER the first reset consumes — the
+    /// SAME quantum then writes the stale signal into the just-wiped ring,
+    /// which replays it ONCE, `target` samples PDC-late (the audit-m16 F6
+    /// hazard; bounded, unlike the re-circulating m14-d chain-ring echo).
+    /// The second pass survives to the NEXT quantum, whose input is
+    /// post-flush silence, and wipes the leak before it can emerge.
     private let resetFlag: UnsafeMutablePointer<daw_atomic_u32>
 
     /// `channelCount × ringCapacity` floats, channel-major. Main-thread
@@ -110,13 +119,21 @@ final class CompensationDelayState: @unchecked Sendable {
     @MainActor
     var currentTarget: Int { Int(daw_atomic_u32_load(target)) }
 
-    /// Arms the reset: next quantum zeroes the rings and snaps
-    /// `appliedOffset = target` with NO crossfade. Transport start/seek/
-    /// engine cold start and offline-render start are already discontinuities.
+    /// Arms `passes` reset quanta (see `resetFlag`): each consumed pass
+    /// zeroes the rings and snaps `appliedOffset = target` with NO crossfade.
+    /// Transport start/seek/engine cold start and offline-render start are
+    /// already discontinuities. 1 = the classic single arm; 2 = the
+    /// flush-family double-arm (m16-f, mirroring
+    /// `ChainEffectUnit.requestReset(passes:)`). Clamped to 1...2.
     @MainActor
-    func armReset() {
-        daw_atomic_u32_store(resetFlag, 1)
+    func armReset(passes: UInt32 = 1) {
+        daw_atomic_u32_store(resetFlag, max(1, min(2, passes)))
     }
+
+    /// Pending reset passes (test seam, @testable — the
+    /// `ChainEffectUnit.pendingResetPasses` mirror).
+    @MainActor
+    var pendingResetPasses: UInt32 { daw_atomic_u32_load(resetFlag) }
 
     // MARK: - Render surface (render thread)
 
@@ -137,12 +154,23 @@ final class CompensationDelayState: @unchecked Sendable {
 
         let target = min(Int(daw_atomic_u32_load(self.target)), Self.compensationCap)
 
-        // 1. Consume the reset: zero rings, snap to target, no crossfade.
-        if daw_atomic_u32_exchange(resetFlag, 0) == 1 {
+        // 1. Consume ONE reset pass: zero rings, snap to target, no
+        // crossfade. Countdown (m16-f — the m15-f chain-walk shape,
+        // `EffectChainProcessor.process`): a double-armed flush re-arms the
+        // remainder so the NEXT quantum wipes whatever an in-flight
+        // pre-flush quantum writes into the just-cleared ring below (§3)
+        // before it can replay `target` samples late. The store-back race
+        // with a concurrent control-plane arm can only ADD resets, never
+        // lose the one in hand.
+        let pendingResets = daw_atomic_u32_exchange(resetFlag, 0)
+        if pendingResets > 0 {
             rings.update(repeating: 0, count: channelCount * Self.ringCapacity)
             writeIndex = 0
             appliedOffset = target
             historyClean = true
+            if pendingResets > 1 {
+                daw_atomic_u32_store(resetFlag, pendingResets - 1)
+            }
         }
 
         // 2. Zero-target fast path: nothing to delay and the rings are clean

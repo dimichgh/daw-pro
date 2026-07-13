@@ -369,6 +369,22 @@ public struct MeterMap: Sendable {
                 beatInBar: rel.truncatingRemainder(dividingBy: bpb))
     }
 
+    /// Snaps `beat` to the nearest barline of the accumulated meter — the
+    /// meter-map-aware replacement for `ClipSnap`'s uniform `(beat/bpb).rounded()
+    /// * bpb` bar snap (m12-d, design rows 62–67). Across a meter boundary the
+    /// bar grid is NOT uniform, so this resolves the containing bar, then picks
+    /// the nearer of that bar's start and the next bar's start. Ties round UP
+    /// (toward the later barline), matching `.rounded()`'s half-away-from-zero
+    /// rule so a trivial single-meter map reproduces the legacy bar snap exactly.
+    /// Clamped ≥ 0 (a leftward drag past the start pins at bar 0).
+    public func nearestBarline(toBeat beat: Double) -> Double {
+        guard beat > 0 else { return 0 }
+        let (bar, _) = barBeat(atBeat: beat)
+        let lower = self.beat(ofBar: bar)
+        let upper = self.beat(ofBar: bar + 1)
+        return (beat - lower) < (upper - beat) ? lower : upper
+    }
+
     /// First beat of 0-based `bar`. Bars before 0 clamp to beat 0 (the
     /// mirror of `barBeat(atBeat:)`'s clamp).
     public func beat(ofBar bar: Int) -> Double {
@@ -420,21 +436,19 @@ extension MeterMap: Codable {
 }
 
 extension TransportState {
-    /// THE map seam (m12-b): the ONE place a `TempoMap` is synthesized from
-    /// the scalar `tempoBPM`. Every beat↔seconds conversion in
-    /// DAWCore/DAWEngine routes through the map API; with no session override
-    /// installed the map is ALWAYS this trivial single-segment shape, so
-    /// behavior is byte-identical to the scalar era (gate-proven).
+    /// THE tempo seam (m12-b/-d): the ONE place a `TempoMap` is synthesized
+    /// from the scalar `tempoBPM`. Every beat↔seconds conversion in
+    /// DAWCore/DAWEngine routes through the map API. A single-tempo project has
+    /// no `tempoMapOverride`, so the map is ALWAYS this trivial single-segment
+    /// shape — behavior byte-identical to the scalar era (gate-proven).
     /// `transport.tempoBPM` remains persisted and remains authoritative for
-    /// segment 0 (design §3.4/§3.6).
-    ///
-    /// Phase-B staging seam — replaced by tempo.setMap in Phase C: a non-nil
-    /// `sessionTempoMapOverride` (installed via
-    /// `ProjectStore.installSessionTempoMap`, app-tier `debug.tempoMap`) wins
-    /// over the scalar so the multi-segment engine paths are live-testable
-    /// before the wire/persistence surface exists.
-    public var tempoMap: TempoMap { sessionTempoMapOverride ?? TempoMap(constantBPM: tempoBPM) }
+    /// segment 0 (design §3.4/§3.6). A `tempo.setMap` mutation (m12-d, Phase C)
+    /// installs a multi-segment `tempoMapOverride`, which then wins here; the
+    /// store keeps `tempoBPM` == segment 0's bpm.
+    public var tempoMap: TempoMap { tempoMapOverride ?? TempoMap(constantBPM: tempoBPM) }
 
-    /// The meter twin of `tempoMap` — synthesized from `timeSignature`.
-    public var meterMap: MeterMap { MeterMap(constant: timeSignature) }
+    /// The meter twin of `tempoMap` — the trivial single-change map synthesized
+    /// from `timeSignature` unless a non-trivial `meterMapOverride` is installed
+    /// (m12-d); the store keeps `timeSignature` == change 0's meter.
+    public var meterMap: MeterMap { meterMapOverride ?? MeterMap(constant: timeSignature) }
 }

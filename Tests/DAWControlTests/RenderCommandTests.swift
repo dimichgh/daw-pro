@@ -35,6 +35,8 @@ final class FakeRenderEngine: AudioEngineControlling {
                         completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {}
     func stopRecording() {}
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
@@ -48,6 +50,8 @@ final class FakeRenderEngine: AudioEngineControlling {
     private(set) var renderOfflineCalls: [[UUID: Int]?] = []
 
     func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         renderOfflineCalls.append(forcedCompensationTargets)
@@ -341,7 +345,9 @@ struct RenderCommandTests {
         let response = await router.handle(ControlRequest(
             id: "1", command: "render.stems", params: ["durationSeconds": .number(1.0)]))
         #expect(!response.ok)
-        #expect(response.error == "nothing to render — project has no audio clips")
+        #expect(response.error
+            == "nothing to render — no clips found in the render range; "
+            + "add clips or pass an explicit durationSeconds")
     }
 
     @Test("fromBeat/durationSeconds are field-named validated")

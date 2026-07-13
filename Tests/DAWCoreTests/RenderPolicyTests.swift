@@ -39,12 +39,16 @@ final class FakeBufferEngine: AudioEngineControlling {
     func stopRecording() {}
 
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
     }
 
     func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         if let renderError { throw renderError }
@@ -110,6 +114,8 @@ struct RenderPolicyTests {
         await #expect(throws: ProjectError.self) {
             _ = try await legacy.renderOffline(
                 tracks: [], tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
+                masterEffects: [],
+                masterAutomation: [],
                 fromBeat: 0, durationSeconds: 1, forcedCompensationTargets: nil)
         }
         let targets = await legacy.offlineCompensationTargets(tracks: [])
@@ -254,8 +260,9 @@ struct RenderPolicyTests {
         engine.stub = stereo(sineSamples(dbfs: -23, seconds: 1))
         let store = makeStore(with: engine)
         // Audio clip ends at beat 4; a MIDI clip ends at beat 8 — the LATEST
-        // extent wins, deliberately broader than renderMixdown's audio-only
-        // legacy default. 8 beats @ 120 BPM = 4 s, + 2.0 s tail.
+        // extent wins. Since m16-d renderMixdown defaults onto this SAME shared
+        // window (MixdownTests pins the identical 6.0 s). 8 beats @ 120 BPM =
+        // 4 s, + 2.0 s tail.
         store.tracks = [
             Track(name: "A", kind: .audio, clips: [
                 Clip(name: "a", startBeat: 0, lengthBeats: 4,
@@ -279,6 +286,31 @@ struct RenderPolicyTests {
             _ = try await store.renderBounce()
         }
         #expect(engine.written.isEmpty)
+    }
+
+    // m16-d/F4 stems survey: render.stems' zero-param default was already the
+    // shared all-clips window (renderWindowSeconds), so a MIDI-only project has
+    // ALWAYS rendered on the zero-param call — the F4 bug lived only in
+    // renderMixdown's inlined audio-only default, never here. This pins that
+    // the sibling stayed correct while the mixdown default landed on the seam.
+    @Test("render.stems zero-param already covers a MIDI-only project (F4 survey)")
+    func stemsDefaultWindowCoversMIDIOnly() async throws {
+        let engine = FakeBufferEngine()
+        engine.stub = stereo(sineSamples(dbfs: -23, seconds: 1))
+        let store = makeStore(with: engine)
+        // A single direct-to-master instrument track with a MIDI clip ending at
+        // beat 8 — no audio clips anywhere.
+        let inst = store.addTrack(kind: .instrument)
+        _ = try store.addMIDIClip(
+            toTrack: inst.id,
+            notes: [MIDINote(pitch: 60, startBeat: 0, lengthBeats: 8)])
+
+        let result = try await store.renderStems()  // zero-param
+
+        #expect(result.stems.count == 1)
+        #expect(engine.renderCalls.count == 1)
+        // 8 beats @ 120 BPM = 4 s + the shared 2.0 s tail = 6.0 s.
+        #expect(abs(engine.renderCalls[0].duration - 6.0) <= 1e-9)
     }
 
     // MARK: - Errors surface verbatim

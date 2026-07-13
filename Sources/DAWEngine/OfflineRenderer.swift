@@ -8,6 +8,14 @@ import Foundation
 public enum EngineError: Error, LocalizedError {
     case renderFailed(String)
     case recordingFailed(String)
+    /// An Objective-C exception AVFAudio raised inside a control-plane entry
+    /// point, caught by the m16-a exception barrier and converted here so it
+    /// surfaces as an ordinary thrown error (the wire's LocalizedError
+    /// mapping turns it into a teaching message) instead of unwinding through
+    /// a MainActor job frame — the proven poisoner (leaked executor-tracking
+    /// TLS record → SE-0423 check crash or silent MainActor wedge; see
+    /// docs/research/design-m16a-canvas-crash.md).
+    case engineException(name: String, reason: String, context: String)
 
     public var errorDescription: String? {
         switch self {
@@ -15,6 +23,9 @@ public enum EngineError: Error, LocalizedError {
             return "Offline render failed: \(reason)"
         case .recordingFailed(let reason):
             return "recording failed: \(reason)"
+        case .engineException(_, let reason, let context):
+            return "the audio engine raised '\(reason)' during \(context) — "
+                + "playback was stopped; play again, or reopen the project if it persists"
         }
     }
 }
@@ -67,6 +78,12 @@ public final class OfflineRenderer {
     /// tests can read per-track status via @testable.
     let auRegistry = AUHostRegistry()
 
+    /// C0 SPIKE SEAM ONLY (m13-d, `MasterSandwichTransparencyTests`):
+    /// forwarded to the graph so the KEPT bit-transparency gate can render
+    /// the pre-m13-d topology against the D1 master sandwich through the
+    /// REAL production render loop. Production never touches it.
+    var masterSandwichEnabled = true
+
     /// Render-load telemetry sink (M9 perf-b), handed to the graph before
     /// reconcile so offline pulls stamp the same counters live rendering
     /// does. `AudioEngine.renderOffline` assigns its OWN context here — that
@@ -108,22 +125,48 @@ public final class OfflineRenderer {
     }
 
     /// `metronomeEnabled` attaches a Metronome to the offline engine and
-    /// schedules clicks across the whole render range (`beatsPerBar` shapes
-    /// the downbeat pattern) — headless, assertion-checkable click output.
-    /// m12-b (design row 53): the render window maps through `tempoMap`;
-    /// Phase A callers always pass a trivial single-segment map.
+    /// schedules clicks across the whole render range (`meterMap` — the REAL
+    /// meter map, m15-a — shapes the downbeat pattern; before m15-a this took
+    /// a `beatsPerBar` scalar and built a constant map, flattening multi-meter
+    /// projects offline exactly like the live bug in audit-m15 §2-B1) —
+    /// headless, assertion-checkable click output. m12-b (design row 53): the
+    /// render window maps through `tempoMap`.
+    ///
+    /// `masterEffects` (m13-d): the master insert chain this render applies —
+    /// `[]` renders the bit-transparent empty sandwich. The CLASS-level
+    /// default is deliberate (design §2.1): it keeps the large engine test
+    /// surface compiling, while the render-class decision (MASTERED vs STEM,
+    /// design §2) lives at the protocol/store layer, which has NO default.
+    /// Built-ins only in v1 (design D4a) — `prepareAudioUnits` needs no
+    /// master loop.
+    ///
+    /// `masterAutomation` (m15-c): the master volume lane this render applies
+    /// — same class-level-default rationale; `[]` leaves the master fader at
+    /// the static `masterVolume`, byte-identical to pre-m15-c.
     public func render(tracks: [Track], tempoMap: TempoMap,
                        fromBeat: Double = 0,
                        durationSeconds: Double,
                        masterVolume: Double = 1,
+                       masterEffects: [EffectDescriptor] = [],
+                       masterAutomation: [AutomationLane] = [],
                        metronomeEnabled: Bool = false,
-                       beatsPerBar: Int = 4) throws -> RenderedAudio {
+                       meterMap: MeterMap = MeterMap(constant: TimeSignature())) throws -> RenderedAudio {
         let engine = AVAudioEngine()
         let graph = PlaybackGraph(engine: engine)
         graph.meterSink = meterSink
         // Telemetry lands before reconcile — node creation is where the
         // context is captured (renderers at init, chain hosts via setter).
         graph.performance = performance
+        // Master chain (m13-d): descriptors land before reconcile builds the
+        // sandwich; the parameter passes below sync them (R6). The spike
+        // seam rides along (production default: sandwich on).
+        graph.masterEffects = masterEffects
+        graph.masterSandwichEnabled = masterSandwichEnabled
+        // Master volume automation (m15-c): lanes + the manual gain land
+        // before the parameter passes, so the pre-start pass pins the master
+        // fader (lane active) or leaves the static write below untouched.
+        graph.masterAutomation = masterAutomation
+        graph.manualMasterVolume = masterVolume.clamped(to: Track.volumeRange)
 
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: sampleRate,
@@ -223,7 +266,7 @@ public final class OfflineRenderer {
                 fromBeat: fromBeat,
                 throughBeat: tempoMap.beat(from: fromBeat, elapsedSeconds: durationSeconds),
                 tempoMap: tempoMap,
-                meterMap: MeterMap(constant: TimeSignature(beatsPerBar: beatsPerBar, beatUnit: 4)),
+                meterMap: meterMap,
                 playerStartBeat: fromBeat
             )
             metronome.start(at: nil)
@@ -306,11 +349,15 @@ public final class OfflineRenderer {
     /// the written file. The write is frame-exact: the file holds exactly the
     /// samples `render` produced, bit for bit.
     public func renderToWAV(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                            masterEffects: [EffectDescriptor] = [],
+                            masterAutomation: [AutomationLane] = [],
                             fromBeat: Double, durationSeconds: Double,
                             to url: URL) throws -> AudioFileInfo {
         let audio = try render(
             tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
-            durationSeconds: durationSeconds, masterVolume: masterVolume
+            durationSeconds: durationSeconds, masterVolume: masterVolume,
+            masterEffects: masterEffects,
+            masterAutomation: masterAutomation
         )
         return try Self.writeWAV(audio, to: url)
     }

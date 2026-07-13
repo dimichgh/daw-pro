@@ -3,6 +3,32 @@ import SwiftUI
 import DAWCore
 import DAWAppKit
 
+/// Which slice of the arrange surface a `TimelineLanesView` renders (m13-g,
+/// ruler-block pinning). `.full` is the legacy single-view composition (previews /
+/// headless callers); the live arrange splits into a pinned `.ruler` block (loop /
+/// marker / tempo lanes + bar numbers, above the shared vertical scroll) and the
+/// scrolling `.lanes` body (clips / takes / automation / playhead) so the ruler
+/// stays visible however deep you scroll — while the two stay HORIZONTALLY synced
+/// (the `.lanes` instance reports its scroll offset, the `.ruler` mirrors it).
+enum ArrangeContent: Equatable {
+    /// Ruler + lanes in one horizontal scroll (the pre-m13-g behaviour).
+    case full
+    /// The pinned ruler block only — loop band, marker lane, tempo lane, bar
+    /// numbers. No vertical scroll; horizontally offset to track the lanes.
+    case ruler
+    /// The scrolling lane content only — clips, take lanes, automation, playhead.
+    /// Starts its lanes at y = 0 (the ruler is pinned separately).
+    case lanes
+}
+
+/// Reports the `.lanes` horizontal scroll offset up to the pinned `.ruler` so the
+/// two stay in sync (m13-g). The lane content's `minX` in the scroll coordinate
+/// space, negated, is the scroll distance.
+struct ArrangeHOffsetKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 /// Arrange timeline: one horizontal lane per track (same order as the sidebar),
 /// clips as rounded interactive blocks positioned by beats, a beat/bar grid, and
 /// a glowing cyan playhead. Clips move/trim/split/fade under the snap grid and
@@ -13,7 +39,6 @@ import DAWAppKit
 struct TimelineLanesView: View {
     var tracks: [Track]
     var positionBeats: Double
-    var beatsPerBar: Int
     var selectedClipID: UUID?
     var onSelectClip: (Clip) -> Void
     /// Tracks whose automation lane is expanded (shared with the sidebar via
@@ -62,6 +87,9 @@ struct TimelineLanesView: View {
     var onSetClipFades: (_ trackID: UUID, _ clip: Clip, _ fadeIn: Double, _ fadeOut: Double,
                          _ inCurve: FadeCurve, _ outCurve: FadeCurve) -> Void = { _, _, _, _, _, _ in }
     var onSetClipGain: (_ trackID: UUID, _ clip: Clip, _ gainDb: Double) -> Void = { _, _, _ in }
+    /// Submits an audio clip's whole gain-envelope point array (m13-e; wired to
+    /// `ProjectStore.setClipGainEnvelope`). Empty clears it.
+    var onSetClipGainEnvelope: (_ trackID: UUID, _ clip: Clip, _ points: [ClipGainPoint]) -> Void = { _, _, _ in }
     /// The stretch HANDLE (M5 ii-e): alt-drag the right edge of an AUDIO clip to
     /// retarget its timeline length while holding the source window (wired to
     /// `ProjectStore.stretchClip`, NOT trim). MIDI right-edge alt-drag stays trim.
@@ -145,9 +173,47 @@ struct TimelineLanesView: View {
     /// is the unsnapped drop-x beat (the plan snaps it with the effective grid).
     var onImportAudio: (_ urls: [URL], _ targetTrackID: UUID?, _ atBeatRaw: Double) -> Void = { _, _, _ in }
 
+    // MARK: Tempo + meter maps (m12-d)
+
+    /// The project's RESOLVED meter map, threaded by value from `store.transport`
+    /// so a wire `tempo.setMap` updates the ruler bar lines/numbers live. Drives
+    /// meter-aware bar numbering (correct across a 7/8→4/4 change) and the
+    /// meter-aware bar snap. A trivial single-4/4 map reproduces the legacy grid.
+    var meterMap: MeterMap = MeterMap(constant: TimeSignature())
+    /// The project's RESOLVED tempo map, threaded by value from `store.transport`
+    /// so a wire `tempo.setMap` updates the tempo lane + the amber clip hint live.
+    var tempoMap: TempoMap = TempoMap(constantBPM: 120)
+    /// The tempo lane's headless model (m12-d) — reads the maps and applies every
+    /// edit through `ProjectStore.setTempoMap`. Shared with `debug.tempoLane` so a
+    /// headless capture drives the SAME instance the live ruler renders.
+    var tempoLane: TempoLaneModel
+    /// True while the transport is recording — the tempo lane is read-only then
+    /// (map edits are refused mid-take; the lane greys its handles to match).
+    var isRecordingTransport: Bool = false
+
+    // MARK: - Ruler-block pinning (m13-g)
+
+    /// Which slice this instance renders. `.full` (default) keeps the legacy
+    /// single-view composition for previews / headless callers; the live arrange
+    /// passes `.ruler` (pinned) and `.lanes` (scrolling).
+    var content: ArrangeContent = .full
+    /// `.ruler` only: the live horizontal offset to shift the ruler by so it tracks
+    /// the `.lanes` instance's horizontal scroll.
+    var hScrollOffset: CGFloat = 0
+    /// `.lanes` only: reports the live horizontal scroll offset so the pinned ruler
+    /// mirrors it (the m10-j shared-scroll discipline, on the horizontal axis).
+    var onHScrollChange: ((CGFloat) -> Void)? = nil
+
     /// Stationary content coordinate space — clip drags measure against this so a
     /// block moving under the cursor never feeds its own translation back.
     static let contentSpace = "arrangeContent"
+    /// The `.lanes` horizontal scroll coordinate space — the offset the ruler reads.
+    static let hScrollSpace = "arrangeHScroll"
+
+    /// The ruler's vertical inset above the lane content. In `.lanes` the ruler is
+    /// pinned elsewhere so lanes start at y = 0; `.full` / `.ruler` keep the ruler
+    /// strip (`rulerHeight`) so bar lines and the ruler baseline seat correctly.
+    private var rulerInset: CGFloat { content == .lanes ? 0 : Self.rulerHeight }
 
     /// Shared clip hit/geometry model at the timeline scale. Reads the live
     /// `rowHeight` so trim/fade/gain hit-testing tracks the adjustable lane height.
@@ -160,12 +226,13 @@ struct TimelineLanesView: View {
     // for the adjustable `rowHeight` input (beta m10-d) — the sidebar rows read the
     // same store value, so both columns scale in lockstep.
     static let pixelsPerBeat: CGFloat = 16
-    /// Ruler height (m11-c grew it 42 → 56 to seat the marker lane BELOW the loop
-    /// band without overloading its hit zone — the m10-g gestures keep their strip,
-    /// markers get their own). Top→bottom the 56 pt ruler stacks: loop band
-    /// `y ∈ [2, 14]`, marker lane `y ∈ [15, 33]`, bar numbers `y ≈ 38…47`, baseline
-    /// at `y = 55`.
-    static let rulerHeight: CGFloat = 56
+    /// Ruler height (m11-c grew it 42 → 56 for the marker lane; m12-d grows it
+    /// 56 → 80 to seat the TEMPO LANE below the marker lane — each ruler surface
+    /// gets its own strip, so no hit zone is overloaded). Top→bottom the 80 pt
+    /// ruler stacks: loop band `y ∈ [2, 14]`, marker lane `y ∈ [15, 33]`, tempo
+    /// lane `y ∈ [35, 57]` (meter flags in its top row, bpm in its bottom row),
+    /// bar numbers `y ≈ 62…71`, baseline at `y = 79`.
+    static let rulerHeight: CGFloat = 80
     static let laneHeight: CGFloat = 34
     static let laneSpacing: CGFloat = 6
     /// The loop region band (beta m10-g) draws as a distinct strip in the TOP of
@@ -182,6 +249,13 @@ struct TimelineLanesView: View {
     /// grabs/adds a marker instead of the loop.
     static let markerLaneTop: CGFloat = 15
     static let markerLaneHeight: CGFloat = 18
+    /// The tempo lane (m12-d) draws its segment bars + boundary handles + meter
+    /// flags in a distinct strip BELOW the marker lane — `y ∈ [tempoLaneTop,
+    /// tempoLaneTop + tempoLaneHeight]` — clear of the marker flags above and the
+    /// bar numbers below. This strip is the tempo gesture surface (layered over the
+    /// loop ruler), so a press here edits the tempo map instead of the loop.
+    static let tempoLaneTop: CGFloat = 35
+    static let tempoLaneHeight: CGFloat = 22
     /// Pointer movement (points) that separates a ruler CLICK (toggle/seek) from a
     /// DRAG (sketch/resize/move) — below it the press stays a click. Shared by the
     /// loop ruler and the marker-flag drag (m11-c).
@@ -230,8 +304,11 @@ struct TimelineLanesView: View {
             .flatMap(\.clips)
             .map { $0.startBeat + $0.lengthBeats }
             .max() ?? 0
-        let bars = Int((lastClipEnd / Double(beatsPerBar)).rounded(.up)) + 2
-        return max(bars * beatsPerBar, 32)   // always show a few empty bars
+        // Display-only padding heuristic (m13-h): the base meter (beat 0) is a fine
+        // divisor for "how many empty bars to show" — this is not a snap path.
+        let basePerBar = meterMap.beatsPerBar(atBeat: 0)
+        let bars = Int((lastClipEnd / Double(basePerBar)).rounded(.up)) + 2
+        return max(bars * basePerBar, 32)   // always show a few empty bars
     }
 
     private var contentWidth: CGFloat { CGFloat(totalBeats) * Self.pixelsPerBeat }
@@ -244,7 +321,9 @@ struct TimelineLanesView: View {
     }
 
     private var contentHeight: CGFloat {
-        var y = Self.rulerHeight
+        // The pinned ruler block is exactly the ruler strip — no lanes.
+        if content == .ruler { return Self.rulerHeight }
+        var y = rulerInset
         for track in tracks {
             y += rowHeight + extraHeight(track) + Self.laneSpacing
         }
@@ -253,7 +332,7 @@ struct TimelineLanesView: View {
 
     /// Top y of track `index`'s clip lane, accounting for expanded tracks above.
     private func laneTop(_ index: Int) -> CGFloat {
-        var y = Self.rulerHeight
+        var y = rulerInset
         for i in 0..<index {
             y += rowHeight + extraHeight(tracks[i]) + Self.laneSpacing
         }
@@ -315,13 +394,32 @@ struct TimelineLanesView: View {
     @State private var dropHover: AudioDropHover?
 
     var body: some View {
-        // Fill the shared-scroll viewport when the lanes are shorter than it (so the
-        // glass column stays flush with the sidebar), else use the natural content
-        // height and let the outer vertical scroll own the overflow (m10-j). An
-        // explicit height on the horizontal ScrollView keeps it from collapsing when
-        // nested inside the outer vertical ScrollView.
-        let laneHeight = max(contentHeight, availableHeight)
-        return ScrollView(.horizontal, showsIndicators: true) {
+        Group {
+            switch content {
+            case .full:  fullBody
+            case .lanes: lanesBody
+            case .ruler: rulerBody
+            }
+        }
+        // Capture staging (m11-c): mirror the debug-driven rename target into the
+        // live @State the flag reads. Runs on set and on first appearance so a
+        // staged value present before the view mounts still opens the field.
+        .onChange(of: stageRenameMarkerID) { _, id in renamingMarkerID = id }
+        .onAppear { if let id = stageRenameMarkerID { renamingMarkerID = id } }
+    }
+
+    /// The `.lanes` viewport-filling height: fill the shared-scroll viewport when
+    /// the lanes are shorter than it (so the glass column stays flush with the
+    /// sidebar), else the natural content height so the outer vertical scroll owns
+    /// the overflow (m10-j).
+    private var laneStackHeight: CGFloat { max(contentHeight, availableHeight) }
+
+    // MARK: - Full body (legacy: ruler + lanes in one horizontal scroll)
+
+    @ViewBuilder
+    private var fullBody: some View {
+        let laneHeight = laneStackHeight
+        ScrollView(.horizontal, showsIndicators: true) {
             ZStack(alignment: .topLeading) {
                 grid
                 loopBand
@@ -333,44 +431,131 @@ struct TimelineLanesView: View {
                 playhead
                 loopRuler
                 markerLane
+                tempoLaneView
             }
             .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
             .coordinateSpace(name: Self.contentSpace)
-            // Drag audio files from Finder onto the lanes to import them (m10-k). The
-            // delegate maps the live drop location → target lane + snapped beat and
-            // routes the loaded URLs through the shared plan pipeline. Attached to the
-            // content (not the scroll) so the drop location is already in content space.
-            .onDrop(of: [.fileURL], delegate: AudioLaneDropDelegate(
-                hover: $dropHover,
-                resolve: { point, fileCount in resolveDropHover(at: point, fileCount: fileCount) },
-                onImport: onImportAudio))
+            .onDrop(of: [.fileURL], delegate: laneDropDelegate)
         }
         .frame(height: laneHeight, alignment: .topLeading)
         .glassPanel()
-        // Capture staging (m11-c): mirror the debug-driven rename target into the
-        // live @State the flag reads. Runs on set and on first appearance so a
-        // staged value present before the view mounts still opens the field.
-        .onChange(of: stageRenameMarkerID) { _, id in renamingMarkerID = id }
-        .onAppear { if let id = stageRenameMarkerID { renamingMarkerID = id } }
+    }
+
+    // MARK: - Lanes body (m13-g: scrolling lane content, reports its h-offset)
+
+    @ViewBuilder
+    private var lanesBody: some View {
+        let laneHeight = laneStackHeight
+        ScrollView(.horizontal, showsIndicators: true) {
+            ZStack(alignment: .topLeading) {
+                grid
+                clipBlocks
+                crossfadeSeams
+                takeLanes
+                automationLanes
+                dropAffordance
+                playhead
+            }
+            .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
+            .coordinateSpace(name: Self.contentSpace)
+            // Report the live horizontal scroll offset (content minX in the scroll
+            // space, negated) so the pinned ruler mirrors it — the m10-j shared-
+            // scroll discipline on the horizontal axis (no second vertical scroll,
+            // so the columns can't desync; only the ruler tracks this offset).
+            .background(GeometryReader { geo in
+                Color.clear.preference(
+                    key: ArrangeHOffsetKey.self,
+                    value: -geo.frame(in: .named(Self.hScrollSpace)).minX)
+            })
+            .onDrop(of: [.fileURL], delegate: laneDropDelegate)
+        }
+        .coordinateSpace(name: Self.hScrollSpace)
+        .onPreferenceChange(ArrangeHOffsetKey.self) { onHScrollChange?($0) }
+        .frame(height: laneHeight, alignment: .topLeading)
+    }
+
+    // MARK: - Ruler body (m13-g: pinned block, horizontally offset to track lanes)
+
+    @ViewBuilder
+    private var rulerBody: some View {
+        ZStack(alignment: .topLeading) {
+            grid
+            loopBand
+            playhead
+            loopRuler
+            markerLane
+            tempoLaneView
+        }
+        .frame(width: contentWidth, height: Self.rulerHeight, alignment: .topLeading)
+        .coordinateSpace(name: Self.contentSpace)
+        // Shift the ruler left by the lanes' scroll offset so bar numbers / loop /
+        // marker / tempo stay under the lanes below; clip to the visible viewport.
+        .offset(x: -hScrollOffset)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: Self.rulerHeight)
+        .clipped()
+        .contentShape(Rectangle())
+    }
+
+    /// The Finder audio-drop delegate — maps the live drop location → target lane +
+    /// snapped beat and routes loaded URLs through the shared plan pipeline (m10-k).
+    private var laneDropDelegate: AudioLaneDropDelegate {
+        AudioLaneDropDelegate(
+            hover: $dropHover,
+            resolve: { point, fileCount in resolveDropHover(at: point, fileCount: fileCount) },
+            onImport: onImportAudio)
     }
 
     // MARK: - Grid + ruler (Canvas — no per-frame allocation beyond Paths)
 
+    /// One integer beat's precomputed grid geometry — the meter-aware bar/beat
+    /// classification and (at bar starts) the 1-based bar-number label. Built once
+    /// per redraw on the main actor so the `@Sendable` grid closure captures only
+    /// these plain values, never `self` or `meterMap` (CANVAS CONTRACT, m16-a).
+    private struct GridBeatCell {
+        var x: CGFloat
+        var isBar: Bool
+        var barLabel: String?
+    }
+
     private var grid: some View {
-        Canvas { context, size in
-            // Lane backgrounds.
-            for index in tracks.indices {
-                let rect = CGRect(x: 0, y: laneTop(index), width: size.width, height: rowHeight)
-                context.fill(Path(rect), with: .color(DAWTheme.panelRaised.opacity(0.4)))
+        // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+        // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+        let content = content
+        let rowHeight = rowHeight
+        let rulerHeight = Self.rulerHeight
+        // Lane-top offsets (one per track, in order) precomputed off the closure.
+        let laneTops: [CGFloat] = tracks.indices.map { laneTop($0) }
+        // Per-beat classification — the SAME meter math as the legacy in-closure loop,
+        // run once here so `meterMap` never crosses into the renderer.
+        let beatCells: [GridBeatCell] = (0...totalBeats).map { beat in
+            let position = meterMap.barBeat(atBeat: Double(beat))
+            let isBar = position.beatInBar < 0.001
+            return GridBeatCell(
+                x: CGFloat(beat) * Self.pixelsPerBeat,
+                isBar: isBar,
+                barLabel: isBar ? "\(position.bar + 1)" : nil)
+        }
+        return Canvas { @Sendable context, size in
+            // Lane backgrounds — not drawn in the pinned ruler block (m13-g).
+            if content != .ruler {
+                for top in laneTops {
+                    let rect = CGRect(x: 0, y: top, width: size.width, height: rowHeight)
+                    context.fill(Path(rect), with: .color(DAWTheme.panelRaised.opacity(0.4)))
+                }
             }
 
-            // Vertical beat/bar lines.
+            // Vertical beat/bar lines — meter-aware (m12-d): a beat is a BAR line
+            // when it starts a bar in the accumulated meter (beatInBar == 0), so a
+            // 7/8→4/4 change re-spaces the emphasized lines correctly instead of the
+            // legacy fixed `beat % beatsPerBar`. The lines span the drawn height —
+            // the ruler strip in the pinned block, the lane stack in the body — so
+            // the bar lines in both align at the same x (m13-g).
             var beatLines = Path()
             var barLines = Path()
-            for beat in 0...totalBeats {
-                let x = CGFloat(beat) * Self.pixelsPerBeat
-                let line = CGRect(x: x, y: 0, width: 1, height: size.height)
-                if beat % beatsPerBar == 0 {
+            for cell in beatCells {
+                let line = CGRect(x: cell.x, y: 0, width: 1, height: size.height)
+                if cell.isBar {
                     barLines.addRect(line)
                 } else {
                     beatLines.addRect(line)
@@ -379,26 +564,28 @@ struct TimelineLanesView: View {
             context.fill(beatLines, with: .color(DAWTheme.hairline))
             context.fill(barLines, with: .color(DAWTheme.gridEmphasis))
 
-            // Ruler baseline + bar numbers (SF Mono digital readout).
-            context.fill(
-                Path(CGRect(x: 0, y: Self.rulerHeight - 1, width: size.width, height: 1)),
-                with: .color(DAWTheme.hairline)
-            )
-            var bar = 1
-            var beat = 0
-            while beat <= totalBeats {
-                let text = Text("\(bar)")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .foregroundColor(DAWTheme.textDim)
-                context.draw(
-                    text,
-                    // Below the marker lane (m11-c): the bar numbers moved down as
-                    // the ruler grew, staying clear of the loop band and flags.
-                    at: CGPoint(x: CGFloat(beat) * Self.pixelsPerBeat + 4, y: Self.rulerHeight - 18),
-                    anchor: .topLeading
+            // Ruler baseline + bar numbers (SF Mono digital readout), meter-aware:
+            // each barline draws its 1-based bar index straight from the meter map,
+            // so numbering stays sequential and correct across a meter change. Not
+            // drawn in the lanes body (the ruler is pinned separately, m13-g).
+            if content != .lanes {
+                context.fill(
+                    Path(CGRect(x: 0, y: rulerHeight - 1, width: size.width, height: 1)),
+                    with: .color(DAWTheme.hairline)
                 )
-                bar += 1
-                beat += beatsPerBar
+                for cell in beatCells {
+                    guard let barLabel = cell.barLabel else { continue }
+                    let text = Text(barLabel)
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundColor(DAWTheme.textDim)
+                    context.draw(
+                        text,
+                        // Below the marker + tempo lanes (m12-d): the bar numbers sit
+                        // in the ruler's bottom strip, clear of the flags and handles.
+                        at: CGPoint(x: cell.x + 4, y: rulerHeight - 18),
+                        anchor: .topLeading
+                    )
+                }
             }
         }
         .frame(width: contentWidth, height: contentHeight)
@@ -422,9 +609,12 @@ struct TimelineLanesView: View {
                     geometry: clipGeometry,
                     snap: effectiveSnap,
                     pro: isPro,
-                    beatsPerBar: beatsPerBar,
+                    meterMap: meterMap,
                     secondsPerBeat: secondsPerBeat,
                     playheadBeat: positionBeats,
+                    crossesTempoBoundary: TempoLaneHint.audioClipCrossesBoundary(
+                        startBeat: clip.startBeat, lengthBeats: clip.lengthBeats,
+                        isMIDI: clip.isMIDI, tempoMap: tempoMap),
                     waveformPeaks: clip.audioFileURL.flatMap { waveformStore.peaks(for: $0) },
                     renderVisual: ClipStretch.renderVisual(for: stretchStatus(clip)),
                     onSelect: { onSelectClip(clip) },
@@ -433,6 +623,7 @@ struct TimelineLanesView: View {
                     onSplit: { onSplitClip(track.id, clip, $0) },
                     onSetFades: { onSetClipFades(track.id, clip, $0, $1, $2, $3) },
                     onSetGain: { onSetClipGain(track.id, clip, $0) },
+                    onSetGainEnvelope: { onSetClipGainEnvelope(track.id, clip, $0) },
                     onStretch: { onStretchClip(track.id, clip, $0) },
                     takeBadge: takeGroup.map { TakeLaneSelection.badge(for: $0) },
                     spliceAtStart: takeGroup != nil
@@ -536,7 +727,7 @@ struct TimelineLanesView: View {
                     geometry: takeGeometry,
                     contentWidth: contentWidth,
                     snap: snap,
-                    beatsPerBar: beatsPerBar,
+                    meterMap: meterMap,
                     secondsPerBeat: secondsPerBeat,
                     waveformStore: waveformStore,
                     onSetComp: { groupID, segments in onSetTakeComp(track.id, groupID, segments) },
@@ -603,7 +794,7 @@ struct TimelineLanesView: View {
     /// lane plus any expanded take/automation rows, so a drop anywhere in a track's
     /// vertical extent targets that track.
     private func trackIndex(atContentY y: CGFloat) -> Int? {
-        guard y >= Self.rulerHeight else { return nil }
+        guard y >= rulerInset else { return nil }
         for i in tracks.indices {
             let top = laneTop(i)
             let bottom = top + rowHeight + extraHeight(tracks[i]) + Self.laneSpacing
@@ -618,7 +809,7 @@ struct TimelineLanesView: View {
     /// what the drop will actually do). `rawBeat` is fed to the callback unsnapped.
     private func resolveDropHover(at point: CGPoint, fileCount: Int) -> AudioDropHover {
         let rawBeat = max(0, Double(point.x / Self.pixelsPerBeat))
-        let snapped = effectiveSnap.snap(beat: rawBeat, beatsPerBar: beatsPerBar)
+        let snapped = effectiveSnap.snap(beat: rawBeat, meterMap: meterMap)
         let index = trackIndex(atContentY: point.y)
         let kind = index.map { tracks[$0].kind }
         let landsOnLane = AudioImportPlan.routesToExistingAudioTrack(
@@ -775,23 +966,23 @@ struct TimelineLanesView: View {
                 case .create:
                     preview = LoopEdit.createRegion(
                         anchorBeat: state.anchorBeat, currentBeat: loopGeometry.beat(forX: curX),
-                        snap: effectiveSnap, beatsPerBar: beatsPerBar)
+                        snap: effectiveSnap, meterMap: meterMap)
                     DragCursor.set(.resizeLeftRight)
                 case .resizeStart:
                     preview = LoopEdit.resizedStart(
                         region: state.origin, newStartRaw: loopGeometry.beat(forX: curX),
-                        snap: effectiveSnap, beatsPerBar: beatsPerBar)
+                        snap: effectiveSnap, meterMap: meterMap)
                     DragCursor.set(.resizeLeftRight)
                 case .resizeEnd:
                     preview = LoopEdit.resizedEnd(
                         region: state.origin, newEndRaw: loopGeometry.beat(forX: curX),
-                        snap: effectiveSnap, beatsPerBar: beatsPerBar)
+                        snap: effectiveSnap, meterMap: meterMap)
                     DragCursor.set(.resizeLeftRight)
                 case .move:
                     let delta = Double((curX - value.startLocation.x) / Self.pixelsPerBeat)
                     preview = LoopEdit.movedRegion(
                         region: state.origin, dragDeltaBeats: delta,
-                        snap: effectiveSnap, beatsPerBar: beatsPerBar)
+                        snap: effectiveSnap, meterMap: meterMap)
                     DragCursor.set(.grabbing)
                 }
                 loopDrag?.preview = preview
@@ -807,7 +998,7 @@ struct TimelineLanesView: View {
                             // A drag that never crossed a snap boundary is a click: seek.
                             onSeek(effectiveSnap.snap(
                                 beat: loopGeometry.beat(forX: value.startLocation.x),
-                                beatsPerBar: beatsPerBar))
+                                meterMap: meterMap))
                         }
                     case .resizeStart, .resizeEnd, .move:
                         if let region = state.preview {
@@ -818,7 +1009,7 @@ struct TimelineLanesView: View {
                     // Never exceeded the slop → a click on the ruler.
                     switch LoopEdit.click(contentX: value.location.x, region: loopRegion,
                                           geometry: loopGeometry, snap: effectiveSnap,
-                                          beatsPerBar: beatsPerBar) {
+                                          meterMap: meterMap) {
                     case .toggle:
                         if let region = loopRegion { onSetLoop(!isLoopEnabled, region.start, region.end) }
                     case .seek(let beat):
@@ -878,12 +1069,12 @@ struct TimelineLanesView: View {
                 .onContinuousHover(coordinateSpace: .named(Self.contentSpace)) { phase in
                     if case .active(let p) = phase {
                         markerAddHoverBeat = effectiveSnap.snap(
-                            beat: markerGeometry.beat(forX: p.x), beatsPerBar: beatsPerBar)
+                            beat: markerGeometry.beat(forX: p.x), meterMap: meterMap)
                     }
                 }
                 .onTapGesture(coordinateSpace: .named(Self.contentSpace)) { location in
                     onSeek(effectiveSnap.snap(beat: markerGeometry.beat(forX: location.x),
-                                              beatsPerBar: beatsPerBar))
+                                              meterMap: meterMap))
                 }
                 .contextMenu {
                     Button("Add Marker Here") { onAddMarker(markerAddHoverBeat) }
@@ -895,6 +1086,28 @@ struct TimelineLanesView: View {
             }
         }
         .explainable(.sessionMarkers)
+    }
+
+    // MARK: - Tempo lane (m12-d)
+
+    /// The tempo lane strip, layered over the loop ruler and occupying ONLY the
+    /// tempo strip (like the marker lane), so a press here edits the tempo map
+    /// instead of the loop. Reads the resolved maps by value (live wire sync) and
+    /// drives every edit through the shared `tempoLane` model → `setTempoMap`.
+    private var tempoLaneView: some View {
+        TempoLaneBand(
+            model: tempoLane,
+            tempoMap: tempoMap,
+            meterMap: meterMap,
+            pixelsPerBeat: Self.pixelsPerBeat,
+            height: Self.tempoLaneHeight,
+            contentWidth: contentWidth,
+            snap: effectiveSnap,
+            isPro: isPro,
+            isRecording: isRecordingTransport,
+            contentSpace: Self.contentSpace
+        )
+        .offset(y: Self.tempoLaneTop)
     }
 
     @ViewBuilder
@@ -929,7 +1142,7 @@ struct TimelineLanesView: View {
                 let delta = Double(translationWidth / Self.pixelsPerBeat)
                 let beat = MarkerLaneEdit.movedBeat(
                     originBeat: drag.originBeat, dragDeltaBeats: delta,
-                    snap: effectiveSnap, beatsPerBar: beatsPerBar)
+                    snap: effectiveSnap, meterMap: meterMap)
                 markerDrag?.previewBeat = beat
                 onMoveMarker(marker.id, beat)   // coalesces to one undo step
                 DragCursor.set(.grabbing)
@@ -1105,9 +1318,18 @@ private struct ClipBlock: View {
     /// layer; Simple drops the trim/fade/split/gain/stretch chrome and gestures so
     /// the block is a move-only body on the (Bar-locked) grid.
     var pro: Bool
-    var beatsPerBar: Int
+    /// The project meter map (m13-h): every move/trim/split/stretch snap routes
+    /// through it, so a drag INTO a different time-signature region snaps on that
+    /// region's grid (`.bar` via `MeterMap.nearestBarline`). Trivial single-meter
+    /// maps reproduce the old base-meter behavior exactly.
+    var meterMap: MeterMap
     var secondsPerBeat: Double
     var playheadBeat: Double
+    /// True for an AUDIO clip whose span crosses a non-trivial tempo boundary
+    /// (m12-d, design §3.5): its material streams at its natural rate through the
+    /// change (no time-stretch), so beat-alignment inside it shifts — an amber
+    /// honesty hint, never a hard block. MIDI clips never set this.
+    var crossesTempoBoundary: Bool = false
     /// Nil for MIDI clips, or an audio clip whose peaks are still loading.
     var waveformPeaks: WaveformPeaks?
     /// Coarse offline-stretch render state (M5 ii-e): shimmer while pending, red
@@ -1119,6 +1341,10 @@ private struct ClipBlock: View {
     var onSplit: (_ atBeat: Double) -> Void
     var onSetFades: (_ fadeIn: Double, _ fadeOut: Double, _ inCurve: FadeCurve, _ outCurve: FadeCurve) -> Void
     var onSetGain: (_ gainDb: Double) -> Void
+    /// Submits the clip's whole gain-envelope point array (m13-e; wired to
+    /// `ProjectStore.setClipGainEnvelope`, whole-array replace + canonicalize).
+    /// Empty clears the envelope.
+    var onSetGainEnvelope: (_ points: [ClipGainPoint]) -> Void = { _ in }
     /// Retargets the clip's timeline length (audio stretch handle, ii-e).
     var onStretch: (_ toLengthBeats: Double) -> Void
 
@@ -1172,6 +1398,11 @@ private struct ClipBlock: View {
     @State private var readout: String?
     @State private var hovering = false
     @State private var gainDragOrigin: Double?
+    /// Live working copy of the gain envelope while a breakpoint is dragged
+    /// (m13-e) — non-nil ONLY during a drag, so per-tick moves render from a
+    /// stable-order draft (the store canonicalizes for the model). The
+    /// `AutomationLaneEditor` draft idiom.
+    @State private var envDraft: [ClipGainPoint]?
     /// Live ⌥ state while hovering (drives the stretch-handle grip cue). Tracked
     /// by a flags-changed monitor installed only while the pointer is over the
     /// block, so at most one clip carries a monitor at a time.
@@ -1183,9 +1414,53 @@ private struct ClipBlock: View {
     /// Pro-only (sp-c): the gain dB chip and its drag are a clip-edit affordance.
     private var showGain: Bool { pro && width > 40 && (clip.gainDb != 0 || hovering || isSelected) }
 
+    // MARK: - Gain envelope overlay (m13-e)
+
+    /// The per-clip gain-envelope breakpoint overlay shows on a SELECTED AUDIO
+    /// clip in PRO density only (docs/DESIGN-LANGUAGE.md "Panels" — Simple hides
+    /// clip-edit chrome). Selecting the clip IS the envelope-edit mode; the
+    /// overlay only hit-tests its breakpoint dots, so the clip body's
+    /// move/split/trim/select gestures pass through untouched between dots.
+    private var showGainEnvelope: Bool { pro && !clip.isMIDI && isSelected }
+    /// Points rendered right now: the live drag draft when dragging, else the
+    /// canonical model envelope.
+    private var envPoints: [ClipGainPoint] { envDraft ?? clip.gainEnvelope }
+    /// Named coordinate space so a breakpoint drag reads CLIP-LOCAL points
+    /// (0…width, 0…height) regardless of where the block is stacked.
+    private var envSpace: String { "clipEnv-\(clip.id.uuidString)" }
+    /// Vertical dB window the overlay MAPS across the clip body (louder at top).
+    /// A usable riding range, narrower than the model's full -72…24 clamp; a
+    /// point beyond it (e.g. an agent-set -72) still stores its true value and
+    /// simply pins to the nearest edge when drawn.
+    private nonisolated static let envDisplayRange: ClosedRange<Double> = -24...12
+    private var playheadWithinClip: Bool {
+        playheadBeat >= clip.startBeat && playheadBeat <= clip.startBeat + clip.lengthBeats
+    }
+
+    /// Clip-local x for a clip-relative beat.
+    private func envX(_ beat: Double) -> CGFloat { CGFloat(beat) * ppb }
+    /// Clip-local y for a gain in dB (top = loud), clamped into the body.
+    private func envY(_ db: Double) -> CGFloat {
+        let lo = Self.envDisplayRange.lowerBound, hi = Self.envDisplayRange.upperBound
+        let frac = (hi - db) / (hi - lo)
+        return min(max(0, CGFloat(frac) * height), height)
+    }
+    /// The dB a body y maps to (inverse of `envY`), clamped to the model range.
+    private func envDb(forY y: CGFloat) -> Double {
+        let lo = Self.envDisplayRange.lowerBound, hi = Self.envDisplayRange.upperBound
+        let frac = Double(1 - min(max(0, y / height), 1))
+        return (lo + frac * (hi - lo)).clamped(to: Clip.gainDbRange)
+    }
+    private func envBeat(forX x: CGFloat) -> Double {
+        Double(min(max(0, x), width) / ppb).clamped(to: 0...max(0, clip.lengthBeats))
+    }
+
     /// Amber hint: this clip is stretched OUTSIDE the 0.75–1.5× transparent band
     /// (docs/DESIGN-LANGUAGE.md amber = warning; never a hard block).
     private var outOfBand: Bool { ClipStretch.isOutOfBand(ratio: clip.stretchRatio) }
+    /// Any amber warning on this block (stretch out-of-band OR a tempo-boundary
+    /// crossing) — both use `DAWTheme.record` amber, both are hints not blocks.
+    private var amberWarning: Bool { outOfBand || crossesTempoBoundary }
     /// Persistent ratio/pitch badge for a non-identity clip (nil for identity).
     private var badgeText: String? {
         ClipStretch.badge(ratio: clip.stretchRatio, semitones: clip.pitchShiftSemitones)
@@ -1194,20 +1469,20 @@ private struct ClipBlock: View {
     /// clip tint. One accent per meaning (design rule 3).
     private var borderColor: Color {
         if renderVisual == .error { return DAWTheme.clip }
-        if outOfBand { return DAWTheme.record }
+        if amberWarning { return DAWTheme.record }
         return tint
     }
     private var strokeOpacity: Double {
         if isSelected { return 0.95 }
-        if outOfBand || renderVisual == .error { return 0.85 }
+        if amberWarning || renderVisual == .error { return 0.85 }
         return 0.55
     }
     private var strokeWidth: CGFloat {
-        (isSelected || outOfBand || renderVisual == .error) ? 1.5 : 1
+        (isSelected || amberWarning || renderVisual == .error) ? 1.5 : 1
     }
     private var glowIntensity: Double {
         if renderVisual == .error { return 0.55 }
-        if outOfBand { return 0.4 }
+        if amberWarning { return 0.4 }
         return isSelected ? 0.5 : 0
     }
     /// Tooltip: base edit hint, plus the out-of-band ratio note when amber-tinted.
@@ -1223,7 +1498,12 @@ private struct ClipBlock: View {
                 ? "MIDI clip — click to edit notes, drag to move, double-click to split"
                 : "\(clip.name) — drag to move, edges to trim, corners to fade, ⌥-drag the right edge to time-stretch"
         }
-        return outOfBand ? base + "\n" + ClipStretch.outOfBandHelp(ratio: clip.stretchRatio) : base
+        var hint = base
+        if outOfBand { hint += "\n" + ClipStretch.outOfBandHelp(ratio: clip.stretchRatio) }
+        if crossesTempoBoundary {
+            hint += "\nThis audio crosses a tempo change — it plays at its own speed through it, so beats inside drift. Bounce or re-record to lock it to the new tempo."
+        }
+        return hint
     }
 
     var body: some View {
@@ -1233,6 +1513,7 @@ private struct ClipBlock: View {
             .overlay { noteMap }
             .overlay { shimmer }
             .overlay { decorations }
+            .overlay { gainEnvelopeOverlay }
             .overlay(alignment: .leading) { label }
             .overlay(alignment: .trailing) { stretchGrip }
             .overlay(
@@ -1240,6 +1521,7 @@ private struct ClipBlock: View {
                     .stroke(borderColor.opacity(strokeOpacity), lineWidth: strokeWidth)
             )
             .overlay(alignment: .topTrailing) { stretchBadge }
+            .overlay(alignment: .topLeading) { tempoBoundaryBadge }
             .overlay(alignment: .bottomLeading) { errorDot }
             .overlay(alignment: .bottomTrailing) { gainChip }
             .overlay(alignment: .leading) { spliceLine }
@@ -1297,6 +1579,26 @@ private struct ClipBlock: View {
                 .background(DAWTheme.panel.opacity(0.85))
                 .clipShape(RoundedRectangle(cornerRadius: 3))
                 .glow(DAWTheme.record, radius: 2, intensity: outOfBand ? 0.5 : 0)
+                .padding(3)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// The amber tempo-boundary hint badge (m12-d, design §3.5): a small "△ tempo"
+    /// marker on an audio clip that spans a non-trivial tempo change, warning that
+    /// its material drifts against the beats past the boundary (never a block —
+    /// amber = warning, and the block still plays). MIDI clips never show it.
+    @ViewBuilder
+    private var tempoBoundaryBadge: some View {
+        if crossesTempoBoundary, width > 26 {
+            Text("△ tempo")
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .foregroundStyle(DAWTheme.record)
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(DAWTheme.panel.opacity(0.85))
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+                .glow(DAWTheme.record, radius: 2, intensity: 0.5)
                 .padding(3)
                 .allowsHitTesting(false)
         }
@@ -1381,6 +1683,13 @@ private struct ClipBlock: View {
 
     // MARK: - Drawing
 
+    /// Opacity the audio waveform DIMS to while the gain-envelope overlay is up
+    /// (m13-g sub-task 3): the cyan polyline is the primary layer, but the
+    /// waveform stays visible as a ghost UNDER it so breakpoints can be placed
+    /// against the audio (docs/DESIGN-LANGUAGE.md "Clip editing" — overlay cyan,
+    /// waveform ghosted). Full strength when no overlay is showing.
+    private static let envGhostOpacity: Double = 0.4
+
     @ViewBuilder
     private var waveform: some View {
         if let peaks = waveformPeaks {
@@ -1392,6 +1701,9 @@ private struct ClipBlock: View {
                 tint: tint
             )
             .clipShape(RoundedRectangle(cornerRadius: 5))
+            // Ghost the waveform under the envelope overlay so it reads as a
+            // backdrop the breakpoints ride, not a competing layer (m13-g).
+            .opacity(showGainEnvelope ? Self.envGhostOpacity : 1)
         } else if !clip.isMIDI {
             // Audio honesty (beta m10-f): while the peaks load off-main (or the file
             // is unreadable → computePeaks nil), show a dim flat center line so an
@@ -1401,6 +1713,7 @@ private struct ClipBlock: View {
                 .fill(tint.opacity(0.3))
                 .frame(height: 1)
                 .frame(maxHeight: .infinity, alignment: .center)
+                .opacity(showGainEnvelope ? Self.envGhostOpacity : 1)
                 .allowsHitTesting(false)
         }
     }
@@ -1443,36 +1756,48 @@ private struct ClipBlock: View {
     @ViewBuilder
     private var decorations: some View {
         if pro {
-        Canvas { context, size in
+            // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+            // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
             let gripBright = (hovering || isSelected) ? 0.9 : 0.4
-            if clip.fadeInBeats > 0 {
-                context.fill(fadeInPath(width: size.width, height: size.height, curve: clip.fadeInCurve),
-                             with: .color(DAWTheme.background.opacity(0.5)))
+            let fadeInBeats = clip.fadeInBeats
+            let fadeOutBeats = clip.fadeOutBeats
+            let fadeInCurve = clip.fadeInCurve
+            let fadeOutCurve = clip.fadeOutCurve
+            let tint = tint
+            let ppb = ppb
+            let geometry = geometry
+            Canvas { @Sendable context, size in
+                if fadeInBeats > 0 {
+                    context.fill(Self.fadeInPath(width: size.width, height: size.height,
+                                                 fadeInBeats: fadeInBeats, ppb: ppb, curve: fadeInCurve),
+                                 with: .color(DAWTheme.background.opacity(0.5)))
+                }
+                if fadeOutBeats > 0 {
+                    context.fill(Self.fadeOutPath(width: size.width, height: size.height,
+                                                  fadeOutBeats: fadeOutBeats, ppb: ppb, curve: fadeOutCurve),
+                                 with: .color(DAWTheme.background.opacity(0.5)))
+                }
+                // Grips at each fade's inner end (at the corner when the fade is 0).
+                let fiX = geometry.fadeInHandleX(fadeInBeats: fadeInBeats, clipWidth: size.width)
+                let foX = geometry.fadeOutHandleX(fadeOutBeats: fadeOutBeats, clipWidth: size.width)
+                context.fill(Self.gripTriangle(atX: fiX), with: .color(tint.opacity(gripBright)))
+                context.fill(Self.gripTriangle(atX: foX), with: .color(tint.opacity(gripBright)))
             }
-            if clip.fadeOutBeats > 0 {
-                context.fill(fadeOutPath(width: size.width, height: size.height, curve: clip.fadeOutCurve),
-                             with: .color(DAWTheme.background.opacity(0.5)))
-            }
-            // Grips at each fade's inner end (at the corner when the fade is 0).
-            let fiX = geometry.fadeInHandleX(fadeInBeats: clip.fadeInBeats, clipWidth: size.width)
-            let foX = geometry.fadeOutHandleX(fadeOutBeats: clip.fadeOutBeats, clipWidth: size.width)
-            context.fill(gripTriangle(atX: fiX), with: .color(tint.opacity(gripBright)))
-            context.fill(gripTriangle(atX: foX), with: .color(tint.opacity(gripBright)))
-        }
-        .allowsHitTesting(false)
+            .allowsHitTesting(false)
         }
     }
 
     /// Rising fade factor 0→1 for progress `t` (linear = t, equal-power = sine).
-    private func fadeShape(_ t: Double, _ curve: FadeCurve) -> Double {
+    private nonisolated static func fadeShape(_ t: Double, _ curve: FadeCurve) -> Double {
         let p = t.clamped(to: 0...1)
         return curve == .linear ? p : sin(p * .pi / 2)
     }
 
     /// Dimmed region above the rising fade-in curve (top-left) — straight for
     /// linear, bowed for equal-power.
-    private func fadeInPath(width w: CGFloat, height h: CGFloat, curve: FadeCurve) -> Path {
-        let fadeW = min(CGFloat(clip.fadeInBeats) * ppb, w)
+    private nonisolated static func fadeInPath(width w: CGFloat, height h: CGFloat,
+                                   fadeInBeats: Double, ppb: CGFloat, curve: FadeCurve) -> Path {
+        let fadeW = min(CGFloat(fadeInBeats) * ppb, w)
         guard fadeW > 0 else { return Path() }
         var p = Path()
         p.move(to: CGPoint(x: 0, y: 0))
@@ -1488,8 +1813,9 @@ private struct ClipBlock: View {
     }
 
     /// Dimmed region above the falling fade-out curve (top-right).
-    private func fadeOutPath(width w: CGFloat, height h: CGFloat, curve: FadeCurve) -> Path {
-        let fadeW = min(CGFloat(clip.fadeOutBeats) * ppb, w)
+    private nonisolated static func fadeOutPath(width w: CGFloat, height h: CGFloat,
+                                    fadeOutBeats: Double, ppb: CGFloat, curve: FadeCurve) -> Path {
+        let fadeW = min(CGFloat(fadeOutBeats) * ppb, w)
         guard fadeW > 0 else { return Path() }
         let startX = w - fadeW
         var p = Path()
@@ -1507,7 +1833,7 @@ private struct ClipBlock: View {
         return p
     }
 
-    private func gripTriangle(atX x: CGFloat) -> Path {
+    private nonisolated static func gripTriangle(atX x: CGFloat) -> Path {
         let s: CGFloat = 4.5
         var p = Path()
         p.move(to: CGPoint(x: x - s, y: 0))
@@ -1548,6 +1874,127 @@ private struct ClipBlock: View {
                 onSetGain(ClipEdit.adjustedGainDb(gainDragOrigin ?? clip.gainDb, deltaDb: deltaDb))
             }
             .onEnded { _ in gainDragOrigin = nil; DragCursor.clear() }
+    }
+
+    // MARK: - Gain envelope overlay (m13-e)
+
+    /// A cyan breakpoint line over the clip body — the automation-editor idiom
+    /// (`AutomationLaneEditor`), scoped to one audio clip. The polyline draws in
+    /// a hit-disabled Canvas; only the small breakpoint dots capture gestures, so
+    /// clip move/split/select still work in the empty space between them. Add a
+    /// point / clear the envelope from the context menu (conflict-free with the
+    /// body's own drag gestures). Cyan = active accent (never violet — not AI).
+    @ViewBuilder
+    private var gainEnvelopeOverlay: some View {
+        if showGainEnvelope {
+            // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+            // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+            let envPoints = envPoints
+            let ppb = ppb
+            let height = height
+            ZStack(alignment: .topLeading) {
+                Canvas { @Sendable context, size in
+                    Self.drawGainEnvelope(&context, size: size, points: envPoints, ppb: ppb, height: height)
+                }
+                .allowsHitTesting(false)
+                ForEach(Array(envPoints.enumerated()), id: \.offset) { index, point in
+                    envDotView
+                        .position(x: envX(point.beat), y: envY(point.gainDb))
+                        .highPriorityGesture(envDotDrag(index))
+                        .simultaneousGesture(envDotDelete(index))
+                        .help("Gain breakpoint — drag to move, double-click to delete")
+                }
+            }
+            .frame(width: width, height: height)
+            .coordinateSpace(name: envSpace)
+            // One card summarizes the overlay's add/move/delete affordances (the
+            // honest-scope rule for Canvas/gesture chrome). Pro-only by construction.
+            .explainable(.clipGainEnvelope)
+        }
+    }
+
+    /// A single glowing breakpoint dot: a small cyan core inside a 14pt hit area.
+    private var envDotView: some View {
+        Circle()
+            .fill(DAWTheme.playback)
+            .frame(width: 7, height: 7)
+            .glow(DAWTheme.playback, radius: 3, intensity: 0.6)
+            .frame(width: 14, height: 14)          // generous hit target
+            .contentShape(Circle())
+    }
+
+    /// Draws the faint 0 dB guide and the neon envelope polyline (flat lead-in /
+    /// lead-out, mirroring `Clip.envelopeGain`'s constant extension). Empty →
+    /// just the guide, inviting the first point.
+    private nonisolated static func drawGainEnvelope(_ context: inout GraphicsContext, size: CGSize,
+                                         points: [ClipGainPoint], ppb: CGFloat, height: CGFloat) {
+        // Clip-local x/y mapping (the instance `envX`/`envY`, reproduced from the
+        // captured value inputs so the renderer stays `self`-free).
+        func envX(_ beat: Double) -> CGFloat { CGFloat(beat) * ppb }
+        func envY(_ db: Double) -> CGFloat {
+            let lo = envDisplayRange.lowerBound, hi = envDisplayRange.upperBound
+            let frac = (hi - db) / (hi - lo)
+            return min(max(0, CGFloat(frac) * height), height)
+        }
+        // Faint dashed guide at 0 dB (unity) — the resting level.
+        let zeroY = envY(0)
+        context.stroke(
+            Path { $0.move(to: CGPoint(x: 0, y: zeroY)); $0.addLine(to: CGPoint(x: size.width, y: zeroY)) },
+            with: .color(DAWTheme.textDim.opacity(0.22)),
+            style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+        guard let first = points.first, let last = points.last else { return }
+        var line = Path()
+        let firstY = envY(first.gainDb)
+        line.move(to: CGPoint(x: 0, y: firstY))
+        line.addLine(to: CGPoint(x: envX(first.beat), y: firstY))
+        for point in points.dropFirst() {
+            line.addLine(to: CGPoint(x: envX(point.beat), y: envY(point.gainDb)))
+        }
+        line.addLine(to: CGPoint(x: size.width, y: envY(last.gainDb)))
+        // Bloom-under-core glow recipe (the automation polyline).
+        context.stroke(line, with: .color(DAWTheme.playback.opacity(0.18)),
+                       style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
+        context.stroke(line, with: .color(DAWTheme.playback.opacity(0.9)),
+                       style: StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round))
+    }
+
+    /// Drag a breakpoint (coalesced under the store's `clip.gainEnv:<clipId>` key
+    /// → one undo step). Reads clip-local coordinates via the named space.
+    private func envDotDrag(_ index: Int) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(envSpace))
+            .onChanged { value in
+                if envDraft == nil { envDraft = clip.gainEnvelope }
+                guard var pts = envDraft, pts.indices.contains(index) else { return }
+                let beat = envBeat(forX: value.location.x)
+                let db = envDb(forY: value.location.y)
+                pts[index] = ClipGainPoint(beat: beat, gainDb: db)
+                envDraft = pts
+                onSetGainEnvelope(pts)
+                readout = "\(fmt(beat)) · \(ClipEdit.gainDbString(db))"
+            }
+            .onEnded { _ in envDraft = nil; readout = nil }
+    }
+
+    /// Double-click a breakpoint to delete it.
+    private func envDotDelete(_ index: Int) -> some Gesture {
+        SpatialTapGesture(count: 2)
+            .onEnded { _ in
+                var pts = clip.gainEnvelope
+                guard pts.indices.contains(index) else { return }
+                pts.remove(at: index)
+                onSetGainEnvelope(pts)
+            }
+    }
+
+    /// Adds a breakpoint at the playhead's clip-relative beat, pinned to the
+    /// envelope's current value there (0 dB when empty) so it lands ON the curve.
+    private func addGainPointAtPlayhead() {
+        let rel = playheadBeat - clip.startBeat
+        guard rel >= 0, rel <= clip.lengthBeats else { return }
+        let db = clip.gainEnvelope.isEmpty
+            ? 0
+            : Clip.envelopeDb(points: clip.gainEnvelope, atBeat: rel)
+        onSetGainEnvelope(clip.gainEnvelope + [ClipGainPoint(beat: rel, gainDb: db)])
     }
 
     // MARK: - Cursor readout
@@ -1633,7 +2080,7 @@ private struct ClipBlock: View {
                     DragCursor.set(.resizeLeftRight)
                     let target = ClipStretch.targetLength(
                         originalStart: active.originStart, originalLength: active.originLength,
-                        dragDeltaBeats: dxBeats, snap: snap, beatsPerBar: beatsPerBar)
+                        dragDeltaBeats: dxBeats, snap: snap, meterMap: meterMap)
                     let preview = ClipStretch.stretchPreview(
                         oldLength: active.originLength, oldRatio: active.originRatio, targetLength: target)
                     onStretch(target)
@@ -1651,20 +2098,20 @@ private struct ClipBlock: View {
         case .body:
             let newStart = ClipEdit.movedStartBeat(
                 originalStart: active.originStart, dragDeltaBeats: dxBeats,
-                snap: snap, beatsPerBar: beatsPerBar)
+                snap: snap, meterMap: meterMap)
             onMove(newStart)
             readout = "start " + fmt(newStart)
         case .trimStart:
             let (s, l) = ClipEdit.trimStart(
                 originalStart: active.originStart, originalLength: active.originLength,
-                newStartBeatRaw: active.originStart + dxBeats, snap: snap, beatsPerBar: beatsPerBar)
+                newStartBeatRaw: active.originStart + dxBeats, snap: snap, meterMap: meterMap)
             onTrim(s, l)
             readout = "start " + fmt(s) + "  len " + fmt(l)
         case .trimEnd:
             let (s, l) = ClipEdit.trimEnd(
                 originalStart: active.originStart,
                 newEndBeatRaw: active.originStart + active.originLength + dxBeats,
-                snap: snap, beatsPerBar: beatsPerBar)
+                snap: snap, meterMap: meterMap)
             onTrim(s, l)
             readout = "len " + fmt(l)
         case .fadeInHandle:
@@ -1691,7 +2138,7 @@ private struct ClipBlock: View {
                 let rel = geometry.beat(forX: value.location.x - clipOriginX)
                 if let beat = ClipEdit.snappedSplit(
                     timelineBeatRaw: clip.startBeat + rel, clipStart: clip.startBeat,
-                    clipLength: clip.lengthBeats, snap: snap, beatsPerBar: beatsPerBar) {
+                    clipLength: clip.lengthBeats, snap: snap, meterMap: meterMap) {
                     onSplit(beat)
                 }
             }
@@ -1738,12 +2185,21 @@ private struct ClipBlock: View {
             Button("Split at Playhead") {
                 if let beat = ClipEdit.snappedSplit(
                     timelineBeatRaw: playheadBeat, clipStart: clip.startBeat,
-                    clipLength: clip.lengthBeats, snap: snap, beatsPerBar: beatsPerBar) {
+                    clipLength: clip.lengthBeats, snap: snap, meterMap: meterMap) {
                     onSplit(beat)
                 }
             }
             Button("Reset Gain") { onSetGain(0) }
                 .disabled(clip.gainDb == 0)
+            // Gain envelope (m13-e): audio clips only — the breakpoint line rides
+            // the clip's level over time. Add lands a point on the curve at the
+            // playhead; drag the dots to shape it; Clear removes the whole line.
+            if !clip.isMIDI {
+                Button("Add Gain Point at Playhead") { addGainPointAtPlayhead() }
+                    .disabled(!playheadWithinClip)
+                Button("Clear Gain Envelope") { onSetGainEnvelope([]) }
+                    .disabled(clip.gainEnvelope.isEmpty)
+            }
             Divider()
             Button(clip.fadeInCurve == .linear ? "Fade In: Equal Power" : "Fade In: Linear") {
                 onSetFades(clip.fadeInBeats, clip.fadeOutBeats,
@@ -1788,7 +2244,9 @@ private struct ClipBlock: View {
 /// Carries the `.crossfade` Explain anchor via the parent; the tooltip names it.
 private struct CrossfadeSeamBadge: View {
     var body: some View {
-        Canvas { context, size in
+        // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+        // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+        Canvas { @Sendable context, size in
             let w = size.width, h = size.height
             var x = Path()
             x.move(to: CGPoint(x: 0, y: h)); x.addLine(to: CGPoint(x: w, y: 0))

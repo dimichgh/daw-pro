@@ -26,7 +26,10 @@ struct VerticalFader: View {
             let height = max(proxy.size.height, 1)
             let fraction = MixerMath.fraction(forGain: gain, in: range)
             let unity = MixerMath.unityFraction(in: range)
-            Canvas { ctx, size in
+            // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+            // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+            let accent = accent
+            Canvas { @Sendable ctx, size in
                 let inset: CGFloat = 6
                 let travel = size.height - inset * 2
                 let grooveW: CGFloat = 5
@@ -101,13 +104,13 @@ struct PanKnob: View {
 
     private var fraction: Double { (pan + 1) / 2 }
 
-    private func point(_ center: CGPoint, _ radius: CGFloat, _ f: Double) -> CGPoint {
+    private nonisolated static func point(_ center: CGPoint, _ radius: CGFloat, _ f: Double) -> CGPoint {
         let radians = MixerMath.knobAngleDegrees(forFraction: f) * .pi / 180
         return CGPoint(x: center.x + radius * CGFloat(cos(radians)),
                        y: center.y + radius * CGFloat(sin(radians)))
     }
 
-    private func arc(_ center: CGPoint, _ radius: CGFloat, from f0: Double, to f1: Double) -> Path {
+    private nonisolated static func arc(_ center: CGPoint, _ radius: CGFloat, from f0: Double, to f1: Double) -> Path {
         var path = Path()
         let steps = 20
         for i in 0...steps {
@@ -119,7 +122,10 @@ struct PanKnob: View {
     }
 
     var body: some View {
-        Canvas { ctx, size in
+        // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+        // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+        let fraction = fraction
+        return Canvas { @Sendable ctx, size in
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let radius = min(size.width, size.height) / 2 - 3
             let cap = Path(ellipseIn: CGRect(x: center.x - radius, y: center.y - radius,
@@ -127,16 +133,16 @@ struct PanKnob: View {
             ctx.fill(cap, with: .color(DAWTheme.panelRaised))
             ctx.stroke(cap, with: .color(DAWTheme.hairline), lineWidth: 1)
 
-            ctx.stroke(arc(center, radius - 2, from: 0, to: 1),
+            ctx.stroke(Self.arc(center, radius - 2, from: 0, to: 1),
                        with: .color(DAWTheme.textDim.opacity(0.25)),
                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
-            ctx.stroke(arc(center, radius - 2, from: 0.5, to: fraction),
+            ctx.stroke(Self.arc(center, radius - 2, from: 0.5, to: fraction),
                        with: .color(DAWTheme.textPrimary.opacity(0.85)),
                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
 
             var pointer = Path()
             pointer.move(to: center)
-            pointer.addLine(to: point(center, radius - 3, fraction))
+            pointer.addLine(to: Self.point(center, radius - 3, fraction))
             ctx.stroke(pointer, with: .color(DAWTheme.textPrimary),
                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
         }
@@ -175,7 +181,9 @@ struct SendMiniFader: View {
             let width = max(proxy.size.width, 1)
             let fraction = MixerMath.fraction(forGain: level, in: Send.levelRange)
             let unity = MixerMath.unityFraction(in: Send.levelRange)
-            Canvas { ctx, size in
+            // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+            // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+            Canvas { @Sendable ctx, size in
                 let groove = Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 2)
                 ctx.fill(groove, with: .color(DAWTheme.panelRaised))
                 var fillCtx = ctx
@@ -251,32 +259,56 @@ struct MixerStateButton: View {
 /// while the effect is passing audio and dims when bypassed. Tap the dot to
 /// toggle bypass; the row's context menu removes it.
 struct InsertRow: View {
+    /// The store + owning-track id let a keyable insert (compressor/gate) host
+    /// the sidechain KEY picker, which drives `ProjectStore.setSidechain` — the
+    /// SAME method the `fx.setSidechain` wire command calls (UI == wire).
+    /// `trackID` is nil on the MASTER chain (m13-d): master effects are never
+    /// keyable (the store rejects a master sidechain), so the key picker is
+    /// hidden there — mirroring the wire's `fx.setSidechain {trackId:"master"}`
+    /// rejection.
+    var store: ProjectStore
+    var trackID: UUID?
     var effect: EffectDescriptor
     var onToggleBypass: () -> Void
     var onRemove: () -> Void
     /// Non-nil ONLY for Audio Unit inserts (M3 vi-b): opens the plugin window.
+    /// Always nil on the master chain (built-ins only, v1).
     var onOpenWindow: (() -> Void)?
 
-    var body: some View {
-        HStack(spacing: 6) {
-            Button(action: onToggleBypass) {
-                Circle()
-                    .fill(effect.isBypassed ? DAWTheme.textDim.opacity(0.35) : DAWTheme.signal)
-                    .frame(width: 7, height: 7)
-                    .glow(DAWTheme.signal, radius: 4, intensity: effect.isBypassed ? 0 : 0.6)
-            }
-            .buttonStyle(.plain)
-            .help(effect.isBypassed ? "Bypassed — click to enable" : "Active — click to bypass")
+    /// Built-in compressor/gate inserts take a sidechain key (m12-g). Hosted AUs
+    /// and every other kind do NOT (the store rejects them with a teaching
+    /// error) — so the picker only shows where a key is actually accepted. The
+    /// MASTER chain (trackID nil) is never keyable (design §4).
+    private var isKeyable: Bool {
+        trackID != nil && (effect.kind == .compressor || effect.kind == .gate)
+    }
 
-            Text(MixerFormat.effectDisplayName(effect))
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(effect.isBypassed ? DAWTheme.textDim : DAWTheme.textPrimary)
-                .lineLimit(1)
-                .strikethrough(effect.isBypassed, color: DAWTheme.textDim)
-            Spacer(minLength: 0)
-            if let onOpenWindow {
-                PluginWindowButton(action: onOpenWindow)
-                    .help("Open the effect plugin window")
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Button(action: onToggleBypass) {
+                    Circle()
+                        .fill(effect.isBypassed ? DAWTheme.textDim.opacity(0.35) : DAWTheme.signal)
+                        .frame(width: 7, height: 7)
+                        .glow(DAWTheme.signal, radius: 4, intensity: effect.isBypassed ? 0 : 0.6)
+                }
+                .buttonStyle(.plain)
+                .help(effect.isBypassed ? "Bypassed — click to enable" : "Active — click to bypass")
+
+                Text(MixerFormat.effectDisplayName(effect))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(effect.isBypassed ? DAWTheme.textDim : DAWTheme.textPrimary)
+                    .lineLimit(1)
+                    .strikethrough(effect.isBypassed, color: DAWTheme.textDim)
+                Spacer(minLength: 0)
+                if let onOpenWindow {
+                    PluginWindowButton(action: onOpenWindow)
+                        .help("Open the effect plugin window")
+                }
+            }
+            if isKeyable, let trackID {
+                SidechainKeyControl(store: store, trackID: trackID, effect: effect)
+                    .explainable(.sidechain)
             }
         }
         .padding(.horizontal, 7)
@@ -290,6 +322,113 @@ struct InsertRow: View {
             }
             Button("Remove Insert", role: .destructive, action: onRemove)
         }
+    }
+}
+
+/// The sidechain KEY picker for a compressor/gate insert row (m12-g S-4). A
+/// keyed effect reacts to another track's post-fader signal (the kick→pad pump)
+/// instead of its own. Binds a headless `SidechainKeyModel` (candidate filter +
+/// injected `ProjectStore.setSidechain` apply) so the picker only ever offers a
+/// source the store accepts and every choice is the SAME edit the wire's
+/// `fx.setSidechain` makes — the view re-implements no validation; the store's
+/// field-named teaching errors surface inline. Standard signal-routing chrome:
+/// the earned active state wears the cyan playback accent, NEVER violet (violet
+/// is AI identity only — docs/DESIGN-LANGUAGE.md Rule 3).
+struct SidechainKeyControl: View {
+    @State private var model: SidechainKeyModel
+
+    init(store: ProjectStore, trackID: UUID, effect: EffectDescriptor) {
+        let effectID = effect.id
+        _model = State(initialValue: SidechainKeyModel(
+            sources: { SidechainKeyPicker.eligibleSources(
+                destinationTrackID: trackID, tracks: store.tracks) },
+            current: {
+                store.tracks.first(where: { $0.id == trackID })?
+                    .effects.first(where: { $0.id == effectID })?.sidechainSourceTrackID
+            },
+            nameForTrack: { id in store.tracks.first(where: { $0.id == id })?.name },
+            apply: { source in
+                try store.setSidechain(trackID: trackID, effectID: effectID, sourceTrackID: source)
+            }
+        ))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Menu {
+                    Button {
+                        model.clear()
+                    } label: {
+                        if model.isKeyed { Text("No Key (self)") }
+                        else { Label("No Key (self)", systemImage: "checkmark") }
+                    }
+                    Divider()
+                    if model.candidates.isEmpty {
+                        Text("No audio tracks to key from")
+                    } else {
+                        ForEach(model.candidates) { source in
+                            Button {
+                                model.setKey(source.id)
+                            } label: {
+                                if model.currentKeyID == source.id {
+                                    Label(source.name, systemImage: "checkmark")
+                                } else {
+                                    Text(source.name)
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    keyBadge
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help(model.isKeyed
+                      ? "Sidechain key — this effect reacts to another track. Click to change or clear."
+                      : "Sidechain key — make this effect react to another track (e.g. duck to a kick).")
+
+                if model.isKeyed {
+                    Button {
+                        model.clear()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(DAWTheme.textDim)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear the sidechain key (return to self-keyed)")
+                }
+                Spacer(minLength: 0)
+            }
+            if let error = model.lastErrorMessage {
+                Text(error)
+                    .font(.system(size: 8))
+                    .foregroundStyle(DAWTheme.record)   // amber: a teaching warning
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// The KEY chip: dim when self-keyed, a lit cyan "KEY ▸ ‹source›" when keyed.
+    private var keyBadge: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 8, weight: .bold))
+            Text(model.isKeyed ? "KEY \u{25B8} \(model.currentKeyName ?? "?")" : "KEY")
+                .font(.system(size: 8, weight: .semibold))
+                .tracking(0.6)
+                .lineLimit(1)
+        }
+        .foregroundStyle(model.isKeyed ? DAWTheme.playback : DAWTheme.textDim)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background((model.isKeyed ? DAWTheme.playback : DAWTheme.textDim).opacity(model.isKeyed ? 0.14 : 0.06))
+        .clipShape(Capsule())
+        .glow(DAWTheme.playback, radius: 3, intensity: model.isKeyed ? 0.5 : 0)
     }
 }
 

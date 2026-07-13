@@ -32,6 +32,8 @@ final class FakeMIDIEngine: AudioEngineControlling {
                         completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {}
     func stopRecording() {}
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)

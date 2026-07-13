@@ -55,7 +55,7 @@ struct EffectChainRenderTests {
 
     /// Records the walk's calls in order — pins reset-before-process.
     private final class SequenceProbeEffect: EffectRendering, @unchecked Sendable {
-        private(set) var calls: [String] = []  // test-thread-only (synchronous walks)
+        var calls: [String] = []  // test-thread-only (synchronous walks)
         func prepare(sampleRate: Double, maxFramesPerQuantum: Int, channelCount: Int) {}
         func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
             calls.append("process")
@@ -472,30 +472,49 @@ struct EffectChainRenderTests {
               + "settled \(channels3[0][0]) (exact 0.25)")
     }
 
-    @Test("un-bypass resets effect state before the next process")
+    @Test("un-bypass resets effect state before the next process (m15-f: fade-out processes, steady bypass skips, double-arm resets twice)")
     func unbypassResetsEffectState() throws {
         let processor = EffectChainProcessor()
         let probe = SequenceProbeEffect()
         let unit = ChainEffectUnit(id: UUID(), kind: .gain,
                                    instance: probe, isBypassed: false)
         processor.publish(EffectChainSnapshot(units: [unit]))
-        let buffer = try makeConstantBuffer(0.5, frames: 64)
+        // 512-frame walks: the 480-frame (10 ms @ 48 kHz) bypass crossfade
+        // completes inside one walk.
+        let buffer = try makeConstantBuffer(0.5, frames: 512)
+        func walk() {
+            processor.process(bufferList: buffer.mutableAudioBufferList, frameCount: 512)
+        }
 
-        processor.process(bufferList: buffer.mutableAudioBufferList, frameCount: 64)
+        walk()
         #expect(probe.calls == ["process"])
 
         unit.setBypassed(true)
-        processor.process(bufferList: buffer.mutableAudioBufferList, frameCount: 64)
-        #expect(probe.calls == ["process"])  // bypassed: skipped entirely
+        walk()  // m15-f: the fade-OUT walk still processes (tail under the falling gain)
+        #expect(probe.calls == ["process", "process"])
+        walk()  // steady bypass: skipped entirely (the pre-m15f law)
+        #expect(probe.calls == ["process", "process"])
 
         unit.setBypassed(false)  // arms the reset flag
-        processor.process(bufferList: buffer.mutableAudioBufferList, frameCount: 64)
-        #expect(probe.calls == ["process", "reset", "process"])  // reset BEFORE process
+        walk()
+        // reset BEFORE process — the resetFlag law, verbatim through the fade-in.
+        #expect(probe.calls == ["process", "process", "reset", "process"])
+        walk()  // fade done: plain steady processing
+        #expect(probe.calls == ["process", "process", "reset", "process", "process"])
 
         // Stop-time tail cut: requestResetAll arms every unit the same way.
         processor.requestResetAll()
-        processor.process(bufferList: buffer.mutableAudioBufferList, frameCount: 64)
-        #expect(probe.calls == ["process", "reset", "process", "reset", "process"])
+        probe.calls = []
+        walk()
+        #expect(probe.calls == ["reset", "process"])
+
+        // m15-f flush-family double-arm: exactly TWO reset walks, then done.
+        processor.requestResetAll(passes: 2)
+        probe.calls = []
+        walk()
+        walk()
+        walk()
+        #expect(probe.calls == ["reset", "process", "reset", "process", "process"])
     }
 
     @Test("v0 chains report zero insert latency through graph and engine")

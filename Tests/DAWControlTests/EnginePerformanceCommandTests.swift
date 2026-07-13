@@ -117,6 +117,8 @@ private final class FakePerformanceEngine: AudioEngineControlling {
     func loopChanged(_ transport: TransportState) {}
     func masterVolumeChanged(_ volume: Double) {}
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         throw ProjectError.engineUnavailable

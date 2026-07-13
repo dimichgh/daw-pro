@@ -141,22 +141,17 @@ extension ProjectStore {
                 case .existingTrack(let id):
                     guard let index = tracks.firstIndex(where: { $0.id == id }) else { continue }
                     // Place the incoming clip, then resolve any overlap it creates
-                    // against ordinary same-lane clips (m11-d): the SAME trim rule as
-                    // moveClip (stationary clips yield the covered region; fully-covered
-                    // ones are removed), folded into this batch's single undo step.
-                    // New-track placements can't overlap, so only this branch resolves.
-                    let aStart = clip.startBeat
-                    let aEnd = clip.startBeat + clip.lengthBeats
-                    var rebuilt: [Clip] = []
-                    rebuilt.reserveCapacity(tracks[index].clips.count + 1)
-                    for existing in tracks[index].clips {
-                        // Comp members keep their existing guards — never trimmed here.
-                        if existing.takeGroupID != nil { rebuilt.append(existing); continue }
-                        rebuilt.append(contentsOf: ProjectStore.resolveOverlap(
-                            stationary: existing, activeStart: aStart, activeEnd: aEnd, tempoMap: tempoMap))
-                    }
-                    rebuilt.append(clip)
-                    tracks[index].clips = rebuilt
+                    // against ordinary same-lane residents through the ONE
+                    // no-silent-overlap choke point (m11-d, unified in m13-b): the
+                    // SAME trim rule as moveClip (stationary clips yield the covered
+                    // region; fully-covered ones are removed), folded into this
+                    // batch's single undo step. New-track placements can't overlap,
+                    // so only this branch resolves.
+                    tracks[index].clips.append(clip)
+                    tracks[index].clips = ProjectStore.resolvingOverlaps(
+                        in: tracks[index].clips, activeIDs: [clip.id],
+                        start: clip.startBeat, end: clip.startBeat + clip.lengthBeats,
+                        tempoMap: tempoMap).clips
                     placedTrackID[i] = id
                     placedTrackName[i] = tracks[index].name
                 case .newTrack(let name):

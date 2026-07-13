@@ -15,14 +15,16 @@ struct MasterVolumeFader: View {
     var body: some View {
         GeometryReader { proxy in
             let height = max(proxy.size.height, 1)
-            Canvas { context, size in
+            // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+            // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+            let fraction = (volume / Self.range.upperBound).clamped(to: 0...1)
+            Canvas { @Sendable context, size in
                 let trackPath = Path(
                     roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 3
                 )
                 context.fill(trackPath, with: .color(DAWTheme.panelRaised))
 
                 // Fill from the bottom, proportional to volume / 2.
-                let fraction = (volume / Self.range.upperBound).clamped(to: 0...1)
                 if fraction > 0.001 {
                     var fill = context
                     fill.clip(to: trackPath)

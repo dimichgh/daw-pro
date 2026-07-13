@@ -20,7 +20,7 @@ struct MixdownStoreTests {
         return store
     }
 
-    @Test("default duration runs to the last clip end plus a 0.5 s tail")
+    @Test("default duration runs to the last clip end plus the shared 2.0 s tail")
     func defaultDuration() async throws {
         let engine = FakeEngine()
         let store = makeStore(engine: engine)
@@ -28,8 +28,9 @@ struct MixdownStoreTests {
         _ = try await store.renderMixdown()
 
         let request = try #require(engine.mixdownRequests.last)
-        // Clip ends at beat 4 → 2.0 s at 120 BPM, + 0.5 s tail.
-        #expect(abs(request.durationSeconds - 2.5) < 1e-9)
+        // m16-d: mixdown defaults onto the SHARED window (renderWindowSeconds).
+        // Clip ends at beat 4 → 2.0 s at 120 BPM, + 2.0 s tail = 4.0 s.
+        #expect(abs(request.durationSeconds - 4.0) < 1e-9)
         #expect(request.fromBeat == 0)
         #expect(request.tempoMap == TempoMap(constantBPM: 120))
         #expect(request.masterVolume == 1)
@@ -44,8 +45,8 @@ struct MixdownStoreTests {
         _ = try await store.renderMixdown(fromBeat: 2)
 
         let request = try #require(engine.mixdownRequests.last)
-        // Beats 2→4 = 1.0 s at 120 BPM, + 0.5 s tail.
-        #expect(abs(request.durationSeconds - 1.5) < 1e-9)
+        // Beats 2→4 = 1.0 s at 120 BPM, + the shared 2.0 s tail = 3.0 s.
+        #expect(abs(request.durationSeconds - 3.0) < 1e-9)
         #expect(request.fromBeat == 2)
     }
 
@@ -63,7 +64,9 @@ struct MixdownStoreTests {
                 Issue.record("wrong case: \(error)")
                 return
             }
-            #expect(error.errorDescription == "nothing to render — project has no audio clips")
+            #expect(error.errorDescription
+                == "nothing to render — no clips found in the render range; "
+                + "add clips or pass an explicit durationSeconds")
         } catch {
             Issue.record("unexpected error: \(error)")
         }
@@ -91,9 +94,12 @@ struct MixdownStoreTests {
         #expect(engine.mixdownRequests.isEmpty)
     }
 
-    // MIDI 23a.
-    @Test("a MIDI-only project has nothing to render (instrument clips aren't audio)")
-    func midiOnlyNothingToRender() async throws {
+    // m16-d/F4: a MIDI-only project renders on the zero-param call — the core
+    // "compose MIDI → render my song" workflow. Instrument clips count toward
+    // the shared all-clips extent (they no longer fall through the old
+    // audio-only filter into a false nothingToRender).
+    @Test("a MIDI-only project renders on the shared all-clips default (F4 fix)")
+    func midiOnlyRendersOnDefault() async throws {
         let engine = FakeEngine()
         let store = ProjectStore()
         store.engine = engine
@@ -103,21 +109,46 @@ struct MixdownStoreTests {
             notes: [MIDINote(pitch: 60, startBeat: 0, lengthBeats: 4)]
         )
 
-        do {
-            _ = try await store.renderMixdown()  // no explicit duration
-            Issue.record("expected nothingToRender for a MIDI-only project")
-        } catch let error as ProjectError {
-            guard case .nothingToRender = error else {
-                Issue.record("wrong case: \(error)"); return
-            }
-            #expect(error.errorDescription == "nothing to render — project has no audio clips")
-        } catch {
-            Issue.record("unexpected error: \(error)")
-        }
-        #expect(engine.mixdownRequests.isEmpty)
+        _ = try await store.renderMixdown()  // no explicit duration
+
+        let request = try #require(engine.mixdownRequests.last)
+        // MIDI clip ends at beat 4 → 2.0 s at 120 BPM, + the shared 2.0 s tail.
+        #expect(abs(request.durationSeconds - 4.0) < 1e-9)
+        #expect(request.fromBeat == 0)
+        #expect(request.tracks.count == 1)
     }
 
-    @Test("explicit duration renders even with no clips")
+    // m16-d bounce-equivalence pin: the mixdown default window is now the
+    // SHARED all-clips extent — the very number render.bounce/measureLoudness/
+    // stems compute. RenderPolicyTests.defaultDurationCoversAllClipKinds pins
+    // the SAME 6.0 s for this exact fixture (audio ends beat 4, MIDI ends beat
+    // 8 → 4 s @ 120 BPM + 2.0 s tail); if either drifts, the seam split again.
+    @Test("default window covers instrument clips, matching render.bounce (F4)")
+    func defaultCoversAllClipKindsLikeBounce() async throws {
+        let engine = FakeEngine()
+        let store = ProjectStore(tracks: [
+            Track(name: "A", kind: .audio, clips: [
+                Clip(name: "a", startBeat: 0, lengthBeats: 4,
+                     audioFileURL: URL(fileURLWithPath: "/tmp/unused.wav")),
+            ]),
+            Track(name: "I", kind: .instrument, clips: [
+                Clip(name: "m", startBeat: 4, lengthBeats: 4, notes: []),
+            ]),
+        ])
+        store.engine = engine
+
+        _ = try await store.renderMixdown()
+
+        let request = try #require(engine.mixdownRequests.last)
+        #expect(abs(request.durationSeconds - 6.0) < 1e-9)
+    }
+
+    // m16-d era-pin (structural): an explicit durationSeconds bypasses the
+    // extent seam entirely and is passed to the engine untouched — so the
+    // unification of the nil-default never perturbs an explicit render (the
+    // live SHA of a fixed explicit-duration render held byte-identical across
+    // the change).
+    @Test("explicit duration renders even with no clips, passed through untouched")
     func explicitDurationNeedsNoClips() async throws {
         let engine = FakeEngine()
         let store = ProjectStore()

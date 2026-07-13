@@ -88,19 +88,36 @@ struct AutomationLaneEditor: View {
 
     // MARK: - Drawing
 
+    /// A value snapshot of everything the renderer needs, taken on the main actor
+    /// before the closure runs. All fields are Sendable so the `@Sendable` Canvas
+    /// closure captures only plain values — never `self` (CANVAS CONTRACT, m16-a).
+    private struct DrawContext {
+        var draft: [AutomationPoint]
+        var geometry: AutomationGeometry
+        var param: AutomationParam
+        var isEnabled: Bool
+        var accent: Color
+        var selection: Int?
+    }
+
     private var canvas: some View {
-        Canvas { context, size in
-            drawBackground(&context, size: size)
-            drawGuideLine(&context, size: size)
-            drawPolyline(&context, size: size)
-            drawBreakpoints(&context)
+        // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+        // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+        let ctx = DrawContext(
+            draft: draft, geometry: geometry, param: param,
+            isEnabled: lane.isEnabled, accent: accent, selection: selection)
+        return Canvas { @Sendable context, size in
+            Self.drawBackground(&context, size: size, ctx: ctx)
+            Self.drawGuideLine(&context, size: size, ctx: ctx)
+            Self.drawPolyline(&context, size: size, ctx: ctx)
+            Self.drawBreakpoints(&context, ctx: ctx)
         }
     }
 
-    private func drawBackground(_ context: inout GraphicsContext, size: CGSize) {
+    private nonisolated static func drawBackground(_ context: inout GraphicsContext, size: CGSize, ctx: DrawContext) {
         context.fill(
             Path(CGRect(origin: .zero, size: size)),
-            with: .color(DAWTheme.background.opacity(lane.isEnabled ? 0.45 : 0.30))
+            with: .color(DAWTheme.background.opacity(ctx.isEnabled ? 0.45 : 0.30))
         )
         // Hairline top edge separating the lane from the clip row above it.
         context.fill(
@@ -110,8 +127,8 @@ struct AutomationLaneEditor: View {
     }
 
     /// The neutral resting line (unity gain / center pan) — a faint dashed guide.
-    private func drawGuideLine(_ context: inout GraphicsContext, size: CGSize) {
-        let y = geometry.y(forValue: param.neutralValue)
+    private nonisolated static func drawGuideLine(_ context: inout GraphicsContext, size: CGSize, ctx: DrawContext) {
+        let y = ctx.geometry.y(forValue: ctx.param.neutralValue)
         context.stroke(
             Path { $0.move(to: CGPoint(x: 0, y: y)); $0.addLine(to: CGPoint(x: size.width, y: y)) },
             with: .color(DAWTheme.textDim.opacity(0.25)),
@@ -123,49 +140,49 @@ struct AutomationLaneEditor: View {
     /// segments between points, flat lead-out to the right edge (matching
     /// `AutomationLane.value(atBeat:)`). Drawn bloom-under-core for the glow
     /// recipe. An empty lane draws a flat line at the neutral value.
-    private func drawPolyline(_ context: inout GraphicsContext, size: CGSize) {
-        let sorted = AutomationLane.canonicalize(draft)
+    private nonisolated static func drawPolyline(_ context: inout GraphicsContext, size: CGSize, ctx: DrawContext) {
+        let sorted = AutomationLane.canonicalize(ctx.draft)
         var line = Path()
         if let first = sorted.first {
-            let firstPoint = geometry.point(for: first)
+            let firstPoint = ctx.geometry.point(for: first)
             line.move(to: CGPoint(x: 0, y: firstPoint.y))
             line.addLine(to: firstPoint)
             for point in sorted.dropFirst() {
-                line.addLine(to: geometry.point(for: point))
+                line.addLine(to: ctx.geometry.point(for: point))
             }
             if let last = sorted.last {
-                let lastPoint = geometry.point(for: last)
+                let lastPoint = ctx.geometry.point(for: last)
                 line.addLine(to: CGPoint(x: size.width, y: lastPoint.y))
             }
         } else {
             // Empty lane: a flat neutral line (inert but shows the target level).
-            let y = geometry.y(forValue: param.neutralValue)
+            let y = ctx.geometry.y(forValue: ctx.param.neutralValue)
             line.move(to: CGPoint(x: 0, y: y))
             line.addLine(to: CGPoint(x: size.width, y: y))
         }
-        let bright = lane.isEnabled ? 1.0 : 0.4
+        let bright = ctx.isEnabled ? 1.0 : 0.4
         // Wide faint bloom first, then the bright core.
-        context.stroke(line, with: .color(accent.opacity(0.18 * bright)),
+        context.stroke(line, with: .color(ctx.accent.opacity(0.18 * bright)),
                        style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
-        context.stroke(line, with: .color(accent.opacity(0.9 * bright)),
+        context.stroke(line, with: .color(ctx.accent.opacity(0.9 * bright)),
                        style: StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round))
     }
 
     /// Glowing breakpoint dots (faint disc + bright core), the selected one ringed.
-    private func drawBreakpoints(_ context: inout GraphicsContext) {
-        let bright = lane.isEnabled ? 1.0 : 0.45
-        for (index, point) in draft.enumerated() {
-            let p = geometry.point(for: point)
-            let isSelected = selection == index
+    private nonisolated static func drawBreakpoints(_ context: inout GraphicsContext, ctx: DrawContext) {
+        let bright = ctx.isEnabled ? 1.0 : 0.45
+        for (index, point) in ctx.draft.enumerated() {
+            let p = ctx.geometry.point(for: point)
+            let isSelected = ctx.selection == index
             // Bloom.
             context.fill(
                 Path(ellipseIn: CGRect(x: p.x - 7, y: p.y - 7, width: 14, height: 14)),
-                with: .color(accent.opacity(0.22 * bright))
+                with: .color(ctx.accent.opacity(0.22 * bright))
             )
             // Core.
             context.fill(
                 Path(ellipseIn: CGRect(x: p.x - 3.5, y: p.y - 3.5, width: 7, height: 7)),
-                with: .color(accent.opacity(bright))
+                with: .color(ctx.accent.opacity(bright))
             )
             if isSelected {
                 context.stroke(

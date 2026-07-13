@@ -5,8 +5,8 @@ import Foundation
 /// Owns the multitrack playback node tree under an `AVAudioEngine`:
 ///
 ///     clip AVAudioPlayerNode (file format) ─┐
-///     clip AVAudioPlayerNode (file format) ─┼─► track AVAudioMixerNode ─► mainMixerNode
-///                                            (SRC / channel-map to graph rate)
+///     clip AVAudioPlayerNode (file format) ─┼─► track AVAudioMixerNode ─► mainMixerNode ─► master chain host ─► output
+///                                            (SRC / channel-map to graph rate)             (m13-d §1-B, post-fader)
 ///
 /// One player + one `AVAudioFile` per clip; one mixer per audio track. Players
 /// connect at the file's `processingFormat`, so all schedule math stays in
@@ -37,6 +37,12 @@ final class PlaybackGraph {
         let stretchRatio: Double
         let pitchShiftSemitones: Double
         let formantPreserve: Bool
+        /// Breakpoint gain envelope (m13-e): part of the SCHEDULE identity — the
+        /// envelope bakes into the scheduled buffers (ClipFadeBake), so a change
+        /// must remove+re-add the clip node (re-bake), exactly like a fade edit.
+        /// A plain `gainDb` edit stays out of the key (it rides `player.volume`);
+        /// a time-varying envelope cannot, so it lives here.
+        let gainEnvelope: [ClipGainPoint]
     }
 
     /// Resolution of one NON-IDENTITY stretched clip at reconcile time.
@@ -110,6 +116,10 @@ final class PlaybackGraph {
     /// order. Send LEVEL is deliberately excluded — levels apply in place via
     /// `sendGain.outputVolume` in `applyParameters` and must never trigger a
     /// stop-reschedule-resume (same rule as ClipKey parameter fields).
+    /// Sidechain key edges (m12-f) are structural too: `sidechainDestinations`
+    /// lists every strip whose ChainHostAU input bus 1 this track's mixer
+    /// feeds (dest model order) — a key set/clear changes the key and rides
+    /// the same quiesce-stop-rewire-resume discipline as a send edit.
     struct RoutingKey: Equatable {
         struct SendKey: Equatable {
             let id: UUID
@@ -118,6 +128,8 @@ final class PlaybackGraph {
         /// nil = master.
         let outputBusID: UUID?
         let sends: [SendKey]
+        /// Strips this track keys (design-m11f-sidechain §4-A), [] for none.
+        var sidechainDestinations: [UUID] = []
     }
 
     /// One bus strip, same sandwich as audio tracks: feeder fan-outs target
@@ -226,6 +238,92 @@ final class PlaybackGraph {
     private var trackNodes: [UUID: TrackNode] = [:]
     private var instrumentNodes: [UUID: InstrumentNode] = [:]
     private var busNodes: [UUID: BusNode] = [:]
+
+    // MARK: Master chain insert (m13-d, design §1-B — the C0 fallback)
+
+    /// The master insert point, ALWAYS installed once per graph lifetime
+    /// (live, post-rebuild, and offline):
+    ///
+    ///     strip mixers ─► mainMixerNode ─► masterChainHost ─► outputNode
+    ///                     (sum + master     (ChainHostAU,
+    ///                      fader, as ever)   post-fader)
+    ///
+    /// C0 VERDICT (measured 2026-07-12, MasterSandwichTransparencyTests):
+    /// design D1 (pre-fader sandwich, `masterSumMixer → chainHost →
+    /// mainMixerNode`) FAILED bit-transparency — `AVAudioMixerNode` applies
+    /// its output volume PER INPUT during accumulation, so today's shape is
+    /// `a·v + b·v + c·v` while D1's is `(a+b+c)·v`: a 1-ulp float drift
+    /// (first diff frame 241, 0x3f172767 vs 0x3f172768) under any non-unity
+    /// master fader. The design's explicit fallback §1-B is therefore the
+    /// production shape: the chain inserts POST-fader between the untouched
+    /// main mixer and the output node — the strip sum and fader math are
+    /// byte-identical to pre-m13-d by construction, and the empty chain is
+    /// the proven pull-through.
+    ///
+    /// Consequences (each documented in design §1-B / ARCHITECTURE.md):
+    /// - Chain edits stay atomic snapshot publishes into `masterChainState`
+    ///   — never topology, never an announce, never a rebuild (the live-add
+    ///   gate holds BY CONSTRUCTION, same as D1).
+    /// - The master chain is POST-fader (deviates from the strip
+    ///   inserts-then-fader convention — the accepted §1-B trade).
+    /// - HONEST TAP RELOCATION: the master meter tap + analyzer move from
+    ///   `mainMixerNode` (now PRE-chain) to this host's output — see
+    ///   `AudioEngine.installMeterTap`; "what you hear is what is analyzed"
+    ///   is preserved verbatim.
+    /// - Metronome and test tone keep their `mainMixerNode` connections and
+    ///   therefore pass THROUGH the master chain (unavoidable under §1-B —
+    ///   `outputNode` has a single input bus; documented, revisit only if a
+    ///   user complains about a limited click).
+    /// - The host's key bus 1 is never armed — `setKeyConnected` is only
+    ///   ever called for strip hosts, and the store rejects master
+    ///   sidechain outright.
+    private(set) var masterChainHost: AVAudioUnitEffect?
+    private(set) var masterChainState: EffectChainState?
+
+    /// The project's master insert chain descriptors — pushed by
+    /// `AudioEngine.masterEffectsChanged` (live) / `OfflineRenderer.render`
+    /// (offline) and synced into `masterChainState` on every
+    /// `applyParameters` pass (R6: before the PDC recompute).
+    var masterEffects: [EffectDescriptor] = []
+
+    // MARK: Master volume automation (m15-c)
+
+    /// The project's MASTER automation lanes (volume-only in v1, store-
+    /// enforced) — pushed by `AudioEngine.masterAutomationChanged` (live) /
+    /// `OfflineRenderer.render` (offline), the `masterEffects` twin. An
+    /// ACTIVE volume lane REPLACES the master fader under the vii-b override
+    /// rule: while rolling `mainMixerNode.outputVolume` pins to 1 and the
+    /// master chain host's PRE-walk gain stage supplies the lane value (the
+    /// §1-B fader position — mainMixer output ≡ chain-host input); while
+    /// stopped the mixer previews `value(atBeat:)` (stopped WYSIWYG).
+    var masterAutomation: [AutomationLane] = []
+
+    /// The manual master fader (`mixer.setMasterVolume`), cached so the
+    /// override rule can hand the node back when a lane deactivates. Pushed
+    /// by AudioEngine (`setManualMasterVolume`, `wireGraphHooks`) and
+    /// `OfflineRenderer.render`; the default 1 matches both the store's and
+    /// AudioEngine's fresh-session default.
+    var manualMasterVolume: Double = 1
+
+    /// True while the master fader is under lane authority (pin or preview),
+    /// so `applyMasterVolume` can distinguish "hand back the manual value
+    /// once" from "never touch the node" — the NULL PATH (no master lane,
+    /// ever) leaves `mainMixerNode.outputVolume` entirely to its pre-m15-c
+    /// owners, byte-identical by construction.
+    private var masterFaderUnderLaneAuthority = false
+
+    /// The lane behind the currently PUBLISHED master schedule (main-actor
+    /// bookkeeping, the `publishedAutomationLanes` twin). Outer `nil` =
+    /// nothing published this roll; `.some(nil)` = explicitly unpublished
+    /// after a mid-roll lane deactivation.
+    private var publishedMasterVolumeLane: AutomationLane??
+
+    /// C0 SPIKE SEAM ONLY (`MasterSandwichTransparencyTests`): `false`
+    /// reproduces the pre-m13-d topology (mainMixerNode wired implicitly to
+    /// the output, no chain host) so the KEPT bit-transparency gate can
+    /// render "today's shape" against the master insert forever. Production
+    /// code never touches it — the insert is unconditional (R1).
+    var masterSandwichEnabled = true
     private(set) var signature: [UUID: [ClipKey]] = [:]
     private(set) var instrumentSignature: [UUID: InstrumentTrackKey] = [:]
     /// Structural routing identity per source (audio + instrument) track.
@@ -313,6 +411,35 @@ final class PlaybackGraph {
     /// track mixer; drives both the live engine's handler and offline tests.
     var meterSink: ((UUID, MeterFrame) -> Void)?
 
+    /// Engine-notices sink (m15-e, audit F6): one `EngineNoticeEvent` per
+    /// schedule-time degradation — the bake-failure fallbacks ("timing wins":
+    /// the clip still sounds, on time, unshaped) and the stretch-pending
+    /// silence transition. Every post happens inside this @MainActor class's
+    /// schedule/reconcile code — control plane only, the render thread gains
+    /// nothing. AudioEngine forwards into the store's ring; OFFLINE graphs
+    /// (OfflineRenderer, bare test graphs) leave it nil by design — a bounce
+    /// surfaces problems through its own error/result path, not as session
+    /// diagnostics. Each posting site keeps its stderr line.
+    var noticeSink: ((EngineNoticeEvent) -> Void)?
+
+    /// Clip ids whose stretch-pending silence has already been NOTICED
+    /// (m15-e): reconcile re-resolves pending clips on every pass, so the
+    /// notice posts once per clip per pending EPISODE — a `.ready` resolution
+    /// re-arms the gate (a later re-edit back into pending posts again).
+    /// Session-bounded; a graph rebuild starts empty and honestly re-posts
+    /// clips that are still silent.
+    private var stretchPendingNoticed: Set<UUID> = []
+
+    /// Clip ids whose media OPEN failed at graph-build time and have already
+    /// posted their `clip-file-missing` notice (m16-c, audit F2): the skipped
+    /// clip stays in the signature, so EVERY reconcile pass retries the open
+    /// and would otherwise re-post on every edit — one post per clip per
+    /// missing EPISODE, the `stretchPendingNoticed` discipline. A successful
+    /// open re-arms the gate (a file that heals and later goes missing again
+    /// posts again). Session-bounded; a graph rebuild starts empty and
+    /// honestly re-posts clips that still cannot open.
+    private var fileOpenFailedNoticed: Set<UUID> = []
+
     /// Render-load telemetry context (M9 perf-b) wired into every strip's
     /// chain host and every instrument renderer AT NODE CREATION — so it
     /// must be assigned right after init, before the first `reconcile`
@@ -329,13 +456,16 @@ final class PlaybackGraph {
     /// routing. Routing rewires are NOT safe against a running AVAudioEngine
     /// (measured live: a mid-play send add leaves its new gain→bus branch
     /// silent until the engine restarts; removing a live bus SEGFAULTs the
-    /// render thread), so the live engine stops itself in this hook — the
-    /// wiring then mutates in the stopped state, the exact build order the
-    /// offline renderer uses — and restarts after reconcile with the
-    /// double-apply convention. TRIVIAL wiring (a fresh node connecting
-    /// straight to master with no sends — the pre-M4 track add, live-proven)
-    /// never fires it, so plain track adds keep recording/capture running.
-    /// Nil (offline render, tests) = no-op.
+    /// render thread). m13-a: the live engine's hook WINDS ACTIVE PLAYBACK
+    /// DOWN (capturing resume state) but no longer stops the engine —
+    /// announce-class passes on a once-rendered engine abort into
+    /// `needsEngineRebuild`, and `AudioEngine.rebuildEngine` discards the
+    /// whole engine and cold-builds a fresh one from the model (the
+    /// stop→start-boundary detach poison cannot exist by construction —
+    /// docs/research/design-m13a-teardown-crash.md). TRIVIAL wiring (a
+    /// fresh node connecting straight to master with no sends — the pre-M4
+    /// track add, live-proven) never fires it, so plain track adds keep
+    /// recording/capture running. Nil (offline render, tests) = no-op.
     var willMutateRoutingTopology: (() -> Void)?
 
     /// IDs of every track currently in the node tree (audio + instrument +
@@ -361,7 +491,7 @@ final class PlaybackGraph {
         self.engine = engine
     }
 
-    // MARK: - Node retirement (M9 crash-a)
+    // MARK: - Teardown discipline (M9 crash-a → m13-a engine-discard)
 
     /// True once the LIVE engine has completed a `start()` — set by
     /// AudioEngine. Offline renderers and headless test graphs never set it,
@@ -369,43 +499,40 @@ final class PlaybackGraph {
     /// stay immediate.
     var engineHasRun = false
 
-    /// Teardown detaches that arrived while the engine was STOPPED after
-    /// having run — the root cause of the M9 teardown crash
-    /// (docs/research/fix-teardown-crash.md): AVFoundation completes a
-    /// detach's internal graph bookkeeping only when it can synchronize with
-    /// a running engine. Detaching a once-rendered node while stopped leaves
-    /// a stale raw node pointer in `AVAudioEngineGraph`'s internal list (it
-    /// survives `reset()` + `start()`; explicit disconnects don't purge it
-    /// either — both measured), and the next `connect` against the running
-    /// engine walks it: use-after-free. Nodes parked here stay attached AND
-    /// strongly held — no freed-memory window can exist — until
-    /// `flushRetiredNodes()` detaches them against a running engine. FIFO,
-    /// so the reconcile edge order (feeders before buses) survives deferral.
-    private(set) var pendingDetachNodes: [AVAudioNode] = []
+    /// m13-a: set when this graph's engine must be DISCARDED and rebuilt
+    /// from the model instead of surgically mutated — an announce-class pass
+    /// on a once-rendered engine, or any teardown that arrived while a
+    /// once-rendered engine sat stopped. Once set, `reconcile` refuses to
+    /// mutate this graph any further (the object is about to be dropped);
+    /// AudioEngine consumes the flag in `tracksDidChange` via
+    /// `rebuildEngine(reason:)`. The flag never resets on this instance —
+    /// its only exit is the graph's replacement. Internal-settable:
+    /// AudioEngine's `projectWillReplace()` forces it at project boundaries
+    /// (design A1, unconditional), and tests pin the refusal behavior.
+    var needsEngineRebuild = false
 
-    /// The ONLY sanctioned detach for teardown paths. Engine running →
-    /// detach now (AVFoundation's dynamic-reconfig path, live-proven at
-    /// 28-strip scale). Stopped after having run → park in the bin. Never
-    /// ran → detach now (offline/test build order, behavior unchanged).
-    private func retireNode(_ node: AVAudioNode) {
+    /// The ONLY sanctioned teardown detach (m13-a, supersedes the M9 retire
+    /// bin — docs/research/design-m13a-teardown-crash.md). A RUNNING engine
+    /// detaches now: the continuously-running dynamic-reconfig path,
+    /// live-proven at 28-strip scale (M9 experiments B/E) and re-confirmed
+    /// by C0 (2026-07-12: every recorded crash required a stop→start
+    /// boundary; no boundary-free live detach ever faulted). A never-run
+    /// engine detaches now too (the offline/test cold build order,
+    /// byte-identical to always). A once-rendered engine that is STOPPED
+    /// must never detach surgically — nodes that rendered and then sat
+    /// attached across a stop→start boundary are already stale in
+    /// AVFoundation's internal node vector, and the next detach walks the
+    /// stale entry (KERN_INVALID_ADDRESS — the falsified M9 flush). The
+    /// node is left ATTACHED (the engine's own attachedNodes set keeps it
+    /// alive, so no freed-memory window can exist) and the graph flags
+    /// itself for a whole-engine rebuild instead; the discard sweeps every
+    /// parked node away with the engine.
+    private func teardownDetach(_ node: AVAudioNode) {
         if engine.isRunning || !engineHasRun {
             engine.detach(node)
         } else {
-            pendingDetachNodes.append(node)
+            needsEngineRebuild = true
         }
-    }
-
-    /// Drains the pending-detach bin against a RUNNING engine. AudioEngine
-    /// calls this after every successful `engine.start()` (prepare, the
-    /// routing-rewire bounce, configuration-change recovery); `reconcile`
-    /// also flushes defensively on entry. No-op while stopped — the bin
-    /// keeps holding the nodes until the engine is next up.
-    func flushRetiredNodes() {
-        guard !pendingDetachNodes.isEmpty, engine.isRunning else { return }
-        for node in pendingDetachNodes {
-            engine.detach(node)
-        }
-        pendingDetachNodes.removeAll()
     }
 
     // MARK: - Reconcile
@@ -413,24 +540,64 @@ final class PlaybackGraph {
     /// Diffs the domain track list against the current node tree, attaching and
     /// detaching nodes as needed. Returns true when the schedule-affecting
     /// signature changed (caller decides whether to stop-reschedule-resume).
+    ///
+    /// m13-a: an announce-class pass against a once-rendered engine does NOT
+    /// run — the graph marks itself `needsEngineRebuild` and returns at the
+    /// announce site, before the first routing-topology mutation; the caller
+    /// (`AudioEngine.tracksDidChange`) then discards the whole engine and
+    /// cold-builds a fresh one from the model.
     @discardableResult
     func reconcile(tracks: [Track]) -> Bool {
-        // Nodes parked across a stopped window retire before new wiring
-        // lands (no-op unless the engine is running and the bin is
-        // non-empty; the primary flush points live in AudioEngine's
-        // post-start seams).
-        flushRetiredNodes()
+        // A graph marked for rebuild is about to be discarded — no further
+        // mutation may touch its (once-rendered) engine. Report "changed"
+        // so no caller can mistake the refusal for a clean no-op.
+        guard !needsEngineRebuild else { return true }
+        // Master chain insert FIRST (m13-d R1): in place before the first
+        // render. Idempotent, attach-only — never an announce, never a
+        // rebuild.
+        ensureMasterSandwich()
         // 0. Bus + routing signatures up front — the step ORDER below is
         // load-bearing: bus nodes are added before any source track wires
         // into them, and removed only after every ex-feeder is rewired.
         let newBusSignature = tracks.filter { $0.kind == .bus }.map(\.id)
+
+        // Sidechain key edges (m12-f): derived from the SAME model field the
+        // chain walk arms (`Effect.sidechainSourceTrackID`, single source of
+        // truth). One key per destination strip (v1; the FIRST keyed effect
+        // wins defensively — the store enforces one), destinations limited
+        // to strips that own a ChainHostAU (audio/bus), sources to non-bus
+        // tracks present in this pass (dangling refs form no edge and the
+        // destination degrades to self-keyed — never a broken graph).
+        let keySourceTrackIDs = Set(
+            tracks.filter { $0.kind != .bus }.map(\.id))
+        var keyDestinationsBySource: [UUID: [UUID]] = [:]
+        for track in tracks where track.kind == .audio || track.kind == .bus {
+            guard let source = track.effects.lazy.compactMap({ effect -> UUID? in
+                guard let s = effect.sidechainSourceTrackID,
+                      keySourceTrackIDs.contains(s), s != track.id else { return nil }
+                return s
+            }).first else { continue }
+            keyDestinationsBySource[source, default: []].append(track.id)
+        }
+
         var newRoutingSignature: [UUID: RoutingKey] = [:]
         for track in tracks where track.kind != .bus {
             newRoutingSignature[track.id] = RoutingKey(
                 outputBusID: track.outputBusID,
                 sends: track.sends.map {
                     RoutingKey.SendKey(id: $0.id, busID: $0.destinationBusID)
-                })
+                },
+                sidechainDestinations: keyDestinationsBySource[track.id] ?? [])
+        }
+
+        // Strips participating in a PHYSICALLY WIRED key edge per the OLD
+        // signature — a removed destination's chainHost detach severs a
+        // source's fan-out leg, so its teardown must announce (quiesce)
+        // exactly like bus-facing wiring.
+        var oldKeyInvolvedStrips: Set<UUID> = []
+        for (source, key) in routingSignature where !key.sidechainDestinations.isEmpty {
+            oldKeyInvolvedStrips.insert(source)
+            oldKeyInvolvedStrips.formUnion(key.sidechainDestinations)
         }
 
         // 0a. Added bus nodes: the same sandwich as audio tracks (sumMixer →
@@ -439,6 +606,8 @@ final class PlaybackGraph {
         var addedBuses: Set<UUID> = []
         for busID in newBusSignature where busNodes[busID] == nil {
             let node = makeStripSandwich(for: busID)
+            // m13-d §1-B: strips keep feeding mainMixerNode — the master
+            // chain sits POST-fader, downstream of the main mixer.
             engine.connect(node.mixer, to: engine.mainMixerNode, format: graphFormat())
             busNodes[busID] = BusNode(sumMixer: node.sumMixer, chainHost: node.chainHost,
                                       chainState: node.chainState,
@@ -453,19 +622,31 @@ final class PlaybackGraph {
         var freshSourceNodes: Set<UUID> = []
 
         // Once-per-pass announcement to `willMutateRoutingTopology`, made
-        // immediately before the FIRST routing-topology mutation so the live
-        // engine can leave the running state before any rewiring happens.
+        // immediately before the FIRST routing-topology mutation. m13-a: for
+        // a once-rendered engine the announce marks the graph for rebuild —
+        // every call site checks `needsEngineRebuild` right after and
+        // ABORTS the pass (still before the first topology mutation, so the
+        // announce contract holds); the hook itself only winds active
+        // playback down (capturing resume state) — it no longer stops the
+        // engine, because the rebuild discards it. Never-run engines
+        // (offline renders, headless tests, pre-start builds) proceed
+        // through the pass exactly as before.
         var announcedRoutingMutation = false
         func announceRoutingMutation() {
             guard !announcedRoutingMutation else { return }
             announcedRoutingMutation = true
             willMutateRoutingTopology?()
+            if engineHasRun {
+                needsEngineRebuild = true
+            }
         }
         // A stored key is "trivial" when the node's wiring is the pre-M4,
-        // live-proven shape: one connection straight to master, no sends.
+        // live-proven shape: one connection straight to master, no sends —
+        // and (m12-f) no sidechain key edges.
         func isTrivial(_ key: RoutingKey?) -> Bool {
             guard let key else { return true }
             return key.outputBusID == nil && key.sends.isEmpty
+                && key.sidechainDestinations.isEmpty
         }
 
         let audioTracks = tracks.filter { $0.kind == .audio }
@@ -479,7 +660,8 @@ final class PlaybackGraph {
                         fadeInCurve: $0.fadeInCurve, fadeOutCurve: $0.fadeOutCurve,
                         stretchRatio: $0.stretchRatio,
                         pitchShiftSemitones: $0.pitchShiftSemitones,
-                        formantPreserve: $0.formantPreserve)
+                        formantPreserve: $0.formantPreserve,
+                        gainEnvelope: $0.gainEnvelope)
             }
         }
 
@@ -488,19 +670,21 @@ final class PlaybackGraph {
         // a node with a live tap leaves the tap block retained against a dead
         // node. Send gains carry no taps.
         for (trackID, node) in trackNodes where newSignature[trackID] == nil {
-            if !isTrivial(routingSignature[trackID]) || !node.sendGainNodes.isEmpty {
-                announceRoutingMutation()  // tearing down bus-facing wiring
+            if !isTrivial(routingSignature[trackID]) || !node.sendGainNodes.isEmpty
+                || oldKeyInvolvedStrips.contains(trackID) {
+                announceRoutingMutation()  // tearing down bus/key-facing wiring
+                if needsEngineRebuild { return true }  // m13-a: engine rebuilds instead
             }
             for clip in node.clips.values {
                 clip.player.stop()
-                retireNode(clip.player)
+                teardownDetach(clip.player)
             }
             node.mixer.removeTap(onBus: 0)
-            retireNode(node.mixer)
-            retireNode(node.chainHost)
-            retireNode(node.sumMixer)
+            teardownDetach(node.mixer)
+            teardownDetach(node.chainHost)
+            teardownDetach(node.sumMixer)
             for gain in node.sendGainNodes.values {
-                retireNode(gain)
+                teardownDetach(gain)
             }
             trackNodes.removeValue(forKey: trackID)
         }
@@ -530,7 +714,7 @@ final class PlaybackGraph {
                     continue
                 }
                 clipNode.player.stop()
-                retireNode(clipNode.player)
+                teardownDetach(clipNode.player)
                 node.clips.removeValue(forKey: clipID)
             }
 
@@ -549,8 +733,19 @@ final class PlaybackGraph {
                 var fileURL = url
                 if !domainClip.isStretchIdentity {
                     switch stretchResolver?(domainClip) {
-                    case .ready(let rendered): fileURL = rendered
-                    case .pending, nil: continue
+                    case .ready(let rendered):
+                        stretchPendingNoticed.remove(key.id)
+                        fileURL = rendered
+                    case .pending, nil:
+                        // m15-e (audit F6): the clip is being scheduled as
+                        // SILENCE — surface it once per pending episode.
+                        if stretchPendingNoticed.insert(key.id).inserted {
+                            noticeSink?(EngineNoticeEvent(
+                                code: "clip-stretch-pending",
+                                message: "'\(domainClip.name)' is still being time-stretched — it plays as silence until the stretch is ready.",
+                                beat: key.startBeat))
+                        }
+                        continue
                     }
                 }
                 do {
@@ -559,11 +754,39 @@ final class PlaybackGraph {
                     engine.attach(clipNode.player)
                     engine.connect(clipNode.player, to: node.sumMixer, format: file.processingFormat)
                     node.clips[key.id] = clipNode
+                    // A clip that opens again healed — re-arm its notice.
+                    fileOpenFailedNoticed.remove(key.id)
                 } catch {
-                    // Skip this clip, keep playing the rest.
+                    // Skip this clip, keep playing the rest. m16-c (audit F2):
+                    // a skipped clip gets NO player node, so the m16-a play
+                    // guard (`startAllPlayers` walks existing ClipNodes only)
+                    // can never see it — this catch is the ONLY site that
+                    // knows, so it posts the honest notice itself.
+                    //
+                    // CODE DECISION (m16-c): a NEW code `clip-file-missing`
+                    // rather than reusing m16-a's `clip-unplayable`. The cause
+                    // is KNOWN here (the media file cannot be opened — the
+                    // agent's remedy is restore/re-link media), while
+                    // `clip-unplayable` is the cause-unknown wiring guard (the
+                    // remedy is play again / engine hiccup). Notices coalesce
+                    // BY CODE, so folding both into one code would let one
+                    // problem's message overwrite the other's — two distinct
+                    // problems deserve two ring entries. The open/recover echo
+                    // (`ProjectStore.echoMissingMediaNotices`) posts the SAME
+                    // `clip-file-missing` code, so open-time and build-time
+                    // detections of one missing file coalesce into one entry.
                     FileHandle.standardError.write(
                         Data("PlaybackGraph: cannot open \(fileURL.path): \(error)\n".utf8)
                     )
+                    if fileOpenFailedNoticed.insert(key.id).inserted {
+                        let missing = !FileManager.default.fileExists(atPath: fileURL.path)
+                        noticeSink?(EngineNoticeEvent(
+                            code: "clip-file-missing",
+                            message: missing
+                                ? "'\(domainClip.name)' plays as silence — its audio file is missing (\(fileURL.path)). Restore or re-link the file to hear this clip."
+                                : "'\(domainClip.name)' plays as silence — its audio file couldn't be opened (\(fileURL.path)). The file may be damaged or in an unsupported format.",
+                            beat: key.startBeat))
+                    }
                 }
             }
 
@@ -602,16 +825,18 @@ final class PlaybackGraph {
             || newInstrumentSignature[trackID]?.samplerZones != node.samplerZones
             || newInstrumentSignature[trackID]?.audioUnitComponent != node.audioUnitComponent
             || newInstrumentSignature[trackID]?.soundBank != node.soundBankAddress {
-            if !isTrivial(routingSignature[trackID]) || !node.sendGainNodes.isEmpty {
-                announceRoutingMutation()  // tearing down bus-facing wiring
+            if !isTrivial(routingSignature[trackID]) || !node.sendGainNodes.isEmpty
+                || oldKeyInvolvedStrips.contains(trackID) {
+                announceRoutingMutation()  // tearing down bus/key-facing wiring
+                if needsEngineRebuild { return true }  // m13-a: engine rebuilds instead
             }
             node.renderer.publish(nil)
             node.renderer.requestFlush()
             node.mixer.removeTap(onBus: 0)
-            retireNode(node.source)
-            retireNode(node.mixer)
+            teardownDetach(node.source)
+            teardownDetach(node.mixer)
             for gain in node.sendGainNodes.values {
-                retireNode(gain)
+                teardownDetach(gain)
             }
             instrumentNodes.removeValue(forKey: trackID)
         }
@@ -649,6 +874,7 @@ final class PlaybackGraph {
             // state before the wiring below mutates.
             if !(isTrivial(routingSignature[track.id]) && isTrivial(key)) {
                 announceRoutingMutation()
+                if needsEngineRebuild { return true }  // m13-a: engine rebuilds instead
             }
 
             // Sever the mixer's ENTIRE old fan-out first — no moment may
@@ -681,13 +907,29 @@ final class PlaybackGraph {
                     node: gain, bus: gain.nextAvailableInputBus))
                 gains[send.id] = gain
             }
+            // m13-d §1-B: master fallback stays the main mixer — the master
+            // chain sits POST-fader, downstream of it.
             let destination = key.outputBusID.flatMap { id in
                 removedBuses.contains(id) ? nil : busNodes[id]?.sumMixer
             } ?? engine.mainMixerNode
             points.append(AVAudioConnectionPoint(
                 node: destination, bus: destination.nextAvailableInputBus))
+            // Sidechain key edges (m12-f): one extra fan-out point per keyed
+            // destination — that strip's ChainHostAU input bus 1, an EXPLICIT
+            // bus index (bus 1 is reserved for the key; never a
+            // nextAvailableInputBus query, which could hand out the key bus
+            // to ordinary wiring). A real graph edge = same-quantum pull,
+            // spike-proven (SidechainBusSpikeTests). Destinations resolve
+            // against the post-add node maps; a vanished one is skipped —
+            // its flag clears at the tail and the effect self-keys.
+            for destID in key.sidechainDestinations {
+                guard let host = trackNodes[destID]?.chainHost
+                    ?? busNodes[destID]?.chainHost else { continue }
+                points.append(AVAudioConnectionPoint(node: host, bus: 1))
+            }
             // Every node in the fan-out array is distinct (fresh gain mixers
-            // + one output dest), so each point's input bus is settled.
+            // + one output dest + foreign chain hosts), so each point's input
+            // bus is settled.
             engine.connect(mixer, to: points, fromBus: 0, format: format)
             setSendGainNodes(gains, forTrack: track.id)
         }
@@ -696,13 +938,34 @@ final class PlaybackGraph {
         // and nothing still connects into these mixers. Tap off before detach.
         if !removedBuses.isEmpty {
             announceRoutingMutation()  // covers the unfed-bus removal case
+            if needsEngineRebuild { return true }  // m13-a: engine rebuilds instead
         }
         for busID in removedBuses {
             guard let node = busNodes.removeValue(forKey: busID) else { continue }
             node.mixer.removeTap(onBus: 0)
-            retireNode(node.mixer)
-            retireNode(node.chainHost)
-            retireNode(node.sumMixer)
+            teardownDetach(node.mixer)
+            teardownDetach(node.chainHost)
+            teardownDetach(node.sumMixer)
+        }
+
+        // 7. Sidechain key-connected flags (m12-f): recomputed every pass
+        // from the NEW signature so each destination's ChainHostAU mirrors
+        // its physically wired key edge — armed only AFTER the wiring above
+        // landed (arm-after-wire), cleared for every strip whose edge
+        // vanished this pass (the render block then never touches bus 1 —
+        // the bit-exact pre-sidechain path). One atomic store per strip.
+        var wiredKeyDestinations: Set<UUID> = []
+        for (sourceID, key) in newRoutingSignature
+        where !key.sidechainDestinations.isEmpty && sourceMixer(forTrack: sourceID) != nil {
+            wiredKeyDestinations.formUnion(key.sidechainDestinations)
+        }
+        for (trackID, node) in trackNodes {
+            ChainHostAU.setKeyConnected(wiredKeyDestinations.contains(trackID),
+                                        of: node.chainHost)
+        }
+        for (busID, node) in busNodes {
+            ChainHostAU.setKeyConnected(wiredKeyDestinations.contains(busID),
+                                        of: node.chainHost)
         }
 
         let changed = newSignature != signature
@@ -725,13 +988,13 @@ final class PlaybackGraph {
     private func detachSendGainNodes(forTrack id: UUID) {
         if let node = trackNodes[id] {
             for gain in node.sendGainNodes.values {
-                retireNode(gain)
+                teardownDetach(gain)
             }
             trackNodes[id]?.sendGainNodes = [:]
         }
         if let node = instrumentNodes[id] {
             for gain in node.sendGainNodes.values {
-                retireNode(gain)
+                teardownDetach(gain)
             }
             node.sendGainNodes = [:]
         }
@@ -793,6 +1056,13 @@ final class PlaybackGraph {
         effectChainState(forTrack: trackID)?.latencySamples(forEffect: effectID) ?? 0
     }
 
+    /// Fixed latency of ONE live master-chain effect instance (m13-d, 0 when
+    /// the id is unknown or the chain is empty) — surfaced through
+    /// `AudioEngine.masterEffectLatencySamples(effectID:)`.
+    func masterEffectLatencySamples(forEffect effectID: UUID) -> Int {
+        masterChainState?.latencySamples(forEffect: effectID) ?? 0
+    }
+
     /// All-effects chain latency for one strip (bypassed effects INCLUDED —
     /// `chainLatencyAll`, spec §1): the stable reported total and the stage-
     /// maxima input. 0 for unknown ids.
@@ -844,10 +1114,12 @@ final class PlaybackGraph {
     /// start paths all re-run it, and OfflineRenderer.render calls it on both
     /// sides of engine start (offline parity by construction).
     ///
-    /// The master strip does not exist as a graph strip (master is the main
-    /// mixer, chain-free today) so the plan input is exactly the track + bus
-    /// strips — the spec's master exclusion holds by construction; a future
-    /// master chain feeds `masterChainLatencySamples` in the report only.
+    /// The master strip does not exist as a graph strip (master is the
+    /// sandwich into the main mixer) so the plan input is exactly the track +
+    /// bus strips — the spec's master exclusion holds by construction; the
+    /// master chain (m13-d) feeds `masterChainLatencySamples` in the REPORT
+    /// only (design D5: common-path, delays every strip equally, no per-strip
+    /// ring could correct it and none tries).
     private func recomputeCompensation(tracks: [Track]) {
         if let override = compensationOverride {
             for stripID in trackIDs {
@@ -860,6 +1132,12 @@ final class PlaybackGraph {
         var strips: [PDCStripInput] = []
         var allByID: [UUID: Int] = [:]
         strips.reserveCapacity(tracks.count)
+        // Sidechain key sources (m12-f) are `hasSends`-class planner inputs:
+        // the key is tapped post-fader exactly like a send, so the source
+        // pads to stage T deterministically (design-m11f-sidechain §4-A).
+        // Single source of truth: the SAME pure helper the store and stem
+        // plan read.
+        let keySources = SidechainGraph.keySourceTrackIDs(tracks: tracks)
         for track in tracks {
             // Only strips that exist in the node tree participate: a ring
             // target has nowhere to land on a not-yet-reconciled strip, and
@@ -869,13 +1147,36 @@ final class PlaybackGraph {
             let kind: PDCStripKind = track.kind == .bus
                 ? .bus
                 : .track(outputsToMaster: track.outputBusID == nil,
-                         hasSends: !track.sends.isEmpty)
+                         hasSends: !track.sends.isEmpty
+                             || keySources.contains(track.id))
+            // The strip's keyed effect (first wins, the reconcile rule):
+            // report input for the honest `sidechainSkewSamples` — the ACTIVE
+            // latency accumulated before the keyed slot is what the main
+            // signal has seen when the key (aligned to its source's stage
+            // target) arrives.
+            var sidechainKey: SidechainKeyInput?
+            if track.kind != .instrument {
+                var latencyBefore = 0
+                for effect in track.effects {
+                    if let source = effect.sidechainSourceTrackID,
+                       keySources.contains(source), source != track.id {
+                        sidechainKey = SidechainKeyInput(
+                            sourceID: source,
+                            latencyBeforeKeyedEffectSamples: latencyBefore)
+                        break
+                    }
+                    if !effect.isBypassed {
+                        latencyBefore += chainState.latencySamples(forEffect: effect.id)
+                    }
+                }
+            }
             let all = chainState.latencySamplesAllEffects
             allByID[track.id] = all
             strips.append(PDCStripInput(
                 id: track.id, kind: kind,
                 chainLatencyAll: all,
-                chainLatencyActive: chainState.latencySamples))
+                chainLatencyActive: chainState.latencySamples,
+                sidechainKey: sidechainKey))
         }
 
         let plan = PDCPlan.compute(input: PDCInput(strips: strips))
@@ -887,11 +1188,21 @@ final class PlaybackGraph {
                 chainLatencySamples: allByID[strip.id] ?? 0,
                 compensationSamples: strip.compensationSamples,
                 clamped: strip.clamped,
-                skewSamples: strip.skewSamples)
+                skewSamples: strip.skewSamples,
+                sidechainSkewSamples: strip.sidechainSkewSamples)
         }
         pdcReport = PDCReport(trackStageSamples: plan.trackStage,
                               busStageSamples: plan.busStage,
-                              masterChainLatencySamples: 0,
+                              // m13-d (design D5): the master chain's ACTIVE
+                              // (non-bypassed) latency sum — report-only.
+                              // The master is common-path (delays every strip
+                              // equally) and NEVER a plan input; no per-strip
+                              // ring could or should correct it. The figure
+                              // legitimately moves on a master bypass toggle
+                              // (no ring to absorb it — the honest
+                              // ruler-to-speaker delay).
+                              masterChainLatencySamples:
+                                  masterChainState?.latencySamples ?? 0,
                               strips: report)
     }
 
@@ -909,6 +1220,12 @@ final class PlaybackGraph {
     /// generation assertions for the no-restart republish tests.
     func automationRenderer(forTrack trackID: UUID) -> AutomationRenderer? {
         automationRenderer(for: trackID)
+    }
+
+    /// The MASTER automation read head (m15-c) — schedule/no-restart
+    /// assertions for the master-lane tests.
+    func masterAutomationRendererForTesting() -> AutomationRenderer? {
+        masterAutomationRenderer
     }
 
     // MARK: - Parameters
@@ -1076,6 +1393,30 @@ final class PlaybackGraph {
         }
         activeAutomationLanes = newActiveLanes
         lastParameterTracks = tracks
+        // Master chain sync (m13-d R6): same pass position as the per-strip
+        // sync above — every pass, both sides of every start, and inside
+        // OfflineRenderer.render (offline parity for free). An atomic
+        // snapshot publish into the master host's processor; never topology.
+        // Ordered BEFORE the PDC recompute so the report's
+        // masterChainLatencySamples sees post-edit latencies — the recompute
+        // funnel's seventh event (master chain edit) with no new site.
+        masterChainState?.sync(descriptors: masterEffects, sampleRate: chainRate)
+        // Master volume lane (m15-c): the strip override rule mirrored onto
+        // the master fader — same pass position, so offline parity and the
+        // stopped-WYSIWYG/roll-start pins land exactly where strips' do.
+        applyMasterVolume(playheadBeat: playheadBeat)
+        // No-restart master republish (the strip rule above, verbatim): a
+        // master lane changed under a rolling transport → rebuild ITS
+        // schedule against the same anchor/epoch. Never a restart — master
+        // automation is in no reconcile signature by construction.
+        if rolling {
+            let activeMasterLane = masterAutomation.activeLane(for: .volume)
+            if let published = publishedMasterVolumeLane {
+                if published != activeMasterLane { publishMasterAutomation(activeMasterLane) }
+            } else if activeMasterLane != nil {
+                publishMasterAutomation(activeMasterLane)
+            }
+        }
         // PDC recompute (M4 viii-c) — AFTER every strip's chain sync above,
         // so the plan sees post-edit latencies (including a hosted AU that
         // just swapped in, or a rate re-prepare). Atomic target stores only.
@@ -1103,6 +1444,12 @@ final class PlaybackGraph {
     /// context (no active lanes → unpublish). Bumps ONLY
     /// `automationGeneration`; the render side re-seeks its cursors by binary
     /// search on the generation change. No-op while stopped.
+    ///
+    /// m14-b L-2: under an active loop unroll the build is the LOOP-UNROLLED
+    /// one (head window + per-cycle blocks through `scheduledThroughCycle`),
+    /// on the roll's shared timelineID — both cycle extensions and mid-roll
+    /// lane edits route through here, so they can never disagree about the
+    /// unrolled shape. Without a loop the build is the linear one, verbatim.
     private func publishAutomation(
         for trackID: UUID, volume: AutomationLane?, pan: AutomationLane?,
         effectParams: [AutomationSchedule.EffectParamLaneSpec]
@@ -1111,15 +1458,111 @@ final class PlaybackGraph {
               let renderer = automationRenderer(for: trackID) else { return }
         var schedule: AutomationSchedule?
         if volume != nil || pan != nil || !effectParams.isEmpty {
-            automationGeneration += 1
-            schedule = AutomationSchedule.build(
-                volumeLane: volume, panLane: pan, effectParamLanes: effectParams,
-                fromBeat: context.fromBeat, tempoMap: context.tempoMap,
-                sampleRate: graphFormat().sampleRate,
-                generation: automationGeneration, mode: context.mode)
+            schedule = buildRollSchedule(context: context, volume: volume,
+                                         pan: pan, effectParams: effectParams)
         }
         renderer.publish(schedule)
         publishedAutomationLanes[trackID] = (volume, pan, effectParams)
+    }
+
+    /// ONE schedule build for the current roll, shared by the strip and the
+    /// MASTER publishes (m15-c) — under an active loop unroll it is the
+    /// loop-unrolled build (head + per-cycle blocks through
+    /// `scheduledThroughCycle`, §8.6 containment); otherwise the linear one.
+    /// A master lane therefore unrolls across loop cycles EXACTLY like a
+    /// track lane, by construction — the two paths cannot disagree.
+    private func buildRollSchedule(
+        context: (fromBeat: Double, tempoMap: TempoMap, mode: AutomationSchedule.Mode),
+        volume: AutomationLane?, pan: AutomationLane?,
+        effectParams: [AutomationSchedule.EffectParamLaneSpec]
+    ) -> AutomationSchedule? {
+        automationGeneration += 1
+        if let state = loopUnroll {
+            return AutomationSchedule.buildLoopUnrolled(
+                volumeLane: volume, panLane: pan, effectParamLanes: effectParams,
+                fromBeat: state.fromBeat,
+                loopStartBeat: state.loop.startBeat,
+                loopEndBeat: state.loop.endBeat,
+                headSeconds: state.headSeconds,
+                cycleSeconds: state.cycleSeconds,
+                // §8.6 containment (m14-d L-4): delivered history below
+                // the containment bound is not rebuilt — blocks are
+                // self-contained, so every value at/after the bound is
+                // identical to the unpruned build (suffix identity).
+                fromCycle: state.prunedBelowCycle,
+                throughCycle: state.scheduledThroughCycle,
+                tempoMap: state.tempoMap,
+                sampleRate: graphFormat().sampleRate,
+                generation: automationGeneration, mode: context.mode,
+                timelineID: automationRollTimelineID)
+        }
+        return AutomationSchedule.build(
+            volumeLane: volume, panLane: pan, effectParamLanes: effectParams,
+            fromBeat: context.fromBeat, tempoMap: context.tempoMap,
+            sampleRate: graphFormat().sampleRate,
+            generation: automationGeneration, mode: context.mode,
+            timelineID: automationRollTimelineID)
+    }
+
+    // MARK: - Master volume automation (m15-c)
+
+    /// The master chain host's automation read head — the master twin of
+    /// `automationRenderer(for:)`. nil until `ensureMasterSandwich` builds
+    /// the host (and forever on a spike graph with the sandwich disabled —
+    /// every master publish then no-ops, the pre-m15-c behavior).
+    private var masterAutomationRenderer: AutomationRenderer? {
+        masterChainHost.flatMap { ChainHostAU.automationRenderer(of: $0) }
+    }
+
+    /// Builds and publishes the MASTER schedule against the current roll
+    /// context (nil lane → unpublish) — `publishAutomation` for the master
+    /// owner, same generation counter, same timeline, same (shared) builder.
+    private func publishMasterAutomation(_ volumeLane: AutomationLane?) {
+        guard let context = automationRollContext,
+              let renderer = masterAutomationRenderer else { return }
+        var schedule: AutomationSchedule?
+        if volumeLane != nil {
+            schedule = buildRollSchedule(context: context, volume: volumeLane,
+                                         pan: nil, effectParams: [])
+        }
+        renderer.publish(schedule)
+        publishedMasterVolumeLane = .some(volumeLane)
+    }
+
+    /// ONE computed write for the master fader under the override rule
+    /// (m15-c): an ACTIVE master volume lane pins `mainMixerNode.outputVolume`
+    /// to 1 while rolling (the pre-walk stage in the master chain host
+    /// supplies the lane gain) and previews `value(atBeat:)` while stopped
+    /// (stopped WYSIWYG); a deactivated lane hands the node back to
+    /// `manualMasterVolume` ONCE. With no lane history this never touches
+    /// the node — the null path's `mainMixerNode.outputVolume` ownership
+    /// (AudioEngine/OfflineRenderer) is byte-identical to pre-m15-c.
+    private func applyMasterVolume(playheadBeat: Double) {
+        if let lane = masterAutomation.activeLane(for: .volume) {
+            let gain = automationRollContext != nil
+                ? 1.0
+                : (lane.value(atBeat: playheadBeat) ?? manualMasterVolume)
+            engine.mainMixerNode.outputVolume = Float(gain)
+            masterFaderUnderLaneAuthority = true
+        } else if masterFaderUnderLaneAuthority {
+            engine.mainMixerNode.outputVolume = Float(manualMasterVolume)
+            masterFaderUnderLaneAuthority = false
+        }
+    }
+
+    /// The `mixer.setMasterVolume` intent (m15-c): caches the manual gain
+    /// and lands it through the override rule in ONE node write — under lane
+    /// authority the lane keeps ruling (a fader move mid-lane never blips
+    /// the pin or the preview); with no active lane this is the pre-m15-c
+    /// direct write, verbatim.
+    func setManualMasterVolume(_ volume: Double, playheadBeat: Double) {
+        manualMasterVolume = volume
+        if masterAutomation.activeLane(for: .volume) != nil {
+            applyMasterVolume(playheadBeat: playheadBeat)
+        } else {
+            masterFaderUnderLaneAuthority = false
+            engine.mainMixerNode.outputVolume = Float(volume)
+        }
     }
 
     /// OFFLINE SEAM: arms the roll context BEFORE the pre-start parameter
@@ -1129,6 +1572,8 @@ final class PlaybackGraph {
     /// ~60 ms anchor lead-in absorbs the pin before schedule t=0.
     func armOfflineAutomation(fromBeat: Double, tempoMap: TempoMap) {
         automationRollContext = (fromBeat, tempoMap, .offline)
+        automationGeneration += 1
+        automationRollTimelineID = automationGeneration
     }
 
     private func addTrackNode(for trackID: UUID) -> TrackNode {
@@ -1136,6 +1581,68 @@ final class PlaybackGraph {
         return TrackNode(sumMixer: node.sumMixer, chainHost: node.chainHost,
                          chainState: node.chainState,
                          automation: node.automation, mixer: node.mixer)
+    }
+
+    // MARK: - Master chain insert construction (m13-d R1, shape §1-B)
+
+    /// ONE creation site, idempotent, fresh-nodes-only (R1): builds the
+    /// post-fader master insert `mainMixerNode → masterChainHost →
+    /// outputNode`, once per graph lifetime, before the first render. Runs
+    /// at `reconcile` entry and from `AudioEngine.prepare()` (which covers
+    /// `rebuildEngine`'s cold build too) before `engine.start()`. It only
+    /// ever attaches a fresh node and connects fresh edges (the sole
+    /// pre-existing edge it replaces is the IMPLICIT mainMixer → output
+    /// wiring, re-routed before the engine ever starts/renders in every
+    /// production path) — the track.add-class operation the announce
+    /// machinery exempts (m13-c) — so it can NEVER set `needsEngineRebuild`
+    /// (pinned by test). There is no teardown path: a rebuild discards the
+    /// whole engine (m13-a), and the insert dies with it.
+    ///
+    /// Kept under the design's `ensureMasterSandwich` name for traceability
+    /// to design-m13d §1/§8 even though the C0 verdict made the shape the
+    /// §1-B post-fader insert, not the D1 sandwich (see the property docs).
+    func ensureMasterSandwich() {
+        guard masterSandwichEnabled, masterChainHost == nil else { return }
+        let chainHost = ChainHostAU.makeChainHostNode()
+        // Telemetry wiring at node creation, before the engine ever renders
+        // (the setPerformanceContext boundary contract) — master chain DSP
+        // counts into perf-b like any strip.
+        ChainHostAU.setPerformanceContext(performance, of: chainHost)
+        engine.attach(chainHost)
+        let format = graphFormat()
+        // EXPLICIT toBus 0 (the m12-f rule): bus 1 is the (never-armed) key
+        // bus; the main feed must not ride a nextAvailableInputBus query.
+        // Connecting the main mixer's output re-routes the implicit
+        // mixer → output edge through the chain host.
+        engine.connect(engine.mainMixerNode, to: chainHost, fromBus: 0, toBus: 0,
+                       format: format)
+        engine.connect(chainHost, to: engine.outputNode, format: format)
+        let processor: EffectChainProcessor
+        if let hosted = ChainHostAU.chainProcessor(of: chainHost) {
+            processor = hosted
+        } else {
+            // Never expected (in-process subclass by construction — the
+            // strip-sandwich fallback verbatim): master inserts go inert,
+            // audio passes through.
+            FileHandle.standardError.write(Data(
+                "PlaybackGraph: master chain host is not ChainHostAU — master inserts disabled\n".utf8))
+            processor = EffectChainProcessor()
+        }
+        let chainState = EffectChainState(processor: processor)
+        // Built-ins only on master in v1 (design D4a) — the provider thunk is
+        // wired for strip-construction symmetry; no master AU is ever
+        // prepared, so a hosted kind would resolve nil → the passthrough
+        // placeholder.
+        chainState.hostedEffectProvider = { [weak self] id in
+            self?.hostedEffectProvider(id)
+        }
+        // m15-c: the master host's volume-automation stage runs PRE-walk —
+        // the §1-B fader position (set at creation, before any render; the
+        // setPerformanceContext boundary discipline). Strip hosts keep the
+        // post-walk default.
+        ChainHostAU.setVolumeStagePreChain(true, of: chainHost)
+        masterChainHost = chainHost
+        masterChainState = chainState
     }
 
     /// One strip's permanent insert sandwich (audio tracks and buses alike):
@@ -1159,7 +1666,11 @@ final class PlaybackGraph {
         ChainHostAU.setPerformanceContext(performance, of: chainHost)
         engine.attach(chainHost)
         let format = graphFormat()
-        engine.connect(sumMixer, to: chainHost, format: format)
+        // EXPLICIT toBus 0 (m12-f): the chain host now declares two input
+        // busses — bus 0 is the strip's main audio, bus 1 is reserved for a
+        // sidechain key edge. The main feed must never ride a
+        // nextAvailableInputBus query that could land on the key bus.
+        engine.connect(sumMixer, to: chainHost, fromBus: 0, toBus: 0, format: format)
         engine.connect(chainHost, to: mixer, format: format)
         let processor: EffectChainProcessor
         if let hosted = ChainHostAU.chainProcessor(of: chainHost) {
@@ -1236,7 +1747,7 @@ final class PlaybackGraph {
             signature[trackID]?.remove(at: index)
             if let clipNode = trackNodes[trackID]?.clips[clipID] {
                 clipNode.player.stop()
-                retireNode(clipNode.player)
+                teardownDetach(clipNode.player)
                 trackNodes[trackID]?.clips.removeValue(forKey: clipID)
             }
         }
@@ -1246,23 +1757,35 @@ final class PlaybackGraph {
     /// detach) and drops its signature entry so the next `reconcile` rebuilds
     /// it — the seam AudioEngine uses when an async AU preparation finishes
     /// and the placeholder node must be replaced with the real instrument.
+    ///
+    /// m13-a: on a once-rendered engine, a strip with bus-facing wiring is
+    /// announce-class — the ENGINE is replaced, not the node. The renderer
+    /// unpublishes (all-notes-off this quantum), the nodes stay attached,
+    /// and the caller's follow-up `tracksDidChange` consumes
+    /// `needsEngineRebuild` — the fresh graph builds the strip with the
+    /// now-prepared instrument via the provider, so no invalidation state
+    /// survives or needs to.
     func invalidateInstrumentNode(trackID: UUID) {
         instrumentSignature.removeValue(forKey: trackID)
         guard let node = instrumentNodes.removeValue(forKey: trackID) else { return }
-        // Same live-safety rule as reconcile: tearing down bus-facing wiring
-        // (send gains, a bus output) must not happen against a running
-        // engine. The caller's next tracksDidChange restarts it.
         let key = routingSignature[trackID]
         if key?.outputBusID != nil || !node.sendGainNodes.isEmpty {
             willMutateRoutingTopology?()
+            if engineHasRun {
+                needsEngineRebuild = true
+                node.renderer.publish(nil)
+                node.renderer.requestFlush()
+                node.mixer.removeTap(onBus: 0)
+                return
+            }
         }
         node.renderer.publish(nil)
         node.renderer.requestFlush()
         node.mixer.removeTap(onBus: 0)
-        retireNode(node.source)
-        retireNode(node.mixer)
+        teardownDetach(node.source)
+        teardownDetach(node.mixer)
         for gain in node.sendGainNodes.values {
-            retireNode(gain)
+            teardownDetach(gain)
         }
     }
 
@@ -1333,13 +1856,121 @@ final class PlaybackGraph {
 
     // MARK: - Scheduling
 
+    /// Live loop window for wrap-aware schedule-ahead (m14-a L-1, design
+    /// design-m13f-gapless-loop §4 Option A). Passed by the LIVE engine only;
+    /// the offline renderer never loops (OfflineRenderer doc — one linear
+    /// pass), so `loop: nil` keeps every existing call site byte-identical.
+    struct LoopWindow: Equatable {
+        let startBeat: Double
+        let endBeat: Double
+    }
+
+    /// One queueable piece of a clip's full-cycle schedule: either a baked
+    /// buffer (fade/envelope shape — baked ONCE, re-enqueued every cycle: the
+    /// Metronome "top-ups only enqueue existing buffers" precedent) or a
+    /// streamed file segment.
+    private enum LoopCycleItem {
+        case buffer(AVAudioPCMBuffer)
+        case segment(startingFrame: AVAudioFramePosition, frameCount: AVAudioFrameCount)
+    }
+
+    /// One clip's contribution to EVERY full loop cycle [loopStart, loopEnd):
+    /// identical window each cycle, so the pieces are computed and baked once.
+    /// The first item carries the cycle's explicit player-relative anchor
+    /// (`round((cycleStartSec + anchorOffsetSeconds) · fileRate)` — an
+    /// ABSOLUTE integral per cycle, never `previous + loopFrames`); the rest
+    /// queue `at: nil`, contiguous, exactly like the linear piece chain.
+    private struct LoopClipPlan {
+        let node: ClipNode
+        let fileRate: Double
+        /// Within-cycle seconds from the loop start to the clip's first
+        /// scheduled frame (0 for clips already sounding at the loop start).
+        let anchorOffsetSeconds: Double
+        let items: [LoopCycleItem]
+    }
+
+    /// Loop unroll state (m14-a L-1): set by `scheduleAll(loop:)`, consumed
+    /// by `topUpLoopCycles`, cleared by `stopAllPlayers` (every stop / seek /
+    /// edit restart) and by any linear `scheduleAll`. Cycle placement derives
+    /// from `headSeconds` / `cycleSeconds` — map integrals evaluated ONCE, so
+    /// every cycle anchor is the absolute integral (design §8.2).
+    private struct LoopUnrollState {
+        /// Player-relative seconds at which cycle 1 begins (integral from the
+        /// schedule's `fromBeat` to the loop end — the cycle-0 head pass).
+        let headSeconds: Double
+        /// Exact loop period: the map integral over [startBeat, endBeat).
+        let cycleSeconds: Double
+        /// Whole unrolled cycles queued so far (0 = only the head pass).
+        var scheduledThroughCycle: Int
+        let clipPlans: [LoopClipPlan]
+        // m14-b L-2: the non-audio unroll builds per-cycle blocks from these.
+        let loop: LoopWindow
+        let fromBeat: Double
+        let tempoMap: TempoMap
+        /// Next noteID base per instrument track (schedule-wide uniqueness
+        /// across appended cycle blocks — the C2 exactly-once accounting).
+        var midiNoteIDBase: [UUID: UInt64] = [:]
+        /// §8.6 containment (m14-d L-4): the first cycle whose MIDI events /
+        /// automation blocks are still materialized (0 = head retained,
+        /// nothing pruned). Advanced by `topUpLoopCycles` under the
+        /// suffix-identity law — events strictly below cycle
+        /// `prunedBelowCycle`'s absolute-integral start frame are removed
+        /// from the staged arrays, and automation rebuilds from this cycle.
+        var prunedBelowCycle: Int = 0
+    }
+
+    private var loopUnroll: LoopUnrollState?
+
+    /// §8.6 containment threshold (m14-d L-4): once the retained history
+    /// spans this many cycles below the containment bound, the next top-up
+    /// prunes. The bound itself is `soundingCycle − 1` (one FULL cycle of
+    /// margin below the control thread's render-clock snapshot, which
+    /// lower-bounds the render side's delivered watermark — the suffix-
+    /// identity law's safety condition). Retained history is therefore
+    /// bounded at ~(threshold + margin + eager/coverage lookahead) cycles of
+    /// events forever, regardless of total cycles played. Internal (not
+    /// private) so the containment soak can pin the trigger arithmetic.
+    static let loopPruneThresholdCycles = 8
+
+    /// One MIDI timeline per roll (m14-b L-2): minted by `startAllPlayers`
+    /// from the same monotonic `scheduleGeneration` counter (so it can never
+    /// collide with a default `timelineID == generation` schedule), cleared
+    /// by `stopAllPlayers`. Loop-cycle extension republishes reuse BOTH the
+    /// id and the anchor `mode` — the render side then re-seeks instead of
+    /// resetting, and voices persist across the wrap (design §5, §9-C2).
+    private var midiRollContext: (timelineID: UInt64, mode: MIDIEventSchedule.Mode)?
+
+    /// The automation timeline of the current roll (same contract), minted
+    /// wherever `automationRollContext` is armed — extension and lane-edit
+    /// republishes share it, so the renderer keeps its latched offline epoch.
+    private var automationRollTimelineID: UInt64 = 0
+
+    /// Test seam: how many full cycles are currently queued (nil = no loop
+    /// unroll active). Read by the C6 horizon-law gate.
+    var loopScheduledThroughCycle: Int? { loopUnroll?.scheduledThroughCycle }
+
+    /// Test seam (m14-d L-4): the first still-materialized cycle (§8.6
+    /// containment; 0 = nothing pruned, nil = no loop unroll active). The
+    /// containment soak counts its transitions and pins the bound.
+    var loopPrunedBelowCycle: Int? { loopUnroll?.prunedBelowCycle }
+
     /// Schedules every clip player-relative: player sample time 0 ≡ transport
     /// position `fromBeat`. All math is in file-rate frames. m12-b: clip
     /// boundaries convert through the tempo-map integral (signed for pre-roll
     /// clips) — bit-identical to the old fixed `secondsPerBeat` for the
     /// Phase-A trivial map. Audio never time-stretches with tempo; the region
     /// window truncates or under-fills the file.
-    func scheduleAll(fromBeat startBeats: Double, tempoMap: TempoMap) {
+    ///
+    /// m14-a L-1: a non-nil `loop` additionally truncates every clip region
+    /// at the loop END (content past the boundary is never queued — cycle
+    /// N+1 is scheduled explicitly at its own anchor, so unwindowed content
+    /// would both overshoot the wrap and collide with the next cycle's
+    /// anchors) and builds the per-clip full-cycle plans that
+    /// `topUpLoopCycles` unrolls. With `loop == nil` (offline render, linear
+    /// live playback, recording) the schedule is byte-identical to pre-m14-a.
+    func scheduleAll(fromBeat startBeats: Double, tempoMap: TempoMap,
+                     loop: LoopWindow? = nil) {
+        loopUnroll = nil
         // Stage the timeline mapping the next startAllPlayers rolls
         // automation with (the pendingEvents convention).
         stagedAutomationStart = (startBeats, tempoMap)
@@ -1370,7 +2001,15 @@ final class PlaybackGraph {
             // Clip-relative frames: where in the clip playback starts, and the
             // clip's full length. Same `.rounded()` convention as ever.
             let segStart = AVAudioFramePosition((offsetSec * fileRate).rounded())
-            let clipLengthFrames = AVAudioFramePosition((regionSec * fileRate).rounded())
+            var clipLengthFrames = AVAudioFramePosition((regionSec * fileRate).rounded())
+            // m14-a L-1: under a live loop the region ALSO truncates at the
+            // loop end (same integral-then-round convention). Clips at/past
+            // the loop end fall out through the frameCount guard below.
+            if let loop {
+                let windowSec = tempoMap.seconds(from: clip.key.startBeat, to: loop.endBeat)
+                clipLengthFrames = min(clipLengthFrames,
+                                       AVAudioFramePosition((windowSec * fileRate).rounded()))
+            }
             let sourceStart = fileOffsetFrames + segStart
             guard sourceStart < fileLength else { return }
             let sourceEnd = min(fileLength, fileOffsetFrames + clipLengthFrames)
@@ -1379,6 +2018,22 @@ final class PlaybackGraph {
 
             let whenSample = AVAudioFramePosition((max(0, clipStartSec) * fileRate).rounded())
             let when = AVAudioTime(sampleTime: whenSample, atRate: fileRate)
+
+            // Gain envelope (m13-e → m13-h2): an enveloped clip takes the
+            // PIECEWISE plan — only the spans the envelope (or a fade) shapes
+            // are baked; provably-unity spans stream straight off the file,
+            // bit-identical to the old full-region bake's `× 1.0` there.
+            // MEASURED (m13-h2, 10-min stereo 48 k clip, 4-beat dip): the old
+            // whole-region bake cost ~155 ms + ~230 MB at EVERY scheduleAll;
+            // piecewise bakes only the shaped frames. The EMPTY-envelope path
+            // below is byte-untouched (the null-case gate).
+            if !clip.clip.gainEnvelope.isEmpty {
+                scheduleEnvelopedPieces(
+                    clip: clip, tempoMap: tempoMap,
+                    fileOffsetFrames: fileOffsetFrames,
+                    segmentStart: segStart, frameCount: frameCount, at: when)
+                return
+            }
 
             // Fade windows intersected with the scheduled region — all three
             // boundaries derive from the same integers, so the pieces are
@@ -1435,6 +2090,12 @@ final class PlaybackGraph {
             } catch {
                 FileHandle.standardError.write(Data(
                     "PlaybackGraph: fade bake failed for \(clip.file.url.lastPathComponent) — scheduling unfaded: \(error)\n".utf8))
+                // m15-e (audit F6): timing won, shape was dropped — tell the
+                // session, not just stderr.
+                noticeSink?(EngineNoticeEvent(
+                    code: "clip-fades-skipped",
+                    message: "Fades on '\(clip.clip.name)' couldn't be applied this pass — the clip played on time, without its fades.",
+                    beat: clip.key.startBeat))
                 clip.player.scheduleSegment(
                     clip.file, startingFrame: sourceStart,
                     frameCount: AVAudioFrameCount(frameCount),
@@ -1470,24 +2131,495 @@ final class PlaybackGraph {
             }
         }
 
+        if let loop {
+            buildLoopUnroll(fromBeat: startBeats, tempoMap: tempoMap, loop: loop)
+        }
+
         // Instrument tracks: stage the merged, sorted event build for each
         // track's schedule (published by startAllPlayers). Pure math on the
         // main actor — microseconds, never render-thread work. Fixed MAP
         // per schedule (m12-b); setTempo (and any future map edit) restarts
         // → rebuilds.
-        for node in instrumentNodes.values {
+        //
+        // m14-b L-2: under a MATERIALIZED loop unroll the head build windows
+        // its note-ONS at the loop end (cycle blocks own everything past it —
+        // unwindowed ons would collide with cycle 1's), while note-OFFS still
+        // land at their natural times, past the boundary if the note
+        // straddles it (tails ring through the seam, design §5). Cycles are
+        // appended by `topUpLoopCycles` → `extendLoopMIDI`, append-only from
+        // this same anchor. With no loop the build is byte-identical to
+        // pre-m14 (`onsetEndBeat: nil`).
+        let onsetWindowEnd = loopUnroll != nil ? loop?.endBeat : nil
+        for (trackID, node) in instrumentNodes {
             node.pendingEvents = MIDIEventSchedule.buildEvents(
                 clips: node.clips, fromBeat: startBeats, tempoMap: tempoMap,
-                sampleRate: node.renderer.sampleRate
+                sampleRate: node.renderer.sampleRate,
+                onsetEndBeat: onsetWindowEnd
             )
+            if onsetWindowEnd != nil {
+                loopUnroll?.midiNoteIDBase[trackID] = UInt64(node.pendingEvents.count / 2)
+            }
+        }
+    }
+
+    // MARK: - Loop cycle unroll (m14-a L-1, design-m13f-gapless-loop §4-A)
+
+    /// Computes the loop timing constants and every clip's full-cycle plan
+    /// (fade/envelope buffers baked ONCE here — a wrap costs zero allocation
+    /// after this). No plans (MIDI-only loop, clips outside the window) still
+    /// records the state: cycle bookkeeping is what the top-up drives.
+    private func buildLoopUnroll(fromBeat: Double, tempoMap: TempoMap, loop: LoopWindow) {
+        let cycleSeconds = tempoMap.seconds(from: loop.startBeat, to: loop.endBeat)
+        let headSeconds = tempoMap.seconds(from: fromBeat, to: loop.endBeat)
+        guard cycleSeconds > 0, headSeconds > 0 else { return }
+        var plans: [LoopClipPlan] = []
+        forEachClip { clip in
+            if let plan = buildCyclePlan(clip: clip, tempoMap: tempoMap, loop: loop) {
+                plans.append(plan)
+            }
+        }
+        loopUnroll = LoopUnrollState(headSeconds: headSeconds, cycleSeconds: cycleSeconds,
+                                     scheduledThroughCycle: 0, clipPlans: plans,
+                                     loop: loop, fromBeat: fromBeat, tempoMap: tempoMap)
+    }
+
+    /// One clip's schedule for a FULL cycle [loopStart, loopEnd) — the same
+    /// per-clip math as the linear pass in `scheduleAll`, with the window
+    /// origin at the loop start (clips beginning before the loop start enter
+    /// mid-file; clips past the loop end contribute nothing). Fade/envelope
+    /// pieces mirror the linear discipline exactly: bake everything FIRST, a
+    /// read failure falls back to the single plain segment (timing wins).
+    private func buildCyclePlan(clip: ClipNode, tempoMap: TempoMap,
+                                loop: LoopWindow) -> LoopClipPlan? {
+        let fileRate = clip.file.processingFormat.sampleRate
+        let fileLength = clip.file.length
+
+        let clipStartSec = tempoMap.seconds(from: loop.startBeat, to: clip.key.startBeat)
+        let regionSec = tempoMap.seconds(
+            from: clip.key.startBeat,
+            to: clip.key.startBeat + clip.key.lengthBeats)
+        let offsetSec = max(0, -clipStartSec)
+        let fileOffsetFrames = AVAudioFramePosition(
+            (clip.clip.startOffsetSeconds * clip.clip.stretchRatio * fileRate).rounded())
+        let segStart = AVAudioFramePosition((offsetSec * fileRate).rounded())
+        let windowSec = tempoMap.seconds(from: clip.key.startBeat, to: loop.endBeat)
+        let clipLengthFrames = min(
+            AVAudioFramePosition((regionSec * fileRate).rounded()),
+            AVAudioFramePosition((windowSec * fileRate).rounded()))
+        let sourceStart = fileOffsetFrames + segStart
+        guard sourceStart < fileLength else { return nil }
+        let sourceEnd = min(fileLength, fileOffsetFrames + clipLengthFrames)
+        let frameCount = sourceEnd - sourceStart
+        guard frameCount > 0 else { return nil }
+        let anchorOffsetSeconds = max(0, clipStartSec)
+
+        let plainSegment = LoopCycleItem.segment(
+            startingFrame: sourceStart, frameCount: AVAudioFrameCount(frameCount))
+
+        if !clip.clip.gainEnvelope.isEmpty {
+            let pieces = ClipFadeBake.envelopedPiecePlan(
+                clip: clip.clip, tempoMap: tempoMap, fileRate: fileRate,
+                segmentStart: segStart, segmentFrameCount: frameCount)
+            var items: [LoopCycleItem] = []
+            do {
+                let reader = try clip.bakeReader()
+                for piece in pieces {
+                    if piece.bake {
+                        items.append(.buffer(try ClipFadeBake.bakePiece(
+                            file: reader,
+                            sourceStartFrame: fileOffsetFrames + piece.start,
+                            frameCount: piece.frameCount,
+                            clip: clip.clip,
+                            clipRelativeStartFrame: piece.start,
+                            tempoMap: tempoMap)))
+                    } else {
+                        items.append(.segment(
+                            startingFrame: fileOffsetFrames + piece.start,
+                            frameCount: AVAudioFrameCount(piece.frameCount)))
+                    }
+                }
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "PlaybackGraph: loop-cycle envelope bake failed for \(clip.file.url.lastPathComponent) — cycles schedule WITHOUT envelope or fades (timing wins): \(error)\n".utf8))
+                // m15-e (audit F6): same code as the linear envelope drop —
+                // one degradation family, coalesced by code in the store.
+                noticeSink?(EngineNoticeEvent(
+                    code: "clip-envelope-skipped",
+                    message: "The gain envelope on '\(clip.clip.name)' couldn't be applied to its looped repeats — they play on time, without the envelope or fades.",
+                    beat: clip.key.startBeat))
+                items = [plainSegment]
+            }
+            return LoopClipPlan(node: clip, fileRate: fileRate,
+                                anchorOffsetSeconds: anchorOffsetSeconds, items: items)
+        }
+
+        let plan = ClipFadeBake.piecePlan(
+            clip: clip.clip, tempoMap: tempoMap, fileRate: fileRate,
+            segmentStart: segStart, segmentFrameCount: frameCount)
+        guard plan.needsBake else {
+            return LoopClipPlan(node: clip, fileRate: fileRate,
+                                anchorOffsetSeconds: anchorOffsetSeconds,
+                                items: [plainSegment])
+        }
+        var items: [LoopCycleItem] = []
+        do {
+            let reader = try clip.bakeReader()
+            if plan.fadeInFrames > 0 {
+                items.append(.buffer(try ClipFadeBake.bakePiece(
+                    file: reader,
+                    sourceStartFrame: fileOffsetFrames + plan.segmentStart,
+                    frameCount: plan.fadeInFrames,
+                    clip: clip.clip,
+                    clipRelativeStartFrame: plan.segmentStart,
+                    tempoMap: tempoMap)))
+            }
+            if plan.middleFrames > 0 {
+                items.append(.segment(
+                    startingFrame: fileOffsetFrames + plan.fadeInEnd,
+                    frameCount: AVAudioFrameCount(plan.middleFrames)))
+            }
+            if plan.fadeOutFrames > 0 {
+                items.append(.buffer(try ClipFadeBake.bakePiece(
+                    file: reader,
+                    sourceStartFrame: fileOffsetFrames + plan.fadeOutStart,
+                    frameCount: plan.fadeOutFrames,
+                    clip: clip.clip,
+                    clipRelativeStartFrame: plan.fadeOutStart,
+                    tempoMap: tempoMap)))
+            }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "PlaybackGraph: loop-cycle fade bake failed for \(clip.file.url.lastPathComponent) — cycles schedule unfaded: \(error)\n".utf8))
+            // m15-e (audit F6): same code as the linear fade drop — one
+            // degradation family, coalesced by code in the store.
+            noticeSink?(EngineNoticeEvent(
+                code: "clip-fades-skipped",
+                message: "Fades on '\(clip.clip.name)' couldn't be applied to its looped repeats — they play on time, without fades.",
+                beat: clip.key.startBeat))
+            items = [plainSegment]
+        }
+        return LoopClipPlan(node: clip, fileRate: fileRate,
+                            anchorOffsetSeconds: anchorOffsetSeconds, items: items)
+    }
+
+    /// Extends the queued loop cycles. Called by the live playhead task every
+    /// tick (control thread) and once at start (`elapsed 0`). No-op without
+    /// loop state. Buffers re-enqueue, files re-read from their region start
+    /// (both spike-proven, L-0 tests 2–3). The target is the MAX of two laws:
+    ///
+    ///  · COVERAGE (design C6 horizon law): cycles queued through
+    ///    `elapsed + horizon` seconds of player time — multiple cycles per
+    ///    call when the loop is short (design §8.3).
+    ///  · EAGER +2 (m14-a MEASURED amendment to §4-A's "eagerly, one cycle
+    ///    ahead"): ≥ 2 cycles queued beyond the SOUNDING cycle at all times.
+    ///    Two offline-measured AVAudioPlayerNode facts force this
+    ///    (LoopPrimitiveProbe, 2026-07-12, macOS 26):
+    ///      1. a player inside the strip sandwich whose queue fully DRAINS
+    ///         (cycle content ends before the loop boundary) freezes — items
+    ///         queued after the drain NEVER sound, at any anchor lead (P6
+    ///         mid-flight: silent; P6 up-front: exact). Keeping cycle k+1
+    ///         queued before cycle k begins means a queue with future
+    ///         content is never empty.
+    ///      2. mid-flight enqueue needs ≥ ~2.5k frames of anchor lead for a
+    ///         bit-exact splice (P3: whole item lost at ≤ 2048, clean at
+    ///         ≥ 2496). The +2 rule queues each cycle ≥ one full cycle ahead;
+    ///         the coverage law dominates for short cycles — combined, every
+    ///         enqueue lands ≥ horizon − tick ahead of its anchor.
+    func topUpLoopCycles(elapsedPlayerSeconds: Double, horizonSeconds: Double) {
+        guard let state = loopUnroll else { return }
+        let soundingCycle = elapsedPlayerSeconds < state.headSeconds
+            ? 0
+            : 1 + Int(((elapsedPlayerSeconds - state.headSeconds) / state.cycleSeconds)
+                .rounded(.down))
+        var target = soundingCycle + 2
+        // Cycles needed so coverage (head + k·cycle) reaches elapsed + horizon.
+        let coverage = elapsedPlayerSeconds + horizonSeconds
+        if state.headSeconds + Double(target) * state.cycleSeconds < coverage {
+            target = Int(((coverage - state.headSeconds) / state.cycleSeconds)
+                .rounded(.up))
+        }
+        var through = state.scheduledThroughCycle
+        while through < target {
+            through += 1
+            enqueueLoopCycle(through, state: state)
+        }
+        // §8.6 containment (m14-d L-4, the suffix-identity law): once the
+        // retained history spans ≥ threshold cycles below the containment
+        // bound, drop staged MIDI events strictly below the bound's absolute-
+        // integral frame and rebuild automation from the bound cycle. The
+        // bound is `soundingCycle − 1` — one full cycle of margin below the
+        // render-clock snapshot that lower-bounds the delivered watermark, so
+        // nothing pending (straddling offs included; pruning is time-based,
+        // not provenance-based) is ever removed. The pruned arrays ride the
+        // SAME republish as the extension below: same timelineID, no flush —
+        // the render side's value-based re-seek lands on its own watermark
+        // and never notices. Audio player queues need no containment: queued
+        // segments are consumed as they play.
+        var prunedBelow = state.prunedBelowCycle
+        let pruneBound = soundingCycle - 1
+        if pruneBound - prunedBelow >= Self.loopPruneThresholdCycles {
+            pruneLoopMIDIHistory(belowCycle: pruneBound, state: state)
+            prunedBelow = pruneBound
+        }
+        guard through != state.scheduledThroughCycle
+            || prunedBelow != state.prunedBelowCycle else { return }
+        loopUnroll?.scheduledThroughCycle = through
+        loopUnroll?.prunedBelowCycle = prunedBelow
+        // m14-b L-2: the non-audio side unrolls the SAME cycles on the same
+        // cadence — append-only blocks against the roll's one anchor,
+        // republished in place. No flush, no re-anchor, no per-wrap restart:
+        // instrument voices and automation values persist through the seam
+        // (design §5); the old `wrapNonAudioSchedules` interim is gone.
+        extendLoopMIDI(fromCycle: state.scheduledThroughCycle + 1, throughCycle: through)
+        extendLoopAutomation()
+    }
+
+    /// §8.6 containment, MIDI side (m14-d L-4): removes every staged event
+    /// with `sampleTime <` cycle `pruneBound`'s start frame — the absolute
+    /// integral `headSeconds + (pruneBound − 1) · cycleSeconds` at each
+    /// track's schedule rate (the one-rounding discipline). Time-based, so a
+    /// straddling note-off from an older cycle that lands at/after the bound
+    /// survives; everything removed is ≥ one full cycle below the delivered
+    /// watermark (delivered by definition). `midiNoteIDBase` is deliberately
+    /// untouched — noteIDs stay schedule-wide unique forever (the C2 ledger
+    /// keys). Control thread only; the render side sees the result via the
+    /// caller's normal same-timeline republish.
+    private func pruneLoopMIDIHistory(belowCycle pruneBound: Int, state: LoopUnrollState) {
+        guard pruneBound >= 1 else { return }
+        let boundSeconds = state.headSeconds + Double(pruneBound - 1) * state.cycleSeconds
+        for node in instrumentNodes.values {
+            let bound = Int64((boundSeconds * node.renderer.sampleRate).rounded())
+            let keepFrom = node.pendingEvents.firstIndex { $0.sampleTime >= bound }
+                ?? node.pendingEvents.count
+            if keepFrom > 0 {
+                node.pendingEvents.removeFirst(keepFrom)
+            }
+        }
+    }
+
+    /// Queues cycle `cycle` (≥ 1) of every clip plan on its existing player.
+    /// THE ANCHOR LAW (design §8.2, C3): the cycle start is the absolute
+    /// integral `headSeconds + (cycle − 1) · cycleSeconds` — computed fresh
+    /// from the state constants every time, never accumulated from a previous
+    /// anchor, so rounding cannot drift across cycles.
+    private func enqueueLoopCycle(_ cycle: Int, state: LoopUnrollState) {
+        let cycleStartSec = state.headSeconds + Double(cycle - 1) * state.cycleSeconds
+        for plan in state.clipPlans {
+            let whenSample = AVAudioFramePosition(
+                ((cycleStartSec + plan.anchorOffsetSeconds) * plan.fileRate).rounded())
+            // First piece carries the explicit anchor; the rest queue
+            // contiguous — the linear piece-chain convention verbatim.
+            var anchor: AVAudioTime? = AVAudioTime(sampleTime: whenSample, atRate: plan.fileRate)
+            for item in plan.items {
+                let at = anchor
+                anchor = nil
+                switch item {
+                case .buffer(let buffer):
+                    plan.node.player.scheduleBuffer(buffer, at: at, options: [],
+                                                    completionHandler: nil)
+                case .segment(let startingFrame, let frameCount):
+                    plan.node.player.scheduleSegment(
+                        plan.node.file, startingFrame: startingFrame,
+                        frameCount: frameCount, at: at, completionHandler: nil)
+                }
+            }
+        }
+    }
+
+    /// Appends cycles [fromCycle, throughCycle] to every instrument track's
+    /// staged event array — per-cycle `buildEvents` from the loop start with
+    /// SECOND-DOMAIN offsets (design §4-A "MIDI"), merged in canonical order
+    /// (straddling note-offs from earlier cycles interleave with the new
+    /// cycle's ons; the merge keeps the delivered prefix untouched) — and,
+    /// once the roll has started, republishes each schedule against the SAME
+    /// anchor and timelineID with only the generation bumped. The render side
+    /// re-seeks to its delivered watermark: no flush, no all-notes-off —
+    /// voices persist across the wrap and offs straddling a seam fire at
+    /// their natural times (design §5, §9-C2). This replaced the m14-a
+    /// `wrapNonAudioSchedules` per-wrap flush+rebuild interim.
+    ///
+    /// Before `startAllPlayers` (the start-time coverage top-up) only the
+    /// staged `pendingEvents` grow — the initial publish then carries the
+    /// already-unrolled array.
+    ///
+    /// `fromCycle > throughCycle` is legal (m14-d L-4): a containment-only
+    /// tick (§8.6 — history pruned, no new cycles due) appends nothing but
+    /// still republishes, so the render side adopts the pruned array.
+    private func extendLoopMIDI(fromCycle: Int, throughCycle: Int) {
+        guard let state = loopUnroll else { return }
+        for (trackID, node) in instrumentNodes {
+            var base = state.midiNoteIDBase[trackID]
+                ?? UInt64(node.pendingEvents.count / 2)
+            for cycle in stride(from: fromCycle, through: throughCycle, by: 1) {
+                // THE ANCHOR LAW (design §8.2, C3): every cycle offset is the
+                // absolute integral from the state constants — never
+                // `previous + cycleFrames`.
+                let cycleStartSec = state.headSeconds
+                    + Double(cycle - 1) * state.cycleSeconds
+                let block = MIDIEventSchedule.buildEvents(
+                    clips: node.clips, fromBeat: state.loop.startBeat,
+                    tempoMap: state.tempoMap,
+                    sampleRate: node.renderer.sampleRate,
+                    onsetEndBeat: state.loop.endBeat,
+                    offsetSeconds: cycleStartSec,
+                    noteIDBase: base
+                )
+                base += UInt64(block.count / 2)
+                node.pendingEvents = MIDIEventSchedule.mergeSorted(node.pendingEvents, block)
+            }
+            loopUnroll?.midiNoteIDBase[trackID] = base
+            if let roll = midiRollContext {
+                scheduleGeneration += 1
+                node.renderer.publish(MIDIEventSchedule(
+                    generation: scheduleGeneration,
+                    mode: roll.mode,
+                    sampleRate: node.renderer.sampleRate,
+                    events: node.pendingEvents,
+                    timelineID: roll.timelineID
+                ))
+            }
+        }
+    }
+
+    /// Republishes every strip with active lanes as the loop-unrolled build
+    /// through the (just advanced) `scheduledThroughCycle` — deterministic
+    /// blocks appended to the same timeline, so the renderer re-seeks its
+    /// cursors and keeps its latched epoch. No-op before the roll starts
+    /// (`startAllPlayers` publishes the initial unrolled schedules itself)
+    /// and for strips with nothing automated.
+    private func extendLoopAutomation() {
+        guard automationRollContext != nil else { return }
+        for trackID in trackIDs {
+            guard let lanes = activeAutomationLanes[trackID],
+                  lanes.volume != nil || lanes.pan != nil || !lanes.effectParams.isEmpty
+            else { continue }
+            publishAutomation(for: trackID, volume: lanes.volume, pan: lanes.pan,
+                              effectParams: lanes.effectParams)
+        }
+        // The master lane extends with the strips (m15-c): same unrolled
+        // blocks, same timeline, so its values stay correct across every
+        // pre-queued cycle.
+        if let lane = masterAutomation.activeLane(for: .volume) {
+            publishMasterAutomation(lane)
+        }
+    }
+
+    /// Schedules one ENVELOPED clip as the alternating baked/streamed pieces
+    /// of `ClipFadeBake.envelopedPiecePlan` (m13-h2). Discipline mirrors the
+    /// fade three-piece path exactly: ALL buffers bake FIRST (a read failure
+    /// falls back to the single plain segment without desyncing piece times —
+    /// timing always wins over shape), then the pieces queue in order on the
+    /// clip's player, the FIRST carrying the explicit anchor and the rest
+    /// `at: nil`, queue-contiguous.
+    private func scheduleEnvelopedPieces(
+        clip: ClipNode, tempoMap: TempoMap,
+        fileOffsetFrames: AVAudioFramePosition,
+        segmentStart: Int64, frameCount: Int64, at when: AVAudioTime
+    ) {
+        let fileRate = clip.file.processingFormat.sampleRate
+        let pieces = ClipFadeBake.envelopedPiecePlan(
+            clip: clip.clip, tempoMap: tempoMap, fileRate: fileRate,
+            segmentStart: segmentStart, segmentFrameCount: frameCount)
+        var baked: [Int: AVAudioPCMBuffer] = [:]
+        do {
+            let reader = try clip.bakeReader()
+            for (index, piece) in pieces.enumerated() where piece.bake {
+                baked[index] = try ClipFadeBake.bakePiece(
+                    file: reader,
+                    sourceStartFrame: fileOffsetFrames + piece.start,
+                    frameCount: piece.frameCount,
+                    clip: clip.clip,
+                    clipRelativeStartFrame: piece.start,
+                    tempoMap: tempoMap)
+            }
+        } catch {
+            // Deliberate fallback (m13-h2 decision): the clip still SOUNDS,
+            // on time, just unshaped — a bake read failure on a file the
+            // player opened successfully at reconcile is a transient I/O
+            // condition, so timing wins over shape. m15-e (audit F6): the
+            // degradation is no longer stderr-only — the notice below is the
+            // filed follow-up, surfaced on project.snapshot.
+            FileHandle.standardError.write(Data(
+                "PlaybackGraph: envelope bake failed for \(clip.file.url.lastPathComponent) — scheduling WITHOUT envelope or fades (timing wins): \(error)\n".utf8))
+            noticeSink?(EngineNoticeEvent(
+                code: "clip-envelope-skipped",
+                message: "The gain envelope on '\(clip.clip.name)' couldn't be applied this pass — the clip played on time, without its envelope or fades.",
+                beat: clip.key.startBeat))
+            clip.player.scheduleSegment(
+                clip.file,
+                startingFrame: fileOffsetFrames + segmentStart,
+                frameCount: AVAudioFrameCount(frameCount),
+                at: when, completionHandler: nil)
+            return
+        }
+        var anchor: AVAudioTime? = when
+        func takeAnchor() -> AVAudioTime? {
+            defer { anchor = nil }
+            return anchor
+        }
+        for (index, piece) in pieces.enumerated() {
+            if let buffer = baked[index] {
+                clip.player.scheduleBuffer(buffer, at: takeAnchor(),
+                                           options: [], completionHandler: nil)
+            } else {
+                clip.player.scheduleSegment(
+                    clip.file,
+                    startingFrame: fileOffsetFrames + piece.start,
+                    frameCount: AVAudioFrameCount(piece.frameCount),
+                    at: takeAnchor(),
+                    completionHandler: nil)
+            }
         }
     }
 
     // MARK: - Player control
 
+    /// True when the clip's player can legally receive `prepare`/`play`:
+    /// attached to an engine AND holding a live output connection. AVFAudio
+    /// raises an ObjC NSException otherwise (proven live, m16-a: "player
+    /// started when in a disconnected state"), and an ObjC raise through a
+    /// MainActor job frame poisons the runtime — leaked executor-tracking TLS
+    /// record, then a crash at the next SE-0423 isolation check or a silent
+    /// MainActor wedge (docs/research/design-m16a-canvas-crash.md). The check
+    /// is origin-agnostic by design: missing media, reconcile races — m16-c
+    /// owns fixing the missing-media CAUSE at open time; this guard makes
+    /// play safe regardless of cause. O(clips) once per transport start —
+    /// control-plane only, zero render-thread surface.
+    private func isPlayable(_ node: ClipNode) -> Bool {
+        guard let host = node.player.engine else { return false }
+        return !host.outputConnectionPoints(for: node.player, outputBus: 0).isEmpty
+    }
+
+    /// One skipped clip's honesty notice (m16-a Leg 0, the m15-e ring):
+    /// names the clip; when the source file is gone from disk, says so.
+    /// Deliberately KEEPS the `clip-unplayable` code even in the missing-file
+    /// wording — this guard fires for a clip whose node EXISTS but cannot
+    /// start (cause unknown at this site); the build-time open catch and the
+    /// open/recover echo own the cause-known case under `clip-file-missing`
+    /// (m16-c — see the CODE DECISION comment at the reconcile open catch).
+    private func postClipUnplayable(_ node: ClipNode) {
+        let missing = !FileManager.default.fileExists(atPath: node.file.url.path)
+        noticeSink?(EngineNoticeEvent(
+            code: "clip-unplayable",
+            message: missing
+                ? "'\(node.clip.name)' couldn't play — its audio file is missing (moved or deleted). The rest of the project keeps playing."
+                : "'\(node.clip.name)' couldn't play this pass — it wasn't connected to the audio output. The rest of the project keeps playing.",
+            beat: node.key.startBeat))
+    }
+
     /// Preloads render resources so `play(at:)` can honor a near-future anchor.
+    /// m16-a Leg 0: the same playability guard + per-node barrier as
+    /// `startAllPlayers` — `prepare(withFrameCount:)` on a detached/
+    /// disconnected player raises the same NSException family. Deliberately
+    /// SILENT here: the immediately following start posts the clip-unplayable
+    /// notice, one per skipped clip per transport start, not two.
     func prepareAllPlayers(withFrameCount frameCount: AVAudioFrameCount) {
-        forEachClip { $0.player.prepare(withFrameCount: frameCount) }
+        forEachClip { node in
+            guard isPlayable(node) else { return }
+            try? withObjCExceptionBarrier("clip player prepare") {
+                node.player.prepare(withFrameCount: frameCount)
+            }
+        }
     }
 
     /// Starts every player against one shared anchor (lockstep). Pass nil for
@@ -1505,18 +2637,65 @@ final class PlaybackGraph {
         // ran (the offline renderer calls this with a nil anchor as its
         // render-session start). Zero rings + snap to target, no crossfade:
         // a start is already a discontinuity, and a bounce must never carry
-        // live tails (offline parity, spec §5).
-        armCompensationResets()
-        forEachClip { $0.player.play(at: anchor) }
+        // live tails (offline parity, spec §5). The shared flush arm count
+        // (m16-f): live starts double-arm — a live start begins from stopped
+        // players, so both passes consume on silent (or stale pre-stop, the
+        // F6 hazard) input well inside the ~60 ms anchor lead; the offline
+        // start stays single-armed (manual rendering serializes control and
+        // render — a second pass would wipe the FIRST legitimate quantum out
+        // of the ring and break null-era byte-identity).
+        armCompensationResets(passes: flushResetPasses)
+        // m16-a Leg 0: never hand a detached/disconnected player to AVFAudio
+        // — `playAtTime:` raises there (the proven MainActor poisoner; see
+        // `isPlayable`). A skipped clip posts one honest notice; every other
+        // player starts against the shared anchor exactly as before.
+        //
+        // The predicate alone is NOT sufficient (measured in the C1 gate,
+        // 2026-07-13): a strip wired onto a just-REBUILT engine that is
+        // already running passes the public connection-points check yet
+        // still raises "player started when in a disconnected state" —
+        // AVFAudio's internal active-render-graph state has no public
+        // mirror. Hence the per-node barrier: the failing clip converts to
+        // the SAME honest notice and every other player still starts. This
+        // is exactly why iteration 1 of the poisoner recipe always survived
+        // (never-run engine: strips wired BEFORE the first start) while
+        // iteration 2 always raised (rebuildEngine starts the fresh empty
+        // engine first, strips attach while it runs) — the audit's
+        // "materializes one project.new/reconcile cycle later", mechanism
+        // now named. Chasing the exact AVFoundation reconfig defect stays
+        // rider R3; both halves of this guard are origin-agnostic.
+        forEachClip { node in
+            guard isPlayable(node) else {
+                postClipUnplayable(node)
+                return
+            }
+            do {
+                try withObjCExceptionBarrier("clip player start") {
+                    node.player.play(at: anchor)
+                }
+            } catch {
+                // Same stderr + notice pairing as the bake-failure fallback.
+                FileHandle.standardError.write(Data(
+                    "PlaybackGraph: play raised for \(node.file.url.lastPathComponent) — clip skipped: \(error)\n".utf8))
+                postClipUnplayable(node)
+            }
+        }
         let mode: MIDIEventSchedule.Mode =
             anchor.map { .live(anchorHostTime: $0.hostTime) } ?? .offline
+        // m14-b L-2: ONE MIDI timeline per roll, minted from the same
+        // monotonic counter as the generations (collision-free by
+        // construction). Loop-cycle extension republishes reuse it — the
+        // render side then re-seeks instead of resetting (same anchor family).
+        scheduleGeneration += 1
+        midiRollContext = (timelineID: scheduleGeneration, mode: mode)
         for node in instrumentNodes.values {
             scheduleGeneration += 1
             node.renderer.publish(MIDIEventSchedule(
                 generation: scheduleGeneration,
                 mode: mode,
                 sampleRate: node.renderer.sampleRate,
-                events: node.pendingEvents
+                events: node.pendingEvents,
+                timelineID: midiRollContext?.timelineID
             ))
         }
         // Automation rolls against the SAME anchor (live) / first-pull epoch
@@ -1525,11 +2704,16 @@ final class PlaybackGraph {
             stagedAutomationStart.fromBeat, stagedAutomationStart.tempoMap,
             anchor.map { .live(anchorHostTime: $0.hostTime) } ?? .offline
         )
+        automationGeneration += 1
+        automationRollTimelineID = automationGeneration
         for trackID in trackIDs {
             let lanes = activeAutomationLanes[trackID]
             publishAutomation(for: trackID, volume: lanes?.volume, pan: lanes?.pan,
                               effectParams: lanes?.effectParams ?? [])
         }
+        // The MASTER lane rolls with the strips (m15-c): same context, same
+        // anchor/epoch, same builder.
+        publishMasterAutomation(masterAutomation.activeLane(for: .volume))
         // Re-run the parameter pass so the override pins (gain 1 / pan 0)
         // land now that the context is rolling. Live, the anchor lead-in
         // absorbs the mixer's internal ramp before schedule t=0; offline,
@@ -1545,11 +2729,17 @@ final class PlaybackGraph {
     /// to 0 — the single reschedule primitive relies on this.
     ///
     /// Instrument tracks: unpublish + flush is THE all-notes-off contract.
-    /// Every stop, seek, tempo change, loop wrap, tracksDidChange restart,
-    /// and configuration-change recovery already routes through here, so the
+    /// Every stop, seek, tempo change, tracksDidChange restart, and
+    /// configuration-change recovery already routes through here, so the
     /// next render quantum resets every instrument (release tails cut —
-    /// v0-honest, same as players).
+    /// v0-honest, same as players). A LOOP WRAP does NOT route through here
+    /// any more (m14-a L-1): the wrap is pre-queued cycles on rolling
+    /// players — the graph never stops at the seam (design §5: tails, PDC
+    /// rings, and voices persist BY OMISSION). Loop-bounds edits still do
+    /// (the design §4-A restart fallback).
     func stopAllPlayers() {
+        loopUnroll = nil
+        midiRollContext = nil
         forEachClip { $0.player.stop() }
         for node in instrumentNodes.values {
             node.renderer.publish(nil)
@@ -1563,54 +2753,110 @@ final class PlaybackGraph {
         for trackID in trackIDs {
             automationRenderer(for: trackID)?.publish(nil)
         }
+        // The master read head unpublishes with the strips (m15-c); the
+        // master fader's stopped-WYSIWYG preview lands on the caller's next
+        // parameter pass, like every strip mixer.
+        publishedMasterVolumeLane = nil
+        masterAutomationRenderer?.publish(nil)
         // Every strip's chain resets on stop: offline determinism, and the
         // tail cut matches the v0-honest instrument flush contract.
-        for node in trackNodes.values { node.chainState.requestResetAll() }
-        for node in instrumentNodes.values { node.chainState.requestResetAll() }
-        for node in busNodes.values { node.chainState.requestResetAll() }
-        // PDC rings reset alongside the chains (M4 viii-b): stop, seek, and
-        // tempo changes all route through here, so no stale delayed tail from
-        // the previous position ever ghosts into the next one. NOTE on loop
-        // wrap: the spec keeps rings across a seamless wrap, but this v0
-        // transport implements the wrap AS the restart primitive (players
-        // stop, chains reset, ~60 ms reschedule gap) — flushing the rings
-        // there matches the chains' existing tail-cut behavior; the no-flush
-        // rule becomes meaningful only when a seamless wrap lands.
-        armCompensationResets()
-    }
-
-    /// Arms every strip's compensation-ring reset (track, instrument, bus) —
-    /// consumed at the top of each ring's next render quantum.
-    private func armCompensationResets() {
+        //
+        // LIVE double-arm (m15-f — the m14-d edit-seam echo blip): the reset
+        // store is visible to the render thread MID-quantum instantly, while
+        // the player stops above land only at the next quantum boundary — so
+        // one walk can consume the reset at its top (ring wiped) and then
+        // process the still-in-flight pre-flush quantum INTO the clean ring;
+        // its echo rings out at the delay spacing inside the seam. One reset
+        // is structurally insufficient because reset consumption and stale-
+        // input delivery happen in the SAME walk, in that order. The second
+        // armed pass survives to the next walk — input by then is post-flush
+        // silence, and the restart primitive's start lead (~60 ms) keeps any
+        // legitimate content far behind it. Manual rendering stays SINGLE-
+        // armed: control and render are serialized there (no in-flight
+        // quantum exists), and offline content restarts on the very next
+        // pull, where a second reset would cut the first legitimate
+        // quantum's tail (null-era byte-identity).
+        let chainResetPasses = flushResetPasses
         for node in trackNodes.values {
-            ChainHostAU.compensationState(of: node.chainHost)?.armReset()
-        }
-        for node in busNodes.values {
-            ChainHostAU.compensationState(of: node.chainHost)?.armReset()
+            node.chainState.requestResetAll(passes: chainResetPasses)
         }
         for node in instrumentNodes.values {
-            node.renderer.compensation.armReset()
+            node.chainState.requestResetAll(passes: chainResetPasses)
+        }
+        for node in busNodes.values {
+            node.chainState.requestResetAll(passes: chainResetPasses)
+        }
+        // The master chain resets with the strips (m13-d): a master
+        // reverb/delay tail cuts at stop exactly like a strip's.
+        masterChainState?.requestResetAll(passes: chainResetPasses)
+        // PDC rings reset alongside the chains (M4 viii-b): stop, seek, and
+        // tempo changes all route through here, so no stale delayed tail from
+        // the previous position ever ghosts into the next one. The spec's
+        // no-flush-on-loop-wrap rule is live as of m14-a L-1: a seamless wrap
+        // never calls this method, so rings persist across the seam exactly
+        // as the spec anticipated; this flush now fires only for real stops,
+        // seeks, and edits. The SAME arm count the chains got above (m16-f
+        // symmetry, audit F6): the in-flight-quantum race is identical in
+        // shape — only its blast radius differs (one PDC-late replay vs a
+        // re-circulating echo).
+        armCompensationResets(passes: chainResetPasses)
+    }
+
+    /// The flush-family reset arm count, computed in ONE place so chain
+    /// rings and PDC compensation rings can never diverge (m15-f law,
+    /// m16-f symmetry): LIVE = 2 (the double-arm that kills the in-flight
+    /// stale quantum), manual rendering = 1 (control and render are
+    /// serialized — no in-flight quantum exists, and a second offline pass
+    /// would cut a legitimate quantum's tail and break null-era
+    /// byte-identity — the load-bearing m15-f deviation).
+    private var flushResetPasses: UInt32 {
+        engine.isInManualRenderingMode ? 1 : 2
+    }
+
+    /// Arms every strip's compensation-ring reset countdown (track,
+    /// instrument, bus) — consumed one pass per ring render quantum
+    /// (m16-f). `passes` must be `flushResetPasses` (or a value derived
+    /// from it) at every call site — never a divergent recompute.
+    ///
+    /// The master chain host carries a ring OBJECT structurally (every
+    /// ChainHostAU does) but it is plan-excluded by construction (see
+    /// `recomputeCompensation` — design D5): its target is never set, its
+    /// ring never writes (`historyClean` never clears, `renderInert`
+    /// forever), so there is nothing to arm — an arm would only memset an
+    /// already-zero 32k ring on the render thread at every stop.
+    private func armCompensationResets(passes: UInt32) {
+        for node in trackNodes.values {
+            ChainHostAU.compensationState(of: node.chainHost)?.armReset(passes: passes)
+        }
+        for node in busNodes.values {
+            ChainHostAU.compensationState(of: node.chainHost)?.armReset(passes: passes)
+        }
+        for node in instrumentNodes.values {
+            node.renderer.compensation.armReset(passes: passes)
         }
     }
 
-    /// Dead code (zero callers — perf-a WATCH item stands): unlike
-    /// `reconcile` it tears down bus-facing wiring WITHOUT announcing
-    /// `willMutateRoutingTopology`. Any future caller must add the announce
-    /// discipline first. Detaches route through `retireNode` (M9 crash-a) so
-    /// even this path cannot detach once-rendered nodes against a stopped
-    /// engine.
+    /// Dead code (zero callers — perf-a WATCH item stands), and since m13-a
+    /// UNREACHABLE by design for once-rendered engines: teardown of a
+    /// once-rendered graph is `AudioEngine.rebuildEngine` (whole-engine
+    /// discard), never a surgical mass detach. Unlike `reconcile` this
+    /// tears down bus-facing wiring WITHOUT announcing
+    /// `willMutateRoutingTopology`; any future caller must add the announce
+    /// discipline first. Detaches route through `teardownDetach` so even
+    /// this path cannot detach once-rendered nodes against a stopped engine
+    /// (it flags the rebuild instead).
     func detachAll() {
         for node in trackNodes.values {
             for clip in node.clips.values {
                 clip.player.stop()
-                retireNode(clip.player)
+                teardownDetach(clip.player)
             }
             node.mixer.removeTap(onBus: 0)
-            retireNode(node.mixer)
-            retireNode(node.chainHost)
-            retireNode(node.sumMixer)
+            teardownDetach(node.mixer)
+            teardownDetach(node.chainHost)
+            teardownDetach(node.sumMixer)
             for gain in node.sendGainNodes.values {
-                retireNode(gain)
+                teardownDetach(gain)
             }
         }
         trackNodes.removeAll()
@@ -1619,10 +2865,10 @@ final class PlaybackGraph {
             node.renderer.publish(nil)
             node.renderer.requestFlush()
             node.mixer.removeTap(onBus: 0)
-            retireNode(node.source)
-            retireNode(node.mixer)
+            teardownDetach(node.source)
+            teardownDetach(node.mixer)
             for gain in node.sendGainNodes.values {
-                retireNode(gain)
+                teardownDetach(gain)
             }
         }
         instrumentNodes.removeAll()
@@ -1630,9 +2876,9 @@ final class PlaybackGraph {
         routingSignature.removeAll()
         for node in busNodes.values {
             node.mixer.removeTap(onBus: 0)
-            retireNode(node.mixer)
-            retireNode(node.chainHost)
-            retireNode(node.sumMixer)
+            teardownDetach(node.mixer)
+            teardownDetach(node.chainHost)
+            teardownDetach(node.sumMixer)
         }
         busNodes.removeAll()
         busSignature.removeAll()

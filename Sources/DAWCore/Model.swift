@@ -185,6 +185,45 @@ public enum FadeCurve: String, Codable, Sendable, Equatable, CaseIterable {
     case equalPower
 }
 
+/// One breakpoint in a clip's gain envelope (m13-e): a CLIP-RELATIVE time in
+/// beats and a gain in dB. `beat` clamps to `>= 0` and `gainDb` to
+/// `Clip.gainDbRange` at init — the ONLY construction path, and where Codable
+/// routes (the `AutomationPoint` / `MIDINote` pattern), so an out-of-range
+/// value can never enter the model. The store additionally clamps `beat` into
+/// `[0, lengthBeats]` and enforces the sorted/distinct invariant
+/// (`Clip.canonicalGainEnvelope`); the envelope interpolates LINEARLY IN dB
+/// between adjacent points (see `Clip.envelopeDb`).
+public struct ClipGainPoint: Codable, Sendable, Equatable {
+    /// Clip-relative position in beats (>= 0).
+    public var beat: Double
+    /// Gain at this point in dB (clamped to `Clip.gainDbRange`; 0 = unity).
+    public var gainDb: Double
+
+    public init(beat: Double, gainDb: Double) {
+        self.beat = max(0, beat)
+        self.gainDb = gainDb.clamped(to: Clip.gainDbRange)
+    }
+
+    private enum CodingKeys: String, CodingKey { case beat, gainDb }
+
+    /// Decoding routes through the clamping init (the `AutomationPoint`
+    /// precedent), so a hand-authored payload can't smuggle a negative beat or
+    /// an out-of-range gain into the model.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            beat: try c.decode(Double.self, forKey: .beat),
+            gainDb: try c.decode(Double.self, forKey: .gainDb))
+    }
+
+    /// Writes both keys explicitly (the full point shape on wire and disk).
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(beat, forKey: .beat)
+        try c.encode(gainDb, forKey: .gainDb)
+    }
+}
+
 public struct Clip: Identifiable, Codable, Sendable, Equatable {
     public let id: UUID
     public var name: String
@@ -244,6 +283,18 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     /// clip; omitted from Codable when nil (pre-take projects stay
     /// byte-identical).
     public var takeGroupID: UUID?
+    /// Per-clip breakpoint GAIN ENVELOPE (m13-e): a clip-relative curve of dB
+    /// breakpoints that MULTIPLIES on top of the static `gainDb` and the fades
+    /// (it does not replace them — `envelopeGain(atBeat:)` folds all three).
+    /// Empty == ABSENT == today's behavior EXACTLY; omitted from Codable when
+    /// empty (a pre-m13-e clip stays byte-identical). Stored CANONICALLY
+    /// ordered (ascending, distinct beats, each beat in `[0, lengthBeats]`,
+    /// each gain in `gainDbRange`) — `Clip.init` heals any input through
+    /// `canonicalGainEnvelope`, and the store's `setClipGainEnvelope` is the
+    /// edit boundary. Audio clips only: the engine realizes it in the offline
+    /// fade-bake (ClipFadeBake) — MIDI clips have no per-clip player to bake
+    /// onto, so `setClipGainEnvelope` rejects them.
+    public var gainEnvelope: [ClipGainPoint]
 
     /// Per-clip gain bounds: a generous studio range, matching the fader's
     /// mental model (a clip can be pulled 72 dB down toward silence or pushed
@@ -302,6 +353,7 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         stretchRatio: Double = 1,
         pitchShiftSemitones: Double = 0,
         formantPreserve: Bool = false,
+        gainEnvelope: [ClipGainPoint] = [],
         takeGroupID: UUID? = nil
     ) {
         self.id = id
@@ -322,6 +374,10 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         self.stretchRatio = stretchRatio.clamped(to: Self.stretchRatioRange)
         self.pitchShiftSemitones = pitchShiftSemitones.clamped(to: Self.pitchShiftSemitonesRange)
         self.formantPreserve = formantPreserve
+        // Heal the envelope to its invariant at every construction path (decode,
+        // split/trim, overlap trim): beats clamped into the clip, sorted, and
+        // deduped last-wins. Empty stays empty.
+        self.gainEnvelope = Self.canonicalGainEnvelope(gainEnvelope, lengthBeats: self.lengthBeats)
     }
 
     /// Linear playback gain at `beat` (measured from the clip start): the static
@@ -360,7 +416,84 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
             let progress = (b - (lengthBeats - outLen)) / outLen
             factor *= Self.fadeShape(progress: 1 - progress, curve: fadeOutCurve)
         }
+        // Breakpoint gain envelope (m13-e): a clip-relative dB curve MULTIPLIED
+        // on top of the static gain and fades. The `isEmpty` guard keeps the
+        // pre-m13-e path byte-identical — an empty envelope never even touches
+        // `factor` (no `× 1.0` to round-trip), so a clip without an envelope
+        // renders and hashes exactly as before (the null-case byte gate).
+        if !gainEnvelope.isEmpty {
+            let db = Self.envelopeDb(points: gainEnvelope, atBeat: b)
+            factor *= pow(10.0, db / 20.0)
+        }
         return factor
+    }
+
+    /// dB value of the breakpoint gain envelope at clip-relative `beat`,
+    /// LINEARLY interpolated in dB between adjacent points, held CONSTANT before
+    /// the first point and at/after the last — the `AutomationLane.value(atBeat:)`
+    /// idiom, linear-only (a gain envelope carries no `.hold` segments). `points`
+    /// must be canonically ordered (ascending, distinct beats), which
+    /// `canonicalGainEnvelope` guarantees. Empty → 0 dB (unity); callers guard
+    /// emptiness so the null path never multiplies. Pure — the engine bake and
+    /// the UI overlay share this single evaluator (the `envelopeGain` contract).
+    public static func envelopeDb(points: [ClipGainPoint], atBeat beat: Double) -> Double {
+        guard let first = points.first, let last = points.last else { return 0 }
+        if beat <= first.beat { return first.gainDb }
+        if beat >= last.beat { return last.gainDb }
+        for i in 0..<(points.count - 1) {
+            let lo = points[i]
+            let hi = points[i + 1]
+            guard beat >= lo.beat, beat < hi.beat else { continue }
+            let span = hi.beat - lo.beat
+            guard span > 0 else { return lo.gainDb }
+            let t = (beat - lo.beat) / span
+            return lo.gainDb + (hi.gainDb - lo.gainDb) * t
+        }
+        return last.gainDb  // unreachable given the guards, but keeps this total
+    }
+
+    /// Canonical order for a gain envelope: every point's `beat` clamped into
+    /// `[0, lengthBeats]`, `gainDb` re-clamped through `ClipGainPoint.init`,
+    /// then sorted ascending with equal-beat duplicates deduped LAST-WINS (the
+    /// `AutomationLane.canonicalize` contract). Empty stays empty. `Clip.init`
+    /// and `ProjectStore.setClipGainEnvelope` both route through this so the
+    /// stored invariant holds no matter how the envelope was built.
+    public static func canonicalGainEnvelope(_ points: [ClipGainPoint],
+                                             lengthBeats: Double) -> [ClipGainPoint] {
+        guard !points.isEmpty else { return [] }
+        let upper = max(0, lengthBeats)
+        var byBeat: [Double: ClipGainPoint] = [:]
+        byBeat.reserveCapacity(points.count)
+        for p in points {
+            let clampedBeat = p.beat.clamped(to: 0...upper)
+            byBeat[clampedBeat] = ClipGainPoint(beat: clampedBeat, gainDb: p.gainDb)
+        }
+        return byBeat.values.sorted { $0.beat < $1.beat }
+    }
+
+    /// Re-windows a gain envelope for a trim / overlap-trim / split edit that
+    /// shifts the clip head by `delta` beats (new clip-relative beat = old −
+    /// `delta`) and sets the length to `newLength`. Interior points inside the
+    /// new window survive (rebased by `−delta`); an interpolated boundary point
+    /// is PINNED at each new edge (beat 0 and `newLength`) so the audible gain
+    /// stays CONTINUOUS with the pre-edit curve across the seam. Empty stays
+    /// empty. The caller's `Clip.init` canonicalizes the result (a boundary that
+    /// coincides with an interior point dedupes last-wins). This is the split
+    /// partition too: the two halves are the windows `[0, splitBeat]` and
+    /// `[splitBeat, length]`, so their shared seam value is identical by
+    /// construction.
+    public static func windowedGainEnvelope(_ points: [ClipGainPoint],
+                                            delta: Double, newLength: Double) -> [ClipGainPoint] {
+        guard !points.isEmpty else { return [] }
+        var out: [ClipGainPoint] = [
+            ClipGainPoint(beat: 0, gainDb: envelopeDb(points: points, atBeat: delta))
+        ]
+        for p in points where p.beat > delta && p.beat < delta + newLength {
+            out.append(ClipGainPoint(beat: p.beat - delta, gainDb: p.gainDb))
+        }
+        out.append(ClipGainPoint(beat: newLength,
+                                 gainDb: envelopeDb(points: points, atBeat: delta + newLength)))
+        return out
     }
 
     /// Rising fade factor for `progress` (0 -> 1): 0 at progress 0, 1 at progress
@@ -376,7 +509,7 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, name, startBeat, lengthBeats, audioFileURL, notes, isAIGenerated
         case startOffsetSeconds, gainDb, fadeInBeats, fadeOutBeats, fadeInCurve, fadeOutCurve
-        case stretchRatio, pitchShiftSemitones, formantPreserve, takeGroupID
+        case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, takeGroupID
     }
 
     /// Decoding routes through the clamping `init`; every edit field tolerates
@@ -403,6 +536,7 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
             stretchRatio: try c.decodeIfPresent(Double.self, forKey: .stretchRatio) ?? 1,
             pitchShiftSemitones: try c.decodeIfPresent(Double.self, forKey: .pitchShiftSemitones) ?? 0,
             formantPreserve: try c.decodeIfPresent(Bool.self, forKey: .formantPreserve) ?? false,
+            gainEnvelope: try c.decodeIfPresent([ClipGainPoint].self, forKey: .gainEnvelope) ?? [],
             takeGroupID: try c.decodeIfPresent(UUID.self, forKey: .takeGroupID)
         )
     }
@@ -429,6 +563,9 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         if stretchRatio != 1 { try c.encode(stretchRatio, forKey: .stretchRatio) }
         if pitchShiftSemitones != 0 { try c.encode(pitchShiftSemitones, forKey: .pitchShiftSemitones) }
         if formantPreserve { try c.encode(formantPreserve, forKey: .formantPreserve) }
+        // Gain envelope (m13-e): written ONLY when non-empty, so a clip without
+        // one carries no new key (byte-identical to a pre-m13-e save).
+        if !gainEnvelope.isEmpty { try c.encode(gainEnvelope, forKey: .gainEnvelope) }
         // Members carry their group marker; ordinary clips (nil) omit it, so a
         // pre-take clip stays byte-identical.
         try c.encodeIfPresent(takeGroupID, forKey: .takeGroupID)
@@ -448,6 +585,43 @@ public struct ClipMoveResult: Sendable, Equatable {
         self.clip = clip
         self.trimmedClipIDs = trimmedClipIDs
         self.removedClipIDs = removedClipIDs
+    }
+}
+
+/// Outcome of `ProjectStore.insertBars` (m15-d): where the empty bars landed
+/// (absolute beat) and how many beats were inserted (meter-aware: `count` bars
+/// of the meter governing the insertion point).
+public struct InsertBarsResult: Sendable, Equatable {
+    public var atBeat: Double
+    public var insertedBeats: Double
+    /// Beats-per-bar of the inserted bars (the meter that continues across the
+    /// insertion point — see `ProjectStore.insertBars`).
+    public var beatsPerBar: Int
+
+    public init(atBeat: Double, insertedBeats: Double, beatsPerBar: Int) {
+        self.atBeat = atBeat
+        self.insertedBeats = insertedBeats
+        self.beatsPerBar = beatsPerBar
+    }
+}
+
+/// Outcome of `ProjectStore.deleteBars` (m15-d): where the deleted range began
+/// (absolute beat), how many beats were removed (meter-aware, summed across any
+/// meter changes inside the range), and the ids of clips/markers the delete
+/// dropped entirely (a straddling clip is trimmed/split, not listed here — only
+/// fully-swallowed ids appear).
+public struct DeleteBarsResult: Sendable, Equatable {
+    public var fromBeat: Double
+    public var deletedBeats: Double
+    public var removedClipIDs: [UUID]
+    public var removedMarkerIDs: [UUID]
+
+    public init(fromBeat: Double, deletedBeats: Double,
+                removedClipIDs: [UUID] = [], removedMarkerIDs: [UUID] = []) {
+        self.fromBeat = fromBeat
+        self.deletedBeats = deletedBeats
+        self.removedClipIDs = removedClipIDs
+        self.removedMarkerIDs = removedMarkerIDs
     }
 }
 
@@ -944,18 +1118,33 @@ public struct TransportState: Codable, Sendable, Equatable {
     /// metronome itself is disabled.
     public var countInBars: Int
 
-    /// Phase-B staging seam — replaced by tempo.setMap in Phase C. When
-    /// non-nil, `tempoMap` (TempoMap.swift) prefers this multi-segment map
-    /// over the scalar-derived trivial one so the m12-c engine paths are
-    /// live-testable before the wire exists. TRANSIENT by construction:
-    /// excluded from `CodingKeys` (never on the wire, never in a snapshot or
-    /// save file), normalized out of undo capture (`captureEditState`), and
-    /// reset with the transport on project open/new.
-    public var sessionTempoMapOverride: TempoMap? = nil
+    /// The project's TEMPO MAP when it is non-trivial (m12-d) — nil for a
+    /// single-tempo project, where `tempoMap` (TempoMap.swift) synthesizes the
+    /// trivial single-segment map from `tempoBPM`. `tempoBPM` stays authoritative
+    /// for segment 0 (the store keeps the two in sync at mutation time). Held on
+    /// `TransportState` so every engine consumer that already reads
+    /// `transport.tempoMap` sees it for free. EXCLUDED from `CodingKeys` — this
+    /// struct's synthesized Codable is the snapshot's `transport` payload AND the
+    /// document's scalar transport shape, both of which must stay byte-identical
+    /// for a trivial project; the map persists instead as the ProjectDocument
+    /// TOP-LEVEL `tempoMap` field and is surfaced by the top-level snapshot
+    /// `tempoMap` field (the markers precedent). It IS undoable: it rides
+    /// `EditState.transport`, so a `tempo.setMap` mutation journals and undo
+    /// restores it exactly. Reset with the transport on project open/new.
+    public var tempoMapOverride: TempoMap? = nil
 
-    /// Wire/persist surface = exactly the pre-m12-c keys. The synthesized
-    /// Codable uses this enum, so `sessionTempoMapOverride` (staging-only)
-    /// can never leak into a snapshot, broadcast, or document.
+    /// The project's METER MAP when it is non-trivial (m12-d) — the meter twin
+    /// of `tempoMapOverride`; nil for a single-time-signature project, where
+    /// `meterMap` synthesizes the trivial map from `timeSignature` (authoritative
+    /// for change 0). Same excluded-from-Codable / top-level-persist / undoable
+    /// story as `tempoMapOverride`.
+    public var meterMapOverride: MeterMap? = nil
+
+    /// Wire/persist surface = exactly the scalar transport keys. The synthesized
+    /// Codable uses this enum, so `tempoMapOverride`/`meterMapOverride` never
+    /// leak into a snapshot's `transport`, a broadcast, or a document's
+    /// `TransportDocument` — they ride the document/snapshot TOP level instead
+    /// (the markers precedent), keeping a trivial project byte-identical.
     private enum CodingKeys: String, CodingKey {
         case isPlaying, isRecording, positionBeats, tempoBPM, timeSignature
         case isLoopEnabled, loopStartBeat, loopEndBeat
@@ -1031,6 +1220,19 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
     public var tracks: [Track]
     /// Master output gain 0...2 (1 = unity), mirrored from `ProjectStore`.
     public var masterVolume: Double
+    /// The MASTER insert chain (m13-d), mirrored from `ProjectStore` — the
+    /// second mirror surface (the m12-f mirror-DTO discipline: descriptor
+    /// Codable alone proves nothing; snapshot AND disk each carry the field
+    /// explicitly). Default `[]` — always encoded, never optional.
+    public var masterEffects: [EffectDescriptor]
+    /// MASTER volume automation (m15-c), mirrored from `ProjectStore` — the
+    /// snapshot leg of the m12-f triple-mirror discipline (store + snapshot +
+    /// disk DTO each carry the field explicitly). Lane shape is EXACTLY the
+    /// per-track `automation` shape ({id, target, points, isEnabled}) with the
+    /// master as owner. Additive and optional; nil (key omitted) when there is
+    /// no master lane, so a pre-m15-c snapshot stays byte-identical (the
+    /// `grooveTemplates` rule).
+    public var masterAutomation: [AutomationLane]?
     /// Project-level groove palette (M5 iii-g). Additive and optional; nil (key
     /// omitted) when the project has no grooves, so a pre-groove snapshot stays
     /// byte-identical. Built-in swing presets are NOT included — pull them via
@@ -1041,6 +1243,16 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
     /// byte-identical. Full fidelity — id/name/beat — so an agent orienting from
     /// `project.snapshot` can seek to a section without a separate `marker.list`.
     public var markers: [Marker]?
+    /// Non-trivial project TEMPO MAP segments (m12-d). Additive and optional;
+    /// nil (key omitted) when the project has a single project-wide tempo, so a
+    /// single-tempo snapshot stays byte-identical (the `markers` rule).
+    /// `transport.tempoBPM` remains = segment 0's bpm. The always-present read is
+    /// `tempo.map` (synthesizes a single segment for a trivial project); this
+    /// field is the omit-when-trivial mirror for orient-from-snapshot.
+    public var tempoMap: [TempoMap.Segment]?
+    /// Non-trivial project METER MAP changes (m12-d) — the meter twin of
+    /// `tempoMap`; nil (key omitted) for a single-time-signature project.
+    public var meterChanges: [MeterMap.Change]?
     public var meters: SessionMeters
     /// Human-readable reason the last record attempt failed (or why the last
     /// take was discarded); nil when the last attempt succeeded. Additive and
@@ -1069,14 +1281,25 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
     /// Monotonic count of live MIDI note events received — agents poll the
     /// delta to detect activity. Additive and optional.
     public var midiEventCount: Int?
+    /// Engine notices (m15-e): schedule-time degradations coalesced by code —
+    /// see `EngineNotice`. Session-transient (NEVER persisted to disk; the
+    /// project file knows nothing of them) and untouched by undo/redo.
+    /// Additive and optional; nil (key omitted) when the ring is empty, so a
+    /// clean session's snapshot stays byte-identical (the `masterAutomation`
+    /// rule).
+    public var engineNotices: [EngineNotice]?
 
     public init(
         name: String,
         transport: TransportState,
         tracks: [Track],
         masterVolume: Double = 1,
+        masterEffects: [EffectDescriptor] = [],
+        masterAutomation: [AutomationLane]? = nil,
         grooveTemplates: [GrooveTemplate]? = nil,
         markers: [Marker]? = nil,
+        tempoMap: [TempoMap.Segment]? = nil,
+        meterChanges: [MeterMap.Change]? = nil,
         meters: SessionMeters = SessionMeters(),
         lastRecordingError: String? = nil,
         selectedInputDeviceUID: String? = nil,
@@ -1085,18 +1308,28 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         undoLabel: String? = nil,
         redoLabel: String? = nil,
         midiInputs: [MIDIInputDevice]? = nil,
-        midiEventCount: Int? = nil
+        midiEventCount: Int? = nil,
+        engineNotices: [EngineNotice]? = nil
     ) {
         self.name = name
         self.transport = transport
         self.tracks = tracks
         self.masterVolume = masterVolume
+        self.masterEffects = masterEffects
+        // Empty master automation → nil so the encoder omits the key
+        // (pre-m15-c snapshots stay byte-identical — the grooveTemplates rule).
+        self.masterAutomation = (masterAutomation?.isEmpty ?? true) ? nil : masterAutomation
         // Empty palette → nil so the encoder omits the key (pre-groove snapshots
         // stay byte-identical).
         self.grooveTemplates = (grooveTemplates?.isEmpty ?? true) ? nil : grooveTemplates
         // Empty marker list → nil so the encoder omits the key (pre-marker
         // snapshots stay byte-identical — the grooveTemplates rule).
         self.markers = (markers?.isEmpty ?? true) ? nil : markers
+        // Tempo/meter maps (m12-d): passed as the non-trivial override's
+        // segments/changes (nil for a trivial project) → the encoder omits the
+        // keys, keeping a single-tempo snapshot byte-identical.
+        self.tempoMap = (tempoMap?.isEmpty ?? true) ? nil : tempoMap
+        self.meterChanges = (meterChanges?.isEmpty ?? true) ? nil : meterChanges
         self.meters = meters
         self.lastRecordingError = lastRecordingError
         self.selectedInputDeviceUID = selectedInputDeviceUID
@@ -1106,6 +1339,9 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         self.redoLabel = redoLabel
         self.midiInputs = midiInputs
         self.midiEventCount = midiEventCount
+        // Empty notices ring → nil so the encoder omits the key (a clean
+        // session's snapshot stays byte-identical — the masterAutomation rule).
+        self.engineNotices = (engineNotices?.isEmpty ?? true) ? nil : engineNotices
     }
 }
 

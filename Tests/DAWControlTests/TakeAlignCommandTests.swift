@@ -14,29 +14,31 @@ import DAWCore
 @Suite("Take auto-align — control protocol (M6 v-d)")
 struct TakeAlignCommandTests {
 
-    private func makeRouter(engine: FakeTransientEngine? = nil) -> (CommandRouter, ProjectStore) {
-        let store = ProjectStore()
+    private func makeRouter(engine: FakeTransientEngine? = nil, tracks: [Track] = [])
+        -> (CommandRouter, ProjectStore) {
+        let store = tracks.isEmpty ? ProjectStore() : ProjectStore(tracks: tracks)
         store.media = FakeMedia()  // 2.0 s → 4 beats @ 120 bpm (the default tempo)
         if let engine { store.engine = engine }
         return (CommandRouter(store: store), store)
     }
 
-    /// Adds two overlapping audio clips at beats 0 and 0.16 (the candidate
-    /// 80 ms late @ 120 BPM), groups them, and returns the wire ids
-    /// (lane 0 = reference at 0, lane 1 = the late take).
-    private func makeOffsetGroup(_ router: CommandRouter) async throws
-        -> (trackID: String, groupID: String, laneIDs: [String]) {
-        let addTrack = await router.handle(ControlRequest(
-            id: "t", command: "track.add", params: ["kind": .string("audio")]))
-        let trackID = try #require(addTrack.result?["id"]?.stringValue)
-        var clipIDs: [String] = []
-        for atBeat in [0.0, 0.16] {
-            let addClip = await router.handle(ControlRequest(
-                id: "c", command: "clip.addAudio",
-                params: ["trackId": .string(trackID), "path": .string("/tmp/Loop.wav"),
-                         "atBeat": .number(atBeat)]))
-            clipIDs.append(try #require(addClip.result?["id"]?.stringValue))
+    /// A pre-seeded audio track with two OVERLAPPING 4-beat clips at beats 0 and
+    /// 0.16 (the candidate 80 ms late @ 120 BPM; lane 0 = reference at 0, lane 1
+    /// = the late take). Post-m13-b no wire verb places overlapping ordinary
+    /// clips (the no-silent-overlap invariant is now complete), so the fixture
+    /// seeds the overlap it intends to group at the MODEL layer.
+    private func offsetTrack() -> (track: Track, trackID: String, clipIDs: [String]) {
+        let url = URL(fileURLWithPath: "/tmp/Loop.wav")
+        let clips = [0.0, 0.16].map {
+            Clip(name: "Loop", startBeat: $0, lengthBeats: 4, audioFileURL: url)
         }
+        let track = Track(name: "Audio", kind: .audio, clips: clips)
+        return (track, track.id.uuidString, clips.map { $0.id.uuidString })
+    }
+
+    /// Groups the two seeded overlapping clips, returning the wire ids.
+    private func makeOffsetGroup(_ router: CommandRouter, trackID: String, clipIDs: [String]) async throws
+        -> (groupID: String, laneIDs: [String]) {
         let group = await router.handle(ControlRequest(
             id: "g", command: "take.group",
             params: ["trackId": .string(trackID),
@@ -45,7 +47,7 @@ struct TakeAlignCommandTests {
         let groupID = try #require(group.result?["group"]?["id"]?.stringValue)
         let laneIDs = try #require(group.result?["group"]?["lanes"]?.arrayValue?
             .map { $0["id"]?.stringValue }).compactMap { $0 }
-        return (trackID, groupID, laneIDs)
+        return (groupID, laneIDs)
     }
 
     // MARK: - Round trip
@@ -54,8 +56,9 @@ struct TakeAlignCommandTests {
     func roundTripApply() async throws {
         let engine = FakeTransientEngine()
         engine.stubMarkers = [0.5, 1.0, 1.5].map { TransientMarker(timeSeconds: $0, strength: 1) }
-        let (router, store) = makeRouter(engine: engine)
-        let (trackID, groupID, laneIDs) = try await makeOffsetGroup(router)
+        let (track, trackID, clipIDs) = offsetTrack()
+        let (router, store) = makeRouter(engine: engine, tracks: [track])
+        let (groupID, laneIDs) = try await makeOffsetGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.autoAlign",
@@ -85,8 +88,9 @@ struct TakeAlignCommandTests {
     func roundTripDryRun() async throws {
         let engine = FakeTransientEngine()
         engine.stubMarkers = [0.5, 1.0, 1.5].map { TransientMarker(timeSeconds: $0, strength: 1) }
-        let (router, store) = makeRouter(engine: engine)
-        let (trackID, groupID, laneIDs) = try await makeOffsetGroup(router)
+        let (track, trackID, clipIDs) = offsetTrack()
+        let (router, store) = makeRouter(engine: engine, tracks: [track])
+        let (groupID, laneIDs) = try await makeOffsetGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.autoAlign",
@@ -158,8 +162,9 @@ struct TakeAlignCommandTests {
     @Test("aligning the reference lane against itself surfaces invalidComp")
     func selfAlign() async throws {
         let engine = FakeTransientEngine()
-        let (router, _) = makeRouter(engine: engine)
-        let (trackID, groupID, laneIDs) = try await makeOffsetGroup(router)
+        let (track, trackID, clipIDs) = offsetTrack()
+        let (router, _) = makeRouter(engine: engine, tracks: [track])
+        let (groupID, laneIDs) = try await makeOffsetGroup(router, trackID: trackID, clipIDs: clipIDs)
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.autoAlign",
             params: ["trackId": .string(trackID), "groupId": .string(groupID),
@@ -172,8 +177,9 @@ struct TakeAlignCommandTests {
     @Test("inconclusive alignment surfaces alignmentInconclusive with counts and advice")
     func inconclusive() async throws {
         let engine = FakeTransientEngine()   // no onsets stubbed → 0 + 0
-        let (router, _) = makeRouter(engine: engine)
-        let (trackID, groupID, laneIDs) = try await makeOffsetGroup(router)
+        let (track, trackID, clipIDs) = offsetTrack()
+        let (router, _) = makeRouter(engine: engine, tracks: [track])
+        let (groupID, laneIDs) = try await makeOffsetGroup(router, trackID: trackID, clipIDs: clipIDs)
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.autoAlign",
             params: ["trackId": .string(trackID), "groupId": .string(groupID),
@@ -194,22 +200,18 @@ struct TakeAlignCommandTests {
             [0.5, 1.0, 1.5].map { TransientMarker(timeSeconds: $0, strength: 1) },
             [0.58, 1.08, 1.58].map { TransientMarker(timeSeconds: $0, strength: 1) },
         ]
-        let (router, store) = makeRouter(engine: engine)
-        let addTrack = await router.handle(ControlRequest(
-            id: "t", command: "track.add", params: ["kind": .string("audio")]))
-        let trackID = try #require(addTrack.result?["id"]?.stringValue)
-        var clipIDs: [String] = []
-        for _ in 0..<2 {
-            let addClip = await router.handle(ControlRequest(
-                id: "c", command: "clip.addAudio",
-                params: ["trackId": .string(trackID), "path": .string("/tmp/Loop.wav"),
-                         "atBeat": .number(0)]))
-            clipIDs.append(try #require(addClip.result?["id"]?.stringValue))
-        }
+        // Both lanes seeded at beat 0 (the overlap is directly modelled —
+        // post-m13-b no wire verb places overlapping ordinary clips).
+        let url = URL(fileURLWithPath: "/tmp/Loop.wav")
+        let seedClips = [Clip(name: "Loop", startBeat: 0, lengthBeats: 4, audioFileURL: url),
+                         Clip(name: "Loop", startBeat: 0, lengthBeats: 4, audioFileURL: url)]
+        let track = Track(name: "Audio", kind: .audio, clips: seedClips)
+        let (router, store) = makeRouter(engine: engine, tracks: [track])
+        let trackID = track.id.uuidString
         let group = await router.handle(ControlRequest(
             id: "g", command: "take.group",
             params: ["trackId": .string(trackID),
-                     "clipIds": .array(clipIDs.map(JSONValue.string))]))
+                     "clipIds": .array(seedClips.map { JSONValue.string($0.id.uuidString) })]))
         let groupID = try #require(group.result?["group"]?["id"]?.stringValue)
         let laneIDs = try #require(group.result?["group"]?["lanes"]?.arrayValue?
             .map { $0["id"]?.stringValue }).compactMap { $0 }
@@ -230,8 +232,9 @@ struct TakeAlignCommandTests {
 
     @Test("headless (no engine) surfaces engineUnavailable")
     func headless() async throws {
-        let (router, _) = makeRouter()   // no engine
-        let (trackID, groupID, laneIDs) = try await makeOffsetGroup(router)
+        let (track, trackID, clipIDs) = offsetTrack()
+        let (router, _) = makeRouter(tracks: [track])   // no engine
+        let (groupID, laneIDs) = try await makeOffsetGroup(router, trackID: trackID, clipIDs: clipIDs)
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.autoAlign",
             params: ["trackId": .string(trackID), "groupId": .string(groupID),

@@ -60,6 +60,15 @@ final class AutomationSchedule {
     static let maxEffectParamTracks = 64
 
     let generation: UInt64                  // monotonic; render side re-seeks its cursors on change
+    /// Timeline identity (m14-b L-2, the `MIDIEventSchedule.timelineID`
+    /// contract): schedules sharing a `timelineID` share ONE anchor/epoch —
+    /// on a generation change with an UNCHANGED id the renderer re-seeks its
+    /// cursors but KEEPS the latched offline epoch (a mid-render loop
+    /// extension or lane edit must not shift the timeline); a CHANGED id
+    /// re-latches (fresh anchor — every restart). Defaults to `generation`,
+    /// so every schedule built without an explicit family id is its own
+    /// fresh timeline — the pre-L-2 behavior verbatim.
+    let timelineID: UInt64
     let mode: Mode
     let sampleRate: Double
     let volumePoints: UnsafeBufferPointer<AutomationBreakpoint>  // sorted, owned
@@ -70,8 +79,10 @@ final class AutomationSchedule {
 
     init(generation: UInt64, mode: Mode, sampleRate: Double,
          volumePoints: [AutomationBreakpoint], panPoints: [AutomationBreakpoint],
-         effectParamTracks: [(effectID: UUID, paramSlot: Int, points: [AutomationBreakpoint])] = []) {
+         effectParamTracks: [(effectID: UUID, paramSlot: Int, points: [AutomationBreakpoint])] = [],
+         timelineID: UInt64? = nil) {
         self.generation = generation
+        self.timelineID = timelineID ?? generation
         self.mode = mode
         self.sampleRate = sampleRate
         self.volumePoints = Self.own(volumePoints)
@@ -135,13 +146,187 @@ final class AutomationSchedule {
         return result
     }
 
+    // MARK: - Loop unroll build math (m14-b L-2, design §4-A "Automation")
+
+    /// Pure evaluator over a lane's canonical points — the
+    /// `AutomationLane.value(atBeat:)` contract verbatim (before first =
+    /// first value, at/after last = last value, `.hold` holds, `.linear`
+    /// interpolates), duplicated here as a STATIC over raw points because
+    /// effect-param lanes reach the build as `EffectParamLaneSpec.points`.
+    /// `points` must be non-empty (the callers' guard).
+    static func pointValue(_ points: [AutomationPoint], atBeat beat: Double) -> Double {
+        guard let first = points.first, let last = points.last else { return 0 }
+        if beat <= first.beat { return first.value }
+        if beat >= last.beat { return last.value }
+        for i in 0..<(points.count - 1) {
+            let lo = points[i]
+            let hi = points[i + 1]
+            guard beat >= lo.beat, beat < hi.beat else { continue }
+            switch lo.curve {
+            case .hold:
+                return lo.value
+            case .linear:
+                let span = hi.beat - lo.beat
+                guard span > 0 else { return lo.value }
+                let t = (beat - lo.beat) / span
+                return lo.value + (hi.value - lo.value) * t
+            }
+        }
+        return last.value
+    }
+
+    /// Curve of the segment LEAVING `beat`: the last point at/before it
+    /// rules; before the first point the region is flat at the first value,
+    /// so `.linear` between equal values is exact.
+    private static func governingCurve(_ points: [AutomationPoint],
+                                       atBeat beat: Double) -> AutomationCurve {
+        var curve = AutomationCurve.linear
+        for point in points where point.beat <= beat { curve = point.curve }
+        return curve
+    }
+
+    /// One loop cycle's self-contained breakpoint block: reproduces the lane
+    /// curve over the WINDOW [loopStart, loopEnd) with `offsetSeconds` added
+    /// in the SECOND DOMAIN before the single rounding (the absolute-integral
+    /// discipline, design §8.2/C3). Shape:
+    ///  · a synthesized START point at the cycle's first frame — the wrapped
+    ///    lane value at `loopStartBeat` with the governing segment's curve
+    ///    (points outside the window must never leak across cycles, so every
+    ///    cycle re-states its entry value; the loopEnd → loopStart step this
+    ///    creates against the previous block IS loop semantics, design §5);
+    ///  · the interior points, mapped as ever;
+    ///  · a synthesized END point ON the cycle-boundary frame — the exact
+    ///    interpolation target for a linear segment leaving the window (both
+    ///    endpoints sit on the original beat-domain line). The NEXT block's
+    ///    start lands on the same frame after it; `value(at:)` reads the
+    ///    last point ≤ t, so the boundary frame belongs to the next cycle.
+    /// Same-frame collisions inside the block dedupe last-wins (the
+    /// `buildBreakpoints` rule).
+    static func buildLoopCycleBreakpoints(
+        points: [AutomationPoint], loopStartBeat: Double, loopEndBeat: Double,
+        tempoMap: TempoMap, sampleRate: Double, offsetSeconds: Double
+    ) -> [AutomationBreakpoint] {
+        guard !points.isEmpty else { return [] }
+        var result: [AutomationBreakpoint] = []
+        func append(beat: Double, value: Double, holds: Bool) {
+            let time = Int64(((offsetSeconds
+                + tempoMap.seconds(from: loopStartBeat, to: beat)) * sampleRate).rounded())
+            let breakpoint = AutomationBreakpoint(sampleTime: time, value: value,
+                                                  holdsSegment: holds)
+            if result.last?.sampleTime == time {
+                result[result.count - 1] = breakpoint  // sample-grid dedupe, last wins
+            } else {
+                result.append(breakpoint)
+            }
+        }
+        append(beat: loopStartBeat,
+               value: pointValue(points, atBeat: loopStartBeat),
+               holds: governingCurve(points, atBeat: loopStartBeat) == .hold)
+        for point in points where point.beat > loopStartBeat && point.beat < loopEndBeat {
+            append(beat: point.beat, value: point.value, holds: point.curve == .hold)
+        }
+        append(beat: loopEndBeat,
+               value: pointValue(points, atBeat: loopEndBeat), holds: false)
+        return result
+    }
+
+    /// The HEAD pass of a loop-unrolled lane build: linear from `fromBeat`
+    /// (points before the anchor keep their negative times — the straddle
+    /// interpolation contract), WINDOWED at the loop end (points at/past it
+    /// belong to no cycle's timeline), closed by the synthesized boundary
+    /// point on the head's end frame — which is exactly cycle 1's start
+    /// frame, `round(headSeconds · rate)`.
+    static func buildLoopHeadBreakpoints(
+        points: [AutomationPoint], fromBeat: Double, loopEndBeat: Double,
+        tempoMap: TempoMap, sampleRate: Double
+    ) -> [AutomationBreakpoint] {
+        guard !points.isEmpty else { return [] }
+        var result = buildBreakpoints(points: points.filter { $0.beat < loopEndBeat },
+                                      fromBeat: fromBeat, tempoMap: tempoMap,
+                                      sampleRate: sampleRate)
+        let time = Int64((tempoMap.seconds(from: fromBeat, to: loopEndBeat) * sampleRate).rounded())
+        let boundary = AutomationBreakpoint(
+            sampleTime: time, value: pointValue(points, atBeat: loopEndBeat),
+            holdsSegment: false)
+        if result.last?.sampleTime == time {
+            result[result.count - 1] = boundary
+        } else {
+            result.append(boundary)
+        }
+        return result
+    }
+
+    /// Builds one strip's LOOP-UNROLLED schedule: the head block plus one
+    /// self-contained block per cycle 1...`throughCycle`, appended in cycle
+    /// order — deterministic, so a later build with a larger `throughCycle`
+    /// is the previous array plus appended strictly-future blocks (the C2
+    /// append-only shape; the renderer re-seeks by value on the generation
+    /// change and, with the shared `timelineID`, keeps its offline epoch).
+    /// Adjacent blocks deliberately DUPLICATE the boundary frame (end point
+    /// then next start point): the pair is load-bearing — the end point is
+    /// the interpolation target of the final in-window segment, the start
+    /// point owns the boundary frame itself.
+    ///
+    /// `fromCycle` (§8.6 containment, m14-d L-4): the first cycle to
+    /// materialize — 0 (default, pre-containment behavior verbatim) includes
+    /// the head block; ≥ 1 drops the head and every earlier cycle's block.
+    /// Because each block re-states its entry value on its own first frame,
+    /// every value at/after cycle `fromCycle`'s start is identical to the
+    /// full build — the suffix-identity law's automation half.
+    static func buildLoopUnrolled(
+        volumeLane: AutomationLane?, panLane: AutomationLane?,
+        effectParamLanes: [EffectParamLaneSpec] = [],
+        fromBeat: Double, loopStartBeat: Double, loopEndBeat: Double,
+        headSeconds: Double, cycleSeconds: Double,
+        fromCycle: Int = 0, throughCycle: Int,
+        tempoMap: TempoMap, sampleRate: Double,
+        generation: UInt64, mode: Mode, timelineID: UInt64
+    ) -> AutomationSchedule? {
+        func unrolled(_ points: [AutomationPoint]) -> [AutomationBreakpoint] {
+            guard !points.isEmpty else { return [] }
+            var result: [AutomationBreakpoint] = []
+            if fromCycle <= 0 {
+                result = buildLoopHeadBreakpoints(
+                    points: points, fromBeat: fromBeat, loopEndBeat: loopEndBeat,
+                    tempoMap: tempoMap, sampleRate: sampleRate)
+            }
+            let firstCycle = max(1, fromCycle)
+            guard throughCycle >= firstCycle else { return result }
+            for cycle in firstCycle...throughCycle {
+                // THE ANCHOR LAW (design §8.2): every cycle offset is the
+                // absolute integral from the state constants, never
+                // `previous + cycleFrames`.
+                let offset = headSeconds + Double(cycle - 1) * cycleSeconds
+                result.append(contentsOf: buildLoopCycleBreakpoints(
+                    points: points, loopStartBeat: loopStartBeat,
+                    loopEndBeat: loopEndBeat, tempoMap: tempoMap,
+                    sampleRate: sampleRate, offsetSeconds: offset))
+            }
+            return result
+        }
+        let volume = volumeLane.map { unrolled($0.points) } ?? []
+        let pan = panLane.map { unrolled($0.points) } ?? []
+        let effectTracks = effectParamLanes.map { lane in
+            (effectID: lane.effectID, paramSlot: lane.paramSlot,
+             points: unrolled(lane.points))
+        }
+        guard !volume.isEmpty || !pan.isEmpty
+            || effectTracks.contains(where: { !$0.points.isEmpty }) else { return nil }
+        return AutomationSchedule(generation: generation, mode: mode,
+                                  sampleRate: sampleRate,
+                                  volumePoints: volume, panPoints: pan,
+                                  effectParamTracks: effectTracks,
+                                  timelineID: timelineID)
+    }
+
     /// Builds one strip's schedule from its ACTIVE volume/pan lanes and
     /// resolved effect-param lanes, or nil when nothing is automated (nothing
     /// to publish — the mixer node and effect knobs behave exactly as today).
     static func build(volumeLane: AutomationLane?, panLane: AutomationLane?,
                       effectParamLanes: [EffectParamLaneSpec] = [],
                       fromBeat: Double, tempoMap: TempoMap, sampleRate: Double,
-                      generation: UInt64, mode: Mode) -> AutomationSchedule? {
+                      generation: UInt64, mode: Mode,
+                      timelineID: UInt64? = nil) -> AutomationSchedule? {
         let volume = volumeLane.map {
             buildBreakpoints(points: $0.points, fromBeat: fromBeat,
                              tempoMap: tempoMap, sampleRate: sampleRate)
@@ -160,7 +345,8 @@ final class AutomationSchedule {
         return AutomationSchedule(generation: generation, mode: mode,
                                   sampleRate: sampleRate,
                                   volumePoints: volume, panPoints: pan,
-                                  effectParamTracks: effectTracks)
+                                  effectParamTracks: effectTracks,
+                                  timelineID: timelineID)
     }
 
     /// Resolves a track's ACTIVE `.effectParam` lanes against its live effect

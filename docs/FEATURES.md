@@ -25,10 +25,10 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Input device selection** | ✅ Shipped | `input.listDevices`, `input.setDevice` commands. UI: Settings, or wire command. |
 | **MIDI input devices** | ✅ Shipped | `midi.listInputs` command. Shows all CoreMIDI sources (hardware + virtual). Hot-plugging works. |
 | **Punch in/out** | ✅ Shipped | `transport.setPunch` command. Audio capture trims to the window; MIDI notes record freely over the window (can be edited after). |
-| **Metronome/click** | ✅ Shipped | Count-in and steady click (audible). `transport.setMetronome` command. |
+| **Metronome/click** | ✅ Shipped | Count-in with bar-length stepper (m15-b rider), steady click (audible). `transport.setMetronome` command. |
 | **Play, stop, seek** | ✅ Shipped | `transport.play`, `transport.stop`, `transport.seek` commands. UI: PLAY/STOP buttons + position readout. |
-| **Tempo** | ✅ Shipped | `transport.setTempo` command. UI: inline editable BPM in transport bar. Range: 20–300 BPM. |
-| **Loop region** | ✅ Shipped | `transport.setLoop` command + interactive loop ruler in the arrange (drag to create, edge-resize, move, click to toggle; m10-g). |
+| **Tempo** | ✅ Shipped | `transport.setTempo` command (single-tempo projects), or `tempo.map` / `tempo.setMap` (multi-segment tempo maps + meter changes). UI: inline editable BPM in transport bar, plus tempo/meter lane in the arrange ruler. Range: 20–400 BPM. |
+| **Loop region** | ✅ Shipped | `transport.setLoop` command + interactive loop ruler in the arrange (drag to create, edge-resize, move, click to toggle; m10-g). Seamless playback (m14): MIDI, automation, metronome, and fades wrap without clicks or resets. |
 | **Sample-accurate playback** | ✅ Shipped | Multitrack audio + MIDI, host-time-aligned from the engine clock. No round-trip latency compensation in v0 (comes with PDC in M4). |
 
 ## Audio Editing
@@ -41,6 +41,8 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Clip start offset** | ✅ Shipped | Trim the beginning of a clip without splitting. Drag the left edge or use `clip.trim`. Persisted separately from the source file. |
 | **Clip move** | ✅ Shipped | Drag the clip body to a new beat position. Snap grid applies. Or `clip.move` command. |
 | **Clip split** | ✅ Shipped | Double-click a clip in Arrange to split at that point. Or `clip.split` command. |
+| **Clip duplicate** | ✅ Shipped | Copy a clip with all properties (fades, gain, stretch, envelope). `clip.duplicate` command (m15-d). |
+| **Arrange bars insert/delete** | ✅ Shipped | Project-wide insert/delete bars, shifting clips, markers, tempo/meter, automation, loop (m15-d). One undo step. |
 | **Time-stretch** | ✅ Shipped | Change a clip's timeline length while keeping pitch — via Option+drag right edge in Arrange or `clip.setStretch` command. Range: 0.25×–4×. Stretches outside 0.75–1.5× amber-tint as a soft warning. |
 | **Time-stretch quality** | ✅ Shipped | Uses a professional time-domain stretcher (Signalsmith Stretch library). Offline renders only (UI clip doesn't preview stretched audio live). |
 | **Transient detection** | ✅ Shipped | `clip.detectTransients` command — spectral-flux analysis of an audio clip. Detects onsets (useful for quantize, comping, alignment). Cached per source file. |
@@ -59,7 +61,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Built-in sampler** | ✅ Shipped | Map audio files to keyboard zones (key spans + pitch offset + gain). Pitched playback via linear-interp resampling. One-shot or looped. Zone media bundled in `.dawproj`. |
 | **AudioUnit instruments** | ✅ Shipped | Host any AU instrument (DLSMusicDevice, AUSampler, third-party). Async prepare with timeout-race failover to placeholder. Full state persisted in `.dawproj` (base64). `instrument.listAudioUnits` command. |
 | **Plugin UI windows** | ✅ Shipped | Open custom UIs for AU instruments + effects. Glass-chrome window frame (cyan/neutral, never violet). Generic AU editor as fallback. `plugin.openUI`, `plugin.closeUI`, `plugin.listOpenUIs` commands. |
-| **MIDI CC (control change)** | ❌ Not yet | MIDI learn, CC automation, and CC messages in MIDI clips not yet shipped. Wire commands exist but UI is WIP. |
+| **MIDI CC (control change)** | ❌ Not yet | MIDI learn, CC automation, and CC messages in MIDI clips not yet shipped. No wire commands or storage exist in v0. |
 
 ## Mixing & Routing
 
@@ -94,7 +96,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Insert chain** | ✅ Shipped | Per-strip effects, ordered. Pre-fader. Atomic snapshot updates (no graph mutations mid-play). Bypass dots per effect. `fx.add`, `fx.remove`, `fx.reorder`, `fx.setBypass`, `fx.setParam`, `fx.describe` commands. |
 | **AU effect hosting** | ✅ Shipped | Any AU effect plugin (AUPeakLimiter, AUDelay, third-party). Async prepare, graceful placeholder on missing/failed AU. Reads real AU latency. Full AU state persisted in `.dawproj`. |
 | **Latency reporting** | ✅ Shipped | Each effect reports `latencySamples`. Summed per strip for PDC planning. `fx.describe` returns latency for each effect. |
-| **Effect bypass** | ✅ Shipped | Per-effect bypass toggle (signal-green = passing, dim = bypassed). `fx.setBypass` command. |
+| **Effect bypass** | ✅ Shipped | Per-effect bypass toggle (signal-green = passing, dim = bypassed). `fx.setBypass` command. Smooth 10 ms crossfade on toggle (m15-f). |
 | **Spectrum display** | ❌ Not yet | No real-time spectrum analyzer in v0. Vibe meter (see below) shows spectral tilt qualitatively. Deferred to v1 UI polish. |
 
 ## Automation
@@ -106,6 +108,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Automation curves** | ✅ Shipped | Linear (straight ramp) default. Bezier curves deferred to v1. |
 | **Volume automation** | ✅ Shipped | Cyan glowing lane (matches fader color). Per-sample linear ramps in engine. Fader override when pinned in mixer (lane supplies, fader reads). |
 | **Pan automation** | ✅ Shipped | Neutral white lane (pan claims no semantic accent). Per-sample linear ramps, center bit-exact null. |
+| **Master volume automation** | ✅ Shipped | Master fade lane (m15-c). Applies pre-chain (under the limiter, the pro-standard order). Stems pass fade-free. |
 | **Effect param automation** | ✅ Shipped (partial) | Built-in effect parameters automatable (per-quantum render-thread eval). AU effect automation NOT YET (deferred). |
 | **Write/touch/latch** | ❌ Not yet | Automation currently read-only on playback (no recording arm). Touch/latch/write modes deferred to v1. |
 
@@ -118,6 +121,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Comp member clips** | ✅ Shipped | Clips in a group reject ordinary clip edits (gain, fade, trim, move). Edit the comp or flatten it first. |
 | **Flatten group** | ✅ Shipped | `take.flatten` command — dissolve a group back to ordinary, editable clips. One undo step. |
 | **Remove lane** | ✅ Shipped | Delete an unused take. `take.removeLane` command. |
+| **Loop-cycle take recording** | ✅ Shipped | Record with loop enabled → one new take lane per loop cycle (m15-b). Newest lane auto-selected. |
 | **Comp crossfade** | ✅ Shipped | Set crossfade width (seconds) at comp boundaries. `take.setCrossfade` command. Audio uses compressed equal-power crossfades; MIDI is hard-cut. |
 | **Auto-align takes** | ✅ Shipped | `take.autoAlign` command — measure onset offset between a take lane and the reference (first lane) and nudge it into alignment. Spectral transient detection + grid search. Useful for aligning AI-generated takes to recorded performance. |
 | **Take lane UI** | ✅ Shipped | Arrange open/close disclosure for takes. Paint comp regions by dragging horizontally on a lane row. Click once to select the entire lane. Newest lane reads distinct (accent bar + bold name). Comp boundaries show as glowing splice seams. |
@@ -195,9 +199,9 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| **Control protocol** | ✅ Shipped | WebSocket JSON on `ws://127.0.0.1:17600` (loopback, local network off). Default port configurable via `DAW_CONTROL_PORT` env var or Settings → Agent Connection. Request: `{id, command, params}`. Response: `{id, ok, result?, error?}`. 108 commands across namespaces (transport, track, clip, mixer, fx, automation, ai, render, plugin, project, input, midi, edit, engine, macro, groove, take, app). |
+| **Control protocol** | ✅ Shipped | WebSocket JSON on `ws://127.0.0.1:17600` (loopback, local network off). Default port configurable via `DAW_CONTROL_PORT` env var or Settings → Agent Connection. Request: `{id, command, params}`. Response: `{id, ok, result?, error?}`. 123 commands across namespaces (transport, track, clip, arrange, mixer, fx, automation, ai, render, plugin, project, input, midi, edit, engine, macro, groove, take, marker, tempo, instrument, app). `project.snapshot` includes live peak/RMS meters for master and every track (`meters.master` / `meters.tracks`), enabling agents to confirm audio is rendering. |
 | **Command parity** | ✅ Shipped | Every control-protocol command maps 1:1 to an MCP tool (bijection, enforced by test). `audit-tools.test.ts` verifies the mapping on every build. |
-| **MCP server** | ✅ Shipped | TypeScript, stdio transport. 111 tools (108 commands + 3 provider-direct generation tools). Runs as a subprocess of an MCP client (Claude Code, Claude Desktop, etc.). Bridges `control.WebSocket` ← → app. Build: `npm install && npm run build`. Run: `node dist/index.js`. |
+| **MCP server** | ✅ Shipped | TypeScript, stdio transport. 126 tools (123 commands + 3 provider-direct generation tools). Runs as a subprocess of an MCP client (Claude Code, Claude Desktop, etc.). Bridges `control.WebSocket` ← → app. Build: `npm install && npm run build`. Run: `node dist/index.js`. |
 | **Tool descriptions** | ✅ Shipped | Every MCP tool has a human-readable title (≤60 chars) and description (≥40 chars, beginner language per Rule 6). Input schema properties all documented recursively. Schema enforced by headless tests. |
 | **Error surface** | ✅ Shipped | Commands return structured errors (ControlError subclasses — `invalidParameter`, `noTrack`, `invalidClip`, etc.). Agents see the specific error and can retry intelligently. |
 | **Async handling** | ✅ Shipped | Render commands (`render.bounce`, `render.mixdown`, `render.stems`, `render.measureLoudness`) support long-running work (180s timeout vs. 5s default). Async AI job commands (`ai.generateSong`, `ai.fixClipRegion`) return immediately with jobId, poll with status commands. |
@@ -209,6 +213,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **macOS minimum** | ✅ Shipped | macOS 14+ (Sonoma or later). Intel + Apple Silicon (M1+) tested. |
 | **Real-time safety** | ✅ Shipped (audited) | Render thread: no allocation, no locks, no ObjC dispatch, no file I/O. Tier-1 (render) vs. Tier-2 (taps/queues) boundary enforced by design. Full audit: `docs/research/audit-rt-safety.md`. |
 | **Audio engine** | ✅ Shipped | AVAudioEngine + CoreAudio. Graph-based routing (nodes → connections). Lock-free communication across boundaries. Offline render support (batch processing for testing + bounces). |
+| **Engine notices** | ✅ Shipped | When playback degrades (skipped fades/envelopes, a clip still time-stretching), an amber transport-bar chip appears in **both** Simple and Pro — it only shows when something happened. Agents see the same facts in `project.snapshot` `engineNotices` (absent = healthy). Session-transient; nothing in the project changes (m15-e). |
 | **Testing framework** | ✅ Shipped | Swift Testing (`import Testing`). DAWCore is headless, engine is separately testable. Integration tests: real MCP client → control wire → app (12 tests). Run: `./scripts/test.sh`. |
 | **Build system** | ✅ Shipped | Swift Package Manager (SPM) monorepo. Targets: DAWCore (domain model), DAWEngine (audio), DAWControl (wire), AIServices (providers), DAWApp (UI), DAWAppKit (headless UI logic), MCP server (TypeScript). |
 | **Crash recovery** | ✅ Shipped | Autosave + recovery bundle on unexpected quit. On relaunch, app offers to recover the last session. Watchdog detects render-thread hangs and recovers. |
@@ -223,7 +228,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Touch/latch/write modes** | ❌ Not yet | Automation is read-only on playback. Recording arm for automation deferred to v1. |
 | **Bezier curves** | ❌ Not yet | Automation lanes use linear interpolation only. Bezier curves deferred to v1 polish. |
 | **AU effect param automation** | ❌ Not yet | Built-in effect params are automatable; AU plugin params are not (per-quantum eval not exposed to hosted AUs yet). |
-| **Master effect chain** | ❌ Not yet | No effects on the master strip yet. Will land when DAWCore grows a master track model. |
+| **Master effect chain** | ✅ Shipped | Insert effects on the master strip (m13-d). Built-ins only in v0; AU effects deferred. |
 | **Spectrum analyzer** | ❌ Not yet | No real-time EQ/spectrum display in the mixer. Vibe meter shows spectral tilt qualitatively. |
 | **VST hosting** | ❌ Not in scope | AudioUnits cover the macOS ecosystem. VST is not on the roadmap. |
 | **Notarization** | ❌ Blocked (pkg-c) | The bundled app is ad-hoc signed (Developer ID signing/notarization pending credential availability). Gatekeeper prompt on first launch on another Mac. |
@@ -232,10 +237,11 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 
 ## Command & Tool Counts
 
-- **Wire commands**: 108 (verified against `Sources/DAWControl/Commands.swift` `allCommands` array)
-- **MCP tools**: 111 (108 commands + 3 provider-direct tools: `generate_lyrics`, `generate_image`, `generate_song_suno`)
+- **Wire commands**: 123 (verified against `Sources/DAWControl/Commands.swift` `allCommands` array; +3 from m15-d arrange ergonomics)
+- **MCP tools**: 126 (123 commands + 3 provider-direct tools: `generate_lyrics`, `generate_image`, `generate_song_suno`)
 - **Built-in effects**: 9 (Gain, EQ, Compressor, Limiter, Reverb, Delay, Saturator, Gate, Chorus)
-- **Explain catalog entries**: 53 (transport, mixer, piano roll, arrange, AI panels, settings, instrument picker coverage)
+- **Copilot catalog entries**: 55 (m15-d adds 3 arrangement verbs to the 52 existing entries)
+- **Explain catalog entries**: 69 (transport, mixer, piano roll, arrange, AI panels, settings, instrument picker coverage; +1 for master automation in m15-c)
 
 ---
 

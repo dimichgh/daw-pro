@@ -32,6 +32,12 @@ final class AutomationRenderer: @unchecked Sendable {
 
     // Render-thread-only state.
     private var lastGeneration = UInt64.max
+    /// Timeline family of the last adopted schedule (m14-b L-2): a generation
+    /// change with the SAME timelineID (loop-cycle extension, mid-roll lane
+    /// edit) keeps the latched offline epoch — the timeline must not shift
+    /// mid-render; a CHANGED id re-latches (fresh anchor). Cursors re-seek on
+    /// EVERY generation change either way (value lookup is position-absolute).
+    private var lastTimelineID = UInt64.max
     private var volumeCursor = -1          // < 0 = re-seek by binary search
     private var panCursor = -1
     /// PREALLOCATED per-effect-param-track cursors (M4 vii-c) — capacity is
@@ -185,17 +191,24 @@ final class AutomationRenderer: @unchecked Sendable {
     // MARK: - Shared render-side position mapping
 
     /// New generation → ALL cursors re-seek (binary search on first
-    /// evaluate), offline epoch re-latches — the MIDIEventSchedule reset
-    /// contract. Both render entry points (`storeEffectParams` pre-walk,
-    /// `apply` post-walk) call this; whichever sees the new generation first
-    /// resets for both, and the second is a generation-equal no-op.
+    /// evaluate) — the MIDIEventSchedule reset contract. The offline epoch
+    /// re-latches ONLY when the timelineID changed too (m14-b L-2): a
+    /// same-timeline republish (loop-cycle extension, mid-roll lane edit)
+    /// shares the original anchor/epoch, and re-latching would shift every
+    /// remaining breakpoint by the elapsed render time. Both render entry
+    /// points (`storeEffectParams` pre-walk, `apply` post-walk) call this;
+    /// whichever sees the new generation first resets for both, and the
+    /// second is a generation-equal no-op.
     private func adoptGeneration(of schedule: AutomationSchedule) {
         guard schedule.generation != lastGeneration else { return }
         lastGeneration = schedule.generation
         volumeCursor = -1
         panCursor = -1
         effectCursors.update(repeating: -1, count: AutomationSchedule.maxEffectParamTracks)
-        offlineEpochLatched = false
+        if schedule.timelineID != lastTimelineID {
+            lastTimelineID = schedule.timelineID
+            offlineEpochLatched = false
+        }
     }
 
     /// Epoch math: schedule-relative frame index of this quantum's start, or

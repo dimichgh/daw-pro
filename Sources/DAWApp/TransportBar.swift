@@ -72,6 +72,28 @@ struct TransportBar: View {
                     .explainable(.transportTestTone)
             }
 
+            // Engine-notices chip (m15-e, audit F6): appears ONLY when the store's
+            // coalesced notices ring is non-empty (a healthy session shows nothing —
+            // no clutter). Semantic AMBER warning (`DAWTheme.record`, the accent
+            // system's warning/clipping-adjacent hue). DENSITY DECISION (documented):
+            // it shows in BOTH Simple and Pro — NOT gated on `isPro`. Two reasons:
+            // (1) it is read-only diagnostic STATUS chrome, not an edit affordance, so
+            // the vibe-meter doctrine applies (status readouts show in both densities);
+            // (2) Rule 6 — a beginner whose fades silently vanished needs to know MORE
+            // than a pro, not less, so hiding a "something sounded off" indicator from
+            // Simple would be user-hostile. Click toggles the popover list.
+            if !store.engineNotices.isEmpty {
+                EngineNoticesChip(
+                    model: EngineNoticesModel(notices: store.engineNotices),
+                    isOpen: appModel.showEngineNotices
+                ) {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        appModel.showEngineNotices.toggle()
+                    }
+                }
+                .explainable(.transportEngineNotices)
+            }
+
             // The session vibe meter — the signature glowing instrument (vm-b). It's
             // read-only STATUS chrome, so it shows in BOTH Simple and Pro, sitting just
             // left of the master cluster. Reads the seed override, else the live poll.
@@ -146,8 +168,16 @@ struct TransportBar: View {
                     .explainable(.transportPunch)
             }
 
-            clickChip
-                .explainable(.transportClick)
+            // CLICK + the count-in stepper as one narrow column (m15-b, the
+            // m10-q §1.3 rider): the stepper rides under the chip so the
+            // record cluster's measured width budget (the m10-j 340 pt
+            // anchor) is untouched — the column is barely wider than the
+            // chip and shorter than the 38 pt transport buttons.
+            VStack(spacing: 2) {
+                clickChip
+                    .explainable(.transportClick)
+                countInStepper
+            }
         }
     }
 
@@ -217,9 +247,8 @@ struct TransportBar: View {
     }
 
     /// Toggles the metronome click. Signal green: the click is a healthy
-    /// reference signal, not a transport mode. Count-in has no UI yet — it is
-    /// set via the control protocol / MCP (transport.setMetronome countInBars)
-    /// until the record cluster grows a count-in selector.
+    /// reference signal, not a transport mode. Count-in lives right below in
+    /// `countInStepper` (same `transport.setMetronome` verb).
     private var clickChip: some View {
         let isOn = store.transport.isMetronomeEnabled
         return Button {
@@ -246,18 +275,71 @@ struct TransportBar: View {
         .help("Metronome click")
     }
 
+    /// Count-in bars stepper (m15-b — the audit's thrice-filed m10-q §1.3
+    /// rider): exposes the existing `transport.setMetronome countInBars`
+    /// setting (0–4 bars, the store clamps). Beginner-readable "IN n" readout
+    /// — signal green when armed (count-in is click family; it clicks even
+    /// with CLICK off), dim at 0. Disabled mid-take like the chip above
+    /// (metronome changes are refused while recording).
+    private var countInStepper: some View {
+        let bars = store.transport.countInBars
+        return HStack(spacing: 3) {
+            CountInNudgeButton(label: "−") { setCountInBars(bars - 1) }
+                .disabled(bars <= TransportState.countInBarsRange.lowerBound)
+            Text("IN \(bars)")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .tracking(0.5)
+                .foregroundStyle(bars > 0 ? DAWTheme.signal : DAWTheme.textDim)
+                .frame(minWidth: 24)
+            CountInNudgeButton(label: "+") { setCountInBars(bars + 1) }
+                .disabled(bars >= TransportState.countInBarsRange.upperBound)
+        }
+        .disabled(store.transport.isRecording)
+        .help("Count-in before recording: 0–4 bars of clicks (they sound even with CLICK off)")
+    }
+
+    /// One stepper move: keep the click toggle as-is, set only the bars
+    /// (`setMetronome` clamps to `countInBarsRange`).
+    private func setCountInBars(_ bars: Int) {
+        try? store.setMetronome(enabled: store.transport.isMetronomeEnabled,
+                                countInBars: bars)
+    }
+
     private var tempoCluster: some View {
         HStack(spacing: 8) {
             DigitalReadout(
                 label: "Tempo",
-                value: String(format: "%.1f", store.transport.tempoBPM),
+                // m12-d: the tempo AT THE PLAYHEAD (design row 73) — on a multi-
+                // segment map this tracks the active section; on a trivial map it
+                // is just the base tempo (byte-identical readout).
+                value: String(format: "%.1f", store.transport.tempoMap.bpm(atBeat: store.transport.positionBeats)),
                 color: DAWTheme.textPrimary
             )
             VStack(spacing: 3) {
-                TempoNudgeButton(label: "+") { try? store.setTempo(store.transport.tempoBPM + 1) }
-                TempoNudgeButton(label: "−") { try? store.setTempo(store.transport.tempoBPM - 1) }
+                TempoNudgeButton(label: "+") { nudgeTempo(by: 1) }
+                TempoNudgeButton(label: "−") { nudgeTempo(by: -1) }
             }
             .disabled(store.transport.isRecording)  // tempo changes are refused mid-take
+        }
+    }
+
+    /// Nudge the tempo by ±1 BPM. On a trivial project this is the scalar fast path
+    /// (`setTempo`); on a multi-segment map it edits the SEGMENT under the playhead
+    /// through `setTempoMap` (design row 73 — the nudge edits the active section),
+    /// so the nudge never hits the multi-segment reject.
+    private func nudgeTempo(by delta: Double) {
+        let map = store.transport.tempoMap
+        let position = store.transport.positionBeats
+        let current = map.bpm(atBeat: position)
+        if store.transport.tempoMapOverride == nil {
+            try? store.setTempo(current + delta)
+        } else {
+            let index = map.segments.lastIndex { $0.startBeat <= position } ?? 0
+            var segments = map.segments
+            segments[index] = TempoMap.Segment(startBeat: segments[index].startBeat, bpm: current + delta)
+            if let updated = try? TempoMap(segments: segments) {
+                try? store.setTempoMap(updated)
+            }
         }
     }
 
@@ -339,6 +421,26 @@ struct TransportButton: View {
                     )
                 )
                 .glow(activeColor, radius: 8, intensity: isActive ? 0.7 : 0)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Micro nudge button for the count-in stepper — the TempoNudgeButton idiom
+/// at sub-row scale (the stepper rides UNDER the CLICK chip, so it must stay
+/// inside the chip column's height budget).
+struct CountInNudgeButton: View {
+    var label: String
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(DAWTheme.textDim)
+                .frame(width: 14, height: 11)
+                .background(DAWTheme.panelRaised)
+                .clipShape(RoundedRectangle(cornerRadius: 2))
         }
         .buttonStyle(.plain)
     }

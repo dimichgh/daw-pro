@@ -40,8 +40,11 @@ struct VibeMeterView: View {
             let state = smoother.advance(to: timeline.date, snapshot: snapshot())
             let rgb = Self.components(for: state)
             let color = Color(.sRGB, red: rgb.r, green: rgb.g, blue: rgb.b, opacity: 1)
-            Canvas { context, size in
-                Self.draw(state, phase: smoother.phase, in: &context,
+            // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+            // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+            let phase = smoother.phase
+            Canvas { @Sendable context, size in
+                Self.draw(state, phase: phase, in: &context,
                           size: size, rgb: rgb, color: color)
             }
             // The wide house-recipe halo (docs/DESIGN-LANGUAGE.md "Glow recipe"),
@@ -74,8 +77,8 @@ struct VibeMeterView: View {
     /// Draws the orb: a radial-gradient body under a crisp neon rim, with a hot core.
     /// All geometry is derived from the smoothed state; nothing is retained between
     /// frames beyond the small point buffer built here.
-    static func draw(_ state: VibeMeterModel, phase: Double, in context: inout GraphicsContext,
-                     size: CGSize, rgb: (r: Double, g: Double, b: Double), color: Color) {
+    nonisolated static func draw(_ state: VibeMeterModel, phase: Double, in context: inout GraphicsContext,
+                                 size: CGSize, rgb: (r: Double, g: Double, b: Double), color: Color) {
         let cx = size.width / 2
         let cy = size.height / 2
         let half = min(size.width, size.height) / 2
@@ -119,9 +122,9 @@ struct VibeMeterView: View {
     /// top, swept up the right side and mirrored to the left — a bilaterally-symmetric
     /// closed silhouette. Each band's normalized magnitude sets its radius, plus a
     /// per-band shimmer ripple that scales with motion.
-    static func silhouettePoints(state: VibeMeterModel, cx: CGFloat, cy: CGFloat,
-                                 ringBase: CGFloat, ampMax: CGFloat,
-                                 ripple: CGFloat, phase: Double) -> [CGPoint] {
+    nonisolated static func silhouettePoints(state: VibeMeterModel, cx: CGFloat, cy: CGFloat,
+                                             ringBase: CGFloat, ampMax: CGFloat,
+                                             ripple: CGFloat, phase: Double) -> [CGPoint] {
         let n = state.bands.count            // 24
         guard n > 1 else { return [] }
         func radius(_ i: Int) -> CGFloat {
@@ -151,7 +154,7 @@ struct VibeMeterView: View {
 
     /// A smooth closed path through `points` via midpoint quad curves — rounds the
     /// polygon so the orb reads organic, not faceted, even at a tiny transport size.
-    static func smoothClosedPath(_ points: [CGPoint]) -> Path {
+    nonisolated static func smoothClosedPath(_ points: [CGPoint]) -> Path {
         var path = Path()
         guard points.count > 2 else { return path }
         func mid(_ a: CGPoint, _ b: CGPoint) -> CGPoint {
@@ -168,7 +171,7 @@ struct VibeMeterView: View {
     }
 
     /// Blend rgb components toward white by `t` (0…1) — for the hot-toward-white core.
-    static func whiten(_ c: (r: Double, g: Double, b: Double), _ t: Double) -> Color {
+    nonisolated static func whiten(_ c: (r: Double, g: Double, b: Double), _ t: Double) -> Color {
         let f = min(max(t, 0), 1)
         return Color(.sRGB, red: c.r + (1 - c.r) * f,
                      green: c.g + (1 - c.g) * f,

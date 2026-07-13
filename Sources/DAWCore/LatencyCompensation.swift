@@ -44,12 +44,39 @@ public struct PDCStripInput: Sendable, Hashable {
     public let kind: PDCStripKind
     public let chainLatencyAll: Int
     public let chainLatencyActive: Int
+    /// Non-nil when this strip hosts a sidechain-keyed effect (m12-f):
+    /// feeds the honest `sidechainSkewSamples` report (design
+    /// design-m11f-sidechain §4-A "report, don't hide"). Additive — existing
+    /// callers/plans are untouched at nil.
+    public let sidechainKey: SidechainKeyInput?
 
-    public init(id: UUID, kind: PDCStripKind, chainLatencyAll: Int, chainLatencyActive: Int) {
+    public init(id: UUID, kind: PDCStripKind, chainLatencyAll: Int, chainLatencyActive: Int,
+                sidechainKey: SidechainKeyInput? = nil) {
         self.id = id
         self.kind = kind
         self.chainLatencyAll = chainLatencyAll
         self.chainLatencyActive = chainLatencyActive
+        self.sidechainKey = sidechainKey
+    }
+}
+
+/// One keyed effect's planner-relevant facts (m12-f). The key is tapped
+/// POST-fader at the source strip (downstream of its compensation ring), so
+/// it arrives aligned to the source's stage target; the destination's main
+/// signal at the keyed chain slot has accumulated only the ACTIVE latency of
+/// the effects BEFORE it. The planner reports the difference — v1 corrects
+/// nothing (design §4-A phase-2 deferral).
+public struct SidechainKeyInput: Sendable, Hashable {
+    /// The key source strip's id (a track in v1; must be among the plan's
+    /// input strips for a nonzero skew to be computable).
+    public let sourceID: UUID
+    /// Σ active latencies of the chain slots BEFORE the keyed effect on the
+    /// DESTINATION strip, in samples (0 when the keyed effect is first).
+    public let latencyBeforeKeyedEffectSamples: Int
+
+    public init(sourceID: UUID, latencyBeforeKeyedEffectSamples: Int) {
+        self.sourceID = sourceID
+        self.latencyBeforeKeyedEffectSamples = latencyBeforeKeyedEffectSamples
     }
 }
 
@@ -80,6 +107,12 @@ public struct PDCStripPlan: Sendable, Hashable {
     /// feed arrives `skewSamples` early relative to bus returns. One delay
     /// per strip cannot satisfy both constraints; reported, not hidden.
     public let skewSamples: Int
+    /// Sidechain key skew (m12-f, design §4-A): key arrival time minus the
+    /// destination's main-signal time at the keyed chain slot, in samples —
+    /// positive = key LATE. 0 for unkeyed strips, for typical all-zero-
+    /// latency sessions, and when the source strip is not a plan input.
+    /// Reported, not corrected (v1 policy — the `skewSamples` precedent).
+    public let sidechainSkewSamples: Int
 
     /// Uncompensated residual when clamped: `plannedSamples − compensationSamples`.
     public var residualSamples: Int { plannedSamples - compensationSamples }
@@ -135,9 +168,14 @@ public struct PDCPlan: Sendable, Hashable {
         var indexByID: [UUID: Int] = [:]
         indexByID.reserveCapacity(input.strips.count)
 
+        // Pass 1: stage targets + v0 skew per strip. Stage targets double as
+        // each strip's planned OUTPUT alignment time, which the sidechain
+        // skew pass below reads for key sources (a strip's post-fader tap
+        // sits downstream of its compensation ring by construction).
+        var stageTargets: [(stageTarget: Int, skew: Int)] = []
+        stageTargets.reserveCapacity(input.strips.count)
+        var stageTargetByID: [UUID: (target: Int, kind: PDCStripKind)] = [:]
         for strip in input.strips {
-            let active = max(0, strip.chainLatencyActive)
-
             let stageTarget: Int
             let skew: Int
             switch strip.kind {
@@ -163,6 +201,37 @@ public struct PDCPlan: Sendable, Hashable {
                 stageTarget = busStage
                 skew = 0
             }
+            stageTargets.append((stageTarget, skew))
+            stageTargetByID[strip.id] = (stageTarget, strip.kind)
+        }
+
+        // Pass 2: plans, including the sidechain key skew (m12-f): key
+        // arrival = the source strip's aligned output time (track → its
+        // stage target; bus → T + its stage target, since bus input arrives
+        // at T); main-signal time at the keyed slot = the destination's
+        // chain-input time (track 0, bus T — rings are post-chain) + the
+        // active latency accumulated before the keyed effect.
+        for (index, strip) in input.strips.enumerated() {
+            let active = max(0, strip.chainLatencyActive)
+            let (stageTarget, skew) = stageTargets[index]
+
+            var sidechainSkew = 0
+            if let key = strip.sidechainKey,
+               let source = stageTargetByID[key.sourceID] {
+                let keyArrival: Int
+                switch source.kind {
+                case .track: keyArrival = source.target
+                case .bus: keyArrival = trackStage + source.target
+                }
+                let destInputTime: Int
+                switch strip.kind {
+                case .track: destInputTime = 0
+                case .bus: destInputTime = trackStage
+                }
+                let mainAtSlot = destInputTime
+                    + max(0, key.latencyBeforeKeyedEffectSamples)
+                sidechainSkew = keyArrival - mainAtSlot
+            }
 
             // Active sum can only exceed the stage target if the caller broke
             // the active ≤ all invariant; floor at 0 (same clamp policy).
@@ -173,7 +242,8 @@ public struct PDCPlan: Sendable, Hashable {
                 plannedSamples: planned,
                 compensationSamples: applied,
                 clamped: planned > cap,
-                skewSamples: skew
+                skewSamples: skew,
+                sidechainSkewSamples: sidechainSkew
             ))
             indexByID[strip.id] = plans.count - 1
         }
@@ -214,13 +284,18 @@ public struct PDCReport: Sendable, Equatable {
         /// The documented v0 skew (nonzero only for a direct-to-master track
         /// with sends while some bus carries fixed latency).
         public let skewSamples: Int
+        /// Sidechain key skew for a keyed strip (m12-f): key arrival minus
+        /// main-signal time at the keyed slot, positive = key late. 0 for
+        /// unkeyed strips. Reported, not corrected (design §4-A).
+        public let sidechainSkewSamples: Int
 
         public init(chainLatencySamples: Int, compensationSamples: Int,
-                    clamped: Bool, skewSamples: Int) {
+                    clamped: Bool, skewSamples: Int, sidechainSkewSamples: Int = 0) {
             self.chainLatencySamples = chainLatencySamples
             self.compensationSamples = compensationSamples
             self.clamped = clamped
             self.skewSamples = skewSamples
+            self.sidechainSkewSamples = sidechainSkewSamples
         }
     }
 
@@ -230,10 +305,15 @@ public struct PDCReport: Sendable, Equatable {
     public let busStageSamples: Int
     /// `T + B` — the global path latency every strip is padded toward.
     public let maxPathLatencySamples: Int
+    /// The master insert chain's ACTIVE (non-bypassed) latency sum (m13-d,
+    /// design D5) — REPORT-ONLY: the master is common-path (delays every
+    /// strip equally) and never a plan input, so no per-strip ring corrects
+    /// it. Moves when a master effect is bypassed (there is no ring to
+    /// absorb the difference — the honest figure is the real signal delay).
+    public let masterChainLatencySamples: Int
     /// Ruler-to-speaker figure for output-delayed mode: `T + B` plus the
-    /// master strip's own (common-path, uncompensated) chain latency. The
-    /// master strip carries no chain today, so this equals `maxPathLatency`;
-    /// the term is kept separate so a future master chain adds in here.
+    /// master chain's own (common-path, uncompensated) ACTIVE latency —
+    /// live since m13-d, exactly as the field was designed.
     public let outputLatencySamples: Int
     /// Per-strip reports keyed by track/bus id.
     public let strips: [UUID: Strip]
@@ -243,6 +323,7 @@ public struct PDCReport: Sendable, Equatable {
         self.trackStageSamples = trackStageSamples
         self.busStageSamples = busStageSamples
         self.maxPathLatencySamples = trackStageSamples + busStageSamples
+        self.masterChainLatencySamples = masterChainLatencySamples
         self.outputLatencySamples =
             trackStageSamples + busStageSamples + masterChainLatencySamples
         self.strips = strips

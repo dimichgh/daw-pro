@@ -21,6 +21,19 @@ private struct StubMedia: MediaImporting {
 @Suite("ClipStretchModel")
 struct ClipStretchModelTests {
 
+    /// Trivial single-meter map (m13-h) — the byte-equivalence anchor.
+    private func meter(_ bpb: Int = 4) -> MeterMap {
+        MeterMap(constant: TimeSignature(beatsPerBar: bpb))
+    }
+
+    /// 4/4 → 6/8 @ beat 16 (bpb 6): barlines …12,16,22,28…
+    private func crossMeter() -> MeterMap {
+        try! MeterMap(changes: [
+            .init(startBeat: 0, beatsPerBar: 4, beatUnit: 4),
+            .init(startBeat: 16, beatsPerBar: 6, beatUnit: 8),
+        ])
+    }
+
     // MARK: - Alt-drag classification
 
     @Test("only a trailing-edge option-drag on an audio clip is a stretch")
@@ -44,18 +57,34 @@ struct ClipStretchModelTests {
         // rawEnd 5.6 → nearest bar (4) = 4? nearest of {4,8} to 5.6 is 4 -> len 4.
         let l1 = ClipStretch.targetLength(
             originalStart: 0, originalLength: 4, dragDeltaBeats: 1.6,
-            snap: .bar, beatsPerBar: 4)
+            snap: .bar, meterMap: meter())
         #expect(l1 == 4)
         // Beat snap, +2.4 → rawEnd 6.4 → snaps to 6 → length 6.
         let l2 = ClipStretch.targetLength(
             originalStart: 0, originalLength: 4, dragDeltaBeats: 2.4,
-            snap: .beat, beatsPerBar: 4)
+            snap: .beat, meterMap: meter())
         #expect(l2 == 6)
         // Dragging far left is floored to the min clip length (start pinned).
         let l3 = ClipStretch.targetLength(
             originalStart: 2, originalLength: 4, dragDeltaBeats: -100,
-            snap: .off, beatsPerBar: 4)
+            snap: .off, meterMap: meter())
         #expect(l3 == ClipEdit.minClipLengthBeats)
+    }
+
+    @Test("target length .bar snap follows the region's meter across a change (m13-h)")
+    func targetLengthCrossBoundary() {
+        let m = crossMeter()   // barlines …12,16,22,28…
+        // A clip starting at 16 (6/8), dragged so the new end lands ~21 → 6/8 bar 22.
+        // originalLength 4 → rawEnd 20 + delta 1 = 21 → snaps to 22 → length 6.
+        let l = ClipStretch.targetLength(
+            originalStart: 16, originalLength: 4, dragDeltaBeats: 1,
+            snap: .bar, meterMap: m)
+        #expect(l == 6)   // 22 - 16, one 6/8 bar
+        // Trivial-map regression: same call on a plain 4/4 map snaps end 21 → 20.
+        let l4 = ClipStretch.targetLength(
+            originalStart: 16, originalLength: 4, dragDeltaBeats: 1,
+            snap: .bar, meterMap: meter())
+        #expect(l4 == 4)   // 20 - 16, one 4/4 bar
     }
 
     // MARK: - Ratio-from-length preview (mirrors the store)

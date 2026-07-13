@@ -33,16 +33,17 @@ public struct AudioImportContext: Sendable, Equatable {
     public var atBeatRaw: Double
     /// The active clip-lane snap (the arrange effective snap).
     public var snap: ClipSnap
-    /// Beats per bar (governs `.bar` snapping in odd meters).
-    public var beatsPerBar: Int
+    /// The project meter map (m13-h): governs `.bar` snapping across time-signature
+    /// changes, so a drop into a 6/8 region lands on the 6/8 grid.
+    public var meterMap: MeterMap
 
     public init(targetTrackID: UUID? = nil, targetTrackKind: TrackKind? = nil,
-                atBeatRaw: Double, snap: ClipSnap, beatsPerBar: Int) {
+                atBeatRaw: Double, snap: ClipSnap, meterMap: MeterMap) {
         self.targetTrackID = targetTrackID
         self.targetTrackKind = targetTrackKind
         self.atBeatRaw = atBeatRaw
         self.snap = snap
-        self.beatsPerBar = beatsPerBar
+        self.meterMap = meterMap
     }
 }
 
@@ -126,7 +127,7 @@ public struct AudioImportPlan: Sendable, Equatable {
         }
 
         let startBeat = context.snap.snap(beat: max(0, context.atBeatRaw),
-                                          beatsPerBar: context.beatsPerBar)
+                                          meterMap: context.meterMap)
 
         var actions: [AudioImportAction] = []
         if Self.routesToExistingAudioTrack(fileCount: audioURLs.count,

@@ -37,6 +37,25 @@ struct CopilotCatalogTests {
         #expect(Set(commands).count == commands.count)
     }
 
+    @Test("catalog carries the m15-d arrangement verbs; count now 55")
+    func catalogCountPin() {
+        // m12-g seeded the fx section with fx.setSidechain alone (47). m13-d
+        // added fx.add / fx.remove / fx.setParam / fx.setBypass — each teaching
+        // the trackId:"master" sentinel + built-ins-only on master — taking the
+        // surface 47 → 51. m13-e's clip.setGainEnvelope took it 51 → 52. m15-d's
+        // clip.duplicate + arrange.insertBars + arrange.deleteBars took it
+        // 52 → 55. A silent add/drop fails here.
+        #expect(CopilotToolCatalog.v1.count == 55)
+        for command in ["fx.add", "fx.remove", "fx.setParam", "fx.setBypass", "fx.setSidechain"] {
+            #expect(CopilotToolCatalog.tool(command: command) != nil, "\(command) missing from the catalog")
+        }
+        #expect(CopilotToolCatalog.tool(command: "clip.setGainEnvelope") != nil,
+                "clip.setGainEnvelope missing from the catalog")
+        for command in ["clip.duplicate", "arrange.insertBars", "arrange.deleteBars"] {
+            #expect(CopilotToolCatalog.tool(command: command) != nil, "\(command) missing from the catalog")
+        }
+    }
+
     @Test("wire-name mapping round-trips bijectively")
     func wireNameMappingRoundTrips() {
         for tool in CopilotToolCatalog.v1 {

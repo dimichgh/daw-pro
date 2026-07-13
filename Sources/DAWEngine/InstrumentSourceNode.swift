@@ -72,6 +72,15 @@ final class InstrumentRenderer: @unchecked Sendable {
     // Render-thread-only state.
     private var cursor = 0
     private var lastGeneration = UInt64.max
+    /// Timeline family of the last adopted schedule (m14-b L-2): a generation
+    /// change with the SAME timelineID is an append-only extension republish —
+    /// re-seek instead of reset (see `renderQuantum` step 3).
+    private var lastTimelineID = UInt64.max
+    /// Delivered watermark: everything with sampleTime < this has been
+    /// delivered (the window end of the last rendered quantum on this
+    /// timeline). The extension re-seek lands the cursor here — no delivered
+    /// event re-fires, no pending event (late-ride-along included) is skipped.
+    private var deliveredThrough = Int64.min
     private var offlineEpoch: Int64 = 0
     private var offlineEpochLatched = false
     /// Live noteIDs: top bit set so they can never collide with schedule IDs
@@ -216,11 +225,26 @@ final class InstrumentRenderer: @unchecked Sendable {
         let raw = daw_atomic_ptr_load(scheduleSlot)
         let schedule = raw.map { Unmanaged<MIDIEventSchedule>.fromOpaque($0).takeUnretainedValue() }
 
-        // 3. New schedule generation → reset the cursor, re-latch the epoch.
+        // 3. New schedule generation. SAME timelineID (m14-b L-2) = an
+        // append-only extension republish against the SAME anchor/epoch: the
+        // array below the delivered watermark is unchanged and everything
+        // appended is strictly future, so the cursor RE-SEEKS to the first
+        // event ≥ the watermark — every delivered on/off stays delivered
+        // exactly once, every pending off (late ride-alongs included) stays
+        // ahead of the cursor. Bounded binary search, no allocation — the ONE
+        // blessed render-side behavior of the gapless-loop design (§8.1, C2,
+        // C4). NEW timelineID = a fresh anchor (every stop/seek/edit restart):
+        // full reset + epoch re-latch, the pre-L-2 contract verbatim.
         if let schedule, schedule.generation != lastGeneration {
             lastGeneration = schedule.generation
-            cursor = 0
-            offlineEpochLatched = false
+            if schedule.timelineID == lastTimelineID {
+                cursor = MIDIEventSchedule.lowerBound(schedule.events, deliveredThrough)
+            } else {
+                lastTimelineID = schedule.timelineID
+                cursor = 0
+                deliveredThrough = Int64.min
+                offlineEpochLatched = false
+            }
         }
 
         // 4. Epoch math: schedule-relative frame index of this quantum's start.
@@ -267,6 +291,9 @@ final class InstrumentRenderer: @unchecked Sendable {
             }
             slice = UnsafeBufferPointer(rebasing: events[cursor..<end])
             cursor = end
+            // Watermark for the extension re-seek (max: defensive against a
+            // non-monotonic host timestamp — the timeline only moves forward).
+            deliveredThrough = max(deliveredThrough, windowEnd)
         }
 
         // 6. Drain the thru ring into the live scratch — live events sound at

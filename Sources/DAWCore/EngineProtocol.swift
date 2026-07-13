@@ -42,6 +42,64 @@ public enum ClipStretchStatus: Sendable, Equatable {
     case failed(String)
 }
 
+/// One schedule-time degradation as the engine reports it (m15-e, audit F6):
+/// playback proceeded, but not exactly as the project describes (a fade/
+/// envelope bake failed, a stretched clip is still rendering, …). Posted from
+/// CONTROL-side schedule code only — the render thread never produces these.
+/// The store coalesces events into its `engineNotices` ring; this event type
+/// carries just the facts one occurrence knows.
+public struct EngineNoticeEvent: Sendable, Equatable {
+    /// Stable machine code (kebab-case) naming the degradation family — the
+    /// store's coalescing key. Current codes: `clip-envelope-skipped`,
+    /// `clip-fades-skipped`, `clip-stretch-pending`, `clip-unplayable`,
+    /// `engine-exception` (m16-a), `clip-file-missing` (m16-c — the
+    /// build-time open catch and the store's open/recover echo).
+    public var code: String
+    /// Beginner-readable description of what the listener actually got
+    /// (design-language copy — no wire-speak, names the clip).
+    public var message: String
+    /// Timeline beat of the affected clip's start, when the site knows one.
+    public var beat: Double?
+
+    public init(code: String, message: String, beat: Double? = nil) {
+        self.code = code
+        self.message = message
+        self.beat = beat
+    }
+}
+
+/// One COALESCED engine notice as surfaced on `project.snapshot` (m15-e):
+/// repeat posts of the same `code` increment `count` and refresh
+/// `message`/`beat`/`lastAt` instead of appending. Session-transient
+/// diagnostics — never persisted to disk, never journaled (undo/redo does
+/// not touch notices), cleared on `project.new`/`project.open`/
+/// `project.recover` (every session replacement).
+public struct EngineNotice: Sendable, Equatable, Codable {
+    /// The coalescing key — see `EngineNoticeEvent.code`.
+    public var code: String
+    /// Latest occurrence's message (latest wins under coalescing).
+    public var message: String
+    /// Latest occurrence's clip-start beat, when known.
+    public var beat: Double?
+    /// How many times this code has posted since the ring was last cleared.
+    public var count: Int
+    /// Session-monotonic post sequence (1 = the first post since the last
+    /// clear) — deliberately NOT wall-clock: a scripted scenario produces
+    /// byte-identical snapshots on every run (gate scripts diff them), and
+    /// relative order across notices stays exactly comparable. It is an
+    /// ordering token, not a timestamp.
+    public var lastAt: Int
+
+    public init(code: String, message: String, beat: Double? = nil,
+                count: Int = 1, lastAt: Int) {
+        self.code = code
+        self.message = message
+        self.beat = beat
+        self.count = count
+        self.lastAt = lastAt
+    }
+}
+
 /// One detected onset in an audio SOURCE file (M5 iii-e). `timeSeconds` is the
 /// position in source-file seconds — geometry-free by design: clip trims and
 /// splits never move it, mirroring the stretch cache's whole-source-file rule.
@@ -82,10 +140,20 @@ public struct MIDIRecordingResult: Sendable, Equatable {
 public struct TakeResult: Sendable {
     public var audio: RecordingResult?
     public var midi: MIDIRecordingResult?
+    /// LINEAR transport beat at which the take stopped (m15-b): the engine's
+    /// capture-clamp beat — the frozen map's inverse integral from the record
+    /// anchor, NEVER modular under a loop. Loop-cycle slicing derives the
+    /// exact MIDI cycle count from it (`MIDIRecordingResult.lengthBeats` is
+    /// rounded UP to whole beats, which would fabricate a phantom cycle at a
+    /// wrap). nil from engines/fakes that never derived one — consumers fall
+    /// back to the rounded length.
+    public var stopBeats: Double?
 
-    public init(audio: RecordingResult? = nil, midi: MIDIRecordingResult? = nil) {
+    public init(audio: RecordingResult? = nil, midi: MIDIRecordingResult? = nil,
+                stopBeats: Double? = nil) {
         self.audio = audio
         self.midi = midi
+        self.stopBeats = stopBeats
     }
 }
 
@@ -104,6 +172,15 @@ public protocol AudioEngineControlling: AnyObject {
     /// trigger an internal stop-reschedule-resume from the current position;
     /// parameter-only changes never interrupt audio.
     func tracksDidChange(_ tracks: [Track])
+
+    /// The WHOLE project is about to be replaced (`project.new` /
+    /// `project.open`) — called immediately before the `tracksDidChange`
+    /// that carries the new session's tracks. m13-a: a real engine that has
+    /// rendered discards its entire graph + hardware engine and rebuilds
+    /// from the new model (no per-node teardown of a once-rendered engine
+    /// is ever attempted — the proven crash class); engines that never ran,
+    /// and engines without the capability, ignore it.
+    func projectWillReplace()
 
     /// Per-clip gain edit (M5 i-b): applied LIVE as one input-gain write on
     /// the clip's player — never a stop-reschedule-resume, so mid-play gain
@@ -132,9 +209,8 @@ public protocol AudioEngineControlling: AnyObject {
     /// Begin playback from transport.positionBeats under transport.tempoMap
     /// (m12-b: the map is derived from transport.tempoBPM — trivial until
     /// Phase C). transport.isMetronomeEnabled is read HERE (and on every
-    /// seek/restart) — there is no dedicated metronome intent; toggling the
-    /// click while playing goes through seek (v0 restart seam, see
-    /// ProjectStore.setMetronome).
+    /// seek/restart); a mid-play toggle goes through `metronomeChanged`
+    /// (m14-c: click-player-local, never a transport restart).
     func startPlayback(_ transport: TransportState)
 
     /// Halt sound; keep the engine hot. Pushes one final render-derived
@@ -155,14 +231,58 @@ public protocol AudioEngineControlling: AnyObject {
     /// Loop settings changed; engine updates its cached loop state. Never interrupts audio.
     func loopChanged(_ transport: TransportState)
 
+    /// Metronome settings changed (m14-c L-3): engine updates its cached
+    /// metronome state and, while playing, starts/stops the CLICK PLAYER
+    /// ONLY — clip playback is never interrupted (byte-identical through a
+    /// toggle; the pre-m14-c seek/restart fallback is retired). Stopped
+    /// engines just cache: the state is read again at the next start.
+    func metronomeChanged(_ transport: TransportState)
+
     /// Master output gain 0...2 (1 = unity). Applied to the main mix bus.
     func masterVolumeChanged(_ volume: Double)
+
+    /// The project's MASTER insert chain changed (m13-d) — the
+    /// `masterVolumeChanged` twin. Live engines cache the descriptors, hand
+    /// them to the graph, and run one parameter pass (chain sync + PDC
+    /// recompute funnel — an atomic snapshot publish into the permanent
+    /// master chain host, NEVER a topology change, never a transport
+    /// interruption; design-m13d §1-B/D3). Pushed on every master chain
+    /// mutation AND every undo/redo/project-boundary restore, exactly like
+    /// the master volume.
+    func masterEffectsChanged(_ effects: [EffectDescriptor])
+
+    /// The project's MASTER volume automation changed (m15-c) — the
+    /// `masterEffectsChanged` twin. Live engines cache the lanes, hand them
+    /// to the graph, and run one parameter pass: while rolling the pass
+    /// republishes the master schedule IN PLACE against the same anchor
+    /// (never a restart — the vii-b no-restart rule); while stopped it lands
+    /// the WYSIWYG lane preview on the master fader. Pushed on every master
+    /// lane mutation AND every undo/redo/project-boundary restore, exactly
+    /// like the master chain.
+    func masterAutomationChanged(_ lanes: [AutomationLane])
 
     /// Bounce the given project state to a WAV file, offline (no hardware).
     /// Async so hosted Audio Unit instruments can be instantiated/prepared for
     /// the offline graph first; the render itself still stalls the main actor
     /// for its duration (v0-accepted for typical song lengths).
+    ///
+    /// `masterEffects` (m13-d, design D2): the master insert chain applied to
+    /// this render — deliberately NO protocol default, so every call site
+    /// declares its render class: MASTERED (program renders — mixdown/
+    /// bounce/loudness — pass the project chain) vs STEM (material renders —
+    /// stem passes, their "00 Mixdown" reference, bounce-in-place, Clip-Fix
+    /// regions — pass `[]`; stems are pre-master by contract S-3′).
+    ///
+    /// `masterAutomation` (m15-c) rides the SAME class split, same no-default
+    /// discipline: MASTERED passes the project's master volume lane (the fade
+    /// is part of the master performance), STEM passes `[]` — a master fade,
+    /// though linear, is performance, not material: baking it into stems or a
+    /// bounce-in-place would double-apply on playback and destroy the
+    /// re-mixable material (the S-3′ extension). The static `masterVolume`
+    /// stays included in BOTH classes, exactly as before m15-c.
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo
 
@@ -173,9 +293,14 @@ public protocol AudioEngineControlling: AnyObject {
     /// `forcedCompensationTargets` non-nil forces per-strip PDC ring targets
     /// (stem passes pass the FULL-SESSION plan so subset renders stay
     /// sample-aligned with the mix — spec §1.1); nil = the automatic plan
-    /// (mix behavior). Memory: one `RenderedAudio` alive per call (~230 MB for
-    /// a 10-min stereo 48 k render) — accepted v0.
+    /// (mix behavior). `masterEffects` + `masterAutomation` declare the
+    /// render class — see `renderMixdown` (m13-d/m15-c: MASTERED passes the
+    /// project chain + master lane, STEM passes `[]` for both; no default by
+    /// design). Memory: one `RenderedAudio` alive per call (~230 MB for a
+    /// 10-min stereo 48 k render) — accepted v0.
     func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio
 
@@ -209,6 +334,13 @@ public protocol AudioEngineControlling: AnyObject {
     /// the per-effect `latencySamples` on the control snapshot. 0 for unknown
     /// tracks/effects and engines without insert support.
     func effectLatencySamples(trackID: UUID, effectID: UUID) -> Int
+
+    /// Fixed algorithmic latency of ONE live MASTER-chain effect instance
+    /// (m13-d), the `effectLatencySamples` twin on the post-fader master chain
+    /// — feeds the per-effect `latencySamples` in the wire snapshot's
+    /// `masterEffects` array. 0 for unknown effects, an empty chain, and
+    /// engines without master-chain support (the default below).
+    func masterEffectLatencySamples(effectID: UUID) -> Int
 
     /// The engine's latest latency-compensation report (M4 viii-c, spec §6):
     /// per-strip all-effects chain latency and applied ring targets plus the
@@ -339,6 +471,14 @@ public protocol AudioEngineControlling: AnyObject {
     /// while playing plus once on stop. Source of truth for
     /// transport.positionBeats during playback.
     var playheadHandler: ((Double) -> Void)? { get set }
+
+    /// Engine-notices sink (m15-e): the engine pushes one event per
+    /// schedule-time degradation (fade/envelope bake failure, stretch-pending
+    /// silence, …), always on the main actor from control-side schedule code
+    /// — the render thread gains nothing. Installed by `ProjectStore` (the
+    /// `playheadHandler` shape), which owns the coalescing ring the wire and
+    /// UI read. Optional capability: the default discards.
+    var engineNoticeHandler: ((EngineNoticeEvent) -> Void)? { get set }
 }
 
 /// Audio Unit hosting and MIDI input are optional engine capability: defaults
@@ -347,6 +487,37 @@ extension AudioEngineControlling {
     /// Per-clip gain is optional capability: engines without per-clip players
     /// pick the change up on the next `tracksDidChange` pass.
     public func clipGainChanged(trackID: UUID, clipID: UUID, gainDb: Double) {}
+
+    /// Project-boundary engine replacement is optional capability (m13-a):
+    /// fakes and headless engines have no once-rendered hardware graph to
+    /// protect, so the default is a no-op.
+    public func projectWillReplace() {}
+
+    /// Live click toggling is optional capability (m14-c): engines without a
+    /// click player pick the change up from the TransportState handed to the
+    /// next start/seek, so the default is a no-op and existing conformers
+    /// compile unchanged.
+    public func metronomeChanged(_ transport: TransportState) {}
+
+    /// The master insert chain is optional capability (m13-d, the
+    /// `projectWillReplace` precedent): fakes and headless engines carry no
+    /// master chain host, so the default is a no-op and existing conformers
+    /// compile unchanged.
+    public func masterEffectsChanged(_ effects: [EffectDescriptor]) {}
+
+    /// Master volume automation is optional capability (m15-c, the
+    /// `masterEffectsChanged` precedent): fakes and headless engines have no
+    /// master fader to automate, so the default is a no-op and existing
+    /// conformers compile unchanged.
+    public func masterAutomationChanged(_ lanes: [AutomationLane]) {}
+
+    /// Engine notices are optional capability (m15-e): engines without
+    /// schedule-time degradation reporting (fakes, headless) discard the
+    /// installed handler, so existing conformers compile unchanged.
+    public var engineNoticeHandler: ((EngineNoticeEvent) -> Void)? {
+        get { nil }
+        set {}
+    }
 
     /// Stretch rendering is optional capability: engines without it (fakes,
     /// headless) report nothing pending.
@@ -360,6 +531,7 @@ extension AudioEngineControlling {
     /// zero latency everywhere.
     public func insertChainLatencySamples(forTrack id: UUID) -> Int { 0 }
     public func effectLatencySamples(trackID: UUID, effectID: UUID) -> Int { 0 }
+    public func masterEffectLatencySamples(effectID: UUID) -> Int { 0 }
     public func pdcReport() -> PDCReport? { nil }
 
     public func availableAudioUnits() -> [AudioUnitComponentInfo] { [] }
@@ -400,6 +572,8 @@ extension AudioEngineControlling {
     /// engines without it (fakes, headless) refuse readably instead of
     /// pretending a silent render happened.
     public func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
                               fromBeat: Double, durationSeconds: Double,
                               forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         throw ProjectError.engineUnavailable

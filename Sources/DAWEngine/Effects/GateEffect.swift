@@ -23,7 +23,7 @@ import Foundation
 /// derived constants recompute only on generation change. Render-path
 /// contract: `process()`/`reset()` allocate nothing, take no locks, log
 /// nothing, touch no ObjC. The detector level is denormal-flushed on silence.
-final class GateEffect: EffectRendering, @unchecked Sendable {
+final class GateEffect: KeyableEffectRendering, @unchecked Sendable {
     private static let maxChannels = 8
 
     /// Immutable box crossing main actor → render thread. POD payload.
@@ -159,6 +159,16 @@ final class GateEffect: EffectRendering, @unchecked Sendable {
     }
 
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
+        process(buffers: buffers, key: nil, frameCount: frameCount)
+    }
+
+    /// Keyed entry (m12-f, `KeyableEffectRendering`): with `key` non-nil the
+    /// open/close detector reads the KEY buffers while the gate gain still
+    /// applies to the main buffers; `key` nil is the plain path above —
+    /// bit-exact self-keyed by construction (condition-4 pinned by test).
+    /// Key frames past the delivered byte size read as silence.
+    func process(buffers: UnsafeMutableAudioBufferListPointer,
+                 key: UnsafeMutableAudioBufferListPointer?, frameCount: Int) {
         adoptPendingParams()
         // Automation lane(s) vanished: knob params restore, no republish.
         if overlay.endQuantum() {
@@ -177,15 +187,41 @@ final class GateEffect: EffectRendering, @unchecked Sendable {
         }
         guard channelCount > 0 else { return }
 
+        // Key channel gather (m12-f): same fixed-size stack shape, no heap.
+        var keyData = InlineChannelPointers()
+        var keyCount = 0
+        var keyFrames = 0
+        if let key {
+            var delivered = frameCount
+            for buffer in key where keyCount < Self.maxChannels {
+                guard let data = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
+                keyData[keyCount] = data
+                delivered = min(delivered, Int(buffer.mDataByteSize) / strideBytes)
+                keyCount += 1
+            }
+            if keyCount > 0 { keyFrames = delivered }
+        }
+
         var g = gain
         var hold = holdRemaining
         var level = detectorLevel
         for frame in 0..<minFrames {
             // Stereo-linked peak detector: instant attack, fixed 5 ms decay.
+            // Keyed: the detector listens to the KEY signal (frames beyond
+            // the delivered key read as silence); self-keyed: the main signal.
             var peak: Float = 0
-            for channel in 0..<channelCount {
-                let sample = abs(channelData[channel]![frame])
-                if sample > peak { peak = sample }
+            if keyCount > 0 {
+                if frame < keyFrames {
+                    for channel in 0..<keyCount {
+                        let sample = abs(keyData[channel]![frame])
+                        if sample > peak { peak = sample }
+                    }
+                }
+            } else {
+                for channel in 0..<channelCount {
+                    let sample = abs(channelData[channel]![frame])
+                    if sample > peak { peak = sample }
+                }
             }
             level = max(peak, level * detectorDecay)
             if level < 1e-20 { level = 0 }  // denormal flush on silence

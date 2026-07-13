@@ -116,7 +116,14 @@ struct ClipWaveform: View {
     var tint: Color
 
     var body: some View {
-        Canvas { context, size in
+        // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+        // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+        let peaks = peaks
+        let startOffsetSeconds = startOffsetSeconds
+        let secondsPerBeat = secondsPerBeat
+        let pixelsPerBeat = pixelsPerBeat
+        let tint = tint
+        return Canvas { @Sendable context, size in
             let midY = size.height / 2
             let halfH = size.height / 2 - 2
             // Step across the width in ~1.5 pt columns — coarse and cheap; the

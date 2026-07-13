@@ -18,11 +18,15 @@ import Foundation
 /// packaging change follows. Recorded in docs/ARCHITECTURE.md.
 @MainActor
 public final class AudioEngine: AudioEngineControlling {
-    private let engine = AVAudioEngine()
+    /// `var` since m13-a: `rebuildEngine(reason:)` discards and replaces the
+    /// whole AVAudioEngine — teardown-class changes never surgically detach
+    /// a once-rendered node (docs/research/design-m13a-teardown-crash.md).
+    private var engine = AVAudioEngine()
     /// Internal (not private) so engine-level tests can pin graph facts the
-    /// recovery paths guarantee (retire-bin drained, strips present) — the
-    /// `auRegistry` seam precedent. Never reached from outside the module.
-    let graph: PlaybackGraph
+    /// recovery paths guarantee (rebuild flag consumed, strips present) —
+    /// the `auRegistry` seam precedent. Never reached from outside the
+    /// module. `var` since m13-a: replaced together with the engine.
+    private(set) var graph: PlaybackGraph
     /// Hosted Audio Unit lifecycle for the LIVE graph (offline renders build
     /// their own registry — fresh AU instances per render).
     let auRegistry = AUHostRegistry()
@@ -51,6 +55,17 @@ public final class AudioEngine: AudioEngineControlling {
     private let tonePlayer = AVAudioPlayerNode()
     private var toneBuffer: AVAudioPCMBuffer?
     private var meterTapInstalled = false
+    /// The node carrying the master meter/analysis tap — m13-d §1-B honest
+    /// tap relocation: the master chain sits POST-fader between
+    /// `mainMixerNode` and the output, so the tap lives on the CHAIN HOST's
+    /// output (post-fader AND post-chain — what you hear is what is
+    /// analyzed; a `mainMixerNode` tap would read pre-chain and never show
+    /// the limiter working). Tracked so shutdown/rebuild remove the tap from
+    /// the node that actually carries it.
+    private var meterTapNode: AVAudioNode?
+    /// Armed debug master-bus capture (m14-d C5 live gate; nil = none) — see
+    /// `startDebugMasterCapture(toPath:)`.
+    private var debugCapture: DebugMasterCapture?
     /// Master-mix analyzer (M8 vm-a) — created once alongside the meter tap
     /// (AVFoundation allows ONE tap per bus, so analysis rides inside the
     /// same closure). Its DSP state is touched ONLY on the tap queue; the
@@ -183,16 +198,106 @@ public final class AudioEngine: AudioEngineControlling {
     private var loopStartBeat: Double = 0
     private var loopEndBeat: Double = 16
 
+    /// m14-a L-1 (design-m13f-gapless-loop §4-A): non-nil while the CURRENT
+    /// schedule was built with a live loop window — the playhead task then
+    /// derives beats MODULARLY (the anchor never moves across wraps), tops up
+    /// unrolled audio cycles, and never calls `restart` at the seam. Rebuilt
+    /// by every `startPlayers`; nil when playback starts at/past the loop end
+    /// (the legacy tick check then wraps ONCE through the restart primitive,
+    /// which re-schedules WITH the window). m15-b: RECORDING loops too — the
+    /// old "deliberately nil while recording" suppression is lifted (design-
+    /// m15b-loop-record §5): the capture writer and MIDI session hang off the
+    /// never-moving anchor, so the wrap never touches them, and the store
+    /// slices the one linear capture into per-cycle take lanes at stop.
+    private struct LoopContext {
+        let startBeat: Double
+        let endBeat: Double
+        /// Player-relative seconds from the anchor start to the FIRST wrap
+        /// (map integral `fromBeat → endBeat`).
+        let headSeconds: Double
+        /// Exact loop period: the map integral over [startBeat, endBeat).
+        /// THE TIMELINE LAW (design §4-A): cycle timing derives from THIS —
+        /// tempo segments past the loop end never leak into it.
+        let cycleSeconds: Double
+    }
+
+    private var loopContext: LoopContext?
+    /// Transport-elapsed second at which the CLICK player's timeline begins
+    /// (m14-c L-3): 0 when the metronome started with the roll, the elapsed
+    /// instant an enable-mid-play re-anchored the click player (player time 0
+    /// ≡ that instant; design §6), or NEGATIVE under a count-in loop record
+    /// (m15-b, design-m15b §5.4a: the click player starts
+    /// `countIn.delaySeconds` BEFORE the transport anchor, so its own
+    /// timeline is that far AHEAD of transport elapsed — without the negative
+    /// offset the click unroll under-feeds by the whole count-in, a real
+    /// starvation window against the 0.2 s horizon). `serviceLoop` subtracts
+    /// it so the click unroll counts cycles in the CLICK player's OWN
+    /// timeline.
+    private var metronomeElapsedOffset: Double = 0
+
+    /// Audio schedule-ahead horizon under an active loop: the C6 law demands
+    /// ≥ 2 playhead-tick periods (2 × 33 ms); 200 ms adds comfortable margin
+    /// for tick jitter while keeping the unroll depth single-digit cycles
+    /// even at the 0.25-beat / 400 BPM minimum (design §8.3, §8.6). Internal
+    /// (not private) so the C6 gate can pin `horizon ≥ 2 ticks` forever.
+    static let loopHorizonSeconds = 0.2
+
     // MARK: Metronome state (cached from transport intents, like loop state)
 
     private let metronome = Metronome()
     private var metronomeEnabled = false
-    private var beatsPerBar = 4
+
+    /// Test seam (m14-c, the `PlaybackGraph.loopScheduledThroughCycle` twin):
+    /// full click cycles the metronome has queued; nil = no loop-mode click
+    /// run armed. Read by the L-3 live toggle smoke.
+    var metronomeLoopScheduledThroughCycle: Int? { metronome.loopScheduledThroughCycle }
+    /// Test seam (m15-b G7): whether the CURRENT schedule carries a live loop
+    /// window — the engine side of the store/engine eligibility-unity pin
+    /// (record with a loop must schedule with the window; without one, never).
+    var loopContextActiveForTesting: Bool { loopContext != nil }
+    /// Test seam (m15-b G6): the click player's timeline offset — negative
+    /// exactly by the count-in delay on a count-in loop start (§5.4a).
+    var metronomeElapsedOffsetForTesting: Double { metronomeElapsedOffset }
+    /// Test seam (m15-b G6): the click loop plan's head — proves the engine
+    /// handed the count-in delay to `scheduleLoopClicks` EXPLICITLY (§5.4b:
+    /// `delay + integral(recordBeat → loopEnd)`, distinguishable from the
+    /// old pre-roll-span integral whenever a tempo boundary sits at or
+    /// before the record beat).
+    var metronomeLoopHeadSecondsForTesting: Double? { metronome.loopPlanHeadSecondsForTesting }
+    /// Test seam (m15-b G4): the live take's MIDI capture session, so the
+    /// held-note fixture can inject synthetic events without CoreMIDI
+    /// hardware. Control-plane only, like every seam here.
+    var midiCaptureSessionForTesting: MIDICaptureSession? { midiInput?.captureSession }
+    /// The REAL meter map (m15-a), cached from every transport intent exactly
+    /// like the loop window — the downbeat source for every click schedule
+    /// and the count-in bar length. Before m15-a this was a `beatsPerBar`
+    /// scalar that flattened the project's meter map to a constant grid:
+    /// measured live (audit-m15 §2-B1), a 4/4→3/4 change at beat 8 accented
+    /// beats 12/16 instead of 11/14/17 — exactly when a musician relies on
+    /// the click most. Control-thread only; never crosses into the render
+    /// path (C4).
+    private var clickMeterMap = MeterMap(constant: TimeSignature())
+    /// Test seam (m15-a): the map above, readable so the plumbing pin can
+    /// prove intents cache `transport.meterMap` itself, never a constant.
+    var clickMeterMapForTesting: MeterMap { clickMeterMap }
+    /// Test seam (m15-a): the meter map the `Metronome` API actually RECEIVED
+    /// from the last schedule call — the second link of the regression chain
+    /// (transport → cache → Metronome; m14-c pins Metronome → clicks).
+    var metronomeMeterMapForTesting: MeterMap { metronome.receivedMeterMap }
     private var countInBars = 0
 
     /// Master output gain 0...2, cached so a value set before the engine first
     /// starts is re-applied in `prepare()`.
     private var masterVolume: Double = 1
+
+    /// The project's master insert chain (m13-d), cached like `masterVolume`
+    /// so `rebuildEngine`'s fresh graph republishes it during cold build
+    /// (`wireGraphHooks`).
+    private var lastMasterEffects: [EffectDescriptor] = []
+
+    /// The project's master volume automation (m15-c), cached like
+    /// `lastMasterEffects` for the rebuild republish.
+    private var lastMasterAutomation: [AutomationLane] = []
 
     /// Last domain track list, cached because engine.start() (re)initializes
     /// mixer input-bus parameters — a pan set before the first start is
@@ -207,26 +312,49 @@ public final class AudioEngine: AudioEngineControlling {
 
     public private(set) var isRunning = false
     public private(set) var isTonePlaying = false
-    /// Latched by the graph's `willMutateRoutingTopology` hook when a
-    /// reconcile had to stop the running engine (live routing rewires are
-    /// unsafe — see the hook wiring in `init`); consumed by `tracksDidChange`,
-    /// which restarts the engine with the double-apply convention.
-    private var engineStoppedForRoutingRewire = false
     /// Position + tempo map captured when the routing-rewire hook wound down
-    /// ACTIVE playback (quiescence-before-stop, see init); consumed by
-    /// `tracksDidChange`, which resumes through the cold-start primitive
-    /// (`startPlayers` + playhead task) after the engine is back up.
+    /// ACTIVE playback (quiescence before the engine discard, see
+    /// `wireGraphHooks`); consumed by `rebuildEngine`, which resumes through
+    /// the cold-start primitive (`startPlayers` + playhead task) against the
+    /// freshly built engine.
     private var resumeAfterRoutingRewire: (beats: Double, tempoMap: TempoMap)?
     public var meteringHandler: ((MeterFrame) -> Void)?
     public var trackMeteringHandler: ((UUID, MeterFrame) -> Void)?
     public var playheadHandler: ((Double) -> Void)?
+    /// Engine-notices sink (m15-e): schedule-time degradation events forwarded
+    /// from the graph's `noticeSink`, always on the main actor (every posting
+    /// site is control-side schedule/reconcile code — zero render-thread
+    /// surface). The store installs this and owns the coalescing ring.
+    public var engineNoticeHandler: ((EngineNoticeEvent) -> Void)?
 
     public init() {
         graph = PlaybackGraph(engine: engine)
+        wireGraphHooks()
+        observeConfigurationChanges()
+    }
+
+    /// Wires every AudioEngine-owned hook into the CURRENT `graph` — called
+    /// from `init` and again by `rebuildEngine` for each fresh graph (m13-a:
+    /// the graph is replaced wholesale, so its hook set must be reinstalled
+    /// verbatim; extracting this is what keeps the rebuild path and the
+    /// cold-start path one implementation).
+    private func wireGraphHooks() {
         // Telemetry context first — node creation (reconcile) captures it.
+        // The SAME context survives every rebuild, so lifetime counters (the
+        // watchdog heartbeat) stay monotonic across engine replacement.
         graph.performance = performance
+        // Master chain (m13-d): a fresh (rebuilt) graph republishes the
+        // cached descriptors — the masterVolume re-apply twin; the rebuild's
+        // parameter passes then sync them into the fresh chain host.
+        graph.masterEffects = lastMasterEffects
+        // Master volume automation (m15-c): same republish, same reason; the
+        // manual gain rides along so the override rule can hand back.
+        graph.masterAutomation = lastMasterAutomation
+        graph.manualMasterVolume = masterVolume
         // Hosted-AU tracks pull their prepared instrument from the registry;
         // nil (pending/missing/failed) falls back to the silent placeholder.
+        // The registry OUTLIVES engine rebuilds — prepared instruments (and
+        // their plugin state) are ours, never engine citizens.
         graph.audioUnitProvider = { [auRegistry] track in
             auRegistry.preparedInstrument(forTrack: track.id)
         }
@@ -239,6 +367,12 @@ public final class AudioEngine: AudioEngineControlling {
         graph.meterSink = { [weak self] trackID, frame in
             self?.trackMeteringHandler?(trackID, frame)
         }
+        // Schedule-time degradation notices (m15-e) forward to the store's
+        // ring; a rebuilt graph re-wires here, so posts survive engine
+        // replacement.
+        graph.noticeSink = { [weak self] event in
+            self?.engineNoticeHandler?(event)
+        }
         // Non-identity stretched clips resolve against the render cache at
         // reconcile time (M5 ii-d): cache hit → the CAF replaces the source;
         // miss → the clip schedules as silence and a debounced render job is
@@ -250,12 +384,18 @@ public final class AudioEngine: AudioEngineControlling {
         // Routing rewires (fan-out re-issue, send-gain/bus teardown) are not
         // safe against a running AVAudioEngine — measured live: a mid-play
         // send add renders its new gain→bus branch SILENT, and removing a
-        // live bus SEGFAULTs the render thread. The graph announces the
-        // first such mutation of a pass; the engine leaves the running state
-        // so the wiring mutates stopped (the offline renderer's proven build
-        // order), and tracksDidChange restarts it right after reconcile with
-        // the double-apply convention. Trivial track adds never announce,
-        // so recording/capture survives those unchanged.
+        // live bus SEGFAULTs the render thread. m13-a: the graph announces
+        // the first such mutation of a pass and ABORTS the pass on a
+        // once-rendered engine (`needsEngineRebuild`); `tracksDidChange`
+        // then discards the whole engine and rebuilds from the model —
+        // `rebuildEngine(reason:)`. This hook's only job is QUIESCENCE:
+        // wind active playback down exactly like stopPlayback (position/
+        // tempo captured for the resume) BEFORE the engine is discarded.
+        // It deliberately does NOT stop the engine — the mid-pass
+        // stop→restart boundary was precisely what poisoned AVFoundation's
+        // node bookkeeping for the old flush-detach path (C0, design §2).
+        // Trivial track adds never announce, so recording/capture survives
+        // those unchanged.
         //
         // QUIESCENCE FIRST (measured live, second E2E round): stopping the
         // engine mid-render with live schedules still published — then
@@ -266,9 +406,8 @@ public final class AudioEngine: AudioEngineControlling {
         // two live-proven lifecycles both stop/start the engine around a
         // QUIESCENT graph: cold start (wire → start → startPlayers) and a
         // transport cycle (full stopPlayback, then startPlayers). So active
-        // playback winds down exactly like stopPlayback BEFORE the engine
-        // stops (position/tempo captured), and tracksDidChange resumes via
-        // the same cold-start primitive a transport start uses.
+        // playback winds down BEFORE the discard, and rebuildEngine resumes
+        // via the same cold-start primitive a transport start uses.
         graph.willMutateRoutingTopology = { [weak self] in
             guard let self, self.engine.isRunning else { return }
             if let anchor = self.currentAnchor {
@@ -280,13 +419,19 @@ public final class AudioEngine: AudioEngineControlling {
                 self.metronome.stop()
                 self.currentAnchor = nil
             }
-            self.engine.stop()
-            self.engineStoppedForRoutingRewire = true
         }
-        // Device switches / sample-rate changes tear down the running graph.
-        // @Sendable is load-bearing (same trap as the meter tap): the closure
-        // fires on a non-main thread, so hop to the main actor before touching
-        // any engine state.
+    }
+
+    /// (Re)registers for configuration changes of the CURRENT engine object —
+    /// the notification is engine-instance-scoped, so `rebuildEngine` must
+    /// re-subscribe after every replacement. Device switches / sample-rate
+    /// changes tear down the running graph. @Sendable is load-bearing (same
+    /// trap as the meter tap): the closure fires on a non-main thread, so
+    /// hop to the main actor before touching any engine state.
+    private func observeConfigurationChanges() {
+        if let configObserver {
+            NotificationCenter.default.removeObserver(configObserver)
+        }
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -303,32 +448,106 @@ public final class AudioEngine: AudioEngineControlling {
     // path); its block captures self weakly, so a never-shut-down test engine
     // leaks only the token, never the engine.
 
+    // MARK: - ObjC exception armor (m16-a Leg 1)
+
+    /// Posts the `engine-exception` notice for a converted AVFAudio raise.
+    /// Fires only for `EngineError.engineException` (the barrier's converted
+    /// NSException) — ordinary Swift errors pass silently, their call sites
+    /// already handle them. Message = the design note's teaching copy, so the
+    /// notices popover and the wire error read the same.
+    private func postEngineExceptionNotice(_ error: any Error) {
+        guard case let EngineError.engineException(_, reason, context) = error else { return }
+        engineNoticeHandler?(EngineNoticeEvent(
+            code: "engine-exception",
+            message: "The audio engine raised '\(reason)' during \(context) — "
+                + "playback was stopped; play again, or reopen the project if it persists."))
+    }
+
+    /// Best-effort transport wind-down after a caught AVFAudio raise: players
+    /// and metronome stopped inside their own barriers (a raise during
+    /// recovery must not escape either), anchor/loop state cleared, meters
+    /// pushed dark, one final playhead push — the honest stopped state the
+    /// teaching copy promises ("playback was stopped").
+    private func windDownAfterException() {
+        playheadTask?.cancel()
+        playheadTask = nil
+        try? withObjCExceptionBarrier("player wind-down") { graph.stopAllPlayers() }
+        try? withObjCExceptionBarrier("metronome wind-down") { metronome.stop() }
+        loopContext = nil
+        metronomeElapsedOffset = 0
+        if currentAnchor != nil {
+            currentAnchor = nil
+            for trackID in graph.trackIDs {
+                trackMeteringHandler?(trackID, .silence)
+            }
+            playheadHandler?(lastKnownBeats)
+        }
+    }
+
+    /// Runs one NON-THROWING control-plane intent under the ObjC exception
+    /// barrier (m16-a Leg 1). The `AudioEngineControlling` transport methods
+    /// this guards (`startPlayback`, `stopPlayback`, `seek`, …) are
+    /// non-throwing by protocol, so a converted raise cannot rethrow through
+    /// them — instead the intent winds the transport down, posts the
+    /// `engine-exception` notice, and writes one stderr line. The notice ring
+    /// plus the honestly-stopped transport ARE the surfaced truth on this
+    /// path; throwing entry points (`prepare`, `startTake`, `renderOffline`)
+    /// rethrow the converted error so the wire's LocalizedError mapping
+    /// produces the teaching failure. Control-plane only (C8): main-actor
+    /// entry points, never render code.
+    private func withGuardedEngineIntent(_ context: String, _ body: () -> Void) {
+        do {
+            try withObjCExceptionBarrier(context) { body() }
+        } catch {
+            windDownAfterException()
+            postEngineExceptionNotice(error)
+            FileHandle.standardError.write(Data(
+                "AudioEngine: caught ObjC exception during \(context): \(error)\n".utf8))
+        }
+    }
+
     public func prepare() throws {
         guard !isRunning else { return }
-        // Touching mainMixerNode implicitly wires mixer -> output.
-        let mixer = engine.mainMixerNode
-        installMeterTap(on: mixer)
-        // Lazy metronome attach: the player joins the graph once, whether or
-        // not the click is enabled — scheduling decides whether it sounds.
-        metronome.attach(to: engine)
-        engine.prepare()
-        try engine.start()
-        isRunning = true
-        // M9 crash-a: from here on, node detaches against a STOPPED engine
-        // are unsafe (once-rendered nodes leave stale entries in
-        // AVFoundation's graph bookkeeping — docs/research/
-        // fix-teardown-crash.md); the graph defers them to its bin, drained
-        // against the running engine after every start.
-        graph.engineHasRun = true
-        graph.flushRetiredNodes()
-        // Mixer parameters land AFTER start(): values set while the engine was
-        // stopped (master volume, track pan/volume/mute/solo) must stick.
-        mixer.outputVolume = Float(masterVolume)
-        graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
-        // M9 crash-c: a successful start re-arms a given-up watchdog (the
-        // only exit from `.failed`) and starts the check loop (idempotent).
-        watchdog.reset()
-        startWatchdog()
+        do {
+            // m16-a Leg 1: hardware start under the exception barrier — an
+            // AVFAudio raise converts, posts the notice, and rethrows so the
+            // standing LocalizedError mapping surfaces a teaching error
+            // wherever this throw lands.
+            try withObjCExceptionBarrier("engine start") {
+                // Touching mainMixerNode implicitly wires mixer -> output.
+                let mixer = engine.mainMixerNode
+                // Master chain insert before start (m13-d R1): normally already
+                // built by the first reconcile; this covers a prepare with no
+                // tracksDidChange yet (test tone on a fresh engine). Idempotent,
+                // attach-only — and it must precede the meter tap below, which
+                // lives on the chain host (§1-B honest tap relocation).
+                graph.ensureMasterSandwich()
+                installMeterTap(on: graph.masterChainHost ?? mixer)
+                // Lazy metronome attach: the player joins the graph once, whether or
+                // not the click is enabled — scheduling decides whether it sounds.
+                metronome.attach(to: engine)
+                engine.prepare()
+                try engine.start()
+                isRunning = true
+                // m13-a: from here on this engine is ONCE-RENDERED — teardown-class
+                // changes must never surgically detach its nodes while it is
+                // stopped; the graph flags `needsEngineRebuild` instead and
+                // `tracksDidChange` replaces the whole engine
+                // (docs/research/design-m13a-teardown-crash.md).
+                graph.engineHasRun = true
+                // Mixer parameters land AFTER start(): values set while the engine was
+                // stopped (master volume, track pan/volume/mute/solo) must stick.
+                mixer.outputVolume = Float(masterVolume)
+                graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+                // M9 crash-c: a successful start re-arms a given-up watchdog (the
+                // only exit from `.failed`) and starts the check loop (idempotent).
+                watchdog.reset()
+                startWatchdog()
+            }
+        } catch {
+            postEngineExceptionNotice(error)
+            throw error
+        }
     }
 
     public func shutdown() {
@@ -350,9 +569,11 @@ public final class AudioEngine: AudioEngineControlling {
             self.configObserver = nil
         }
         if meterTapInstalled {
-            engine.mainMixerNode.removeTap(onBus: 0)
+            (meterTapNode ?? engine.mainMixerNode).removeTap(onBus: 0)
             meterTapInstalled = false
+            meterTapNode = nil
         }
+        stopDebugMasterCapture()  // idempotent; closes the file cleanly
         engine.stop()
         isRunning = false
         meteringHandler?(.silence)
@@ -378,36 +599,48 @@ public final class AudioEngine: AudioEngineControlling {
                 return
             }
         }
-        startPlayers(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap)
-        startPlayheadTask()
+        // m16-a Leg 1: the proven poisoner path (playAtTime: inside
+        // startPlayers) runs under the ObjC exception barrier — see
+        // `withGuardedEngineIntent` for why a caught raise cannot rethrow
+        // through this non-throwing protocol method.
+        withGuardedEngineIntent("transport start") {
+            startPlayers(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap)
+            startPlayheadTask()
+        }
     }
 
     public func stopPlayback() {
         guard currentAnchor != nil else { return }
-        let beats = derivedBeats()
-        lastKnownBeats = beats
-        playheadTask?.cancel()
-        playheadTask = nil
-        graph.stopAllPlayers()
-        metronome.stop()
-        currentAnchor = nil
-        // Meters go dark immediately — the taps stop firing once players stop,
-        // so without this push the UI would freeze at the last level.
-        for trackID in graph.trackIDs {
-            trackMeteringHandler?(trackID, .silence)
+        withGuardedEngineIntent("transport stop") {
+            let beats = derivedBeats()  // modular under a loop — BEFORE the context clears
+            loopContext = nil
+            metronomeElapsedOffset = 0
+            lastKnownBeats = beats
+            playheadTask?.cancel()
+            playheadTask = nil
+            graph.stopAllPlayers()
+            metronome.stop()
+            currentAnchor = nil
+            // Meters go dark immediately — the taps stop firing once players stop,
+            // so without this push the UI would freeze at the last level.
+            for trackID in graph.trackIDs {
+                trackMeteringHandler?(trackID, .silence)
+            }
+            // One final render-derived playhead update so the transport lands
+            // exactly where audio stopped.
+            playheadHandler?(beats)
+            // Stopped WYSIWYG (M4 vii-b): the override pins (gain 1 / pan 0)
+            // hand back to lane-value previews at the exact stop position.
+            graph.applyParameters(tracks: lastTracks, playheadBeat: beats)
         }
-        // One final render-derived playhead update so the transport lands
-        // exactly where audio stopped.
-        playheadHandler?(beats)
-        // Stopped WYSIWYG (M4 vii-b): the override pins (gain 1 / pan 0)
-        // hand back to lane-value previews at the exact stop position.
-        graph.applyParameters(tracks: lastTracks, playheadBeat: beats)
     }
 
     public func seek(_ transport: TransportState) {
         cacheTransportFlags(from: transport)
         guard currentAnchor != nil else { return }  // stopped: position arrives with next start
-        restart(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap)
+        withGuardedEngineIntent("transport seek") {
+            restart(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap)
+        }
     }
 
     public func setTempo(_ transport: TransportState) {
@@ -417,10 +650,12 @@ public final class AudioEngine: AudioEngineControlling {
         // transport.positionBeats can be a display-stale ~33 ms behind.
         // m12-b (design row 49): the same restart seam serves any future
         // map edit — the transport's (trivial) map rides in whole.
-        let beats = derivedBeats()
-        restart(fromBeat: beats, tempoMap: transport.tempoMap)
-        lastKnownBeats = beats
-        playheadHandler?(beats)
+        withGuardedEngineIntent("tempo change") {
+            let beats = derivedBeats()
+            restart(fromBeat: beats, tempoMap: transport.tempoMap)
+            lastKnownBeats = beats
+            playheadHandler?(beats)
+        }
     }
 
     /// Live per-clip gain (M5 i-b): dB → linear onto the clip player's input
@@ -435,6 +670,18 @@ public final class AudioEngine: AudioEngineControlling {
 
     public func tracksDidChange(_ tracks: [Track]) {
         lastTracks = tracks
+        // m16-a Leg 1: reconcile + rebuild under the exception barrier — the
+        // audit's storm-flavored raises (a player attached-but-not-yet-
+        // connected while reconcile churns) and the m13-a cousin family
+        // (AVAudioEngineGraph _Connect/RemoveNode) both live on this path.
+        withGuardedEngineIntent("track reconcile") {
+            tracksDidChangeBody(tracks)
+        }
+    }
+
+    /// `tracksDidChange`'s body, verbatim (split out so the barrier wrap
+    /// keeps the early `return` semantics of the rebuild branch).
+    private func tracksDidChangeBody(_ tracks: [Track]) {
         // AU sync FIRST: a stale hosted instrument is released before
         // reconcile rebuilds its node, so the provider hands the placeholder
         // (never an instrument for the wrong component) to the fresh node.
@@ -449,31 +696,16 @@ public final class AudioEngine: AudioEngineControlling {
         // for fresh param edits through the graph's stretchResolver).
         syncStretchRenders(tracks)
         let changed = graph.reconcile(tracks: tracks)
-        // A routing rewire stopped the engine mid-reconcile (see the hook in
-        // init): bring it back with the SAME double-apply order the offline
-        // renderer and prepare() use — master volume + all track/send-gain
-        // volumes land pre-start (stick from frame 0, no ramp), pan re-lands
-        // post-start via the unconditional applyParameters below.
-        if engineStoppedForRoutingRewire {
-            engineStoppedForRoutingRewire = false
-            engine.mainMixerNode.outputVolume = Float(masterVolume)
-            graph.applyParameters(tracks: tracks, playheadBeat: lastKnownBeats)
-            // reset() re-initializes every node before start, making the
-            // bounce maximally cold-start-like — the one live-proven shape
-            // for bringing freshly wired fan-out legs up (see the hook
-            // rationale in init).
-            engine.reset()
-            do {
-                try engine.start()
-                // Nodes torn down while the engine sat stopped mid-pass
-                // retire NOW, against the running engine (M9 crash-a — see
-                // prepare()).
-                graph.flushRetiredNodes()
-            } catch {
-                isRunning = false
-                FileHandle.standardError.write(Data(
-                    "AudioEngine: restart after routing rewire failed: \(error)\n".utf8))
-            }
+        // m13-a: an announce-class pass (routing rewire, bus/routed-strip
+        // teardown — including project boundaries via projectWillReplace),
+        // or any teardown that arrived while a once-rendered engine sat
+        // stopped, aborts reconcile and lands here: discard the whole
+        // engine and cold-build a fresh one from the model. The rebuild
+        // runs its own parameter passes, fanout re-sync and playback
+        // resume, so this pass ends here.
+        if graph.needsEngineRebuild {
+            rebuildEngine(reason: "announce-class reconcile")
+            return
         }
         // Parameters land on every invocation: volume/pan/mute/solo changes are
         // mixer-parameter writes that must never interrupt audio, and freshly
@@ -493,17 +725,15 @@ public final class AudioEngine: AudioEngineControlling {
             restart(fromBeat: derivedBeats(), tempoMap: anchor.tempoMap)
         }
         if let resume = resumeAfterRoutingRewire {
-            // A routing rewire interrupted active playback (the hook wound
-            // the transport down to quiescence before stopping the engine —
-            // currentAnchor is nil, so the restart above was skipped).
-            // Resume through the SAME primitive a cold transport start uses:
-            // schedule + anchor + players + playhead task, against the now
-            // freshly started, quiescent engine. renderClockTrusted: false is
-            // load-bearing — the just-bounced engine still reports the OLD
-            // render session's sample clock (see startPlayers), and anchoring
-            // on it froze the playhead for the previous session's length:
-            // the actual mechanism behind "a mid-play send stays silent
-            // until stop/play" (M4 i, pinned live 2026-07-06).
+            // Defensive (m13-a): an announce always aborts into the rebuild
+            // branch above, which consumes the resume state itself — so this
+            // should be unreachable. It stays as a belt-and-braces resume:
+            // a transport the hook wound down must never remain silently
+            // stopped, whatever future path fires the hook without a
+            // rebuild. Same cold-start primitive; renderClockTrusted: false
+            // is load-bearing (a just-bounced engine still reports the OLD
+            // render session's sample clock — see startPlayers; M4 i,
+            // pinned live 2026-07-06).
             resumeAfterRoutingRewire = nil
             if isRunning {
                 startPlayers(fromBeat: resume.beats, tempoMap: resume.tempoMap,
@@ -511,6 +741,135 @@ public final class AudioEngine: AudioEngineControlling {
                 startPlayheadTask()
             }
         }
+    }
+
+    // MARK: - Engine rebuild (m13-a)
+
+    /// THE teardown primitive for a once-rendered engine
+    /// (docs/research/design-m13a-teardown-crash.md §3): discard the whole
+    /// `AVAudioEngine` + `PlaybackGraph` and cold-build fresh ones from the
+    /// model. No surgical detach of a once-rendered node can occur, by
+    /// construction — the falsified alternative (park detaches, flush them
+    /// after a stop→reset→start bounce) died 2026-07-12 with six identical
+    /// `UpdateGraphAfterReconfig` crash reports across two binaries.
+    ///
+    /// Reached from `tracksDidChange` when the graph flagged
+    /// `needsEngineRebuild`: every announce-class rewire (A2 — send/output/
+    /// sidechain-key edits, routed-strip or bus teardown, routed instrument
+    /// invalidation) and every project boundary (A1 — `projectWillReplace`,
+    /// unconditional once the engine has rendered).
+    ///
+    /// What survives untouched (design §4): the AU registry and every
+    /// prepared instrument/effect INSTANCE incl. hosted-AU state (our
+    /// objects, never engine citizens — the fresh graph re-pulls them
+    /// through the providers), the input-capture engine, all DAWCore state,
+    /// caches, telemetry context (heartbeat stays monotonic), MIDI input.
+    /// Everything node-shaped rebuilds from `lastTracks` through the same
+    /// cold-build order `prepare()` + the offline renderer use.
+    ///
+    /// RT-safety (design §5): main-actor only, zero render-thread changes.
+    /// The old engine's last reference dies AFTER `stop()` returns (render
+    /// callbacks quiesced) — the ordinary dealloc contract.
+    private func rebuildEngine(reason: String) {
+        // 1. Quiesce: if playback is still anchored (a project boundary can
+        //    arrive without the announce hook having wound down), capture
+        //    resume state exactly like the hook.
+        if let anchor = currentAnchor {
+            resumeAfterRoutingRewire = (beats: derivedBeats(), tempoMap: anchor.tempoMap)
+            playheadTask?.cancel()
+            playheadTask = nil
+            graph.stopAllPlayers()
+            metronome.stop()
+            currentAnchor = nil
+        }
+        // 2. Detach engine-lifetime fixtures from the DOOMED engine so their
+        //    nodes re-attach cleanly to the fresh one (both attach guards
+        //    key off `player.engine == nil`, which must not depend on the
+        //    old engine's dealloc timing). Safe in both engine states: while
+        //    RUNNING this is the boundary-free live detach (clean in every
+        //    recorded experiment); while STOPPED the deferred bookkeeping
+        //    can never be walked — the engine object is discarded before
+        //    any further graph operation exists.
+        stopTestTone()
+        if tonePlayer.engine != nil {
+            engine.detach(tonePlayer)
+        }
+        metronome.detach()
+        // 3. Master tap off, stop, and discard. The analyzer resets only
+        //    after the tap is removed and the engine stopped (its threading
+        //    contract); the meter/analysis caches refresh on the fresh tap's
+        //    first delivery.
+        if meterTapInstalled {
+            (meterTapNode ?? engine.mainMixerNode).removeTap(onBus: 0)
+            meterTapInstalled = false
+            meterTapNode = nil
+        }
+        stopDebugMasterCapture()  // a capture never outlives its engine
+        engine.stop()
+        isRunning = false
+        masterAnalyzer?.reset()
+        engine = AVAudioEngine()  // old engine's last reference dies here
+        graph = PlaybackGraph(engine: engine)
+        wireGraphHooks()
+        observeConfigurationChanges()
+        // 4. Cold build from the model — the offline renderer's proven
+        //    order: graph wiring against the never-started engine, volumes
+        //    pre-start (stick from frame 0, no ramp), start, then the
+        //    post-start parameter pass (pan re-lands after start()'s mixer
+        //    re-initialization — the double-apply convention). The master
+        //    chain insert forms first (m13-d R1) so the meter tap can land
+        //    on the fresh chain host (§1-B honest tap relocation).
+        let mixer = engine.mainMixerNode  // touching it wires mixer → output
+        graph.ensureMasterSandwich()
+        installMeterTap(on: graph.masterChainHost ?? mixer)
+        metronome.attach(to: engine)
+        graph.reconcile(tracks: lastTracks)
+        mixer.outputVolume = Float(masterVolume)
+        graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+        engine.prepare()
+        do {
+            try engine.start()
+            isRunning = true
+            graph.engineHasRun = true
+            graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+            // A successful start re-arms the watchdog exactly like prepare().
+            watchdog.reset()
+            startWatchdog()
+        } catch {
+            // Start refused (device gone mid-rebuild): the fresh graph is
+            // NEVER-RUN, so every subsequent operation is the offline-safe
+            // cold build order; the next prepare() (transport start, config
+            // recovery, watchdog restart) brings the hardware back up.
+            FileHandle.standardError.write(Data(
+                "AudioEngine: rebuild (\(reason)) could not start hardware: \(error)\n".utf8))
+        }
+        // 5. The live-thru fanout re-syncs against the REBUILT renderers —
+        //    fresh instances; the old ones get the all-notes-off flush.
+        syncMIDIThruFanout(lastTracks)
+        // 6. Resume interrupted playback through the cold-start primitive.
+        //    renderClockTrusted: false — the fresh engine's render clock has
+        //    no callbacks yet (see startPlayers).
+        if let resume = resumeAfterRoutingRewire {
+            resumeAfterRoutingRewire = nil
+            if isRunning {
+                startPlayers(fromBeat: resume.beats, tempoMap: resume.tempoMap,
+                             renderClockTrusted: false)
+                startPlayheadTask()
+            }
+        }
+    }
+
+    /// A1 (m13-a): project boundaries (`project.new` / `project.open`)
+    /// discard the engine UNCONDITIONALLY once it has rendered — there is
+    /// no warm state worth keeping while the whole session is being
+    /// replaced, and no per-node teardown of a once-rendered engine is ever
+    /// safe to bet on. Marks the graph; the store's immediately following
+    /// `tracksDidChange` (with the NEW project's tracks) consumes the flag
+    /// via `rebuildEngine`. Never-run engines (fresh app, headless) keep
+    /// the plain reconcile path — nothing to protect, no hardware touched.
+    public func projectWillReplace() {
+        guard graph.engineHasRun else { return }
+        graph.needsEngineRebuild = true
     }
 
     /// Republishes the live-thru fanout with every ARMED instrument track's
@@ -754,6 +1113,13 @@ public final class AudioEngine: AudioEngineControlling {
         graph.effectLatencySamples(forTrack: trackID, effectID: effectID)
     }
 
+    /// Fixed latency of ONE live master-chain effect instance (m13-d) — the
+    /// per-track `effectLatencySamples` twin on the post-fader master chain,
+    /// feeding the wire snapshot's `masterEffects[].latencySamples`.
+    public func masterEffectLatencySamples(effectID: UUID) -> Int {
+        graph.masterEffectLatencySamples(forEffect: effectID)
+    }
+
     /// The latest PDC recompute report (M4 viii-c) — rebuilt by the graph at
     /// the tail of every parameter pass; nil until the first pass runs.
     public func pdcReport() -> PDCReport? {
@@ -764,25 +1130,68 @@ public final class AudioEngine: AudioEngineControlling {
         masterVolume = volume.clamped(to: Track.volumeRange)
         // mainMixerNode exists (and holds parameters) whether or not the
         // engine is running; prepare() re-applies the cached value regardless.
-        engine.mainMixerNode.outputVolume = Float(masterVolume)
+        // m15-c: the write routes through the graph's override rule — with an
+        // ACTIVE master volume lane the lane keeps fader authority (pin while
+        // rolling, WYSIWYG preview while stopped); with no lane this is the
+        // pre-m15-c direct write, verbatim.
+        graph.setManualMasterVolume(masterVolume, playheadBeat: lastKnownBeats)
     }
 
+    /// Master insert chain changed (m13-d): cache (rebuild republish), hand
+    /// to the graph, and run ONE parameter pass — the chain sync + PDC
+    /// recompute funnel (R6). An atomic snapshot publish into the permanent
+    /// master chain host; never topology, never a rebuild, never a
+    /// transport interruption (the live-add gate BY CONSTRUCTION).
+    public func masterEffectsChanged(_ effects: [EffectDescriptor]) {
+        lastMasterEffects = effects
+        graph.masterEffects = effects
+        graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+    }
+
+    /// Master volume automation changed (m15-c): cache (rebuild republish),
+    /// hand to the graph, and run ONE parameter pass — while rolling the
+    /// pass republishes the master schedule IN PLACE against the same
+    /// anchor/epoch (never a restart; master automation is in no reconcile
+    /// signature by construction), while stopped it lands the WYSIWYG lane
+    /// preview (or hands the fader back to the manual gain) on the main
+    /// mixer. The `masterEffectsChanged` shape, verbatim.
+    public func masterAutomationChanged(_ lanes: [AutomationLane]) {
+        lastMasterAutomation = lanes
+        graph.masterAutomation = lanes
+        graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+    }
+
+    /// `masterEffects` defaults `[]` on the CONCRETE class only (the
+    /// OfflineRenderer class-level-default rationale, design §2.1): the
+    /// render-class decision (MASTERED vs STEM) is forced at the PROTOCOL
+    /// layer, which has no default — direct concrete calls are engine-test
+    /// plumbing, and their `[]` is exactly the pre-m13-d behavior.
     public func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor] = [],
+                              masterAutomation: [AutomationLane] = [],
                               fromBeat: Double, durationSeconds: Double,
                               to url: URL) async throws -> AudioFileInfo {
         // Refactored over the M5 iv-b buffer seam: render to memory (the
         // WYSIWYG stretch await and fresh-renderer rules live there), then
         // write — the exact composition `renderToWAV` performed, behavior
         // frozen (the existing mixdown/stretch suites are the proof).
+        // Internal delegation forwards its own render-class parameter
+        // (design §2.1).
         let audio = try await renderOffline(
             tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects,
+            masterAutomation: masterAutomation,
             fromBeat: fromBeat, durationSeconds: durationSeconds,
             forcedCompensationTargets: nil
         )
         return try writeAudioFile(audio, to: url)
     }
 
+    /// `masterEffects` / `masterAutomation` concrete-class defaults — see
+    /// `renderMixdown`.
     public func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor] = [],
+                              masterAutomation: [AutomationLane] = [],
                               fromBeat: Double, durationSeconds: Double,
                               forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         // Stretch WYSIWYG (M5 ii-d): a bounce WAITS for pending stretch
@@ -820,10 +1229,24 @@ public final class AudioEngine: AudioEngineControlling {
         // automatic plan, exactly what renderMixdown always did.
         renderer.compensationTargets = forcedCompensationTargets
         await renderer.prepareAudioUnits(tracks: tracks)
-        return try renderer.render(
-            tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
-            durationSeconds: durationSeconds, masterVolume: masterVolume
-        )
+        // m16-a Leg 1: the offline-render entry runs its synchronous AVFAudio
+        // work under the exception barrier — a raise converts and rethrows,
+        // so `render.mixdown`/bounce commands fail with the teaching error
+        // instead of poisoning the MainActor. (AU preparation above is async
+        // instantiation with its own internal error handling.)
+        do {
+            return try withObjCExceptionBarrier("offline render") {
+                try renderer.render(
+                    tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
+                    durationSeconds: durationSeconds, masterVolume: masterVolume,
+                    masterEffects: masterEffects,
+                    masterAutomation: masterAutomation
+                )
+            }
+        } catch {
+            postEngineExceptionNotice(error)
+            throw error
+        }
     }
 
     public func offlineCompensationTargets(tracks: [Track]) async -> [UUID: Int] {
@@ -903,11 +1326,86 @@ public final class AudioEngine: AudioEngineControlling {
     }
 
     public func loopChanged(_ transport: TransportState) {
-        // Cached only — the playhead task reads these bounds each tick and wraps
-        // via the restart primitive. Enabling a loop whose region already sits
-        // behind the playhead is safe: the next tick's `beats >= loopEndBeat`
-        // check wraps it. Never touches live scheduling here.
+        let scheduledLoop = loopContext
         cacheTransportFlags(from: transport)
+        // ENABLING a loop stays cache-only (never touches live scheduling):
+        // the current schedule is linear, and the first tick past the loop
+        // end wraps through the restart primitive, which re-schedules WITH
+        // the window — one seam at the first wrap, gapless from then on.
+        // Enabling a loop whose region already sits behind the playhead is
+        // safe the same way (the tick's `beats >= loopEndBeat` check).
+        //
+        // m14-a L-1: with unrolled cycles ALREADY QUEUED, a bounds change or
+        // a disable can no longer be cache-only — queued segments cannot be
+        // cancelled (the restart-primitive doc), so stale cycles from the old
+        // window would keep sounding. ONE restart seam on the EDIT, exactly
+        // the design §4-A fallback (a seam on edit is honest; a seam every
+        // cycle was the bug).
+        guard let scheduledLoop, let anchor = currentAnchor else { return }
+        if !loopEnabled
+            || scheduledLoop.startBeat != loopStartBeat
+            || scheduledLoop.endBeat != loopEndBeat {
+            // m16-a Leg 1: the restart seam reaches the same playAtTime: loop
+            // as a transport start — same barrier, same wind-down on a raise.
+            withGuardedEngineIntent("loop change") {
+                restart(fromBeat: derivedBeats(), tempoMap: anchor.tempoMap)
+            }
+        }
+    }
+
+    /// Metronome toggled (m14-c L-3, design §6): CLICK-PLAYER-LOCAL only —
+    /// the transport, clip players, and schedules are NEVER touched, so a
+    /// mid-play toggle leaves clip output byte-identical (the ProjectStore
+    /// seek/restart fallback is retired). Disable = `metronome.stop()` (its
+    /// OWN player; the queue clears, player time resets). Enable mid-play =
+    /// re-anchor the click player at "now + startLeadSeconds" and schedule
+    /// from that beat (placement jitter = the documented ±1-frame live-anchor
+    /// class, InstrumentSourceNode); under an active loop the re-anchored run
+    /// unrolls cycles from the current MODULAR position, with
+    /// `metronomeElapsedOffset` recording where the new click timeline began.
+    /// Stopped transport → cache-only (state is read at the next start);
+    /// recording keeps its committed click schedule (the store refuses the
+    /// toggle mid-take — this guard is defense in depth).
+    public func metronomeChanged(_ transport: TransportState) {
+        cacheTransportFlags(from: transport)
+        guard let anchor = currentAnchor, activeTake == nil else { return }
+        // m16-a Leg 1: the click player's own play(at:) is the same AVFAudio
+        // raise family — barrier the click-local work like every other
+        // control-plane intent that starts a player.
+        withGuardedEngineIntent("metronome toggle") {
+            metronomeChangedBody(anchor: anchor)
+        }
+    }
+
+    /// `metronomeChanged`'s click-local body, verbatim (split out for the
+    /// barrier wrap — the inner `guard` return keeps its semantics).
+    private func metronomeChangedBody(anchor: PlaybackAnchor) {
+        metronome.stop()
+        guard metronomeEnabled else { return }
+        let elapsed = elapsedSeconds(anchor: anchor)
+        let anchorBeat = beat(forElapsedSeconds: elapsed + Self.startLeadSeconds,
+                              anchor: anchor)
+        if let loop = loopContext {
+            metronome.scheduleLoopClicks(
+                fromBeat: anchorBeat,
+                loopStartBeat: loop.startBeat, loopEndBeat: loop.endBeat,
+                tempoMap: anchor.tempoMap, meterMap: clickMeterMap,
+                playerStartBeat: anchorBeat
+            )
+            metronome.topUpLoopCycles(elapsedPlayerSeconds: 0,
+                                      horizonSeconds: Self.loopHorizonSeconds)
+            metronomeElapsedOffset = elapsed + Self.startLeadSeconds
+        } else {
+            metronome.scheduleClicks(
+                fromBeat: anchorBeat,
+                throughBeat: anchorBeat + Metronome.topUpChunkBeats,
+                tempoMap: anchor.tempoMap, meterMap: clickMeterMap,
+                playerStartBeat: anchorBeat
+            )
+        }
+        metronome.start(at: AVAudioTime(
+            hostTime: mach_absolute_time()
+                &+ AVAudioTime.hostTime(forSeconds: Self.startLeadSeconds)))
     }
 
     // MARK: - Recording
@@ -967,6 +1465,40 @@ public final class AudioEngine: AudioEngineControlling {
         guard activeTake == nil, currentAnchor == nil else {
             throw EngineError.recordingFailed("already rolling")
         }
+        // m16-a Leg 1: the whole record start (input capture, hardware
+        // prepare, the startPlayers play loop, writer/MIDI alignment) runs
+        // under the exception barrier — startTake already throws, so a
+        // converted raise rethrows into the wire's LocalizedError mapping;
+        // the catch below first winds down whatever half-started.
+        var capture: InputCapture?
+        var writer: RecordingWriter?
+        do {
+            try withObjCExceptionBarrier("record start") {
+                try startTakeBody(transport, audioURL: audioURL, captureMIDI: captureMIDI,
+                                  capture: &capture, writer: &writer,
+                                  completion: completion)
+            }
+        } catch {
+            if case EngineError.engineException = error {
+                try? withObjCExceptionBarrier("capture wind-down") { capture?.stop() }
+                writer?.finalize { _ in }  // zero/few frames → file deleted
+                windDownAfterException()
+                activeTake = nil
+                recordingWatchdog?.cancel()
+                recordingWatchdog = nil
+                postEngineExceptionNotice(error)
+            }
+            throw error
+        }
+    }
+
+    /// `startTake`'s body from the capture step onward, verbatim (split out
+    /// for the barrier wrap; `capture`/`writer` are inout so the catch can
+    /// wind down whatever had already started when a raise cut the body
+    /// short).
+    private func startTakeBody(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
+                               capture: inout InputCapture?, writer: inout RecordingWriter?,
+                               completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws {
         // 2. Audio capture side first (only when the take wants audio): any
         //    input/file failure throws synchronously with no engine state
         //    change. Two-phase capture start: prepare() resolves/pins the
@@ -974,8 +1506,6 @@ public final class AudioEngine: AudioEngineControlling {
         //    device's rate/channels can differ from the system default's),
         //    the writer sizes from THAT, then start(writer:) installs the tap
         //    and starts I/O. MIDI-only takes never touch the microphone.
-        var capture: InputCapture?
-        var writer: RecordingWriter?
         if let audioURL {
             let audioCapture = InputCapture()
             audioCapture.deviceUID = selectedInputUID
@@ -1001,6 +1531,11 @@ public final class AudioEngine: AudioEngineControlling {
         //    (see startPlayers). Everything below reads the delayed anchor, so
         //    capture trims to the actual take start — the finished take
         //    excludes the count-in and clip placement math is unchanged.
+        //    m15-b: with a loop enabled this schedules WITH the window like
+        //    any playback start (ProjectStore seeks record to the loop start
+        //    first, so the window guard below always passes) — playback wraps
+        //    gaplessly while the capture stays ONE linear take against the
+        //    never-moving anchor; the store slices it per cycle at stop.
         startPlayers(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap,
                      countInBars: transport.countInBars)
         startPlayheadTask()
@@ -1122,7 +1657,13 @@ public final class AudioEngine: AudioEngineControlling {
         recordingWatchdog = nil
         // Stop beat BEFORE playback teardown — the anchor dies with
         // stopPlayback, and the MIDI session's open notes clamp to this beat.
-        let stopBeat = derivedBeats()
+        // LINEAR by law (m15-b, design-m15b §5.3): the capture session stamps
+        // note beats through the frozen map's LINEAR inverse integral, so the
+        // clamp must live in the same domain — `derivedBeats()` is MODULAR
+        // under a live loop, and a note held into cycle 3 would clamp to a
+        // cycle-1 beat and collapse to the 0.001-beat floor. The playhead
+        // keeps the modular read; only the capture clamp is linear.
+        let stopBeat = derivedLinearBeats()
         take.capture?.configurationChangeHandler = nil
         take.capture?.stop()
         stopPlayback()
@@ -1142,7 +1683,8 @@ public final class AudioEngine: AudioEngineControlling {
         }
         let completion = take.completion
         guard let writer = take.writer else {
-            completion(.success(TakeResult(audio: nil, midi: midiResult)))
+            completion(.success(TakeResult(audio: nil, midi: midiResult,
+                                           stopBeats: stopBeat)))
             return
         }
         let midiSide = midiResult
@@ -1159,7 +1701,8 @@ public final class AudioEngine: AudioEngineControlling {
                         ),
                         startOffsetSeconds: take.startOffsetSeconds
                     ),
-                    midi: midiSide
+                    midi: midiSide,
+                    stopBeats: stopBeat
                 )
             }
             Task { @MainActor in
@@ -1178,7 +1721,11 @@ public final class AudioEngine: AudioEngineControlling {
         loopStartBeat = transport.loopStartBeat
         loopEndBeat = transport.loopEndBeat
         metronomeEnabled = transport.isMetronomeEnabled
-        beatsPerBar = transport.timeSignature.beatsPerBar
+        // m15-a: the WHOLE meter map, not a scalar — `transport.meterMap`
+        // synthesizes the trivial map from the base time signature when the
+        // project has no meter changes, so the trivial case is byte-identical
+        // to the old constant-map arithmetic (the null-era gate).
+        clickMeterMap = transport.meterMap
         countInBars = transport.countInBars
     }
 
@@ -1220,14 +1767,42 @@ public final class AudioEngine: AudioEngineControlling {
     /// M4 (i) "mid-play send stays silent" defect). The host clock is
     /// monotonic across the bounce, and players start on a hostTime anchor in
     /// both branches, so nothing else changes.
+    /// m15-b (design-m15b §5.1): the old `scheduleLoop: false` record-path
+    /// escape is GONE — recording schedules with the loop window exactly like
+    /// playback. The capture side never notices: the writer's accept window
+    /// and the MIDI session are anchored ONCE to the never-moving M14 anchor,
+    /// and loop unrolling only queues more segments on rolling players.
     private func startPlayers(fromBeat beats: Double, tempoMap: TempoMap, countInBars: Int = 0,
                               renderClockTrusted: Bool = true) {
         metronome.stop()  // clears the click queue; player time resets to 0
-        graph.scheduleAll(fromBeat: beats, tempoMap: tempoMap)
+        // m14-a L-1: an eligible live loop schedules WITH the window — the
+        // wrap is then pre-queued cycles on rolling players, never a restart.
+        loopContext = nil
+        metronomeElapsedOffset = 0
+        var loopWindow: PlaybackGraph.LoopWindow?
+        if loopEnabled,
+           loopEndBeat > loopStartBeat, beats < loopEndBeat {
+            let cycleSeconds = tempoMap.seconds(from: loopStartBeat, to: loopEndBeat)
+            let headSeconds = tempoMap.seconds(from: beats, to: loopEndBeat)
+            if cycleSeconds > 0, headSeconds > 0 {
+                loopWindow = PlaybackGraph.LoopWindow(startBeat: loopStartBeat,
+                                                      endBeat: loopEndBeat)
+                loopContext = LoopContext(startBeat: loopStartBeat, endBeat: loopEndBeat,
+                                          headSeconds: headSeconds, cycleSeconds: cycleSeconds)
+            }
+        }
+        graph.scheduleAll(fromBeat: beats, tempoMap: tempoMap, loop: loopWindow)
+        if loopContext != nil {
+            // Initial coverage: eager +2 cycles and the C6 horizon — all
+            // pre-queued anchored segments, the L-0 spike's proven shape.
+            // Later top-ups ride the playhead task.
+            graph.topUpLoopCycles(elapsedPlayerSeconds: 0,
+                                  horizonSeconds: Self.loopHorizonSeconds)
+        }
         graph.prepareAllPlayers(withFrameCount: 8_192)
 
         let countIn = Metronome.countInPlan(
-            countInBars: countInBars, beatsPerBar: beatsPerBar,
+            countInBars: countInBars, meterMap: clickMeterMap,
             tempoMap: tempoMap, atBeat: beats
         )
         let output = engine.outputNode
@@ -1253,7 +1828,7 @@ public final class AudioEngine: AudioEngineControlling {
             )
             graph.startAllPlayers(at: AVAudioTime(hostTime: anchorHost))
             startMetronome(fromBeat: beats, tempoMap: tempoMap,
-                           countInClickBeats: countIn.clickBeats,
+                           countIn: countIn,
                            at: AVAudioTime(hostTime: clickAnchorHost))
         } else {
             // No render clock yet (first callback pending): host-clock anchor
@@ -1270,7 +1845,7 @@ public final class AudioEngine: AudioEngineControlling {
             )
             graph.startAllPlayers(at: AVAudioTime(hostTime: anchorHost))
             startMetronome(fromBeat: beats, tempoMap: tempoMap,
-                           countInClickBeats: countIn.clickBeats,
+                           countIn: countIn,
                            at: AVAudioTime(hostTime: clickAnchorHost))
         }
     }
@@ -1283,23 +1858,92 @@ public final class AudioEngine: AudioEngineControlling {
     /// against the ORIGINAL anchor the player starts on. Metronome disabled
     /// and no count-in → the player stays stopped.
     private func startMetronome(fromBeat beats: Double, tempoMap: TempoMap,
-                                countInClickBeats: Int, at anchor: AVAudioTime) {
+                                countIn: (delaySeconds: Double, clickBeats: Int),
+                                at anchor: AVAudioTime) {
+        let countInClickBeats = countIn.clickBeats
         guard metronomeEnabled || countInClickBeats > 0 else { return }
         if countInClickBeats > 0 {
             metronome.scheduleCountIn(clickBeats: countInClickBeats,
                                       tempoMap: tempoMap, atBeat: beats,
-                                      beatsPerBar: beatsPerBar)
+                                      meterMap: clickMeterMap)
         }
         if metronomeEnabled {
-            metronome.scheduleClicks(
-                fromBeat: beats,
-                throughBeat: beats + Metronome.topUpChunkBeats,
-                tempoMap: tempoMap,
-                meterMap: MeterMap(constant: TimeSignature(beatsPerBar: beatsPerBar, beatUnit: 4)),
-                playerStartBeat: beats - Double(countInClickBeats)
-            )
+            if let loop = loopContext {
+                // m14-c L-3: loop-mode runs schedule the head pass
+                // [beats, loop end) and unroll whole cycles on the playhead
+                // cadence — the same absolute-integral anchors as the
+                // audio/MIDI unroll (the L-1 per-wrap re-anchor interim, its
+                // boundary-click skip, and its short-loop jitter are gone).
+                // m15-b (design-m15b §5.4b): a loop-record start CAN carry a
+                // count-in now. The pre-roll is a record-beat LOOKUP by
+                // policy (countInPlan), NOT a map integral across the
+                // pre-roll span — so the count-in delay is passed EXPLICITLY
+                // and cycle click anchors land at
+                // `delaySeconds + integral(recordBeat → loopEnd) + k·L`,
+                // with playerStartBeat == beats (never `beats − clickBeats`,
+                // which would integrate the map across the pre-roll).
+                metronome.scheduleLoopClicks(
+                    fromBeat: beats,
+                    loopStartBeat: loop.startBeat, loopEndBeat: loop.endBeat,
+                    tempoMap: tempoMap, meterMap: clickMeterMap,
+                    playerStartBeat: beats,
+                    countInDelaySeconds: countIn.delaySeconds
+                )
+                // Initial coverage, exactly like the graph's start-time call
+                // (elapsed 0 in the CLICK player's own timeline).
+                metronome.topUpLoopCycles(elapsedPlayerSeconds: 0,
+                                          horizonSeconds: Self.loopHorizonSeconds)
+                // §5.4a: the click player's timeline begins delaySeconds
+                // BEFORE the transport anchor — serviceLoop's subtraction
+                // must ADD the count-in back (0 when no count-in: the null
+                // case is arithmetic-identical to m14-c).
+                metronomeElapsedOffset = -countIn.delaySeconds
+            } else {
+                metronome.scheduleClicks(
+                    fromBeat: beats,
+                    throughBeat: beats + Metronome.topUpChunkBeats,
+                    tempoMap: tempoMap, meterMap: clickMeterMap,
+                    playerStartBeat: beats - Double(countInClickBeats)
+                )
+            }
         }
         metronome.start(at: anchor)
+    }
+
+    /// Elapsed player-timeline seconds since the anchor — the render clock
+    /// when the anchor carries a valid sample epoch, the host clock otherwise.
+    /// Signed: negative during the ~60 ms start lead-in.
+    private func elapsedSeconds(anchor: PlaybackAnchor) -> Double {
+        if anchor.hasSampleAnchor,
+           let renderTime = engine.outputNode.lastRenderTime, renderTime.isSampleTimeValid {
+            return Double(renderTime.sampleTime - anchor.anchorSampleTime)
+                / anchor.outputSampleRate
+        }
+        let now = mach_absolute_time()
+        // Signed host-tick delta: during the lead-in `now` is before the anchor.
+        return now >= anchor.anchorHostTime
+            ? AVAudioTime.seconds(forHostTime: now - anchor.anchorHostTime)
+            : -AVAudioTime.seconds(forHostTime: anchor.anchorHostTime - now)
+    }
+
+    /// Beat for `seconds` of elapsed anchor time. Linear (pre-m14-a verbatim,
+    /// m12-b row 47: the map's inverse integral with the lead-in/count-in
+    /// `max()` clamp) until the first wrap; MODULAR under an active loop
+    /// context past `headSeconds` (m14-a L-1): the anchor NEVER moves across
+    /// wraps — cycle position is `(elapsed − head) mod cycleSeconds`, and THE
+    /// TIMELINE LAW holds by construction: `within < cycleSeconds`, so the
+    /// map inverse is only ever evaluated inside [loop.startBeat,
+    /// loop.endBeat) — segments past the loop end never leak into cycle
+    /// timing.
+    private func beat(forElapsedSeconds seconds: Double, anchor: PlaybackAnchor) -> Double {
+        if let loop = loopContext, seconds >= loop.headSeconds {
+            let within = (seconds - loop.headSeconds)
+                .truncatingRemainder(dividingBy: loop.cycleSeconds)
+            return min(loop.endBeat,
+                       anchor.tempoMap.beat(from: loop.startBeat, elapsedSeconds: within))
+        }
+        return max(anchor.startBeats,
+                   anchor.tempoMap.beat(from: anchor.startBeats, elapsedSeconds: seconds))
     }
 
     /// Current transport position derived from the output node's render clock
@@ -1307,26 +1951,26 @@ public final class AudioEngine: AudioEngineControlling {
     /// ~60 ms lead-in never reads as motion — the same `max()` clamp also
     /// pins the playhead to the record-start position for the whole count-in
     /// (the recording anchor is delayed by the count-in duration, so elapsed
-    /// time reads negative until the take actually begins).
+    /// time reads negative until the take actually begins). Wraps modularly
+    /// under an active loop (m14-a; see `beat(forElapsedSeconds:anchor:)`).
     private func derivedBeats() -> Double {
         guard let anchor = currentAnchor else { return lastKnownBeats }
-        if anchor.hasSampleAnchor,
-           let renderTime = engine.outputNode.lastRenderTime, renderTime.isSampleTimeValid {
-            let seconds = Double(renderTime.sampleTime - anchor.anchorSampleTime)
-                / anchor.outputSampleRate
-            // m12-b (design row 47): the map's inverse integral — for the
-            // trivial map bit-identical to the old linear term. The max()
-            // clamp is retained verbatim (lead-in / count-in pin).
-            return max(anchor.startBeats,
-                       anchor.tempoMap.beat(from: anchor.startBeats, elapsedSeconds: seconds))
-        }
-        let now = mach_absolute_time()
-        // Signed host-tick delta: during the lead-in `now` is before the anchor.
-        let seconds = now >= anchor.anchorHostTime
-            ? AVAudioTime.seconds(forHostTime: now - anchor.anchorHostTime)
-            : -AVAudioTime.seconds(forHostTime: anchor.anchorHostTime - now)
+        return beat(forElapsedSeconds: elapsedSeconds(anchor: anchor), anchor: anchor)
+    }
+
+    /// LINEAR transport beat since the anchor — `derivedBeats` WITHOUT the
+    /// modular loop branch (m15-b, design-m15b §5.3): the frozen map's
+    /// inverse integral with the same lead-in/count-in `max()` clamp, never
+    /// wrapping. This is the CAPTURE clock: the MIDI session stamps note
+    /// beats linearly through the same map from the same anchor, so the
+    /// stop clamp (and the store's per-cycle slicing inversion) must read
+    /// this domain. Internal (not private) so the G4 held-note fixture can
+    /// pin linear-vs-modular divergence across a live wrap.
+    func derivedLinearBeats() -> Double {
+        guard let anchor = currentAnchor else { return lastKnownBeats }
         return max(anchor.startBeats,
-                   anchor.tempoMap.beat(from: anchor.startBeats, elapsedSeconds: seconds))
+                   anchor.tempoMap.beat(from: anchor.startBeats,
+                                        elapsedSeconds: elapsedSeconds(anchor: anchor)))
     }
 
     /// Pushes engine-derived beats to the main actor at ~30 Hz while playing.
@@ -1337,25 +1981,61 @@ public final class AudioEngine: AudioEngineControlling {
                 try? await Task.sleep(for: .milliseconds(33))
                 guard let self, !Task.isCancelled, let anchor = self.currentAnchor else { break }
                 var beats = self.derivedBeats()
-                // Loop wrap: on reaching the loop end, jump back to the loop start
-                // through the reschedule primitive. That inherits `restart`'s
-                // ~60 ms lead-in gap, so the wrap is audible as a brief seam —
-                // v0-honest; sample-accurate looping needs pre-scheduled tails.
-                // Suppressed while recording: a take is one linear capture, and
-                // wrapping would break the writer's single-anchor alignment.
-                if self.activeTake == nil,
-                   self.loopEnabled, self.loopEndBeat > self.loopStartBeat,
-                   beats >= self.loopEndBeat {
-                    self.restart(fromBeat: self.loopStartBeat, tempoMap: anchor.tempoMap)
-                    beats = self.loopStartBeat
+                if let loop = self.loopContext {
+                    // m14-a L-1 gapless wrap: audio cycles are pre-queued on
+                    // the ROLLING players (the graph never stops at the seam;
+                    // derivedBeats already wrapped `beats` modularly). Keep
+                    // audio/MIDI/automation/click coverage ahead of the
+                    // playhead — everything unrolls on this one cadence.
+                    self.serviceLoop(loop, anchor: anchor)
+                } else {
+                    if self.loopEnabled, self.loopEndBeat > self.loopStartBeat,
+                       beats >= self.loopEndBeat {
+                        // Loop cached but the current schedule is LINEAR
+                        // (loop enabled mid-play, or playback started at/past
+                        // the loop end): wrap ONCE through the restart
+                        // primitive — `startPlayers` re-schedules WITH the
+                        // window, so every later wrap is gapless. An
+                        // edit-class seam, never per-cycle (design §4-A
+                        // fallback). m15-b: unreachable while recording —
+                        // record with a loop SEEKS to the loop start first
+                        // (so the schedule carries the window and
+                        // `loopContext != nil`), and `transport.setLoop` is
+                        // refused mid-record, so a rolling take can never
+                        // find itself linear-with-a-loop here.
+                        self.restart(fromBeat: self.loopStartBeat, tempoMap: anchor.tempoMap)
+                        beats = self.loopStartBeat
+                    }
+                    // Keep the linear click queue ahead of the playhead
+                    // (control-thread work; no-op unless an open-ended
+                    // linear click run is active — loop runs unroll whole
+                    // cycles inside `serviceLoop` instead, m14-c L-3).
+                    self.metronome.topUp(currentBeat: beats)
                 }
                 self.lastKnownBeats = beats
-                // Keep the click queue ahead of the playhead (control-thread
-                // work; no-op unless an open-ended click run is active).
-                self.metronome.topUp(currentBeat: beats)
                 self.playheadHandler?(beats)
             }
         }
+    }
+
+    /// One playhead tick's loop servicing (m14-a L-1, control thread only):
+    /// audio + MIDI + automation + CLICK horizon top-up every tick — the
+    /// graph's `topUpLoopCycles` unrolls the first three append-only against
+    /// the roll's one anchor (m14-b L-2: no per-wrap flush, no re-anchor;
+    /// voices and automation values persist through the seam), and the
+    /// metronome unrolls clicks the same way on its OWN player (m14-c L-3:
+    /// no per-wrap stop/re-anchor — the L-1 boundary-click-skip and
+    /// short-loop-jitter classes are dead). The click elapsed subtracts
+    /// `metronomeElapsedOffset` because an enable-mid-play re-anchors the
+    /// click player's timeline (design §6) while the transport anchor never
+    /// moves.
+    private func serviceLoop(_ loop: LoopContext, anchor: PlaybackAnchor) {
+        let elapsed = elapsedSeconds(anchor: anchor)
+        graph.topUpLoopCycles(elapsedPlayerSeconds: elapsed,
+                              horizonSeconds: Self.loopHorizonSeconds)
+        metronome.topUpLoopCycles(
+            elapsedPlayerSeconds: elapsed - metronomeElapsedOffset,
+            horizonSeconds: Self.loopHorizonSeconds)
     }
 
     /// Best-effort recovery when the device or its format changes under us —
@@ -1385,9 +2065,10 @@ public final class AudioEngine: AudioEngineControlling {
         let seconds = now >= anchor.anchorHostTime
             ? AVAudioTime.seconds(forHostTime: now - anchor.anchorHostTime)
             : 0
-        // m12-b (design row 48): same inverse integral + clamp as derivedBeats.
-        let beats = max(anchor.startBeats,
-                        anchor.tempoMap.beat(from: anchor.startBeats, elapsedSeconds: seconds))
+        // m12-b (design row 48): same inverse integral + clamp as derivedBeats
+        // — and the same modular wrap under a loop (m14-a), so recovery
+        // resumes inside the window and re-schedules with it.
+        let beats = beat(forElapsedSeconds: seconds, anchor: anchor)
         lastKnownBeats = beats
 
         graph.stopAllPlayers()
@@ -1398,9 +2079,6 @@ public final class AudioEngine: AudioEngineControlling {
                 try engine.start()
             }
             isRunning = true
-            // Retire any teardown nodes parked while the device was down
-            // (M9 crash-a — see prepare()).
-            graph.flushRetiredNodes()
             // A fresh start re-initializes mixer parameters — restore the mix.
             engine.mainMixerNode.outputVolume = Float(masterVolume)
             graph.applyParameters(tracks: lastTracks)
@@ -1447,9 +2125,17 @@ public final class AudioEngine: AudioEngineControlling {
     /// hardware. `recoverEngine()` only restarts mid-playback (its
     /// config-change contract, kept byte-identical), so the
     /// stopped-transport live-thru stall falls through to `prepare()` — the
-    /// cold-start primitive (start + retire-bin flush + mixer/parameter
-    /// restore). Throwing (a dead device refusing to start) is the
-    /// watchdog's failure signal.
+    /// cold-start primitive (start + mixer/parameter restore). Throwing (a
+    /// dead device refusing to start) is the watchdog's failure signal.
+    ///
+    /// m13-a WATCH (recorded, out of scope by design §6.6): recovery
+    /// restarts the SAME engine across a stop→start boundary, so nodes that
+    /// rendered before the stall are boundary-crossed afterwards — a later
+    /// plain (trivial-strip) teardown detach against the RUNNING recovered
+    /// engine is the C0 crash shape; announce-class teardowns rebuild the
+    /// engine anyway. C0 never implicated this path (zero recovery events
+    /// in every recorded crash); if it ever fires, route recovery through
+    /// `rebuildEngine` in a follow-up item rather than widening m13-a.
     func watchdogRestart() throws {
         engine.stop()
         isRunning = false
@@ -1468,22 +2154,30 @@ public final class AudioEngine: AudioEngineControlling {
     // MARK: - Test tone (verifies the output path is real)
 
     public func startTestTone(frequency: Double = 440, amplitude: Float = 0.25) throws {
-        try prepare()
+        try prepare()  // carries its own barrier (m16-a Leg 1)
         guard !isTonePlaying else { return }
+        // m16-a Leg 1: a literal player play() — barrier + rethrow (this
+        // entry already throws, so the wire gets the teaching error).
+        do {
+            try withObjCExceptionBarrier("test tone start") {
+                let format = engine.mainMixerNode.outputFormat(forBus: 0)
+                guard let buffer = Self.makeSineBuffer(
+                    format: format, frequency: frequency, amplitude: amplitude
+                ) else { return }
+                toneBuffer = buffer
 
-        let format = engine.mainMixerNode.outputFormat(forBus: 0)
-        guard let buffer = Self.makeSineBuffer(
-            format: format, frequency: frequency, amplitude: amplitude
-        ) else { return }
-        toneBuffer = buffer
-
-        if tonePlayer.engine == nil {
-            engine.attach(tonePlayer)
-            engine.connect(tonePlayer, to: engine.mainMixerNode, format: format)
+                if tonePlayer.engine == nil {
+                    engine.attach(tonePlayer)
+                    engine.connect(tonePlayer, to: engine.mainMixerNode, format: format)
+                }
+                tonePlayer.scheduleBuffer(buffer, at: nil, options: .loops)
+                tonePlayer.play()
+                isTonePlaying = true
+            }
+        } catch {
+            postEngineExceptionNotice(error)
+            throw error
         }
-        tonePlayer.scheduleBuffer(buffer, at: nil, options: .loops)
-        tonePlayer.play()
-        isTonePlaying = true
     }
 
     public func stopTestTone() {
@@ -1513,9 +2207,13 @@ public final class AudioEngine: AudioEngineControlling {
 
     // MARK: - Metering
 
-    private func installMeterTap(on mixer: AVAudioMixerNode) {
+    /// m13-d §1-B: `node` is the master CHAIN HOST's output in production
+    /// (post-fader, post-chain — the honest relocation; `mainMixerNode` only
+    /// as a defensive fallback when the insert is absent). Generic over
+    /// `AVAudioNode` for exactly that reason.
+    private func installMeterTap(on node: AVAudioNode) {
         guard !meterTapInstalled else { return }
-        let format = mixer.outputFormat(forBus: 0)
+        let format = node.outputFormat(forBus: 0)
         // Master-mix analysis (M8 vm-a) shares this tap — one tap per bus is
         // an AVFoundation limit. The analyzer preallocates everything here
         // (main actor, init time); the tap closure only feeds it.
@@ -1524,7 +2222,7 @@ public final class AudioEngine: AudioEngineControlling {
         // @Sendable is load-bearing: without it this closure (formed in a
         // @MainActor context) inherits main-actor isolation and the Swift
         // runtime traps when AVFAudio invokes it on its tap queue.
-        mixer.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable [weak self] buffer, _ in
+        node.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable [weak self] buffer, _ in
             // Runs on an audio-adjacent thread: compute scalars here, hop with a
             // Sendable value only. No engine state may be touched from this closure.
             guard let channels = buffer.floatChannelData else { return }
@@ -1542,9 +2240,10 @@ public final class AudioEngine: AudioEngineControlling {
             }
             let denominator = Float(frames * Int(buffer.format.channelCount))
             let frame = MeterFrame(peak: peak, rms: (sumSquares / denominator).squareRoot())
-            // Post-master-fader analysis: this tap reads mainMixerNode's
-            // output, i.e. after `outputVolume` (the master fader) — what
-            // you hear is what's analyzed. AVFAudio serializes tap
+            // Post-master-fader, post-master-chain analysis (m13-d §1-B):
+            // this tap reads the master chain host's output — after the
+            // fader AND the chain — what you hear is what's analyzed (the
+            // meters show the limiter working). AVFAudio serializes tap
             // deliveries, so the analyzer is single-threaded by contract;
             // the snapshot VALUE (Sendable) rides the same main-actor hop
             // as the MeterFrame.
@@ -1559,12 +2258,60 @@ public final class AudioEngine: AudioEngineControlling {
             }
         }
         meterTapInstalled = true
+        meterTapNode = node
     }
 
     /// Latest master-mix analysis snapshot (M8 vm-a) — poll-based like
     /// meters. `.floor` until the tap has run (and again after `shutdown`).
     public func masterAnalysis() -> MasterAnalysisSnapshot {
         latestMasterAnalysis
+    }
+
+    // MARK: - Debug master-bus capture (m14-d C5 live gate; app `debug.*` tier)
+
+    /// Starts a sample-level capture of the master summing bus —
+    /// `mainMixerNode`'s output (post-strip-chains and strip faders,
+    /// pre-master-insert; the meter/analysis tap lives on the master CHAIN
+    /// HOST's output, so this bus is tap-free — one tap per bus is the
+    /// AVFoundation limit). A DEBUG affordance for verification gates that
+    /// need sample-level evidence — C5: a chain tail crossing the live loop
+    /// seam and the absence of the old 60 ms zero-run, which the meter tap's
+    /// UI-rate scalars cannot carry. Deliberately concrete-class-only (NOT
+    /// on `AudioEngineControlling`): the app's debug tier owns the concrete
+    /// engine (the `hostedInstrumentAudioUnit` precedent) and this never
+    /// becomes an agent-facing capability. One capture at a time. Buffers
+    /// cross from AVFoundation's tap queue to a serial writer queue — the
+    /// InputCapture/RecordingWriter discipline; nothing here touches the
+    /// render thread.
+    public func startDebugMasterCapture(toPath path: String) throws {
+        guard debugCapture == nil else {
+            throw EngineError.renderFailed(
+                "debug master capture already running — stop it first")
+        }
+        guard isRunning else {
+            throw EngineError.renderFailed(
+                "engine not running — start playback before capturing")
+        }
+        let node = engine.mainMixerNode
+        let format = node.outputFormat(forBus: 0)
+        let capture = try DebugMasterCapture(
+            node: node, url: URL(fileURLWithPath: path), format: format)
+        node.installTap(onBus: 0, bufferSize: 1_024, format: format) { @Sendable buffer, _ in
+            capture.append(buffer)
+        }
+        debugCapture = capture
+    }
+
+    /// Stops the debug capture: removes the tap, drains the writer queue,
+    /// and closes the file (deallocation flushes the header — the
+    /// RecordingWriter convention). Returns frames written; nil when no
+    /// capture was armed. Idempotent.
+    @discardableResult
+    public func stopDebugMasterCapture() -> Int64? {
+        guard let capture = debugCapture else { return nil }
+        capture.node.removeTap(onBus: 0)
+        debugCapture = nil
+        return capture.finalize()
     }
 
     /// Render-load / overrun telemetry (M9 perf-b): counters stamped by
@@ -1575,5 +2322,62 @@ public final class AudioEngine: AudioEngineControlling {
     /// read-then-reset ordering notes) — the perf-c windowed-profiling seam.
     public func performanceStats(reset: Bool) -> EnginePerformanceStats {
         reset ? performance.snapshotAndReset() : performance.snapshot()
+    }
+}
+
+/// m14-d (C5 live gate): the debug master-bus capture writer — tap
+/// deliveries cross onto a serial queue that owns the `AVAudioFile` (the
+/// `RecordingWriter` discipline, minimal form: no accept window, no
+/// host-time alignment — verification captures analyze relative structure).
+/// `@unchecked Sendable` justification: `file`/`frames` are only touched on
+/// `queue`; `node` is immutable and only dereferenced on the main actor (the
+/// engine's stop path removes the tap from it).
+private final class DebugMasterCapture: @unchecked Sendable {
+    /// One tap delivery crossing onto the writer queue — the RecordingWriter
+    /// `TapDelivery` justification verbatim: the tap hands over a freshly
+    /// allocated buffer it never touches again, and exactly one consumer
+    /// (the serial queue) reads it.
+    private struct TapDelivery: @unchecked Sendable {
+        let buffer: AVAudioPCMBuffer
+    }
+
+    /// The tapped node, kept so `stopDebugMasterCapture` removes the tap
+    /// from the node that actually carries it (the `meterTapNode` rule).
+    let node: AVAudioNode
+    private let queue = DispatchQueue(label: "dawpro.debug-master-capture")
+    private var file: AVAudioFile?
+    private var frames: Int64 = 0
+
+    init(node: AVAudioNode, url: URL, format: AVAudioFormat) throws {
+        self.node = node
+        file = try AVAudioFile(forWriting: url, settings: format.settings,
+                               commonFormat: .pcmFormatFloat32, interleaved: false)
+    }
+
+    /// Callable from the tap's delivery thread.
+    func append(_ buffer: AVAudioPCMBuffer) {
+        let delivery = TapDelivery(buffer: buffer)
+        queue.async { [self] in
+            guard let file else { return }  // finalized or write-failed
+            do {
+                try file.write(from: delivery.buffer)
+                frames += Int64(delivery.buffer.frameLength)
+            } catch {
+                // First failure stops the capture's writes; the partial file
+                // stays readable (header flushed on finalize/dealloc).
+                self.file = nil
+            }
+        }
+    }
+
+    /// Drains queued deliveries and closes the file — deallocation flushes
+    /// the header (the RecordingWriter convention; the explicit pool keeps
+    /// an autoreleased reference from deferring it, because the gate reads
+    /// the file immediately). Returns total frames written.
+    func finalize() -> Int64 {
+        queue.sync {
+            autoreleasepool { file = nil }
+            return frames
+        }
     }
 }

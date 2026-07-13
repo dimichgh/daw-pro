@@ -47,6 +47,20 @@ public enum ClipSnap: String, CaseIterable, Sendable, Equatable {
         return max(0, (beat / grid).rounded() * grid)
     }
 
+    /// Meter-map-aware snap (m12-d, design rows 62–67). `bar` follows the
+    /// accumulated meter — across a time-signature change the bar grid is not
+    /// uniform, so it routes through `MeterMap.nearestBarline`; the finer
+    /// divisions (`beat`/`half`/`quarter`) are meter-agnostic (a beat is a
+    /// quarter-note everywhere) and fall through to the uniform math. Reproduces
+    /// `snap(beat:beatsPerBar:)` exactly for a trivial single-meter map, so
+    /// arrange surfaces adopt it without changing single-meter behavior.
+    public func snap(beat: Double, meterMap: MeterMap) -> Double {
+        switch self {
+        case .bar: return max(0, meterMap.nearestBarline(toBeat: max(0, beat)))
+        default: return snap(beat: beat, beatsPerBar: meterMap.beatsPerBar(atBeat: max(0, beat)))
+        }
+    }
+
     /// The snap the arrange clip lane actually uses for a given panel density
     /// (docs/DESIGN-LANGUAGE.md "Panels", sp-c). **Simple locks the grid to `.bar`**
     /// — a beginner moves clips a whole bar at a time and the snap picker is hidden
@@ -153,11 +167,15 @@ public enum ClipEdit {
 
     /// New (snapped, floored) start beat for a body drag: the original start plus
     /// the raw beat delta, snapped to the grid. Feeds `moveClip(toStartBeat:)`.
+    /// Meter-aware (m13-h): a drag INTO a different time-signature region snaps on
+    /// that region's grid — `.bar` routes through `MeterMap.nearestBarline`, so a
+    /// clip pulled into a 6/8 section lands on the 6/8 barlines. Reproduces the
+    /// old base-meter math exactly for a trivial single-meter map.
     public static func movedStartBeat(
         originalStart: Double, dragDeltaBeats: Double,
-        snap: ClipSnap, beatsPerBar: Int
+        snap: ClipSnap, meterMap: MeterMap
     ) -> Double {
-        snap.snap(beat: max(0, originalStart + dragDeltaBeats), beatsPerBar: beatsPerBar)
+        snap.snap(beat: max(0, originalStart + dragDeltaBeats), meterMap: meterMap)
     }
 
     // MARK: - Trim
@@ -167,10 +185,10 @@ public enum ClipEdit {
     /// clip keeps at least `minClipLengthBeats`. Feeds `trimClip(...)`.
     public static func trimStart(
         originalStart: Double, originalLength: Double, newStartBeatRaw: Double,
-        snap: ClipSnap, beatsPerBar: Int
+        snap: ClipSnap, meterMap: MeterMap
     ) -> (startBeat: Double, lengthBeats: Double) {
         let end = originalStart + originalLength
-        let snapped = snap.snap(beat: max(0, newStartBeatRaw), beatsPerBar: beatsPerBar)
+        let snapped = snap.snap(beat: max(0, newStartBeatRaw), meterMap: meterMap)
         let maxStart = max(0, end - minClipLengthBeats)
         let start = min(max(0, snapped), maxStart)
         return (start, end - start)
@@ -181,9 +199,9 @@ public enum ClipEdit {
     /// least `minClipLengthBeats`. Feeds `trimClip(...)`.
     public static func trimEnd(
         originalStart: Double, newEndBeatRaw: Double,
-        snap: ClipSnap, beatsPerBar: Int
+        snap: ClipSnap, meterMap: MeterMap
     ) -> (startBeat: Double, lengthBeats: Double) {
-        let snapped = snap.snap(beat: max(0, newEndBeatRaw), beatsPerBar: beatsPerBar)
+        let snapped = snap.snap(beat: max(0, newEndBeatRaw), meterMap: meterMap)
         let end = max(snapped, originalStart + minClipLengthBeats)
         return (originalStart, end - originalStart)
     }
@@ -224,10 +242,10 @@ public enum ClipEdit {
     /// double-click-at-cursor and split-at-playhead paths.
     public static func snappedSplit(
         timelineBeatRaw: Double, clipStart: Double, clipLength: Double,
-        snap: ClipSnap, beatsPerBar: Int
+        snap: ClipSnap, meterMap: MeterMap
     ) -> Double? {
         let end = clipStart + clipLength
-        let snapped = snap.snap(beat: timelineBeatRaw, beatsPerBar: beatsPerBar)
+        let snapped = snap.snap(beat: timelineBeatRaw, meterMap: meterMap)
         if snapped > clipStart, snapped < end { return snapped }
         if timelineBeatRaw > clipStart, timelineBeatRaw < end { return timelineBeatRaw }
         return nil

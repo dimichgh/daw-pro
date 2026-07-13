@@ -18,25 +18,27 @@ struct MiniLevelBar: View {
     var minWidth: CGFloat = 44
     var maxWidth: CGFloat = 44
 
-    private func zoneColor(_ fraction: Double) -> Color {
+    private nonisolated static func zoneColor(_ fraction: Double) -> Color {
         if fraction > 0.92 { return DAWTheme.clip }
         if fraction > 0.72 { return DAWTheme.record }
         return DAWTheme.signal
     }
 
     var body: some View {
-        Canvas { context, size in
-            let count = segmentCount
+        // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+        // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+        let count = segmentCount
+        let level = Double(meter.rms.clamped(to: 0...1))
+        return Canvas { @Sendable context, size in
             let gap: CGFloat = 1.0
             // Guard against a degenerate/negative segment width if the frame is
             // ever proposed narrower than the gaps demand.
             let segmentWidth = max(0.5, (size.width - CGFloat(count - 1) * gap) / CGFloat(count))
-            let level = Double(meter.rms.clamped(to: 0...1))
 
             for index in 0..<count {
                 let fraction = Double(index + 1) / Double(count)
                 let isLit = level >= Double(index) / Double(count) + 0.001
-                let color = zoneColor(fraction)
+                let color = Self.zoneColor(fraction)
                 let x = CGFloat(index) * (segmentWidth + gap)
                 let rect = CGRect(x: x, y: 0, width: segmentWidth, height: size.height)
                 let path = Path(roundedRect: rect, cornerRadius: 1)
@@ -44,7 +46,7 @@ struct MiniLevelBar: View {
             }
         }
         .frame(minWidth: minWidth, maxWidth: maxWidth, minHeight: 6, maxHeight: 6)
-        .glow(zoneColor(Double(meter.rms)), radius: 4, intensity: Double(meter.rms) * 0.7)
+        .glow(Self.zoneColor(Double(meter.rms)), radius: 4, intensity: Double(meter.rms) * 0.7)
         .accessibilityLabel("Track level")
         .accessibilityValue("\(Int(Double(meter.rms) * 100)) percent")
     }

@@ -101,14 +101,14 @@ public enum TakeComp {
     /// to a whole-lane select.
     public static func classifyDrag(
         laneID: UUID, fromBeatRaw: Double, toBeatRaw: Double,
-        snap: ClipSnap, beatsPerBar: Int, range: ClosedRange<Double>,
+        snap: ClipSnap, meterMap: MeterMap, range: ClosedRange<Double>,
         clickThresholdBeats: Double = 0.15
     ) -> TakePaintGesture {
         let rawSpan = abs(toBeatRaw - fromBeatRaw)
         let lo = min(fromBeatRaw, toBeatRaw)
         let hi = max(fromBeatRaw, toBeatRaw)
-        var start = snap.snap(beat: lo, beatsPerBar: beatsPerBar)
-        var end = snap.snap(beat: hi, beatsPerBar: beatsPerBar)
+        var start = snap.snap(beat: lo, meterMap: meterMap)
+        var end = snap.snap(beat: hi, meterMap: meterMap)
         if end <= start { end = start + minPaintBeats }
         // Clamp into the group range, preserving a non-empty span.
         start = start.clamped(to: range)

@@ -43,8 +43,16 @@ struct MixerChannelStrip: View {
             // freed vertical space flows into `faderAndMeter` (maxHeight: .infinity),
             // giving beginners a longer fader throw / finer level control.
             if isPro {
-                insertsSection
-                    .explainable(.mixerInserts)
+                MixerInsertsSection(
+                    store: store,
+                    trackID: track.id,
+                    effects: track.effects,
+                    onAddAudioUnit: { model.openEffectPicker(trackID: track.id) },
+                    onOpenWindow: { effectID in
+                        model.openPluginWindow(trackID: track.id, effectID: effectID)
+                    }
+                )
+                .explainable(.mixerInserts)
                 if !isBus {
                     sendsSection
                         .explainable(.mixerSends)
@@ -71,7 +79,8 @@ struct MixerChannelStrip: View {
                 .stroke(track.isAIGenerated ? DAWTheme.ai.opacity(0.4) : DAWTheme.hairline, lineWidth: 1)
         )
         .contextMenu {
-            Button("Remove Track", role: .destructive) { store.removeTrack(id: track.id) }
+            // m13-c: refused mid-recording (transportBusy) — safe no-op here.
+            Button("Remove Track", role: .destructive) { _ = try? store.removeTrack(id: track.id) }
         }
     }
 
@@ -117,62 +126,6 @@ struct MixerChannelStrip: View {
                 )
             }
         }
-    }
-
-    // MARK: Inserts
-
-    private var insertsSection: some View {
-        VStack(spacing: 4) {
-            HStack {
-                StripSectionLabel(text: "Inserts")
-                addMenu
-            }
-            if track.effects.isEmpty {
-                Text("No inserts")
-                    .font(.system(size: 9))
-                    .foregroundStyle(DAWTheme.textSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 2)
-            } else {
-                ForEach(track.effects) { effect in
-                    InsertRow(
-                        effect: effect,
-                        onToggleBypass: {
-                            try? store.setEffectBypassed(trackID: track.id, effectID: effect.id,
-                                                         bypassed: !effect.isBypassed)
-                        },
-                        onRemove: { try? store.removeEffect(trackID: track.id, effectID: effect.id) },
-                        // AU inserts get one open-window button (M3 vi-b); built-in
-                        // effects (nil) have first-class in-app editors instead.
-                        onOpenWindow: effect.kind == .audioUnit
-                            ? { model.openPluginWindow(trackID: track.id, effectID: effect.id) }
-                            : nil
-                    )
-                }
-            }
-        }
-    }
-
-    private var addMenu: some View {
-        Menu {
-            ForEach(addableEffectKinds, id: \.self) { kind in
-                Button(MixerFormat.effectDisplayName(EffectDescriptor(kind: kind))) {
-                    _ = try? store.addEffect(toTrack: track.id, kind: kind)
-                }
-            }
-        } label: {
-            Image(systemName: "plus")
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(DAWTheme.textPrimary)
-                .frame(width: 16, height: 16)
-                .background(DAWTheme.panelRaised)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Add an insert effect")
     }
 
     // MARK: Sends
@@ -346,12 +299,135 @@ struct MixerChannelStrip: View {
     }
 }
 
+/// The inserts section shared by channel/bus strips and the master strip
+/// (m13-d, design §6): a section label, the "+" add-menu, and one `InsertRow`
+/// per effect — generalized over its target by `trackID: UUID?` (nil = the
+/// MASTER chain). Every action drives the matching `ProjectStore` method —
+/// `addEffect`/`removeEffect`/`setEffectBypassed` for a track/bus, the
+/// `addMasterEffect`/`removeMasterEffect`/`setMasterEffectBypassed` twins for
+/// master — exactly the methods the `fx.*` wire verbs call (UI == wire).
+/// `addableEffectKinds` is already the built-in set = exactly what the master
+/// chain accepts (built-ins only, v1), so the menu needs no per-target filter;
+/// the master target opens no plugin window (built-ins have in-app editors).
+struct MixerInsertsSection: View {
+    var store: ProjectStore
+    /// nil = the project master chain; non-nil = a track/bus by id.
+    var trackID: UUID?
+    var effects: [EffectDescriptor]
+    /// Opens the AU-effect picker modal (m13-g, audit F6) — supplied by a track/bus
+    /// host only, so the add-menu grows an "Audio Units…" item there. nil on the
+    /// MASTER chain (built-ins only in v1, `masterChainBuiltInOnly`): hiding the
+    /// item is the honest UI — no offer-then-error.
+    var onAddAudioUnit: (() -> Void)?
+    /// Opens an AU insert's plugin window (M3 vi-b) — supplied by a track/bus
+    /// host only; nil on master (built-ins only).
+    var onOpenWindow: ((UUID) -> Void)?
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack {
+                StripSectionLabel(text: "Inserts")
+                addMenu
+            }
+            if effects.isEmpty {
+                Text("No inserts")
+                    .font(.system(size: 9))
+                    .foregroundStyle(DAWTheme.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
+            } else {
+                ForEach(effects) { effect in
+                    InsertRow(
+                        store: store,
+                        trackID: trackID,
+                        effect: effect,
+                        onToggleBypass: { toggleBypass(effect) },
+                        onRemove: { remove(effect) },
+                        // AU inserts get one open-window button (M3 vi-b); built-in
+                        // effects (nil) have first-class in-app editors instead, and
+                        // the master chain never hosts AUs so it stays nil there.
+                        onOpenWindow: (trackID != nil && effect.kind == .audioUnit)
+                            ? { onOpenWindow?(effect.id) }
+                            : nil
+                    )
+                }
+            }
+        }
+    }
+
+    private var addMenu: some View {
+        Menu {
+            ForEach(addableEffectKinds, id: \.self) { kind in
+                Button(MixerFormat.effectDisplayName(EffectDescriptor(kind: kind))) {
+                    add(kind)
+                }
+            }
+            // Audio Units item (m13-g, audit F6): opens the searchable AU-effect
+            // picker modal. Track/bus chains ONLY — the master chain is built-ins-
+            // only in v1 (`masterChainBuiltInOnly`), so `onAddAudioUnit` is nil there
+            // and the item is HIDDEN rather than offered-then-errored. Pro-only by
+            // construction (this whole section renders only in Pro). The picker
+            // drives the SAME `store.addEffect(kind:.audioUnit)` the wire's
+            // `fx.add kind:"audioUnit"` uses.
+            if let onAddAudioUnit {
+                Divider()
+                Button("Audio Units…", action: onAddAudioUnit)
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(DAWTheme.textPrimary)
+                .frame(width: 16, height: 16)
+                .background(DAWTheme.panelRaised)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Add an insert effect")
+    }
+
+    private func add(_ kind: EffectDescriptor.Kind) {
+        if let trackID {
+            _ = try? store.addEffect(toTrack: trackID, kind: kind)
+        } else {
+            _ = try? store.addMasterEffect(kind: kind)
+        }
+    }
+
+    private func toggleBypass(_ effect: EffectDescriptor) {
+        if let trackID {
+            try? store.setEffectBypassed(trackID: trackID, effectID: effect.id,
+                                         bypassed: !effect.isBypassed)
+        } else {
+            try? store.setMasterEffectBypassed(effectID: effect.id, bypassed: !effect.isBypassed)
+        }
+    }
+
+    private func remove(_ effect: EffectDescriptor) {
+        if let trackID {
+            try? store.removeEffect(trackID: trackID, effectID: effect.id)
+        } else {
+            try? store.removeMasterEffect(effectID: effect.id)
+        }
+    }
+}
+
 /// The master strip: accent-bordered and wider, pinned at the right of the
-/// console. Volume fader + stereo output meter + digital dB readout. (DAWCore
-/// has no master insert chain — effects are per-track — so master inserts are
-/// intentionally absent; see the milestone report.)
+/// console. Volume fader + stereo output meter + digital dB readout, and — in
+/// Pro (m13-d) — the master INSERT chain: effects on the whole mix, post-fader
+/// (the last stop before the speakers), built-ins only in v1. Simple hides the
+/// section (the density-honesty rule), leaving the fader a longer throw.
 struct MixerMasterStrip: View {
     @Environment(ProjectStore.self) private var store
+    /// The mixer console's shared density store (`MixerView.panelID`) — read so
+    /// the master strip reveals its inserts only in Pro, exactly like the
+    /// channel strips.
+    var densityStore: PanelDensityStore
+
+    /// Pro density reveals the master insert chain (Simple: fader + meters only).
+    private var isPro: Bool { densityStore.density(forPanel: MixerView.panelID) == .pro }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -367,6 +443,21 @@ struct MixerMasterStrip: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             Divider().overlay(DAWTheme.playback.opacity(0.25))
+            // Pro-only master insert chain (built-ins only, no plugin windows).
+            if isPro {
+                MixerInsertsSection(
+                    store: store,
+                    trackID: nil,
+                    effects: store.masterEffects,
+                    onOpenWindow: nil
+                )
+                .explainable(.mixerMasterInserts)
+                Divider().overlay(DAWTheme.playback.opacity(0.25))
+                // Pro-only master VOLUME automation (m15-c): a fit-to-width fade
+                // editor for the whole mix. Simple hides it, like the inserts above.
+                MasterAutomationSection()
+                Divider().overlay(DAWTheme.playback.opacity(0.25))
+            }
             HStack(alignment: .center, spacing: 10) {
                 VerticalFader(
                     gain: store.masterVolume,
@@ -393,6 +484,166 @@ struct MixerMasterStrip: View {
                 .stroke(DAWTheme.playback.opacity(0.4), lineWidth: 1.5)
         )
         .glow(DAWTheme.playback, radius: 8, intensity: 0.12)
+    }
+}
+
+/// The master strip's VOLUME AUTOMATION section (m15-c, Pro only): a fit-to-width
+/// breakpoint editor for the whole-mix master fade. It mirrors a track's arrange
+/// automation lane — the SAME `AutomationLaneEditor` / `AutomationGeometry` /
+/// `AutomationEdit` machinery and the same click-to-add / drag-to-move /
+/// double-click-to-delete interactions — but homed on the master STRIP, the
+/// master's only place in the app (it has no arrange row or sidebar header, so its
+/// lane lives with its owner, exactly as a track's lane lives on the track's arrange
+/// row). Simple density hides the whole section (the density-honesty rule, like the
+/// master inserts). Every edit routes through the store's master-automation methods —
+/// the SAME ones the `automation.* {trackId:"master"}` wire verbs call, so a lane
+/// edited here is byte-identical to one edited by an agent (UI == wire by construction).
+struct MasterAutomationSection: View {
+    @Environment(ProjectStore.self) private var store
+
+    /// Compact lane height (vs the arrange's 64) — the strip is narrow, and a
+    /// master fade is a handful of points, so it reads fine shorter.
+    private static let laneHeight: CGFloat = 58
+
+    /// The master VOLUME lane, or nil when the mix has none yet (→ the create
+    /// button). v1 keeps at most one master lane, so this is the whole surface.
+    private var lane: AutomationLane? {
+        AutomationLaneSelection.masterVolumeLane(in: store.masterAutomation)
+    }
+
+    /// The whole-song beat span the overview fits into its width. A master fade
+    /// lands on the song, so the lane shows the WHOLE song at a glance (fit-to-width,
+    /// no nested scroll). Measured from the mix's last clip end, floored at 16 so an
+    /// empty/short session still reads. Clip content ONLY (never the lane's own
+    /// points), so the fit stays STABLE while you drag a breakpoint — the scale never
+    /// rescales under the cursor.
+    private var spanBeats: Double {
+        let lastClipEnd = store.tracks.flatMap(\.clips)
+            .map { $0.startBeat + $0.lengthBeats }.max() ?? 0
+        return max(lastClipEnd, 16)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            header
+            if let lane {
+                editor(lane)
+            } else {
+                createButton
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .explainable(.masterAutomation)
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            // "AUTOMATION" verbatim from the track sidebar's AutomationTrackControls
+            // (the master lane is volume-only, so no target chips). In the narrow
+            // master strip the ON/OFF + trash controls get FIRST claim on the width —
+            // the label shrinks a hair (minimumScaleFactor) rather than the toggle
+            // truncating, so "ON" always reads in full.
+            Text("AUTOMATION")
+                .font(.system(size: 8, weight: .semibold))
+                .tracking(1.2)
+                .foregroundStyle(DAWTheme.textDim)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .layoutPriority(0)
+            Spacer(minLength: 4)
+            if let lane {
+                enableToggle(lane).layoutPriority(1)
+                removeButton(lane).layoutPriority(1)
+            }
+        }
+    }
+
+    /// Shown when no master lane exists — creates the volume lane (empty + inert
+    /// until points land), which flips this section into the editor.
+    private var createButton: some View {
+        Button {
+            _ = try? store.addMasterAutomationLane(target: .volume)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "chart.xyaxis.line")
+                    .font(.system(size: 10, weight: .bold))
+                Text("Automate Volume")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(DAWTheme.playback)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .background(DAWTheme.playback.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(DAWTheme.playback.opacity(0.4), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Draw a master volume fade or level ride across the whole mix")
+    }
+
+    /// The fit-to-width lane editor: the shared `AutomationLaneEditor` scaled so the
+    /// whole `spanBeats` fills the strip width (GeometryReader → pixelsPerBeat).
+    private func editor(_ lane: AutomationLane) -> some View {
+        GeometryReader { geo in
+            AutomationLaneEditor(
+                lane: lane,
+                param: .volume,
+                geometry: AutomationGeometry(
+                    pixelsPerBeat: max(1, geo.size.width / CGFloat(spanBeats)),
+                    laneHeight: Self.laneHeight,
+                    range: AutomationParam.volume.range),
+                contentWidth: geo.size.width,
+                onCommit: { points in
+                    _ = try? store.setMasterAutomationPoints(laneID: lane.id, points: points)
+                }
+            )
+            // Re-seed the editor's draft if the lane identity changes (create/remove).
+            .id(lane.id)
+        }
+        .frame(height: Self.laneHeight)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(DAWTheme.hairline, lineWidth: 1))
+    }
+
+    /// Read/manual toggle — green "ON" when the drawn fade drives the master, dim
+    /// "OFF" when the manual master fader is back in charge (the track lane idiom).
+    private func enableToggle(_ lane: AutomationLane) -> some View {
+        Button {
+            _ = try? store.setMasterAutomationLaneEnabled(laneID: lane.id, !lane.isEnabled)
+        } label: {
+            Text(lane.isEnabled ? "ON" : "OFF")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .tracking(0.5)
+                .foregroundStyle(lane.isEnabled ? DAWTheme.signal : DAWTheme.textDim)
+                .padding(.horizontal, 7)
+                .frame(height: 18)
+                .background(lane.isEnabled ? DAWTheme.signal.opacity(0.18) : DAWTheme.panel)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4).stroke(
+                        lane.isEnabled ? DAWTheme.signal.opacity(0.6) : DAWTheme.hairline, lineWidth: 1)
+                )
+                .glow(DAWTheme.signal, radius: 4, intensity: lane.isEnabled ? 0.4 : 0)
+        }
+        .buttonStyle(.plain)
+        .help(lane.isEnabled ? "Automation on — the drawn fade drives the master volume"
+                             : "Automation off — the master fader is manual")
+    }
+
+    private func removeButton(_ lane: AutomationLane) -> some View {
+        Button {
+            _ = try? store.removeMasterAutomationLane(laneID: lane.id)
+        } label: {
+            Image(systemName: "trash")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(DAWTheme.textDim)
+                .frame(width: 20, height: 18)
+                .background(DAWTheme.panel)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(DAWTheme.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Delete the master volume automation lane")
     }
 }
 

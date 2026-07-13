@@ -2,96 +2,17 @@ import SwiftUI
 import DAWCore
 import DAWAppKit
 
-struct TrackListView: View {
+/// The discoverable add-track control (beta m10-i): a themed chip menu (the
+/// piano-roll snap-picker idiom, never a stock gray control — Rule 2) offering
+/// the three track kinds a human can create. Each routes to `store.addTrack`,
+/// which supplies a sensible default name ("Inst 3", "Audio 2", "Bus 1"). One
+/// component backs both the header chip and the empty-state button so they stay
+/// in sync. Carries the shared `.arrangeAddTrack` Explain entry.
+struct AddTrackMenu<ChipLabel: View>: View {
     @Environment(ProjectStore.self) private var store
+    @ViewBuilder var label: () -> ChipLabel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("TRACKS")
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(1.4)
-                    .foregroundStyle(DAWTheme.textDim)
-                Spacer()
-                // A LABELED add-track affordance so a human never has to wonder
-                // whether tracks are AI-only (beta m10-i): a compact "+ ADD" chip
-                // that drops a kind menu. Neutral chrome — textPrimary on the
-                // raised chip, no accent at rest (Rule 3: a create "+" earns no
-                // accent).
-                addTrackMenu {
-                    HStack(spacing: 3) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 10, weight: .bold))
-                        Text("ADD")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .tracking(0.8)
-                    }
-                    .foregroundStyle(DAWTheme.textPrimary)
-                    .padding(.horizontal, 8)
-                    .frame(height: 22)
-                    .background(DAWTheme.panelRaised)
-                    .clipShape(RoundedRectangle(cornerRadius: 5))
-                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-
-            if store.tracks.isEmpty {
-                VStack(spacing: 10) {
-                    VStack(spacing: 6) {
-                        Text("No tracks yet")
-                            .font(.system(size: 12))
-                            .foregroundStyle(DAWTheme.textDim)
-                        Text("Add one below, or let an agent do it over MCP")
-                            .font(.system(size: 10))
-                            .foregroundStyle(DAWTheme.textFaint)
-                    }
-                    // The empty state gets a REAL, obvious add button (not just the
-                    // tucked-away header chip) so a first-time human has a clear
-                    // starting move (beta m10-i).
-                    addTrackMenu {
-                        HStack(spacing: 5) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 11, weight: .bold))
-                            Text("ADD TRACK")
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .tracking(0.8)
-                        }
-                        .foregroundStyle(DAWTheme.textPrimary)
-                        .padding(.horizontal, 12)
-                        .frame(height: 28)
-                        .background(DAWTheme.panelRaised)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(DAWTheme.hairline, lineWidth: 1))
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                // No inner ScrollView (m10-j): the shared outer vertical ScrollView
-                // in ContentView scrolls the sidebar rows and the timeline lanes
-                // TOGETHER as one unit, so they stay pixel-locked. This is a plain
-                // VStack; the TRACKS header above rides the shared scroll at the top.
-                VStack(spacing: 6) {
-                    ForEach(store.tracks) { track in
-                        TrackRow(track: track)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 8)
-            }
-        }
-        .frame(maxHeight: .infinity, alignment: .top)
-        .glassPanel()
-    }
-
-    /// The discoverable add-track control (beta m10-i): a themed chip menu (the
-    /// piano-roll snap-picker idiom, never a stock gray control — Rule 2) offering
-    /// the three track kinds a human can create. Each routes to `store.addTrack`,
-    /// which supplies a sensible default name ("Inst 3", "Audio 2", "Bus 1"). One
-    /// helper backs both the header chip and the empty-state button so they stay
-    /// in sync. Carries the shared `.arrangeAddTrack` Explain entry.
-    private func addTrackMenu<ChipLabel: View>(@ViewBuilder label: () -> ChipLabel) -> some View {
         Menu {
             Button {
                 store.addTrack(kind: .instrument)
@@ -111,6 +32,105 @@ struct TrackListView: View {
         .fixedSize()
         .help("Add a track — instrument, audio, or bus")
         .explainable(.arrangeAddTrack)
+    }
+}
+
+/// The pinned TRACKS header bar (m13-g, ruler-block pinning): the "TRACKS" label +
+/// the add-track chip. Extracted from the old `TrackListView` so it can ride the
+/// pinned ruler block ABOVE the shared vertical scroll (staying visible however
+/// deep you scroll) while `TrackRowsList` scrolls below it. Its content sits at the
+/// TOP of the block (`rulerHeight` tall) so it aligns with the ruler beside it.
+struct TracksHeaderBar: View {
+    var body: some View {
+        HStack {
+            Text("TRACKS")
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(1.4)
+                .foregroundStyle(DAWTheme.textDim)
+            Spacer()
+            // A LABELED add-track affordance so a human never has to wonder whether
+            // tracks are AI-only (beta m10-i): a compact "+ ADD" chip that drops a
+            // kind menu. Neutral chrome — textPrimary on the raised chip, no accent
+            // at rest (Rule 3: a create "+" earns no accent).
+            AddTrackMenu {
+                HStack(spacing: 3) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .bold))
+                    Text("ADD")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .tracking(0.8)
+                }
+                .foregroundStyle(DAWTheme.textPrimary)
+                .padding(.horizontal, 8)
+                .frame(height: 22)
+                .background(DAWTheme.panelRaised)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+/// The scrolling track rows (m13-g) — the sidebar body BELOW the pinned
+/// `TracksHeaderBar`. Rows anchor at the top of the shared vertical scroll (no top
+/// padding), so row 0 lines up with lane 0 (which also starts at y = 0 now that the
+/// ruler is pinned separately). A plain VStack: the shared outer vertical
+/// ScrollView in ContentView scrolls these rows and the timeline lanes TOGETHER as
+/// one unit (m10-j), so they stay pixel-locked.
+struct TrackRowsList: View {
+    @Environment(ProjectStore.self) private var store
+
+    var body: some View {
+        Group {
+            if store.tracks.isEmpty {
+                VStack(spacing: 10) {
+                    VStack(spacing: 6) {
+                        Text("No tracks yet")
+                            .font(.system(size: 12))
+                            .foregroundStyle(DAWTheme.textDim)
+                        Text("Add one below, or let an agent do it over MCP")
+                            .font(.system(size: 10))
+                            .foregroundStyle(DAWTheme.textFaint)
+                    }
+                    // The empty state gets a REAL, obvious add button (not just the
+                    // tucked-away header chip) so a first-time human has a clear
+                    // starting move (beta m10-i).
+                    AddTrackMenu {
+                        HStack(spacing: 5) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("ADD TRACK")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .tracking(0.8)
+                        }
+                        .foregroundStyle(DAWTheme.textPrimary)
+                        .padding(.horizontal, 12)
+                        .frame(height: 28)
+                        .background(DAWTheme.panelRaised)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(DAWTheme.hairline, lineWidth: 1))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Row 0 anchors flush at the top of the scroll (no top padding), so
+                // it lines up with lane 0 — which also starts at y = 0 now that the
+                // ruler is pinned separately (m13-g). Both columns flush = aligned.
+                VStack(spacing: 6) {
+                    ForEach(store.tracks) { track in
+                        TrackRow(track: track)
+                            .id(track.id)   // scroll target (m13-g deep-scroll proof)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .glassPanel()
     }
 }
 
@@ -206,7 +226,8 @@ struct TrackRow: View {
                 }
             }
             Button("Remove Track", role: .destructive) {
-                store.removeTrack(id: track.id)
+                // m13-c: refused mid-recording (transportBusy) — safe no-op here.
+                _ = try? store.removeTrack(id: track.id)
             }
         }
     }

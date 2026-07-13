@@ -581,26 +581,52 @@ private struct PianoRollGrid: View {
     var snap: SnapResolution
     var noteColor: Color
 
+    /// A value snapshot of everything the renderer needs, taken on the main actor
+    /// before the closure runs. All fields are Sendable so the `@Sendable` Canvas
+    /// closure captures only plain values — never `model` or `self` (CANVAS
+    /// CONTRACT, m16-a; the pitch/beat mappings are affine and reproduced inline).
+    private struct GridSnapshot {
+        var rowHeight: CGFloat
+        var pixelsPerBeat: CGFloat
+        var clipLengthBeats: Double
+        var draft: [MIDINote]
+        var selectedIDs: Set<UUID>
+        var beatsPerBar: Int
+        var snapStep: Double
+        var noteColor: Color
+    }
+
     var body: some View {
-        Canvas { context, size in
-            drawBlackKeyRows(&context, size: size)
-            drawGridLines(&context, size: size)
-            drawOutOfClipShade(&context, size: size)
-            drawNotes(&context)
+        // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+        // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+        let s = GridSnapshot(
+            rowHeight: model.rowHeight,
+            pixelsPerBeat: model.pixelsPerBeat,
+            clipLengthBeats: model.clipLengthBeats,
+            draft: model.draft,
+            selectedIDs: model.selection,
+            beatsPerBar: beatsPerBar,
+            snapStep: snap.beats ?? 1,
+            noteColor: noteColor)
+        return Canvas { @Sendable context, size in
+            Self.drawBlackKeyRows(&context, size: size, s: s)
+            Self.drawGridLines(&context, size: size, s: s)
+            Self.drawOutOfClipShade(&context, size: size, s: s)
+            Self.drawNotes(&context, s: s)
         }
     }
 
-    private func drawBlackKeyRows(_ context: inout GraphicsContext, size: CGSize) {
+    private nonisolated static func drawBlackKeyRows(_ context: inout GraphicsContext, size: CGSize, s: GridSnapshot) {
         for pitch in 0..<PianoRollModel.pitchCount where KeyboardSidebar.isBlackKey(pitch) {
-            let y = model.y(forPitch: pitch)
+            let y = CGFloat(PianoRollModel.pitchCount - 1 - pitch) * s.rowHeight
             context.fill(
-                Path(CGRect(x: 0, y: y, width: size.width, height: model.rowHeight)),
+                Path(CGRect(x: 0, y: y, width: size.width, height: s.rowHeight)),
                 with: .color(Color.black.opacity(0.22))
             )
         }
         // Octave separators.
         for pitch in stride(from: 0, through: PianoRollModel.pitchCount - 1, by: 12) {
-            let y = model.y(forPitch: pitch)
+            let y = CGFloat(PianoRollModel.pitchCount - 1 - pitch) * s.rowHeight
             context.fill(
                 Path(CGRect(x: 0, y: y, width: size.width, height: 0.5)),
                 with: .color(Color.white.opacity(0.10))
@@ -608,13 +634,13 @@ private struct PianoRollGrid: View {
         }
     }
 
-    private func drawGridLines(_ context: inout GraphicsContext, size: CGSize) {
-        let beatsShown = Int((size.width / model.pixelsPerBeat).rounded(.up))
-        let step = snap.beats ?? 1
+    private nonisolated static func drawGridLines(_ context: inout GraphicsContext, size: CGSize, s: GridSnapshot) {
+        let beatsShown = Int((size.width / s.pixelsPerBeat).rounded(.up))
+        let step = s.snapStep
         var beat = 0.0
         while beat <= Double(beatsShown) + 0.0001 {
-            let x = model.x(forBeat: beat)
-            let isBar = beat.truncatingRemainder(dividingBy: Double(beatsPerBar)).magnitude < 0.001
+            let x = CGFloat(beat) * s.pixelsPerBeat
+            let isBar = beat.truncatingRemainder(dividingBy: Double(s.beatsPerBar)).magnitude < 0.001
             let isBeat = beat.truncatingRemainder(dividingBy: 1).magnitude < 0.001
             let color = isBar
                 ? DAWTheme.gridEmphasis
@@ -624,8 +650,8 @@ private struct PianoRollGrid: View {
         }
     }
 
-    private func drawOutOfClipShade(_ context: inout GraphicsContext, size: CGSize) {
-        let clipX = model.x(forBeat: model.clipLengthBeats)
+    private nonisolated static func drawOutOfClipShade(_ context: inout GraphicsContext, size: CGSize, s: GridSnapshot) {
+        let clipX = CGFloat(s.clipLengthBeats) * s.pixelsPerBeat
         guard clipX < size.width else { return }
         context.fill(
             Path(CGRect(x: clipX, y: 0, width: size.width - clipX, height: size.height)),
@@ -633,10 +659,15 @@ private struct PianoRollGrid: View {
         )
     }
 
-    private func drawNotes(_ context: inout GraphicsContext) {
-        for note in model.draft {
-            let rect = model.rect(for: note).insetBy(dx: 0.5, dy: 1.5)
-            let selected = model.isSelected(note.id)
+    private nonisolated static func drawNotes(_ context: inout GraphicsContext, s: GridSnapshot) {
+        for note in s.draft {
+            let rect = CGRect(
+                x: CGFloat(note.startBeat) * s.pixelsPerBeat,
+                y: CGFloat(PianoRollModel.pitchCount - 1 - note.pitch) * s.rowHeight,
+                width: max(3, CGFloat(note.lengthBeats) * s.pixelsPerBeat),
+                height: s.rowHeight
+            ).insetBy(dx: 0.5, dy: 1.5)
+            let selected = s.selectedIDs.contains(note.id)
             let velocity = Double(note.velocity) / 127
             let opacity = 0.45 + 0.5 * velocity
             let path = Path(roundedRect: rect, cornerRadius: 3)
@@ -644,13 +675,13 @@ private struct PianoRollGrid: View {
                 // Subtle bloom behind a selected note.
                 context.fill(
                     Path(roundedRect: rect.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 4),
-                    with: .color(noteColor.opacity(0.28))
+                    with: .color(s.noteColor.opacity(0.28))
                 )
             }
-            context.fill(path, with: .color(noteColor.opacity(selected ? min(1, opacity + 0.2) : opacity)))
+            context.fill(path, with: .color(s.noteColor.opacity(selected ? min(1, opacity + 0.2) : opacity)))
             context.stroke(
                 path,
-                with: .color(selected ? DAWTheme.textPrimary.opacity(0.9) : noteColor.opacity(0.9)),
+                with: .color(selected ? DAWTheme.textPrimary.opacity(0.9) : s.noteColor.opacity(0.9)),
                 lineWidth: selected ? 1 : 0.5
             )
         }

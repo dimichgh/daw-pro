@@ -26,6 +26,16 @@ struct ContentView: View {
     @State private var sidebarDragOrigin: CGFloat?
     @State private var editorDragOrigin: CGFloat?
 
+    /// Live horizontal scroll offset of the arrange lanes (m13-g). The scrolling
+    /// `.lanes` instance reports it; the pinned `.ruler` block mirrors it so the
+    /// ruler stays horizontally synced with the content while pinned above the
+    /// vertical scroll. View-local — pure scroll bookkeeping.
+    @State private var arrangeHScroll: CGFloat = 0
+
+    /// Gap between the pinned ruler block and the scrolling track area (m13-g) —
+    /// reads as a distinct pinned ruler bar over the track panels.
+    private static let arrangeBlockGap: CGFloat = 6
+
     /// The clip whose piano roll is open (nil = closed). Only MIDI clips open it.
     /// Hoisted onto AppModel — see `model` above.
     private var selectedClipID: UUID? {
@@ -84,17 +94,7 @@ struct ContentView: View {
         // (the Settings-overlay idiom) — rendered INSIDE the main window content so
         // `debug.captureUI` can snapshot it headlessly (a popover can't be). Opened
         // by the track-header / mixer instrument chips and `debug.instrumentPicker`.
-        .overlay {
-            if model.instrumentPickerTrackID != nil {
-                InstrumentPickerOverlay(
-                    model: model.instrumentPicker,
-                    densityStore: model.panelDensity,
-                    onChoose: { model.applyInstrumentChoice($0) },
-                    onImport: { model.importSoundBankViaPanel() },
-                    onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeInstrumentPicker() } }
-                )
-            }
-        }
+        .overlay { pickerOverlays }
         // Quantize & groove panel (m11-a): a centered dark-glass modal over a scrim
         // (the instrument-picker idiom) — rendered INSIDE the window so
         // `debug.captureUI` can snapshot it. Opened by the piano-roll QUANTIZE chip,
@@ -139,6 +139,34 @@ struct ContentView: View {
                     onReplayTour: { withAnimation(.easeOut(duration: 0.2)) { model.replayTour() } },
                     onClose: { withAnimation(.easeOut(duration: 0.15)) { model.showSettings = false } }
                 )
+            }
+        }
+        // Engine-notices popover (m15-e, audit F6): a bottom-anchored dark-glass
+        // card listing schedule-time degradations, opened by the transport-bar
+        // notices chip (and `debug.postEngineNotice`). Rendered INSIDE the window
+        // (the ContentView "a popover can't be captured" precedent — a real
+        // NSPopover lives in its own window, invisible to the `debug.captureUI`
+        // cacheDisplay path) so a headless capture snapshots it. A near-transparent
+        // backdrop dismisses on any outside click. Anchored trailing, floated above
+        // the transport bar — it reads as popping from the bar's right status cluster.
+        .overlay(alignment: .bottom) {
+            if model.showEngineNotices, !store.engineNotices.isEmpty {
+                ZStack(alignment: .bottomTrailing) {
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation(.easeOut(duration: 0.15)) { model.showEngineNotices = false }
+                        }
+                    EngineNoticesPopover(
+                        model: EngineNoticesModel(notices: store.engineNotices),
+                        onClose: {
+                            withAnimation(.easeOut(duration: 0.15)) { model.showEngineNotices = false }
+                        }
+                    )
+                    .padding(.trailing, 24)
+                    .padding(.bottom, 84)
+                }
+                .transition(.opacity)
             }
         }
         // "Explain this" overlay (M8 ex-a/ex-b): inject the mode + coordinator around
@@ -242,6 +270,34 @@ struct ContentView: View {
         return hasher.finalize()
     }
 
+    /// The instrument + AU-effect picker modals (m10-n / m13-g), extracted from
+    /// `body` so the long overlay chain type-checks. Both are centered dark-glass
+    /// modals rendered inside the window (so `debug.captureUI` can snapshot them);
+    /// each routes selection through the SAME store method the wire uses.
+    @ViewBuilder
+    private var pickerOverlays: some View {
+        if model.instrumentPickerTrackID != nil {
+            InstrumentPickerOverlay(
+                model: model.instrumentPicker,
+                densityStore: model.panelDensity,
+                onChoose: { model.applyInstrumentChoice($0) },
+                onImport: { model.importSoundBankViaPanel() },
+                onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeInstrumentPicker() } }
+            )
+        }
+        // AU-effect picker (m13-g, audit F6): opened by a Pro channel/bus strip's
+        // insert add-menu "Audio Units…" item; UI-only — Add routes through the SAME
+        // `store.addEffect(kind:.audioUnit)` the wire uses. Never opened for master.
+        if model.effectPickerTrackID != nil {
+            EffectPickerOverlay(
+                model: model.effectPicker,
+                trackName: model.effectPickerTrackName,
+                onChoose: { config in withAnimation(.easeOut(duration: 0.15)) { model.applyEffectChoice(config) } },
+                onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeEffectPicker() } }
+            )
+        }
+    }
+
     /// The Arrange surface: track list + timeline, with the piano roll docked
     /// below when a MIDI clip is open. Extracted so `body` can switch it against
     /// the Mix console without duplicating the header/transport chrome.
@@ -249,132 +305,62 @@ struct ContentView: View {
     private func arrangeWorkspace(_ geo: GeometryProxy) -> some View {
         arrangeToolbar
         HStack(spacing: 10) {
-            // Shared-scroll arrange (m10-j): ONE vertical ScrollView owns BOTH
-            // columns (the sidebar track rows + the timeline lanes) as a single
-            // HStack, so there is exactly one scroll position and the two columns can
-            // never desync — the structurally safer choice over synchronizing two
-            // offsets. When the content is taller than the viewport the whole track
-            // area scrolls together (rows stay pixel-locked to lanes); when it's
-            // shorter, `minHeight` fills the viewport so the glass panels don't shrink
-            // to their content. The Sketchpad/ClipFix side panels stay OUTSIDE this
-            // scroll at full height. On macOS, wheel-driven scrolling doesn't conflict
-            // with the click-drag splitters inside (the existing row-height grabber
-            // already lives inside a scroll). The ruler + TRACKS header sit at the top
-            // of the shared content — their HORIZONTAL behavior is unchanged (the
-            // ruler still h-scrolls with the lanes); vertically they ride the scroll.
+            // Ruler-block pinning (m13-g): the ruler + loop band + marker lane +
+            // tempo lane + TRACKS header PIN in a block ABOVE the shared vertical
+            // scroll (a sibling in the VStack, so it never scrolls away), while the
+            // ScrollView below still owns BOTH columns (rows + lanes) as ONE unit —
+            // the m10-j no-desync invariant is preserved (there is still exactly one
+            // vertical scroll for both columns). The pinned ruler stays HORIZONTALLY
+            // synced with the lanes: the `.lanes` instance reports its scroll offset
+            // into `arrangeHScroll` and the `.ruler` instance mirrors it. The
+            // Sketchpad/ClipFix side panels stay OUTSIDE this at full height.
             GeometryReader { trackGeo in
-                ScrollView(.vertical) {
+                let sidebarW = model.panelLayout.sidebarWidth
+                let bodyViewport = max(0, trackGeo.size.height
+                                       - TimelineLanesView.rulerHeight - Self.arrangeBlockGap)
+                VStack(spacing: Self.arrangeBlockGap) {
+                    // PINNED RULER BLOCK — both columns, fixed at rulerHeight.
                     HStack(spacing: 10) {
-                        TrackListView()
-                            .frame(width: model.panelLayout.sidebarWidth)
-                        // Draggable sidebar↔timeline splitter (beta m10-d). Drag right
-                        // widens the track list; the store clamps to 250–420 pt.
-                        sidebarSplitter
-                        TimelineLanesView(
-                            tracks: store.tracks,
-                            positionBeats: store.transport.positionBeats,
-                            beatsPerBar: store.transport.timeSignature.beatsPerBar,
-                            selectedClipID: selectedClipID,
-                            onSelectClip: selectClip,
-                            expandedTrackIDs: model.expandedAutomationTrackIDs,
-                            selectedLaneByTrack: model.automationLaneSelection,
-                            onCommitPoints: { trackID, laneID, points in
-                                _ = try? store.setAutomationPoints(trackID: trackID, laneID: laneID, points: points)
-                            },
-                            snap: model.clipSnap,
-                            secondsPerBeat: 60.0 / store.transport.tempoBPM,
-                            waveformStore: model.waveformStore,
-                            densityStore: model.panelDensity,
-                            // Global track-row height (beta m10-d) — the SAME store value
-                            // the sidebar rows use, so lanes and headers stay pixel-aligned.
-                            rowHeight: model.panelLayout.rowHeight,
-                            // The shared-scroll viewport height (m10-j): the timeline fills
-                            // it when content is short and reports its natural (content)
-                            // height when tall, so the outer scroll drives the overflow.
-                            availableHeight: trackGeo.size.height,
-                            onMoveClip: { trackID, clip, toStart in
-                                _ = try? store.moveClip(trackId: trackID, clipId: clip.id, toStartBeat: toStart)
-                            },
-                            onTrimClip: { trackID, clip, newStart, newLength in
-                                _ = try? store.trimClip(trackId: trackID, clipId: clip.id,
-                                                        newStartBeat: newStart, newLengthBeats: newLength)
-                            },
-                            onSplitClip: { trackID, clip, atBeat in
-                                _ = try? store.splitClip(trackId: trackID, clipId: clip.id, atBeat: atBeat)
-                            },
-                            onSetClipFades: { trackID, clip, fadeIn, fadeOut, inCurve, outCurve in
-                                _ = try? store.setClipFades(trackId: trackID, clipId: clip.id,
-                                                            fadeInBeats: fadeIn, fadeOutBeats: fadeOut,
-                                                            fadeInCurve: inCurve, fadeOutCurve: outCurve)
-                            },
-                            onSetClipGain: { trackID, clip, gainDb in
-                                _ = try? store.setClipGain(trackId: trackID, clipId: clip.id, gainDb: gainDb)
-                            },
-                            onStretchClip: { trackID, clip, toLength in
-                                _ = try? store.stretchClip(trackId: trackID, clipId: clip.id, toLengthBeats: toLength)
-                            },
-                            // Quantize & groove (m11-a): the arrange clip context menu
-                            // (Pro, sp-c) opens the SAME panel the piano roll does.
-                            // "Extract Groove…" jumps straight to the extract field.
-                            onOpenQuantize: { clip in model.openQuantizePanel(clipID: clip.id) },
-                            onExtractGroove: { clip in
-                                model.openQuantizePanel(clipID: clip.id, startExtract: true)
-                            },
-                            // Crossfade two adjacent/overlapping audio clips (m11-d,
-                            // Pro clip menu) — routes through the store's crossfade
-                            // method (one undo step; the sanctioned-overlap tool).
-                            onCrossfadeClips: { trackID, clipID, otherClipID, length in
-                                _ = try? store.crossfadeClips(trackId: trackID, clipId: clipID,
-                                                              otherClipId: otherClipID, lengthBeats: length)
-                            },
-                            stretchStatus: { clip in model.stretchStatus(for: clip.id) },
-                            expandedTakeTrackIDs: model.expandedTakeTrackIDs,
-                            onSetTakeComp: { trackID, groupID, segments in
-                                _ = try? store.setCompSegments(trackId: trackID, groupId: groupID, segments: segments)
-                            },
-                            onSelectTake: { trackID, groupID, laneID in
-                                _ = try? store.selectTake(trackId: trackID, groupId: groupID, laneId: laneID)
-                            },
-                            onFlattenTakeGroup: { trackID, groupID in
-                                _ = try? store.flattenTakeGroup(trackId: trackID, groupId: groupID)
-                            },
-                            onRemoveTakeLane: { trackID, groupID, laneID in
-                                _ = try? store.removeTakeLane(trackId: trackID, groupId: groupID, laneId: laneID)
-                            },
-                            // Loop region ruler (beta m10-g): loop state flows in by value
-                            // so an agent's `transport.setLoop` over the wire updates the
-                            // band live; the callbacks route through the pre-existing store
-                            // methods (no new wire command — the m10-c/e pure-view precedent).
-                            isLoopEnabled: store.transport.isLoopEnabled,
-                            loopStartBeat: store.transport.loopStartBeat,
-                            loopEndBeat: store.transport.loopEndBeat,
-                            onSetLoop: { enabled, start, end in
-                                _ = try? store.setLoop(enabled: enabled, startBeat: start, endBeat: end)
-                            },
-                            onSeek: { beat in _ = try? store.seek(toBeats: beat) },
-                            // Session markers (m11-c): markers flow in by value from the
-                            // store (already beat-sorted) so an agent's marker.* over the
-                            // wire updates the lane live; callbacks route through the store
-                            // marker methods (undo/coalescing free).
-                            markers: store.markers,
-                            onAddMarker: { beat in _ = store.addMarker(beat: beat) },
-                            onMoveMarker: { markerID, beat in _ = try? store.moveMarker(id: markerID, beat: beat) },
-                            onRenameMarker: { markerID, name in _ = try? store.renameMarker(id: markerID, name: name) },
-                            onRemoveMarker: { markerID in try? store.removeMarker(id: markerID) },
-                            stageRenameMarkerID: model.stagedMarkerRenameID,
-                            // Audio import via drag-drop (beta m10-k): dropped file URLs
-                            // run through the SAME shared plan pipeline the File→Import
-                            // menu uses; the target lane + drop beat come from the drop
-                            // location, routing/fan-out/naming decided by AudioImportPlan.
-                            onImportAudio: { urls, targetTrackID, atBeatRaw in
-                                model.importAudioFiles(urls: urls, targetTrackID: targetTrackID,
-                                                       atBeatRaw: atBeatRaw)
-                            }
-                        )
+                        TracksHeaderBar()
+                            .frame(width: sidebarW, height: TimelineLanesView.rulerHeight)
+                            .glassPanel()
+                        // Spacer matching the 6pt sidebarSplitter below, so the pinned
+                        // ruler lines up with the scrolling lanes.
+                        Color.clear.frame(width: 6)
+                        arrangeTimeline(.ruler, viewport: 0)
+                            .glassPanel()
                     }
-                    // Fill the viewport when content is short (glass panels stay full
-                    // height); grow past it when tall (the shared scroll takes over).
-                    .frame(minHeight: trackGeo.size.height, alignment: .top)
+                    // Pin the block to exactly `rulerHeight`. Without this the 6pt
+                    // `Color.clear` spacer (which has no height) is vertically greedy,
+                    // so the VStack splits its space ~50/50 between this block and the
+                    // scroll below — leaving the ruler floating mid-panel (m13-g fix).
+                    .frame(height: TimelineLanesView.rulerHeight)
+                    // SHARED VERTICAL SCROLL — owns both columns (m10-j preserved).
+                    ScrollViewReader { proxy in
+                        ScrollView(.vertical) {
+                            HStack(spacing: 10) {
+                                TrackRowsList()
+                                    .frame(width: sidebarW)
+                                // Draggable sidebar↔timeline splitter (beta m10-d).
+                                sidebarSplitter
+                                arrangeTimeline(.lanes, viewport: bodyViewport)
+                            }
+                            // Fill the viewport when content is short (glass panels stay
+                            // full height); grow past it when tall (scroll takes over).
+                            .frame(minHeight: bodyViewport, alignment: .top)
+                        }
+                        // Deep-scroll proof (m13-g G3): `debug.arrangeScroll` sets a
+                        // target track id + bumps a nonce; the shared scroll jumps to
+                        // it so a capture can frame the bottom of a deep session with
+                        // the block pinned. (Nonce, not the id, so a repeat still fires.)
+                        .onChange(of: model.arrangeScrollNonce) { _, _ in
+                            guard let target = model.arrangeScrollTarget else { return }
+                            withAnimation(.easeOut(duration: 0.25)) {
+                                proxy.scrollTo(target,
+                                               anchor: model.arrangeScrollToBottom ? .bottom : .top)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -404,7 +390,10 @@ struct ContentView: View {
             editorSplitter(geoHeight: geo.size.height)
             PianoRollView(
                 clip: clip,
-                beatsPerBar: store.transport.timeSignature.beatsPerBar,
+                // m12-d (design row 74, v1 policy: one meter per clip view): the
+                // grid uses the meter GOVERNING THE CLIP'S START beat, so a clip in
+                // a 7/8 section rules bars every 7 beats and a 4/4 clip every 4.
+                beatsPerBar: store.transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
                 // The SAME transport source the arrange timeline consumes (no second
                 // ticker) — the piano roll playhead is a rendering of this state.
                 positionBeats: store.transport.positionBeats,
@@ -427,6 +416,119 @@ struct ContentView: View {
             .id(clip.id)
             .frame(height: geo.size.height * model.panelLayout.editorFraction)
         }
+    }
+
+    /// Builds one arrange-timeline instance in the given render mode (m13-g). The
+    /// SAME big param set drives both the pinned `.ruler` block and the scrolling
+    /// `.lanes` body — the two share geometry (contentWidth/beat scale) so bar lines
+    /// align, and stay horizontally synced via `arrangeHScroll` (the `.lanes`
+    /// instance reports its offset; the `.ruler` mirrors it). `viewport` is the
+    /// vertical space the lanes fill when content is short (0 for the ruler).
+    @ViewBuilder
+    private func arrangeTimeline(_ content: ArrangeContent, viewport: CGFloat) -> some View {
+        TimelineLanesView(
+            tracks: store.tracks,
+            positionBeats: store.transport.positionBeats,
+            selectedClipID: selectedClipID,
+            onSelectClip: selectClip,
+            expandedTrackIDs: model.expandedAutomationTrackIDs,
+            selectedLaneByTrack: model.automationLaneSelection,
+            onCommitPoints: { trackID, laneID, points in
+                _ = try? store.setAutomationPoints(trackID: trackID, laneID: laneID, points: points)
+            },
+            snap: model.clipSnap,
+            // m12-d: route the waveform seconds-per-beat through the tempo-map API.
+            // Base-tempo scalar (segment 0); clips crossing a non-trivial boundary
+            // carry the amber honesty hint instead.
+            secondsPerBeat: store.transport.tempoMap.secondsPerBeat(atBeat: 0),
+            waveformStore: model.waveformStore,
+            densityStore: model.panelDensity,
+            // Global track-row height (beta m10-d) — the SAME store value the sidebar
+            // rows use, so lanes and headers stay pixel-aligned.
+            rowHeight: model.panelLayout.rowHeight,
+            // The shared-scroll viewport height (m10-j): the lanes fill it when short.
+            availableHeight: viewport,
+            onMoveClip: { trackID, clip, toStart in
+                _ = try? store.moveClip(trackId: trackID, clipId: clip.id, toStartBeat: toStart)
+            },
+            onTrimClip: { trackID, clip, newStart, newLength in
+                _ = try? store.trimClip(trackId: trackID, clipId: clip.id,
+                                        newStartBeat: newStart, newLengthBeats: newLength)
+            },
+            onSplitClip: { trackID, clip, atBeat in
+                _ = try? store.splitClip(trackId: trackID, clipId: clip.id, atBeat: atBeat)
+            },
+            onSetClipFades: { trackID, clip, fadeIn, fadeOut, inCurve, outCurve in
+                _ = try? store.setClipFades(trackId: trackID, clipId: clip.id,
+                                            fadeInBeats: fadeIn, fadeOutBeats: fadeOut,
+                                            fadeInCurve: inCurve, fadeOutCurve: outCurve)
+            },
+            onSetClipGain: { trackID, clip, gainDb in
+                _ = try? store.setClipGain(trackId: trackID, clipId: clip.id, gainDb: gainDb)
+            },
+            onSetClipGainEnvelope: { trackID, clip, points in
+                _ = try? store.setClipGainEnvelope(trackId: trackID, clipId: clip.id, points: points)
+            },
+            onStretchClip: { trackID, clip, toLength in
+                _ = try? store.stretchClip(trackId: trackID, clipId: clip.id, toLengthBeats: toLength)
+            },
+            // Quantize & groove (m11-a): the arrange clip context menu (Pro, sp-c)
+            // opens the SAME panel the piano roll does.
+            onOpenQuantize: { clip in model.openQuantizePanel(clipID: clip.id) },
+            onExtractGroove: { clip in
+                model.openQuantizePanel(clipID: clip.id, startExtract: true)
+            },
+            // Crossfade two adjacent/overlapping audio clips (m11-d, Pro clip menu).
+            onCrossfadeClips: { trackID, clipID, otherClipID, length in
+                _ = try? store.crossfadeClips(trackId: trackID, clipId: clipID,
+                                              otherClipId: otherClipID, lengthBeats: length)
+            },
+            stretchStatus: { clip in model.stretchStatus(for: clip.id) },
+            expandedTakeTrackIDs: model.expandedTakeTrackIDs,
+            onSetTakeComp: { trackID, groupID, segments in
+                _ = try? store.setCompSegments(trackId: trackID, groupId: groupID, segments: segments)
+            },
+            onSelectTake: { trackID, groupID, laneID in
+                _ = try? store.selectTake(trackId: trackID, groupId: groupID, laneId: laneID)
+            },
+            onFlattenTakeGroup: { trackID, groupID in
+                _ = try? store.flattenTakeGroup(trackId: trackID, groupId: groupID)
+            },
+            onRemoveTakeLane: { trackID, groupID, laneID in
+                _ = try? store.removeTakeLane(trackId: trackID, groupId: groupID, laneId: laneID)
+            },
+            // Loop region ruler (beta m10-g): loop state flows in by value so an
+            // agent's `transport.setLoop` over the wire updates the band live; the
+            // callbacks route through the pre-existing store methods.
+            isLoopEnabled: store.transport.isLoopEnabled,
+            loopStartBeat: store.transport.loopStartBeat,
+            loopEndBeat: store.transport.loopEndBeat,
+            onSetLoop: { enabled, start, end in
+                _ = try? store.setLoop(enabled: enabled, startBeat: start, endBeat: end)
+            },
+            onSeek: { beat in _ = try? store.seek(toBeats: beat) },
+            // Session markers (m11-c): markers flow in by value from the store.
+            markers: store.markers,
+            onAddMarker: { beat in _ = store.addMarker(beat: beat) },
+            onMoveMarker: { markerID, beat in _ = try? store.moveMarker(id: markerID, beat: beat) },
+            onRenameMarker: { markerID, name in _ = try? store.renameMarker(id: markerID, name: name) },
+            onRemoveMarker: { markerID in try? store.removeMarker(id: markerID) },
+            stageRenameMarkerID: model.stagedMarkerRenameID,
+            // Audio import via drag-drop (beta m10-k).
+            onImportAudio: { urls, targetTrackID, atBeatRaw in
+                model.importAudioFiles(urls: urls, targetTrackID: targetTrackID,
+                                       atBeatRaw: atBeatRaw)
+            },
+            // Tempo + meter maps (m12-d): the RESOLVED maps flow in by value.
+            meterMap: store.transport.meterMap,
+            tempoMap: store.transport.tempoMap,
+            tempoLane: model.tempoLaneModel,
+            isRecordingTransport: store.transport.isRecording,
+            // Ruler-block pinning (m13-g): the render mode + horizontal-sync wiring.
+            content: content,
+            hScrollOffset: arrangeHScroll,
+            onHScrollChange: { arrangeHScroll = $0 }
+        )
     }
 
     /// The vertical hairline between the track sidebar and the timeline (beta

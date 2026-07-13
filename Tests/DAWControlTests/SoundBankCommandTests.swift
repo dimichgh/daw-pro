@@ -33,6 +33,8 @@ private final class AUListingEngine: AudioEngineControlling {
                         completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {}
     func stopRecording() {}
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
@@ -385,18 +387,28 @@ struct SoundBankCommandTests {
     }
 
     // 16.
-    @Test("allCommands carries the three instrument.* additions (m10-n-2); count now 116")
+    @Test("allCommands carries the three instrument.* additions (m10-n-2); count now 118")
     func commandCountPin() {
         // m10-n-2 took the surface 105 → 108 with these three; m11-b's read-only
         // edit.history took it 108 → 109; m11-c's five marker.* commands took it
         // 109 → 114; m11-d's clip.crossfade took it 114 → 115; m11-e's
-        // track.bounceInPlace took it 115 → 116. The three instrument commands
-        // must stay.
-        #expect(CommandRouter.allCommands.count == 116)
+        // track.bounceInPlace took it 115 → 116; m12-d's tempo.map + tempo.setMap
+        // took it 116 → 118; m12-g's fx.setSidechain took it 118 → 119; m13-e's
+        // clip.setGainEnvelope took it 119 → 120. m15-d's clip.duplicate +
+        // arrange.insertBars + arrange.deleteBars took it 120 → 123. The three
+        // instrument commands must stay.
+        #expect(CommandRouter.allCommands.count == 123)
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBanks"))
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBankPrograms"))
         #expect(CommandRouter.allCommands.contains("instrument.importSoundBank"))
         #expect(CommandRouter.allCommands.contains("clip.crossfade"))
         #expect(CommandRouter.allCommands.contains("track.bounceInPlace"))
+        #expect(CommandRouter.allCommands.contains("clip.duplicate"))
+        #expect(CommandRouter.allCommands.contains("arrange.insertBars"))
+        #expect(CommandRouter.allCommands.contains("arrange.deleteBars"))
+        #expect(CommandRouter.allCommands.contains("tempo.map"))
+        #expect(CommandRouter.allCommands.contains("tempo.setMap"))
+        #expect(CommandRouter.allCommands.contains("fx.setSidechain"))
+        #expect(CommandRouter.allCommands.contains("clip.setGainEnvelope"))
     }
 }

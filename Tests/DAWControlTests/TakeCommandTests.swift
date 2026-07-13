@@ -13,33 +13,28 @@ import DAWCore
 @MainActor
 @Suite("Take commands — control protocol (M5 iii-b)")
 struct TakeCommandTests {
-    private func makeRouter() -> (CommandRouter, ProjectStore) {
-        let store = ProjectStore()
-        store.media = FakeMedia()  // 2.0 s → 4 beats @ 120 bpm (the default tempo)
-        return (CommandRouter(store: store), store)
-    }
-
-    /// Adds an audio track plus three OVERLAPPING 4-beat clips at 0/2/4 beats
-    /// (0–4, 2–6, 4–8 — a connected overlap chain), returning the wire ids.
-    private func addOverlappingClips(_ router: CommandRouter) async throws -> (trackID: String, clipIDs: [String]) {
-        let addTrack = await router.handle(ControlRequest(
-            id: "t", command: "track.add", params: ["kind": .string("audio")]))
-        let trackID = try #require(addTrack.result?["id"]?.stringValue)
-        var clipIDs: [String] = []
-        for atBeat in [0.0, 2.0, 4.0] {
-            let addClip = await router.handle(ControlRequest(
-                id: "c", command: "clip.addAudio",
-                params: ["trackId": .string(trackID), "path": .string("/tmp/Loop.wav"),
-                         "atBeat": .number(atBeat)]))
-            clipIDs.append(try #require(addClip.result?["id"]?.stringValue))
+    /// A router over a store PRE-SEEDED with three OVERLAPPING 4-beat clips at
+    /// 0/2/4 beats on an audio track (0–4, 2–6, 4–8 — a connected overlap
+    /// chain). Post-m13-b no wire verb places overlapping ordinary clips (the
+    /// no-silent-overlap invariant is now complete), so a take-group fixture
+    /// seeds the overlap it intends to group at the MODEL layer — the
+    /// `ProjectStore(tracks:)` seam the ClipFix/Quantize command tests use.
+    private func makeOverlappingRouter()
+        -> (router: CommandRouter, store: ProjectStore, trackID: String, clipIDs: [String]) {
+        let url = URL(fileURLWithPath: "/tmp/Loop.wav")
+        let clips = [0.0, 2.0, 4.0].map {
+            Clip(name: "Loop", startBeat: $0, lengthBeats: 4, audioFileURL: url)
         }
-        return (trackID, clipIDs)
+        let track = Track(name: "Audio", kind: .audio, clips: clips)
+        let store = ProjectStore(tracks: [track])
+        store.media = FakeMedia()  // 2.0 s → 4 beats @ 120 bpm (the default tempo)
+        return (CommandRouter(store: store), store, track.id.uuidString, clips.map { $0.id.uuidString })
     }
 
-    /// Forms a group from the three overlapping clips, returning the wire ids
-    /// (trackID, groupID, laneIDs oldest-first).
-    private func makeGroup(_ router: CommandRouter) async throws -> (trackID: String, groupID: String, laneIDs: [String]) {
-        let (trackID, clipIDs) = try await addOverlappingClips(router)
+    /// Forms a group from the seeded overlapping clips, returning the wire ids
+    /// (groupID, laneIDs oldest-first).
+    private func makeGroup(_ router: CommandRouter, trackID: String, clipIDs: [String]) async throws
+        -> (groupID: String, laneIDs: [String]) {
         let group = await router.handle(ControlRequest(
             id: "g", command: "take.group",
             params: ["trackId": .string(trackID),
@@ -48,15 +43,14 @@ struct TakeCommandTests {
         let laneIDs = try #require(group.result?["group"]?["lanes"]?.arrayValue?.map { $0["id"]?.stringValue })
             .compactMap { $0 }
         let groupID = try #require(group.result?["group"]?["id"]?.stringValue)
-        return (trackID, groupID, laneIDs)
+        return (groupID, laneIDs)
     }
 
     // MARK: - take.group
 
     @Test("take.group forms lanes oldest-first, newest-wins comp, and materializes members")
     func groupHappyPath() async throws {
-        let (router, store) = makeRouter()
-        let (trackID, clipIDs) = try await addOverlappingClips(router)
+        let (router, store, trackID, clipIDs) = makeOverlappingRouter()
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.group",
@@ -79,8 +73,7 @@ struct TakeCommandTests {
 
     @Test("take.group rejections: fewer than 2 clips, and an unknown clip id")
     func groupRejections() async throws {
-        let (router, _) = makeRouter()
-        let (trackID, clipIDs) = try await addOverlappingClips(router)
+        let (router, _, trackID, clipIDs) = makeOverlappingRouter()
 
         let tooFew = await router.handle(ControlRequest(
             id: "1", command: "take.group",
@@ -100,8 +93,8 @@ struct TakeCommandTests {
 
     @Test("clip.trim on a take-group member surfaces clipInTakeGroup verbatim")
     func memberEditRejected() async throws {
-        let (router, store) = makeRouter()
-        let (trackID, groupID, _) = try await makeGroup(router)
+        let (router, store, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, _) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
         let memberID = try #require(store.tracks[0].clips.first?.id.uuidString)
 
         let response = await router.handle(ControlRequest(
@@ -118,8 +111,8 @@ struct TakeCommandTests {
 
     @Test("take.setComp replaces the comp wholesale and rebuilds members")
     func setCompHappyPath() async throws {
-        let (router, store) = makeRouter()
-        let (trackID, groupID, laneIDs) = try await makeGroup(router)
+        let (router, store, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, laneIDs) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.setComp",
@@ -138,8 +131,8 @@ struct TakeCommandTests {
 
     @Test("take.setComp rejections: unknown lane and inverted segment")
     func setCompRejections() async throws {
-        let (router, _) = makeRouter()
-        let (trackID, groupID, laneIDs) = try await makeGroup(router)
+        let (router, _, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, laneIDs) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let unknownLane = await router.handle(ControlRequest(
             id: "1", command: "take.setComp",
@@ -162,8 +155,8 @@ struct TakeCommandTests {
 
     @Test("take.setComp surfaces a per-index error for a malformed segment")
     func setCompMalformedSegment() async throws {
-        let (router, _) = makeRouter()
-        let (trackID, groupID, _) = try await makeGroup(router)
+        let (router, _, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, _) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.setComp",
@@ -177,8 +170,8 @@ struct TakeCommandTests {
 
     @Test("take.select swaps the comp to one full-range segment on the chosen lane")
     func selectHappyPath() async throws {
-        let (router, store) = makeRouter()
-        let (trackID, groupID, laneIDs) = try await makeGroup(router)
+        let (router, store, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, laneIDs) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.select",
@@ -192,8 +185,8 @@ struct TakeCommandTests {
 
     @Test("take.select on an unknown lane surfaces laneNotFound verbatim")
     func selectUnknownLane() async throws {
-        let (router, _) = makeRouter()
-        let (trackID, groupID, _) = try await makeGroup(router)
+        let (router, _, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, _) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.select",
@@ -206,8 +199,8 @@ struct TakeCommandTests {
 
     @Test("take.removeLane deletes an unused lane")
     func removeLaneHappyPath() async throws {
-        let (router, _) = makeRouter()
-        let (trackID, groupID, laneIDs) = try await makeGroup(router)
+        let (router, _, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, laneIDs) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
         // Comp defaults to the newest (last) lane; lane 0 is unused.
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.removeLane",
@@ -219,8 +212,8 @@ struct TakeCommandTests {
 
     @Test("take.removeLane rejects a lane the comp still references")
     func removeLaneInUse() async throws {
-        let (router, _) = makeRouter()
-        let (trackID, groupID, laneIDs) = try await makeGroup(router)
+        let (router, _, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, laneIDs) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
         // Comp defaults to the newest (last) lane — referenced, so removing it fails.
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.removeLane",
@@ -233,8 +226,8 @@ struct TakeCommandTests {
 
     @Test("take.flatten dissolves the group and restores editability")
     func flattenHappyPath() async throws {
-        let (router, store) = makeRouter()
-        let (trackID, groupID, _) = try await makeGroup(router)
+        let (router, store, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, _) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.flatten",
@@ -256,8 +249,8 @@ struct TakeCommandTests {
 
     @Test("take.flatten on an unknown group surfaces takeGroupNotFound verbatim")
     func flattenUnknownGroup() async throws {
-        let (router, _) = makeRouter()
-        let (trackID, _, _) = try await makeGroup(router)
+        let (router, _, trackID, clipIDs) = makeOverlappingRouter()
+        _ = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.flatten",
@@ -270,8 +263,8 @@ struct TakeCommandTests {
 
     @Test("take.move shifts lanes, comp, and members together")
     func moveHappyPath() async throws {
-        let (router, store) = makeRouter()
-        let (trackID, groupID, _) = try await makeGroup(router)
+        let (router, store, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, _) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.move",
@@ -286,8 +279,8 @@ struct TakeCommandTests {
 
     @Test("take.move on an unknown track surfaces trackNotFound verbatim")
     func moveUnknownTrack() async throws {
-        let (router, _) = makeRouter()
-        let (_, groupID, _) = try await makeGroup(router)
+        let (router, _, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, _) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.move",
@@ -300,8 +293,8 @@ struct TakeCommandTests {
 
     @Test("take.setCrossfade clamps to 0...0.2 and rebuilds members")
     func setCrossfadeHappyPath() async throws {
-        let (router, store) = makeRouter()
-        let (trackID, groupID, _) = try await makeGroup(router)
+        let (router, store, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, _) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.setCrossfade",
@@ -314,8 +307,8 @@ struct TakeCommandTests {
 
     @Test("take.setCrossfade on an unknown group surfaces takeGroupNotFound verbatim")
     func setCrossfadeUnknownGroup() async throws {
-        let (router, _) = makeRouter()
-        let (trackID, _, _) = try await makeGroup(router)
+        let (router, _, trackID, clipIDs) = makeOverlappingRouter()
+        _ = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let response = await router.handle(ControlRequest(
             id: "1", command: "take.setCrossfade",
@@ -328,8 +321,8 @@ struct TakeCommandTests {
 
     @Test("project.snapshot carries track.takeGroups and clip.takeGroupID")
     func snapshotCarriesTakeFields() async throws {
-        let (router, _) = makeRouter()
-        let (trackID, groupID, laneIDs) = try await makeGroup(router)
+        let (router, _, trackID, clipIDs) = makeOverlappingRouter()
+        let (groupID, laneIDs) = try await makeGroup(router, trackID: trackID, clipIDs: clipIDs)
 
         let snapshot = await router.handle(ControlRequest(id: "1", command: "project.snapshot"))
         let tracks = try #require(snapshot.result?["tracks"]?.arrayValue)

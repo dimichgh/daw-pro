@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import DAWCore
 
 /// Direct-manipulation loop region on the arrange ruler (beta m10-g). The wire
 /// command `transport.setLoop` and `ProjectStore.setLoop` already persist a loop
@@ -118,11 +119,22 @@ public enum LoopEdit {
     /// unit long isn't rejected by rounding.
     private static let epsilon: Double = 1e-9
 
-    /// The minimum region length for a given snap: one grid unit when snapping,
-    /// else the absolute floor. So a snapped create/resize can never produce a
-    /// sub-grid loop, and an off-grid one still can't go below the floor.
-    public static func minRegionBeats(snap: ClipSnap, beatsPerBar: Int) -> Double {
-        snap.gridBeats(beatsPerBar: beatsPerBar) ?? minLoopLengthBeats
+    /// The minimum region length for a given snap, measured at `atBeat` (m13-h).
+    /// One grid unit when snapping, else the absolute floor. Under a meter map the
+    /// `.bar` grid length is POSITION-DEPENDENT (a 6/8 bar is 3 beats, a 4/4 bar is
+    /// 4), so `.bar` returns the length of the BAR CONTAINING `atBeat`; callers pass
+    /// the region's start-side anchor (the earlier snapped endpoint for create, the
+    /// snapped candidate start for a start-resize, the pinned start for an
+    /// end-resize) so the floor tracks the bar the loop actually sits in. The finer
+    /// divisions are meter-agnostic (a beat is a quarter-note everywhere) and the
+    /// off case is the absolute floor — both `atBeat`-independent. Reproduces the
+    /// old `gridBeats(beatsPerBar:)` value exactly for a trivial single-meter map.
+    public static func minRegionBeats(snap: ClipSnap, meterMap: MeterMap, atBeat: Double) -> Double {
+        if case .bar = snap {
+            let (bar, _) = meterMap.barBeat(atBeat: max(0, atBeat))
+            return meterMap.beat(ofBar: bar + 1) - meterMap.beat(ofBar: bar)
+        }
+        return snap.gridBeats(beatsPerBar: meterMap.beatsPerBar(atBeat: atBeat)) ?? minLoopLengthBeats
     }
 
     // MARK: Create (sketch a new region)
@@ -134,13 +146,15 @@ public enum LoopEdit {
     /// snapping ON, two distinct snapped grid points are already ≥ one grid apart,
     /// so the minimum falls out; with snapping OFF the floor is enforced explicitly.
     public static func createRegion(
-        anchorBeat: Double, currentBeat: Double, snap: ClipSnap, beatsPerBar: Int
+        anchorBeat: Double, currentBeat: Double, snap: ClipSnap, meterMap: MeterMap
     ) -> LoopRegion? {
-        let a = snap.snap(beat: anchorBeat, beatsPerBar: beatsPerBar)
-        let b = snap.snap(beat: currentBeat, beatsPerBar: beatsPerBar)
+        let a = snap.snap(beat: anchorBeat, meterMap: meterMap)
+        let b = snap.snap(beat: currentBeat, meterMap: meterMap)
         let lo = min(a, b)
         let hi = max(a, b)
-        let minLen = minRegionBeats(snap: snap, beatsPerBar: beatsPerBar)
+        // Measure the minimum at the region's LEFT anchor (`lo`) so a `.bar` create
+        // in an odd-meter region requires exactly one of THAT region's bars.
+        let minLen = minRegionBeats(snap: snap, meterMap: meterMap, atBeat: lo)
         guard hi - lo >= minLen - epsilon else { return nil }
         return LoopRegion(start: lo, end: hi)
     }
@@ -151,10 +165,12 @@ public enum LoopEdit {
     /// so at least one snap unit remains. Dragging the start PAST the end pins it
     /// exactly one unit before the end (CLAMP, not flip — the predictable choice).
     public static func resizedStart(
-        region: LoopRegion, newStartRaw: Double, snap: ClipSnap, beatsPerBar: Int
+        region: LoopRegion, newStartRaw: Double, snap: ClipSnap, meterMap: MeterMap
     ) -> LoopRegion {
-        let minLen = minRegionBeats(snap: snap, beatsPerBar: beatsPerBar)
-        let snapped = snap.snap(beat: max(0, newStartRaw), beatsPerBar: beatsPerBar)
+        let snapped = snap.snap(beat: max(0, newStartRaw), meterMap: meterMap)
+        // The start edge is what moves — measure the one-bar floor at the snapped
+        // candidate start (the bar the new left edge lands in).
+        let minLen = minRegionBeats(snap: snap, meterMap: meterMap, atBeat: snapped)
         let maxStart = max(0, region.end - minLen)
         let start = min(max(0, snapped), maxStart)
         return LoopRegion(start: start, end: region.end)
@@ -164,10 +180,12 @@ public enum LoopEdit {
     /// one snap unit remains. Dragging the end PAST the start pins it exactly one
     /// unit after the start (CLAMP, not flip).
     public static func resizedEnd(
-        region: LoopRegion, newEndRaw: Double, snap: ClipSnap, beatsPerBar: Int
+        region: LoopRegion, newEndRaw: Double, snap: ClipSnap, meterMap: MeterMap
     ) -> LoopRegion {
-        let minLen = minRegionBeats(snap: snap, beatsPerBar: beatsPerBar)
-        let snapped = snap.snap(beat: max(0, newEndRaw), beatsPerBar: beatsPerBar)
+        // The start edge is pinned — measure the one-bar floor at the pinned start
+        // (the loop's first bar), so an end pulled below it keeps that bar.
+        let minLen = minRegionBeats(snap: snap, meterMap: meterMap, atBeat: region.start)
+        let snapped = snap.snap(beat: max(0, newEndRaw), meterMap: meterMap)
         let end = max(snapped, region.start + minLen)
         return LoopRegion(start: region.start, end: end)
     }
@@ -178,10 +196,10 @@ public enum LoopEdit {
     /// START to the grid and clamps at 0 — a leftward drag past 0 pins the region
     /// at beat 0 with its length intact (never inverts, never goes negative).
     public static func movedRegion(
-        region: LoopRegion, dragDeltaBeats: Double, snap: ClipSnap, beatsPerBar: Int
+        region: LoopRegion, dragDeltaBeats: Double, snap: ClipSnap, meterMap: MeterMap
     ) -> LoopRegion {
         let length = region.length
-        let newStart = snap.snap(beat: max(0, region.start + dragDeltaBeats), beatsPerBar: beatsPerBar)
+        let newStart = snap.snap(beat: max(0, region.start + dragDeltaBeats), meterMap: meterMap)
         return LoopRegion(start: newStart, end: newStart + length)
     }
 
@@ -193,13 +211,13 @@ public enum LoopEdit {
     /// the press agree about what's "inside."
     public static func click(
         contentX: CGFloat, region: LoopRegion?, geometry: LoopRulerGeometry,
-        snap: ClipSnap, beatsPerBar: Int
+        snap: ClipSnap, meterMap: MeterMap
     ) -> LoopClickResult {
         switch geometry.classify(contentX: contentX, region: region) {
         case .body, .edgeStart, .edgeEnd:
             return .toggle
         case .empty:
-            return .seek(snap.snap(beat: geometry.beat(forX: contentX), beatsPerBar: beatsPerBar))
+            return .seek(snap.snap(beat: geometry.beat(forX: contentX), meterMap: meterMap))
         }
     }
 }

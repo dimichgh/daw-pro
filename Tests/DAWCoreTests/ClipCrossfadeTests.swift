@@ -320,3 +320,277 @@ struct ClipCrossfadeTests {
         #expect(abs(store.tracks[0].clips[0].lengthBeats - 4) < 1e-9)  // resident restored
     }
 }
+
+/// m13-b — completes the no-silent-overlap invariant across the four verbs the
+/// M13 audit (B2) proved bypassed the m11-d policy: `clip.trim` extend,
+/// `clip.stretchToLength`, `clip.addAudio atBeat`, `clip.addMIDI atBeat`, plus
+/// the extra geometry-GROWING verb found while auditing (`insertTimeRange`).
+/// Every geometry-committing verb now routes through the ONE
+/// `resolvingOverlaps` choke point, inside its single `performEdit`. Take/comp
+/// members stay exempt (takes intentionally stack). Reuses FakeMedia (2.0 s →
+/// 4 beats at 120 BPM) and FakeEngine from the DAWCoreTests target.
+@MainActor
+@Suite("No-silent-overlap completion — the four bypass verbs (m13-b)")
+struct NoSilentOverlapCompletionTests {
+    private let url = URL(fileURLWithPath: "/tmp/Loop.wav")
+
+    /// True when no two ORDINARY (non-take) clips on the track share any span.
+    private func noOverlaps(_ store: ProjectStore, _ trackID: UUID) -> Bool {
+        let clips = store.tracks.first { $0.id == trackID }!.clips
+            .filter { $0.takeGroupID == nil }
+            .sorted { $0.startBeat < $1.startBeat }
+        guard clips.count > 1 else { return true }
+        for i in 1..<clips.count {
+            if clips[i].startBeat + 1e-9 < clips[i - 1].startBeat + clips[i - 1].lengthBeats {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Audio track with two 4-beat clips at [0,4] and [4,8] (sequential import).
+    private func twoAudioClips() throws -> (ProjectStore, UUID, Clip, Clip) {
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(kind: .audio)
+        let a = try store.importAudio(url: url, toTrack: track.id)   // [0,4]
+        let b = try store.importAudio(url: url, toTrack: track.id)   // [4,8]
+        return (store, track.id, a, b)
+    }
+
+    // MARK: - clip.trim extend (bypass #1, audit overlap [124,125])
+
+    @Test("trim EXTEND over a neighbour trims the resident's head (no overlap)")
+    func trimExtendTrimsResidentHead() throws {
+        let (store, trackID, a, b) = try twoAudioClips()
+        // Extend A's trailing edge to length 5 → active [0,5] covers B's head [4,5].
+        let trimmed = try store.trimClip(trackId: trackID, clipId: a.id,
+                                         newStartBeat: 0, newLengthBeats: 5)
+        #expect(abs(trimmed.lengthBeats - 5) < 1e-9)
+        let residentB = store.tracks[0].clips.first { $0.id == b.id }!
+        #expect(abs(residentB.startBeat - 5) < 1e-9)          // leading edge → 5
+        #expect(abs(residentB.lengthBeats - 3) < 1e-9)
+        // Leading-edge trim of 1 beat advances the source offset by 1*60/120 = 0.5 s.
+        #expect(abs(residentB.startOffsetSeconds - 0.5) < 1e-9)
+        #expect(noOverlaps(store, trackID))
+    }
+
+    @Test("trim EXTEND that trims a neighbour is ONE undo step restoring BOTH clips")
+    func trimExtendIsOneUndoStep() throws {
+        let (store, trackID, a, b) = try twoAudioClips()
+        _ = try store.trimClip(trackId: trackID, clipId: a.id, newStartBeat: 0, newLengthBeats: 5)
+        #expect(store.tracks[0].clips.first { $0.id == b.id }!.startBeat == 5)
+        #expect(try store.undo() == "Trim Clip '\(a.name)'")
+        let ra = store.tracks[0].clips.first { $0.id == a.id }!
+        let rb = store.tracks[0].clips.first { $0.id == b.id }!
+        #expect(ra.startBeat == 0 && abs(ra.lengthBeats - 4) < 1e-9)
+        #expect(rb.startBeat == 4 && abs(rb.lengthBeats - 4) < 1e-9)
+    }
+
+    @Test("trim EXTEND leaving a sub-minClipLength remnant REMOVES the resident")
+    func trimExtendSubMinRemnantRemovesResident() throws {
+        let (store, trackID, a, b) = try twoAudioClips()
+        // Extend A to end at 7.99 → B's remnant [7.99,8] = 0.01 < 1/32 → removed.
+        _ = try store.trimClip(trackId: trackID, clipId: a.id, newStartBeat: 0, newLengthBeats: 7.99)
+        #expect(store.tracks[0].clips.count == 1)
+        #expect(store.tracks[0].clips[0].id == a.id)
+        #expect(store.tracks[0].clips.first { $0.id == b.id } == nil)
+        #expect(noOverlaps(store, trackID))
+    }
+
+    // MARK: - clip.stretchToLength (bypass #2, audit overlap [124,126])
+
+    @Test("stretchToLength over a neighbour trims the resident's head (no overlap)")
+    func stretchTrimsResidentHead() throws {
+        let (store, trackID, a, b) = try twoAudioClips()
+        // Stretch A from 4 → 6 beats → active [0,6] covers B's head [4,6].
+        let stretched = try store.stretchClip(trackId: trackID, clipId: a.id, toLengthBeats: 6)
+        #expect(abs(stretched.lengthBeats - 6) < 1e-9)
+        let residentB = store.tracks[0].clips.first { $0.id == b.id }!
+        #expect(abs(residentB.startBeat - 6) < 1e-9)
+        #expect(abs(residentB.lengthBeats - 2) < 1e-9)
+        #expect(noOverlaps(store, trackID))
+    }
+
+    @Test("stretchToLength that trims a neighbour is ONE undo step restoring BOTH clips")
+    func stretchIsOneUndoStep() throws {
+        let (store, trackID, a, b) = try twoAudioClips()
+        _ = try store.stretchClip(trackId: trackID, clipId: a.id, toLengthBeats: 6)
+        #expect(store.tracks[0].clips.first { $0.id == b.id }!.startBeat == 6)
+        #expect(try store.undo() == "Stretch Clip '\(a.name)'")
+        let ra = store.tracks[0].clips.first { $0.id == a.id }!
+        let rb = store.tracks[0].clips.first { $0.id == b.id }!
+        #expect(abs(ra.lengthBeats - 4) < 1e-9)
+        #expect(rb.startBeat == 4 && abs(rb.lengthBeats - 4) < 1e-9)
+    }
+
+    @Test("stretchToLength that fully covers a neighbour REMOVES it")
+    func stretchFullyCoversRemovesResident() throws {
+        let (store, trackID, a, b) = try twoAudioClips()
+        // Shrink B to a 2-beat clip at [4,6], then stretch A to length 8 → [0,8]
+        // fully covers B.
+        _ = try store.trimClip(trackId: trackID, clipId: b.id, newStartBeat: 4, newLengthBeats: 2)
+        _ = try store.stretchClip(trackId: trackID, clipId: a.id, toLengthBeats: 8)
+        #expect(store.tracks[0].clips.count == 1)
+        #expect(store.tracks[0].clips[0].id == a.id)
+        #expect(noOverlaps(store, trackID))
+    }
+
+    // MARK: - clip.addAudio atBeat (bypass #3, audit overlap [1,120] full doubling)
+
+    @Test("addAudio atBeat over a resident trims the resident's tail (no overlap)")
+    func addAudioAtBeatTrimsResidentTail() throws {
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(kind: .audio)
+        let resident = try store.importAudio(url: url, toTrack: track.id)     // [0,4]
+        // Land a second clip at beat 2 → active [2,6] covers resident's tail [2,4].
+        let landed = try store.importAudio(url: url, toTrack: track.id, atBeat: 2)
+        #expect(abs(landed.startBeat - 2) < 1e-9)
+        let residentAfter = store.tracks[0].clips.first { $0.id == resident.id }!
+        #expect(abs(residentAfter.lengthBeats - 2) < 1e-9)   // tail trimmed to 2
+        #expect(store.tracks[0].clips.count == 2)
+        #expect(noOverlaps(store, track.id))
+    }
+
+    @Test("addAudio atBeat that FULLY doubles a resident collapses to a single clip (worst shape)")
+    func addAudioFullDoublingCollapsesToSingle() throws {
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(kind: .audio)
+        let resident = try store.importAudio(url: url, toTrack: track.id)     // [0,4]
+        // The audit's worst shape: land a second identical clip AT the resident's
+        // start → it fully covers the resident → the silent volume-doubling
+        // collapses to ONE clip (the loudness-honesty geometry).
+        let landed = try store.importAudio(url: url, toTrack: track.id, atBeat: 0)
+        #expect(store.tracks[0].clips.count == 1)
+        #expect(store.tracks[0].clips[0].id == landed.id)
+        #expect(store.tracks[0].clips.first { $0.id == resident.id } == nil)
+        #expect(noOverlaps(store, track.id))
+    }
+
+    @Test("addAudio atBeat that trims a resident is ONE undo step restoring it")
+    func addAudioAtBeatIsOneUndoStep() throws {
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(kind: .audio)
+        let resident = try store.importAudio(url: url, toTrack: track.id)     // [0,4]
+        let landed = try store.importAudio(url: url, toTrack: track.id, atBeat: 2)
+        #expect(store.tracks[0].clips.first { $0.id == resident.id }!.lengthBeats < 4)
+        #expect(try store.undo() == "Import '\(landed.name)'")
+        #expect(store.tracks[0].clips.count == 1)
+        #expect(abs(store.tracks[0].clips[0].lengthBeats - 4) < 1e-9)   // resident restored
+        #expect(store.tracks[0].clips[0].id == resident.id)
+    }
+
+    @Test("addAudio atBeat leaving a sub-minClipLength remnant REMOVES the resident")
+    func addAudioSubMinRemnantRemovesResident() throws {
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let track = store.addTrack(kind: .audio)
+        let resident = try store.importAudio(url: url, toTrack: track.id)     // [0,4]
+        // Land at 0.01 → resident's head remnant [0,0.01] = 0.01 < 1/32 → removed.
+        _ = try store.importAudio(url: url, toTrack: track.id, atBeat: 0.01)
+        #expect(store.tracks[0].clips.count == 1)
+        #expect(store.tracks[0].clips.first { $0.id == resident.id } == nil)
+        #expect(noOverlaps(store, track.id))
+    }
+
+    // MARK: - clip.addMIDI atBeat (bypass #4, audit overlap [2,4] double-note)
+
+    @Test("addMIDI atBeat over a resident trims the resident's tail notes (no double-note)")
+    func addMIDIAtBeatTrimsResidentNotes() throws {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .instrument)
+        let resident = try store.addMIDIClip(toTrack: track.id, atBeat: 0, lengthBeats: 4, notes: [
+            MIDINote(pitch: 60, startBeat: 0, lengthBeats: 1),   // timeline 0
+            MIDINote(pitch: 62, startBeat: 1, lengthBeats: 1),   // timeline 1
+            MIDINote(pitch: 64, startBeat: 2, lengthBeats: 1),   // timeline 2 — dropped
+            MIDINote(pitch: 65, startBeat: 3, lengthBeats: 1),   // timeline 3 — dropped
+        ])
+        // Land a new MIDI clip at beat 2 → active [2,6] covers resident tail [2,4].
+        _ = try store.addMIDIClip(toTrack: track.id, atBeat: 2, lengthBeats: 4)
+        let residentAfter = store.tracks[0].clips.first { $0.id == resident.id }!
+        #expect(abs(residentAfter.lengthBeats - 2) < 1e-9)
+        #expect(Set((residentAfter.notes ?? []).map(\.pitch)) == [60, 62])
+        #expect(noOverlaps(store, track.id))
+    }
+
+    @Test("addMIDI atBeat that trims a resident is ONE undo step restoring its notes")
+    func addMIDIAtBeatIsOneUndoStep() throws {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .instrument)
+        let resident = try store.addMIDIClip(toTrack: track.id, atBeat: 0, lengthBeats: 4, notes: [
+            MIDINote(pitch: 60, startBeat: 0, lengthBeats: 1),
+            MIDINote(pitch: 64, startBeat: 3, lengthBeats: 1),
+        ])
+        let landed = try store.addMIDIClip(toTrack: track.id, atBeat: 2, lengthBeats: 4)
+        #expect(store.tracks[0].clips.first { $0.id == resident.id }!.lengthBeats < 4)
+        #expect(try store.undo() == "Add MIDI Clip '\(landed.name)'")
+        let restored = store.tracks[0].clips.first { $0.id == resident.id }!
+        #expect(abs(restored.lengthBeats - 4) < 1e-9)
+        #expect(Set((restored.notes ?? []).map(\.pitch)) == [60, 64])
+        #expect(store.tracks[0].clips.count == 1)
+    }
+
+    @Test("addMIDI atBeat leaving a sub-minClipLength remnant REMOVES the resident")
+    func addMIDISubMinRemnantRemovesResident() throws {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .instrument)
+        let resident = try store.addMIDIClip(toTrack: track.id, atBeat: 0, lengthBeats: 4)
+        // Land at 0.01 → resident head remnant [0,0.01] = 0.01 < 1/32 → removed.
+        _ = try store.addMIDIClip(toTrack: track.id, atBeat: 0.01, lengthBeats: 4)
+        #expect(store.tracks[0].clips.count == 1)
+        #expect(store.tracks[0].clips.first { $0.id == resident.id } == nil)
+        #expect(noOverlaps(store, track.id))
+    }
+
+    // MARK: - insertTimeRange (extra geometry-GROWING verb found by audit)
+
+    @Test("insertTimeRange growth over a neighbour trims it, in ONE undo step")
+    func insertTimeRangeGrowthTrimsNeighbour() throws {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .instrument)
+        let a = try store.addMIDIClip(toTrack: track.id, atBeat: 0, lengthBeats: 4,
+                                      notes: [MIDINote(pitch: 60, startBeat: 0, lengthBeats: 1)])
+        let b = try store.addMIDIClip(toTrack: track.id, atBeat: 4, lengthBeats: 4)
+        // Insert 2 beats of silence inside A → A grows to [0,6], covering B's head [4,6].
+        let grown = try store.insertTimeRange(clipID: a.id, atBeat: 2, lengthBeats: 2)
+        #expect(abs(grown.lengthBeats - 6) < 1e-9)
+        let residentB = store.tracks[0].clips.first { $0.id == b.id }!
+        #expect(abs(residentB.startBeat - 6) < 1e-9)
+        #expect(abs(residentB.lengthBeats - 2) < 1e-9)
+        #expect(noOverlaps(store, track.id))
+        // One undo restores BOTH the grown clip and the trimmed neighbour.
+        #expect(try store.undo() == "Insert Time Range")
+        #expect(abs(store.tracks[0].clips.first { $0.id == a.id }!.lengthBeats - 4) < 1e-9)
+        #expect(store.tracks[0].clips.first { $0.id == b.id }!.startBeat == 4)
+    }
+
+    // MARK: - Take/comp members stay exempt (regression pin)
+
+    @Test("take-group members STILL STACK — an overlapping verb never trims them")
+    func takeMembersStayStacked() throws {
+        // Two overlapping audio clips grouped into a take group (members stack).
+        let a = Clip(name: "A", startBeat: 0, lengthBeats: 4,
+                     audioFileURL: URL(fileURLWithPath: "/tmp/a.wav"))
+        let b = Clip(name: "B", startBeat: 0, lengthBeats: 4,
+                     audioFileURL: URL(fileURLWithPath: "/tmp/b.wav"))
+        let track = Track(name: "Aud", kind: .audio, clips: [a, b])
+        let store = ProjectStore(tracks: [track])
+        store.media = FakeMedia()
+        _ = try store.groupTakes(trackId: track.id, clipIds: [a.id, b.id])
+        let memberBefore = try #require(store.tracks[0].clips.first { $0.takeGroupID != nil })
+
+        // Land a new ordinary clip AT the group's range [0,4] via clip.addAudio.
+        let landed = try store.importAudio(url: url, toTrack: track.id, atBeat: 0)
+
+        // The take-group member is UNTOUCHED (takes intentionally stack); the new
+        // ordinary clip lands over it.
+        let memberAfter = try #require(store.tracks[0].clips.first { $0.id == memberBefore.id })
+        #expect(memberAfter.startBeat == memberBefore.startBeat)
+        #expect(memberAfter.lengthBeats == memberBefore.lengthBeats)
+        #expect(memberAfter.takeGroupID == memberBefore.takeGroupID)
+        #expect(store.tracks[0].clips.contains { $0.id == landed.id })
+    }
+}

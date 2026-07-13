@@ -89,6 +89,12 @@ public struct TakeGroup: Identifiable, Codable, Sendable, Equatable {
     public static let crossfadeSecondsRange: ClosedRange<Double> = 0...0.2
     /// Default join-crossfade width (seconds).
     public static let defaultCrossfadeSeconds: Double = 0.010
+    /// Loop-cycle take recording floor (m15-b, design-m15b §6): the shortest
+    /// loop cycle `record` accepts with a loop enabled — bounds lane creation
+    /// at ≤ 60 lanes/minute (one 4/4 bar at 240 BPM). Below it, record
+    /// refuses with a teaching error instead of spraying sliver lanes
+    /// (a 0.25-beat loop at 400 BPM would land ~27 lanes/second).
+    public static let minLoopRecordCycleSeconds: Double = 1.0
 
     public init(
         id: UUID = UUID(),
@@ -210,7 +216,16 @@ public enum CompFlattener {
                 fadeInCurve: .linear, fadeOutCurve: .linear,
                 stretchRatio: source.stretchRatio,
                 pitchShiftSemitones: source.pitchShiftSemitones,
-                formantPreserve: source.formantPreserve
+                formantPreserve: source.formantPreserve,
+                // Window the envelope with the same split/trim discipline the
+                // arrange edits use (ProjectStore.swift:2426/2512/2623): a
+                // materialized member plays only [memberStart, memberEnd] of the
+                // lane, so re-anchor at delta = memberStart − laneStart. Empty
+                // source envelope windows to empty (MIDI lanes stay clean).
+                gainEnvelope: Clip.windowedGainEnvelope(
+                    source.gainEnvelope,
+                    delta: memberStart - laneStart,
+                    newLength: memberLength)
             )
             member.takeGroupID = group.id
 

@@ -19,7 +19,9 @@ struct TakeLanesView: View {
     var geometry: TakeLaneGeometry
     var contentWidth: CGFloat
     var snap: ClipSnap
-    var beatsPerBar: Int
+    /// Project meter map (m13-h): comp paint snaps route through it so a paint in
+    /// an odd-meter region snaps on that region's grid.
+    var meterMap: MeterMap
     var secondsPerBeat: Double
     var waveformStore: WaveformStore
     /// Replaces a group's comp wholesale (wired to `setCompSegments`).
@@ -55,7 +57,7 @@ struct TakeLanesView: View {
                     geometry: geometry,
                     contentWidth: contentWidth,
                     snap: snap,
-                    beatsPerBar: beatsPerBar,
+                    meterMap: meterMap,
                     secondsPerBeat: secondsPerBeat,
                     waveformPeaks: lane.clip.audioFileURL.flatMap { waveformStore.peaks(for: $0) },
                     onSetComp: { onSetComp(group.id, $0) },
@@ -113,7 +115,7 @@ private struct TakeLaneRow: View {
     var geometry: TakeLaneGeometry
     var contentWidth: CGFloat
     var snap: ClipSnap
-    var beatsPerBar: Int
+    var meterMap: MeterMap
     var secondsPerBeat: Double
     var waveformPeaks: WaveformPeaks?
     var onSetComp: (_ segments: [CompSegment]) -> Void
@@ -246,7 +248,7 @@ private struct TakeLaneRow: View {
     private func classify(fromBeat: Double, toX: CGFloat) -> TakePaintGesture {
         TakeComp.classifyDrag(
             laneID: lane.id, fromBeatRaw: fromBeat, toBeatRaw: geometry.beat(forX: toX),
-            snap: snap, beatsPerBar: beatsPerBar, range: group.rangeBeats)
+            snap: snap, meterMap: meterMap, range: group.rangeBeats)
     }
 
     @ViewBuilder

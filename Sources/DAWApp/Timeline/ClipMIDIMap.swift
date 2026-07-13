@@ -24,7 +24,14 @@ struct ClipMIDIMap: View {
     private var geometry: MIDIMapGeometry { MIDIMapGeometry(pixelsPerBeat: pixelsPerBeat) }
 
     var body: some View {
-        Canvas { context, size in
+        // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+        // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+        let notes = notes
+        let geometry = geometry
+        let lengthBeats = lengthBeats
+        let tint = tint
+        let opacity = opacity
+        return Canvas { @Sendable context, size in
             guard !notes.isEmpty else { return }
             let rects = geometry.noteRects(notes, clipLengthBeats: lengthBeats, height: size.height)
             let shading = GraphicsContext.Shading.color(tint.opacity(opacity))

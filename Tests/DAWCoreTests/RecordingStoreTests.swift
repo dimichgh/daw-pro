@@ -35,6 +35,8 @@ final class FakeRecordingEngine: AudioEngineControlling {
     func masterVolumeChanged(_ volume: Double) {}
 
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
@@ -278,8 +280,11 @@ struct RecordingStoreTests {
         #expect(engine.stopPlaybackCount == 1)
     }
 
-    // T16.
-    @Test("seek/returnToZero/setTempo refuse while recording; loop and arm stay allowed")
+    // T16. (m15-b: setLoop moved from the allowed set to the refused set —
+    // the rolling take's slicing window and the engine's scheduled loop are
+    // frozen at record start, and a mid-take bounds edit would reach
+    // loopChanged's restart and kill the capture anchor. design-m15b §5.2.)
+    @Test("seek/returnToZero/setTempo/setLoop refuse while recording; arm and mute stay allowed")
     func transportLocksWhileRecording() throws {
         let engine = FakeRecordingEngine()
         let store = ProjectStore()
@@ -307,14 +312,23 @@ struct RecordingStoreTests {
         #expect(tempoMessage == "cannot change tempo while recording — stop first")
         #expect(store.transport.tempoBPM == 120)  // untouched
 
-        // Loop, arm, and mixer moves stay legal mid-take.
-        try store.setLoop(enabled: true, startBeat: 0, endBeat: 8)
+        // setLoop is refused mid-take (m15-b) with the exact teaching error.
+        error = projectError { try store.setLoop(enabled: true, startBeat: 0, endBeat: 8) }
+        guard case .transportBusy(let loopMessage) = try #require(error) else {
+            Issue.record("expected transportBusy from setLoop"); return
+        }
+        #expect(loopMessage == "cannot change the loop while recording — stop first")
+        #expect(!store.transport.isLoopEnabled)  // untouched
+
+        // Arm and mixer moves stay legal mid-take.
         #expect(try store.setTrackArm(id: other.id, armed: true))
         #expect(store.setTrackMute(id: track.id, muted: true))
 
         store.stop()
         try store.seek(toBeats: 4)  // allowed again
         #expect(store.transport.positionBeats == 4)
+        try store.setLoop(enabled: true, startBeat: 0, endBeat: 8)  // allowed again
+        #expect(store.transport.isLoopEnabled)
     }
 
     // T17.
@@ -330,12 +344,14 @@ struct RecordingStoreTests {
         try store.setTrackArm(id: doomed.id, armed: true)
 
         try store.record()
-        // Mid-take churn: disarm A, arm B, delete C entirely.
+        // Mid-take churn: disarm A, arm B (both param-class, legal mid-take).
         try store.setTrackArm(id: armed.id, armed: false)
         try store.setTrackArm(id: unarmed.id, armed: true)
-        store.removeTrack(id: doomed.id)
 
         store.stop()
+        // Delete C after stop but BEFORE the take finalizes (m13-c refuses a
+        // track removal mid-recording) — the fan-out still skips it.
+        #expect(try store.removeTrack(id: doomed.id))
         let url = try #require(engine.startRecordingURLs.last)
         engine.finishTake(.success(take(url)))
 
@@ -493,5 +509,224 @@ struct RecordingStoreTests {
         store.stop()
         engine.finishTake(.failure(ProjectError.recordingFailed("boom")))
         #expect(store.snapshot().lastRecordingError == "recording failed: boom")
+    }
+
+    // MARK: - m13-c: routing-topology guard while recording
+
+    /// Arms one audio track and rolls a take so the store reports
+    /// `isRecording` — the shared setup for every guard test below.
+    private func rolling(_ store: ProjectStore, engine: FakeRecordingEngine) throws {
+        let rec = store.addTrack(name: "Rec", kind: .audio)
+        try store.setTrackArm(id: rec.id, armed: true)
+        try store.record()
+        #expect(store.transport.isRecording)
+    }
+
+    // m13-c A: the send/output routing verbs.
+    @Test("addSend / removeSend / setTrackOutput refuse mid-recording, succeed after stop")
+    func routingSendVerbsGuarded() throws {
+        let engine = FakeRecordingEngine()
+        let store = ProjectStore()
+        store.engine = engine
+        let src = store.addTrack(name: "Src", kind: .audio)
+        let bus = store.addTrack(name: "Bus", kind: .bus)
+        let bus2 = store.addTrack(name: "Bus2", kind: .bus)
+        let send = try store.addSend(toTrack: src.id, busID: bus.id, level: 0.5)
+        try rolling(store, engine: engine)
+
+        var error = projectError { _ = try store.addSend(toTrack: src.id, busID: bus2.id) }
+        guard case .transportBusy(let addMsg) = try #require(error) else {
+            Issue.record("expected transportBusy from addSend"); return
+        }
+        #expect(addMsg == "cannot add a send while recording — stop first")
+
+        error = projectError { try store.removeSend(trackID: src.id, sendID: send.id) }
+        guard case .transportBusy(let remMsg) = try #require(error) else {
+            Issue.record("expected transportBusy from removeSend"); return
+        }
+        #expect(remMsg == "cannot remove a send while recording — stop first")
+
+        error = projectError { try store.setTrackOutput(id: src.id, busID: bus.id) }
+        guard case .transportBusy(let outMsg) = try #require(error) else {
+            Issue.record("expected transportBusy from setTrackOutput"); return
+        }
+        #expect(outMsg == "cannot change a track's output while recording — stop first")
+
+        // Untouched: the pre-existing send survives, no output-bus assignment.
+        let srcNow = try #require(store.tracks.first { $0.id == src.id })
+        #expect(srcNow.sends.count == 1)
+        #expect(srcNow.outputBusID == nil)
+
+        store.stop()
+        _ = try store.addSend(toTrack: src.id, busID: bus2.id)   // allowed again
+        try store.setTrackOutput(id: src.id, busID: bus.id)
+        try store.removeSend(trackID: src.id, sendID: send.id)
+        let after = try #require(store.tracks.first { $0.id == src.id })
+        #expect(after.outputBusID == bus.id)
+        #expect(after.sends.map(\.destinationBusID) == [bus2.id])
+    }
+
+    // m13-c B: removeTrack (unconditional — a routed strip teardown announces).
+    @Test("removeTrack refuses mid-recording, succeeds after stop")
+    func removeTrackGuarded() throws {
+        let engine = FakeRecordingEngine()
+        let store = ProjectStore()
+        store.engine = engine
+        let victim = store.addTrack(name: "Victim", kind: .audio)
+        try rolling(store, engine: engine)
+
+        let error = projectError { _ = try store.removeTrack(id: victim.id) }
+        guard case .transportBusy(let msg) = try #require(error) else {
+            Issue.record("expected transportBusy from removeTrack"); return
+        }
+        #expect(msg == "cannot remove a track while recording — stop first")
+        #expect(store.tracks.contains { $0.id == victim.id })  // untouched
+
+        store.stop()
+        #expect(try store.removeTrack(id: victim.id))          // allowed again
+        #expect(!store.tracks.contains { $0.id == victim.id })
+    }
+
+    // m13-c C: fx.setSidechain (unconditional — sets/clears a key edge).
+    @Test("setSidechain refuses mid-recording, succeeds after stop")
+    func setSidechainGuarded() throws {
+        let engine = FakeRecordingEngine()
+        let store = ProjectStore()
+        store.engine = engine
+        let kick = store.addTrack(name: "Kick", kind: .audio)
+        let pad = store.addTrack(name: "Pad", kind: .audio)
+        let comp = try store.addEffect(toTrack: pad.id, kind: .compressor)
+        try rolling(store, engine: engine)
+
+        let error = projectError {
+            _ = try store.setSidechain(trackID: pad.id, effectID: comp.id, sourceTrackID: kick.id)
+        }
+        guard case .transportBusy(let msg) = try #require(error) else {
+            Issue.record("expected transportBusy from setSidechain"); return
+        }
+        #expect(msg == "cannot change a sidechain while recording — stop first")
+        let padNow = try #require(store.tracks.first { $0.id == pad.id })
+        #expect(padNow.effects[0].sidechainSourceTrackID == nil)  // untouched
+
+        store.stop()
+        _ = try store.setSidechain(trackID: pad.id, effectID: comp.id, sourceTrackID: kick.id)
+        let padAfter = try #require(store.tracks.first { $0.id == pad.id })
+        #expect(padAfter.effects[0].sidechainSourceTrackID == kick.id)
+    }
+
+    // m13-c D: removeEffect is CONDITIONAL — only a keyed effect refuses.
+    @Test("removeEffect: a plain effect stays legal mid-take, a keyed effect refuses")
+    func removeEffectConditional() throws {
+        let engine = FakeRecordingEngine()
+        let store = ProjectStore()
+        store.engine = engine
+        let kick = store.addTrack(name: "Kick", kind: .audio)
+        let pad = store.addTrack(name: "Pad", kind: .audio)
+        let comp = try store.addEffect(toTrack: pad.id, kind: .compressor)
+        let eq = try store.addEffect(toTrack: pad.id, kind: .eq)
+        _ = try store.setSidechain(trackID: pad.id, effectID: comp.id, sourceTrackID: kick.id)
+        try rolling(store, engine: engine)
+
+        // Plain (non-keyed) effect removal never announces → legal mid-take.
+        try store.removeEffect(trackID: pad.id, effectID: eq.id)
+        #expect(try #require(store.tracks.first { $0.id == pad.id }).effects.map(\.id) == [comp.id])
+
+        // The keyed compressor removal would clear a key edge → refused.
+        let error = projectError { try store.removeEffect(trackID: pad.id, effectID: comp.id) }
+        guard case .transportBusy(let msg) = try #require(error) else {
+            Issue.record("expected transportBusy from keyed removeEffect"); return
+        }
+        #expect(msg == "cannot remove a sidechain-keyed effect while recording — stop first")
+        #expect(try #require(store.tracks.first { $0.id == pad.id }).effects.count == 1)  // comp survives
+
+        store.stop()
+        try store.removeEffect(trackID: pad.id, effectID: comp.id)  // allowed again
+        #expect(try #require(store.tracks.first { $0.id == pad.id }).effects.isEmpty)
+    }
+
+    // m13-c E: setInstrument is CONDITIONAL — only a node rebuild on a routed
+    // strip refuses; a param overlay and an unrouted swap stay legal.
+    @Test("setInstrument: routed node-rebuild refuses; param overlay + unrouted swap legal")
+    func setInstrumentConditional() throws {
+        let engine = FakeRecordingEngine()
+        let store = ProjectStore()
+        store.engine = engine
+        let synth = store.addTrack(name: "Synth", kind: .instrument)
+        let bus = store.addTrack(name: "Bus", kind: .bus)
+        _ = try store.addSend(toTrack: synth.id, busID: bus.id)  // route it
+        let plain = store.addTrack(name: "Plain", kind: .instrument)  // trivial routing
+        try rolling(store, engine: engine)
+
+        // Poly-synth param overlay = SAME node → legal even on the routed track.
+        _ = try store.setInstrument(id: synth.id, waveform: .square)
+
+        // Kind swap on the routed track rebuilds the node → refused.
+        let error = projectError { _ = try store.setInstrument(id: synth.id, kind: .sampler) }
+        guard case .transportBusy(let msg) = try #require(error) else {
+            Issue.record("expected transportBusy from routed setInstrument"); return
+        }
+        #expect(msg == "cannot change a routed track's instrument while recording — stop first")
+        #expect(try #require(store.tracks.first { $0.id == synth.id }).instrument?.kind == .polySynth)
+
+        // Same kind swap on a TRIVIALLY-routed instrument track → legal.
+        _ = try store.setInstrument(id: plain.id, kind: .sampler)
+        #expect(try #require(store.tracks.first { $0.id == plain.id }).instrument?.kind == .sampler)
+
+        store.stop()
+        _ = try store.setInstrument(id: synth.id, kind: .sampler)  // allowed again
+        #expect(try #require(store.tracks.first { $0.id == synth.id }).instrument?.kind == .sampler)
+    }
+
+    // m13-c F: the explicitly-legal set stays legal mid-take (so a future guard
+    // never overreaches into param/chain/attach-only territory).
+    @Test("param-only + attach-only verbs stay legal mid-recording")
+    func legalVerbsRemainUnguarded() throws {
+        let engine = FakeRecordingEngine()
+        let store = ProjectStore()
+        store.engine = engine
+        let t = store.addTrack(name: "T", kind: .audio)
+        let bus = store.addTrack(name: "Bus", kind: .bus)
+        let send = try store.addSend(toTrack: t.id, busID: bus.id)
+        let comp = try store.addEffect(toTrack: t.id, kind: .compressor)
+        let eq = try store.addEffect(toTrack: t.id, kind: .eq)
+        try rolling(store, engine: engine)
+
+        // Param-only strip edits.
+        #expect(store.setTrackVolume(id: t.id, volume: 0.5))
+        #expect(store.setTrackPan(id: t.id, pan: 0.3))
+        #expect(store.setTrackMute(id: t.id, muted: true))
+        #expect(store.setTrackSolo(id: t.id, soloed: true))
+        // Send LEVEL (not add/remove) is param-only.
+        _ = try store.setSendLevel(trackID: t.id, sendID: send.id, level: 0.7)
+        // FX param + bypass are chain-publish, never routing.
+        _ = try store.setEffectParam(trackID: t.id, effectID: comp.id, name: "thresholdDb", value: -12)
+        try store.setEffectBypassed(trackID: t.id, effectID: eq.id, bypassed: true)
+        // Attach-only / chain-structure verbs that never announce.
+        _ = store.addTrack(name: "T2", kind: .audio)            // addTrack
+        _ = try store.addEffect(toTrack: t.id, kind: .delay)    // addEffect
+        try store.reorderEffect(trackID: t.id, effectID: eq.id, toIndex: 0)  // reorderEffect
+        // m13-d: MASTER chain verbs are chain-publish, never topology —
+        // deliberately legal mid-take (design D3; "add a limiter while the
+        // artist is rolling" is the workflow).
+        let mLim = try store.addMasterEffect(kind: .limiter)
+        _ = try store.setMasterEffectParam(effectID: mLim.id, name: "ceilingDb", value: -6)
+        try store.setMasterEffectBypassed(effectID: mLim.id, bypassed: true)
+        let mEq = try store.addMasterEffect(kind: .eq)
+        try store.reorderMasterEffect(effectID: mEq.id, toIndex: 0)
+        try store.removeMasterEffect(effectID: mEq.id)
+        // m15-c: MASTER automation verbs are parameter-plane (an atomic
+        // schedule republish, never topology, never announce-capable) —
+        // deliberately legal mid-take, like track automation. The capture
+        // path is a separate input-only engine (InputCapture), so a master
+        // fade can never color the take being recorded.
+        let mLane = try store.addMasterAutomationLane(target: .volume)
+        _ = try store.setMasterAutomationPoints(laneID: mLane.id, points: [
+            AutomationPoint(beat: 0, value: 1), AutomationPoint(beat: 8, value: 0),
+        ])
+        _ = try store.setMasterAutomationLaneEnabled(laneID: mLane.id, false)
+        try store.removeMasterAutomationLane(laneID: mLane.id)
+
+        #expect(store.transport.isRecording)  // never interrupted the take
+        store.stop()
     }
 }

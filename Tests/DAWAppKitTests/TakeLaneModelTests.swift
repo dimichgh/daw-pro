@@ -12,6 +12,11 @@ import DAWCore
 /// draws is provably one the store will store (the ClipEditModel precedent).
 @Suite struct TakeLaneModelTests {
 
+    /// Trivial single-meter map (m13-h) — reproduces old base-meter snapping.
+    private func meter(_ bpb: Int = 4) -> MeterMap {
+        MeterMap(constant: TimeSignature(beatsPerBar: bpb))
+    }
+
     // A local mirror of ProjectStore.setCompSegments' validation: known lanes,
     // end > start, sorted, non-overlapping. If the editor's output would fail
     // this it would be rejected by the store — so every paint result must pass.
@@ -61,7 +66,7 @@ import DAWCore
     @Test func classifyClickBelowThresholdSelects() {
         let lane = UUID()
         let g = TakeComp.classifyDrag(laneID: lane, fromBeatRaw: 3.0, toBeatRaw: 3.02,
-                                      snap: .off, beatsPerBar: 4, range: 0...8)
+                                      snap: .off, meterMap: meter(), range: 0...8)
         #expect(g.isClick)   // 0.02-beat raw span < 0.15 threshold
     }
 
@@ -69,7 +74,7 @@ import DAWCore
         let lane = UUID()
         // Dragged right-to-left (to < from); snap to beat grid; ordered lo..hi.
         let g = TakeComp.classifyDrag(laneID: lane, fromBeatRaw: 5.4, toBeatRaw: 1.6,
-                                      snap: .beat, beatsPerBar: 4, range: 0...8)
+                                      snap: .beat, meterMap: meter(), range: 0...8)
         #expect(!g.isClick)
         #expect(g.startBeat == 2)   // 1.6 -> 2
         #expect(g.endBeat == 5)     // 5.4 -> 5
@@ -79,9 +84,23 @@ import DAWCore
         let lane = UUID()
         // A tiny snapped span at the range end still clamps to a >= min span.
         let g = TakeComp.classifyDrag(laneID: lane, fromBeatRaw: 7.9, toBeatRaw: 8.4,
-                                      snap: .off, beatsPerBar: 4, range: 0...8)
+                                      snap: .off, meterMap: meter(), range: 0...8)
         #expect(g.endBeat <= 8.0 + 1e-9)
         #expect(g.endBeat > g.startBeat)
+    }
+
+    @Test func classifyDragBarSnapFollowsMeterChange() {
+        // 4/4 → 6/8 @ beat 16 (bpb 6): a bar-snapped paint in the 6/8 region snaps on
+        // that region's grid (barlines …16,22,28…), not a fixed 4-beat grid (m13-h).
+        let m = try! MeterMap(changes: [
+            .init(startBeat: 0, beatsPerBar: 4, beatUnit: 4),
+            .init(startBeat: 16, beatsPerBar: 6, beatUnit: 8),
+        ])
+        let lane = UUID()
+        let g = TakeComp.classifyDrag(laneID: lane, fromBeatRaw: 17, toBeatRaw: 21,
+                                      snap: .bar, meterMap: m, range: 0...28)
+        #expect(g.startBeat == 16)   // 17 → nearest 6/8 barline
+        #expect(g.endBeat == 22)     // 21 → nearest 6/8 barline
     }
 
     // MARK: - Paint override

@@ -10,9 +10,10 @@ import DAWAppKit
 struct MixerView: View {
     @Environment(ProjectStore.self) private var store
     /// The console's shared density store (docs/DESIGN-LANGUAGE.md "Panels").
-    /// Threaded to every channel/bus strip; the master strip never reads it
-    /// (its modes coincide). The SIMPLE/PRO chip in the Mix toolbar binds the
-    /// same store under `panelID`.
+    /// Threaded to every channel/bus strip AND the master strip — since m13-d
+    /// the master strip reveals its insert chain only in Pro (its fader/meters
+    /// show in both). The SIMPLE/PRO chip in the Mix toolbar binds the same
+    /// store under `panelID`.
     var densityStore: PanelDensityStore
 
     /// Stable density key for the whole mixer console — the console is ONE panel,
@@ -48,7 +49,7 @@ struct MixerView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             // Master is outside the scroller so it stays pinned at the right.
-            MixerMasterStrip()
+            MixerMasterStrip(densityStore: densityStore)
                 .padding(.vertical, 12)
                 .padding(.leading, 8)
                 .padding(.trailing, 14)

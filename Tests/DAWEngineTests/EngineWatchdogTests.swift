@@ -271,22 +271,23 @@ struct EngineWatchdogEngineTests {
         #expect(!graph.hasInstrumentedStrips)
     }
 
-    @Test("recoverEngine without an anchor is the notification path's early-out: bin untouched, no restart")
+    @Test("recoverEngine without an anchor is the notification path's early-out: rebuild debt untouched, no restart")
     func recoverEngineWithoutAnchorIsEarlyOut() {
         // Extraction-fidelity pin: the config-change body's `guard let
         // anchor` early-return survived the crash-c extraction verbatim.
-        // Build a parked retire-bin (stopped-after-run teardown, the crash-a
-        // shape), then prove recoverEngine() leaves it alone when there is
-        // no playback anchor — it may ONLY sync isRunning and return.
+        // m13-a analog of the old "bin untouched" pin: mark the graph for
+        // rebuild (the flag a stopped-after-run teardown would set), then
+        // prove recoverEngine() neither consumes it nor restarts anything
+        // when there is no playback anchor — it may ONLY sync isRunning and
+        // return; rebuild debt belongs to tracksDidChange alone.
         let engine = AudioEngine()
         engine.tracksDidChange([Track(name: "A", kind: .audio)])
         engine.graph.engineHasRun = true   // exactly what prepare() sets
-        engine.tracksDidChange([])         // teardown while "stopped after run"
-        #expect(!engine.graph.pendingDetachNodes.isEmpty)
+        engine.graph.needsEngineRebuild = true
 
         engine.recoverEngine()
-        #expect(!engine.graph.pendingDetachNodes.isEmpty)  // NOT flushed
-        #expect(!engine.isRunning)                          // only synced
+        #expect(engine.graph.needsEngineRebuild)  // NOT consumed
+        #expect(!engine.isRunning)                // only synced
     }
 
     @Test("live: watchdogRestart bounces a playing engine through the shared recovery")
@@ -326,9 +327,8 @@ struct EngineWatchdogEngineTests {
         try engine.watchdogRestart()
         #expect(engine.isRunning)
         #expect(engine.watchdogStatus().engineRunning)
-        // The retire bin was drained against the restarted engine
-        // (recoverEngine's crash-a flush).
-        #expect(engine.graph.pendingDetachNodes.isEmpty)
+        // A healthy restart leaves no rebuild debt behind (m13-a).
+        #expect(!engine.graph.needsEngineRebuild)
 
         // Playback resumed through startPlayers: the playhead keeps moving.
         let pushesAtRestart = pushes.count

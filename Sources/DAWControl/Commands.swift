@@ -140,6 +140,8 @@ public final class CommandRouter {
         "transport.setLoop",
         "transport.setPunch",
         "transport.setMetronome",
+        "tempo.map",
+        "tempo.setMap",
         "marker.add",
         "marker.remove",
         "marker.rename",
@@ -163,6 +165,7 @@ public final class CommandRouter {
         "fx.reorder",
         "fx.setBypass",
         "fx.setParam",
+        "fx.setSidechain",
         "fx.describe",
         "fx.listAudioUnits",
         "instrument.listAudioUnits",
@@ -186,7 +189,9 @@ public final class CommandRouter {
         "clip.split",
         "clip.trim",
         "clip.move",
+        "clip.duplicate",
         "clip.setGain",
+        "clip.setGainEnvelope",
         "clip.setFades",
         "clip.crossfade",
         "clip.setStretch",
@@ -197,6 +202,8 @@ public final class CommandRouter {
         "clip.humanize",
         "clip.detectTransients",
         "clip.quantizeAudio",
+        "arrange.insertBars",
+        "arrange.deleteBars",
         "take.group",
         "take.setComp",
         "take.select",
@@ -370,22 +377,65 @@ public final class CommandRouter {
             return .success(request.id, .object(["markers": .array(markers)]))
 
         case "transport.setTempo":
+            // The single-segment FAST PATH (m12-d). Sets one project-wide tempo;
+            // the store REJECTS with a teaching error pointing at tempo.setMap on
+            // a project that carries a multi-segment tempo map (surfaces via the
+            // LocalizedError mapping — .tempoMapMultiSegment).
             let bpm = try params.require("bpm", \.doubleValue)
             try store.setTempo(bpm)
             return .success(request.id, .number(store.transport.tempoBPM))
 
+        case "tempo.map":
+            // No params. Reads the RESOLVED tempo + meter maps (always >= 1 entry
+            // each — a single-tempo project reports its synthesized single
+            // segment/change) plus the monotonic mapRevision. The omit-when-
+            // trivial mirror rides project.snapshot's tempoMap/meterChanges.
+            return .success(request.id, Self.tempoMapJSON(store))
+
+        case "tempo.setMap":
+            // Full-map REPLACE (m12-d, design §3.6). params: segments (required,
+            // >= 1, each {beat, bpm}; segment 0 MUST be at beat 0), meterChanges
+            // (optional; omit to leave the current meter map untouched). Validated
+            // with field-named teaching errors. ONE undoable step (coalescing key
+            // "tempo.map"); a single-segment map collapses to the scalar tempo.
+            // transportBusy while recording surfaces via the LocalizedError map.
+            let tempoMap = try Self.parseTempoMap(params)
+            let meterMap = try Self.parseMeterMap(params)
+            try store.setTempoMap(tempoMap, meterMap: meterMap)
+            return .success(request.id, Self.tempoMapJSON(store))
+
         case "transport.record":
-            // Starts one take on every armed audio AND instrument track
-            // (track.setArm works on both). Punch windows trim AUDIO capture
-            // only — MIDI notes record across the full roll (v0; notes are
-            // individually editable after the fact). Microphone permission
-            // gates apply only when audio tracks are armed.
+            // No params. Starts one take on every armed audio AND instrument
+            // track (track.setArm works on both). Punch windows trim AUDIO
+            // capture only — MIDI notes record across the full roll (v0;
+            // notes are individually editable after the fact). Microphone
+            // permission gates apply only when audio tracks are armed.
+            // LOOP-CYCLE TAKES (m15-b, design-m15b-loop-record): with the
+            // loop enabled, record SEEKS to the loop start first (visible
+            // in this response's positionBeats), loops for real (no silent
+            // linear roll), and lands one take lane per loop pass on the
+            // SAME take group at stop — newest lane comped, an honest
+            // partial last lane on a mid-cycle stop. No behavior flag; loop
+            // state alone decides (disable the loop first for a plain
+            // linear take). Refuses with a teaching error when punch is
+            // ALSO enabled (loop × punch is unsupported in v1) or when the
+            // loop is shorter than TakeGroup.minLoopRecordCycleSeconds
+            // (1 s/cycle). noArmedTracks/recordPermissionDenied/
+            // recordPermissionPending/transportBusy/invalidPunchRange/
+            // invalidLoopRange surface via the LocalizedError mapping.
             try store.record()
             return .success(request.id, try JSONValue(encoding: store.transport))
 
         case "transport.setLoop":
-            // (params: enabled bool, startBeat number, endBeat number).
-            // Being added in parallel — do not duplicate here.
+            // params: enabled bool (required), startBeat number (optional,
+            // >= 0, kept if omitted), endBeat number (optional, > startBeat,
+            // kept if omitted) — omitting a beat lets the UI toggle looping
+            // without re-stating the range. Refused mid-record (m15-b):
+            // "cannot change the loop while recording — stop first" — a
+            // rolling take's loop window is frozen at record start, so a
+            // mid-take bounds edit would restart the engine's scheduled loop
+            // and kill the capture writer's anchor. transportBusy/
+            // invalidLoopRange surface via the LocalizedError mapping.
             let enabled = try params.require("enabled", \.boolValue)
             let startBeat = params["startBeat"]?.doubleValue
             let endBeat = params["endBeat"]?.doubleValue
@@ -438,7 +488,7 @@ public final class CommandRouter {
             } else {
                 reroutedCounts = nil
             }
-            guard store.removeTrack(id: id) else { throw ControlError.noTrack(id) }
+            guard try store.removeTrack(id: id) else { throw ControlError.noTrack(id) }
             if let reroutedCounts {
                 return .success(request.id, .object(["rerouted": .object([
                     "outputs": .number(Double(reroutedCounts.outputs)),
@@ -482,6 +532,15 @@ public final class CommandRouter {
             // = master — exact input.setDevice pattern; non-string/non-null →
             // 'busId' must be a string or null). busRoutingFixed/notABus/
             // trackNotFound surface via the LocalizedError mapping.
+            //
+            // F5 HARDENING (m15-d): this is an "omit = destructive default" verb —
+            // omitting `busId` UN-ROUTES the track to master. So a typo'd key
+            // (the audit's measured `{output: <busId>}`) would silently un-route
+            // and return ok. Unknown keys are REJECTED with a teaching error
+            // before anything runs, so a typo can never masquerade as an un-route.
+            try params.rejectUnknownKeys(
+                ["trackId", "busId"], verb: "track.setOutput",
+                hint: "omit 'busId' (or pass it null) to route the track to master")
             let outTrackID = try params.requireTrackID()
             let outBusID: UUID?
             switch params["busId"] {
@@ -676,13 +735,15 @@ public final class CommandRouter {
             return .success(request.id, .object(["bank": soundBankInfoJSON(importedBank)]))
 
         case "fx.add":
-            // params: trackId (required), kind (required, one of the effect
-            // kinds), index? (int, clamps into [0, chain length]), params?
-            // (object of name:value, clamped silently via EffectParamSpec — an
-            // unknown name errors before anything is added). Returns {effectId,
-            // effects}. Unknown kind lists valid kinds; chainFull/trackNotFound
-            // surface via the LocalizedError mapping.
-            let fxAddTrackID = try params.requireTrackID()
+            // params: trackId (required — a track/bus UUID or the "master"
+            // sentinel, m13-d), kind (required, one of the effect kinds), index?
+            // (int, clamps into [0, chain length]), params? (object of
+            // name:value, clamped silently via EffectParamSpec — an unknown name
+            // errors before anything is added). Returns {effectId, effects}.
+            // Unknown kind lists valid kinds; chainFull/trackNotFound surface via
+            // the LocalizedError mapping. On the MASTER chain only built-in kinds
+            // are legal (kind "audioUnit" → masterChainBuiltInOnly via the store).
+            let fxAddTarget = try params.parseFXTarget()
             let fxKind = try parseEffectKind(params["kind"])
             let fxIndex = params["index"]?.doubleValue.map { Int($0) }
             // Pre-validate any initial param names against the kind's schema so a
@@ -699,69 +760,158 @@ public final class CommandRouter {
                     if let number = value.doubleValue { fxInitialParams.append((name, number)) }
                 }
             }
-            // kind "audioUnit" additionally takes audioUnit {type?, subType,
-            // manufacturer} (type defaults "aufx"), resolved STRICTLY against
-            // the installed effect components — unknown component errors and
-            // nothing is added. Omitting audioUnit for this kind errors at
-            // the store boundary (audioUnitEffectRequiresComponent).
-            var fxAudioUnit: AudioUnitConfig?
-            if fxKind == .audioUnit {
-                fxAudioUnit = try parseAudioUnit(
-                    params["audioUnit"], defaultType: "aufx",
-                    candidates: store.availableAudioUnitEffects(),
-                    listCommand: "fx.listAudioUnits")
+            switch fxAddTarget {
+            case .track(let fxAddTrackID):
+                // kind "audioUnit" additionally takes audioUnit {type?, subType,
+                // manufacturer} (type defaults "aufx"), resolved STRICTLY against
+                // the installed effect components — unknown component errors and
+                // nothing is added. Omitting audioUnit for this kind errors at
+                // the store boundary (audioUnitEffectRequiresComponent).
+                var fxAudioUnit: AudioUnitConfig?
+                if fxKind == .audioUnit {
+                    fxAudioUnit = try parseAudioUnit(
+                        params["audioUnit"], defaultType: "aufx",
+                        candidates: store.availableAudioUnitEffects(),
+                        listCommand: "fx.listAudioUnits")
+                }
+                let fxDescriptor = try store.addEffect(toTrack: fxAddTrackID, kind: fxKind,
+                                                       at: fxIndex, audioUnit: fxAudioUnit)
+                for (name, value) in fxInitialParams {
+                    _ = try store.setEffectParam(trackID: fxAddTrackID, effectID: fxDescriptor.id,
+                                                 name: name, value: value)
+                }
+                return .success(request.id, fxResult(trackID: fxAddTrackID, effectID: fxDescriptor.id))
+            case .master:
+                // Master hosts built-in effects only in v1 (design D4a): the
+                // store throws masterChainBuiltInOnly for kind "audioUnit"
+                // BEFORE anything changes, so no AU component is parsed here.
+                let fxDescriptor = try store.addMasterEffect(kind: fxKind, at: fxIndex)
+                for (name, value) in fxInitialParams {
+                    _ = try store.setMasterEffectParam(effectID: fxDescriptor.id,
+                                                       name: name, value: value)
+                }
+                return .success(request.id, masterFxResult(effectID: fxDescriptor.id))
             }
-            let fxDescriptor = try store.addEffect(toTrack: fxAddTrackID, kind: fxKind,
-                                                   at: fxIndex, audioUnit: fxAudioUnit)
-            for (name, value) in fxInitialParams {
-                _ = try store.setEffectParam(trackID: fxAddTrackID, effectID: fxDescriptor.id,
-                                             name: name, value: value)
-            }
-            return .success(request.id, fxResult(trackID: fxAddTrackID, effectID: fxDescriptor.id))
 
         case "fx.remove":
-            // params: trackId (required), effectId (required UUID). effectNotFound/
-            // trackNotFound surface via the LocalizedError mapping.
-            let fxRemTrackID = try params.requireTrackID()
+            // params: trackId (required — a track UUID or "master", m13-d),
+            // effectId (required UUID). effectNotFound/trackNotFound surface via
+            // the LocalizedError mapping.
             let fxRemEffectID = try params.requireEffectID()
-            try store.removeEffect(trackID: fxRemTrackID, effectID: fxRemEffectID)
-            return .success(request.id, fxResult(trackID: fxRemTrackID))
+            switch try params.parseFXTarget() {
+            case .track(let fxRemTrackID):
+                try store.removeEffect(trackID: fxRemTrackID, effectID: fxRemEffectID)
+                return .success(request.id, fxResult(trackID: fxRemTrackID))
+            case .master:
+                try store.removeMasterEffect(effectID: fxRemEffectID)
+                return .success(request.id, masterFxResult())
+            }
 
         case "fx.reorder":
-            // params: trackId (required), effectId (required UUID), index
-            // (required int, clamps into the valid range). effectNotFound/
-            // trackNotFound surface via the LocalizedError mapping.
-            let fxReoTrackID = try params.requireTrackID()
+            // params: trackId (required — a track UUID or "master", m13-d),
+            // effectId (required UUID), index (required int, clamps into the
+            // valid range). effectNotFound/trackNotFound surface via the
+            // LocalizedError mapping.
             let fxReoEffectID = try params.requireEffectID()
             let fxReoIndex = try params.require("index", \.doubleValue)
-            try store.reorderEffect(trackID: fxReoTrackID, effectID: fxReoEffectID,
-                                    toIndex: Int(fxReoIndex))
-            return .success(request.id, fxResult(trackID: fxReoTrackID))
+            switch try params.parseFXTarget() {
+            case .track(let fxReoTrackID):
+                try store.reorderEffect(trackID: fxReoTrackID, effectID: fxReoEffectID,
+                                        toIndex: Int(fxReoIndex))
+                return .success(request.id, fxResult(trackID: fxReoTrackID))
+            case .master:
+                try store.reorderMasterEffect(effectID: fxReoEffectID, toIndex: Int(fxReoIndex))
+                return .success(request.id, masterFxResult())
+            }
 
         case "fx.setBypass":
-            // params: trackId (required), effectId (required UUID), bypassed
-            // (required bool). effectNotFound/trackNotFound surface via the
-            // LocalizedError mapping.
-            let fxBypTrackID = try params.requireTrackID()
+            // params: trackId (required — a track UUID or "master", m13-d),
+            // effectId (required UUID), bypassed (required bool). effectNotFound/
+            // trackNotFound surface via the LocalizedError mapping.
             let fxBypEffectID = try params.requireEffectID()
             let fxBypassed = try params.require("bypassed", \.boolValue)
-            try store.setEffectBypassed(trackID: fxBypTrackID, effectID: fxBypEffectID,
-                                        bypassed: fxBypassed)
-            return .success(request.id, fxResult(trackID: fxBypTrackID))
+            switch try params.parseFXTarget() {
+            case .track(let fxBypTrackID):
+                try store.setEffectBypassed(trackID: fxBypTrackID, effectID: fxBypEffectID,
+                                            bypassed: fxBypassed)
+                return .success(request.id, fxResult(trackID: fxBypTrackID))
+            case .master:
+                try store.setMasterEffectBypassed(effectID: fxBypEffectID, bypassed: fxBypassed)
+                return .success(request.id, masterFxResult())
+            }
 
         case "fx.setParam":
-            // params: trackId (required), effectId (required UUID), name (required
-            // string), value (required number, clamps silently through the spec
-            // range like track.setVolume). An unknown name surfaces
-            // unknownEffectParam (listing the valid names); effectNotFound/
-            // trackNotFound also surface via the LocalizedError mapping.
-            let fxParTrackID = try params.requireTrackID()
+            // params: trackId (required — a track UUID or "master", m13-d),
+            // effectId (required UUID), name (required string), value (required
+            // number, clamps silently through the spec range like
+            // track.setVolume). An unknown name surfaces unknownEffectParam
+            // (listing the valid names); effectNotFound/trackNotFound also
+            // surface via the LocalizedError mapping.
             let fxParEffectID = try params.requireEffectID()
             let fxParName = try params.require("name", \.stringValue)
             let fxParValue = try params.require("value", \.doubleValue)
-            let fxParDescriptor = try store.setEffectParam(
-                trackID: fxParTrackID, effectID: fxParEffectID, name: fxParName, value: fxParValue)
-            return .success(request.id, fxResult(trackID: fxParTrackID, effectID: fxParDescriptor.id))
+            switch try params.parseFXTarget() {
+            case .track(let fxParTrackID):
+                let fxParDescriptor = try store.setEffectParam(
+                    trackID: fxParTrackID, effectID: fxParEffectID, name: fxParName, value: fxParValue)
+                return .success(request.id, fxResult(trackID: fxParTrackID, effectID: fxParDescriptor.id))
+            case .master:
+                let fxParDescriptor = try store.setMasterEffectParam(
+                    effectID: fxParEffectID, name: fxParName, value: fxParValue)
+                return .success(request.id, masterFxResult(effectID: fxParDescriptor.id))
+            }
+
+        case "fx.setSidechain":
+            // params: trackId (required), effectId (required UUID), sourceTrackId
+            // (nullable/optional — ABSENT or `null` CLEARS the key). Keys a
+            // built-in compressor/gate off another track's post-fader signal
+            // (m12-g S-4; replaces the retired app-tier staging seam).
+            // The store validates and throws the four field-named teaching errors
+            // verbatim (sidechainUnsupportedEffect on a non-compressor/gate incl.
+            // hosted AUs; sidechainUnsupportedTrack on an instrument destination;
+            // sidechainUnsupportedSource on a bus key source; sidechainWouldCreate-
+            // Cycle naming the → path; sidechainOneSourcePerStrip) plus
+            // trackNotFound/effectNotFound via the LocalizedError mapping.
+            // Returns the track's resolved insert chain (the fx.* convention —
+            // the keyed effect carries `sidechainSourceTrackId`) PLUS
+            // `sidechainSkewSamples` (the honest key-tap PDC skew, parity with
+            // the retired seam).
+            // The master chain cannot host a sidechain-keyed effect (m13-d,
+            // design §4): reject `trackId:"master"` with the NAMED teaching
+            // error rather than the generic UUID-parse error.
+            guard case .track(let fxScTrackID) = try params.parseFXTarget() else {
+                throw ProjectError.sidechainMasterUnsupported
+            }
+            let fxScEffectID = try params.requireEffectID()
+            // sourceTrackId absent → nil (clear); explicit null → nil (clear); a
+            // non-null value must be a valid UUID (field-named on a bad value).
+            // The "master" sentinel is rejected here too (wire-level, m13-d): the
+            // master output cannot be a key SOURCE — this upgrades the raw
+            // UUID-parse error that "master" used to hit at this site.
+            var fxScSource: UUID?
+            switch params["sourceTrackId"] {
+            case .string(let raw)?:
+                if raw == "master" {
+                    throw ControlError("the master output cannot be a sidechain key source")
+                }
+                guard let parsed = UUID(uuidString: raw) else {
+                    throw ControlError("'sourceTrackId' is not a valid UUID: \(raw)")
+                }
+                fxScSource = parsed
+            case .null?, nil:
+                fxScSource = nil
+            default:
+                throw ControlError("'sourceTrackId' must be a track id string or null")
+            }
+            _ = try store.setSidechain(trackID: fxScTrackID, effectID: fxScEffectID,
+                                       sourceTrackID: fxScSource)
+            let fxScSkew = store.pdcReport()?.strips[fxScTrackID]?.sidechainSkewSamples ?? 0
+            var fxScResult = fxResult(trackID: fxScTrackID, effectID: fxScEffectID)
+            if case .object(var obj) = fxScResult {
+                obj["sidechainSkewSamples"] = .number(Double(fxScSkew))
+                fxScResult = .object(obj)
+            }
+            return .success(request.id, fxScResult)
 
         case "fx.describe":
             // params: kind? (omit for every kind). Returns the parameter schemas
@@ -910,7 +1060,8 @@ public final class CommandRouter {
             return .success(request.id, songSkeletonResult(skeleton))
 
         case "automation.addLane":
-            // params: trackId (required), target (required) — the SAME
+            // params: trackId (required — a track UUID, or the "master"
+            // sentinel, m15-c), target (required) — the SAME
             // {type: "volume"|"pan"|"sendLevel"|"effectParam", sendId?,
             // effectId?, param?} shape AutomationTarget itself reads/writes on
             // the wire and on disk (see parseAutomationTarget — no hand-parsed
@@ -921,55 +1072,82 @@ public final class CommandRouter {
             // (automationTargetNotSupported — an honest deferral, not a silent
             // no-op); any other unresolvable target (unknown send/effect id, or
             // an unknown/empty effect param name) → automationTargetUnresolvable;
-            // unknown track → trackNotFound. Both surface via the LocalizedError
-            // mapping. Response: {"lane": {id, target, points, isEnabled}}.
-            let addLaneTrackID = try params.requireTrackID()
+            // unknown track → trackNotFound. trackId:"master" (m15-c) targets
+            // the project-level MASTER VOLUME lane — {type:"volume"} ONLY; any
+            // other target → masterAutomationVolumeOnly, a teaching error
+            // naming where those lanes live. All surface via the
+            // LocalizedError mapping. Response: {"lane": {id, target, points,
+            // isEnabled}} either way.
             let addLaneTarget = try parseAutomationTarget(params["target"])
-            let addedLane = try store.addAutomationLane(trackID: addLaneTrackID, target: addLaneTarget)
-            return .success(request.id, .object(["lane": try JSONValue(encoding: addedLane)]))
+            switch try params.parseFXTarget() {
+            case .track(let addLaneTrackID):
+                let addedLane = try store.addAutomationLane(
+                    trackID: addLaneTrackID, target: addLaneTarget)
+                return .success(request.id, .object(["lane": try JSONValue(encoding: addedLane)]))
+            case .master:
+                let addedLane = try store.addMasterAutomationLane(target: addLaneTarget)
+                return .success(request.id, .object(["lane": try JSONValue(encoding: addedLane)]))
+            }
 
         case "automation.removeLane":
-            // params: trackId (required), laneId (required UUID).
-            // automationLaneNotFound/trackNotFound surface via the
-            // LocalizedError mapping.
-            let removeLaneTrackID = try params.requireTrackID()
+            // params: trackId (required — a track UUID or "master", m15-c),
+            // laneId (required UUID). automationLaneNotFound/trackNotFound
+            // surface via the LocalizedError mapping.
             let removeLaneID = try params.requireLaneID()
-            try store.removeAutomationLane(trackID: removeLaneTrackID, laneID: removeLaneID)
+            switch try params.parseFXTarget() {
+            case .track(let removeLaneTrackID):
+                try store.removeAutomationLane(trackID: removeLaneTrackID, laneID: removeLaneID)
+            case .master:
+                try store.removeMasterAutomationLane(laneID: removeLaneID)
+            }
             return .success(request.id)
 
         case "automation.setPoints":
-            // params: trackId (required), laneId (required UUID), points
-            // (required array of {beat >= 0, value, curve?} — see
-            // parseAutomationPoints, which decodes each element through
-            // AutomationPoint's OWN Codable so a malformed entry names its
-            // index; an omitted curve defaults "linear"). WHOLE-ARRAY replace
-            // (the clip-notes precedent) — the store re-canonicalizes (sorted
-            // by beat, equal-beat dedupe last-wins), clamps every value to the
-            // target's live range, and trims silently to the newest 4096
+            // params: trackId (required — a track UUID or "master", m15-c),
+            // laneId (required UUID), points (required array of {beat >= 0,
+            // value, curve?} — see parseAutomationPoints, which decodes each
+            // element through AutomationPoint's OWN Codable so a malformed
+            // entry names its index; an omitted curve defaults "linear").
+            // WHOLE-ARRAY replace (the clip-notes precedent) — the store
+            // re-canonicalizes (sorted by beat, equal-beat dedupe last-wins),
+            // clamps every value to the target's live range (master: the
+            // masterVolume range 0...2), and trims silently to the newest 4096
             // points when the array is over cap. automationLaneNotFound/
             // trackNotFound surface via the LocalizedError mapping. Response:
             // {"lane": {id, target, points, isEnabled}}.
-            let setPointsTrackID = try params.requireTrackID()
             let setPointsLaneID = try params.requireLaneID()
             guard let rawPoints = params["points"] else {
                 throw ControlError("missing or invalid required param 'points'")
             }
             let parsedPoints = try parseAutomationPoints(rawPoints)
-            let pointedLane = try store.setAutomationPoints(
-                trackID: setPointsTrackID, laneID: setPointsLaneID, points: parsedPoints)
+            let pointedLane: AutomationLane
+            switch try params.parseFXTarget() {
+            case .track(let setPointsTrackID):
+                pointedLane = try store.setAutomationPoints(
+                    trackID: setPointsTrackID, laneID: setPointsLaneID, points: parsedPoints)
+            case .master:
+                pointedLane = try store.setMasterAutomationPoints(
+                    laneID: setPointsLaneID, points: parsedPoints)
+            }
             return .success(request.id, .object(["lane": try JSONValue(encoding: pointedLane)]))
 
         case "automation.setLaneEnabled":
-            // params: trackId (required), laneId (required UUID), enabled
-            // (required bool) — toggles the lane between read (drawn curve)
-            // and manual (fader/knob) without touching its points.
-            // automationLaneNotFound/trackNotFound surface via the
-            // LocalizedError mapping. Response: {"lane": {...}}.
-            let setEnabledTrackID = try params.requireTrackID()
+            // params: trackId (required — a track UUID or "master", m15-c),
+            // laneId (required UUID), enabled (required bool) — toggles the
+            // lane between read (drawn curve) and manual (fader/knob) without
+            // touching its points. automationLaneNotFound/trackNotFound
+            // surface via the LocalizedError mapping. Response: {"lane": {...}}.
             let setEnabledLaneID = try params.requireLaneID()
             let laneEnabled = try params.require("enabled", \.boolValue)
-            let enabledLane = try store.setAutomationLaneEnabled(
-                trackID: setEnabledTrackID, laneID: setEnabledLaneID, laneEnabled)
+            let enabledLane: AutomationLane
+            switch try params.parseFXTarget() {
+            case .track(let setEnabledTrackID):
+                enabledLane = try store.setAutomationLaneEnabled(
+                    trackID: setEnabledTrackID, laneID: setEnabledLaneID, laneEnabled)
+            case .master:
+                enabledLane = try store.setMasterAutomationLaneEnabled(
+                    laneID: setEnabledLaneID, laneEnabled)
+            }
             return .success(request.id, .object(["lane": try JSONValue(encoding: enabledLane)]))
 
         case "clip.addAudio":
@@ -1089,6 +1267,49 @@ public final class CommandRouter {
             moveObject["removed"] = .array(moveResult.removedClipIDs.map { .string($0.uuidString) })
             return .success(request.id, .object(moveObject))
 
+        case "clip.duplicate":
+            // params: clipId (required). toStartBeat? (>= 0) — omitted appends
+            // FLUSH after the source clip's tail; toTrackId? — omitted duplicates
+            // onto the source's own track, else a value-copy lands on that track
+            // (type-checked by content: a MIDI clip needs an instrument track, an
+            // audio clip an audio track). VALUE-COPIES everything (media/notes,
+            // gain, fades + curves, gain envelope, stretch/pitch, AI flag) under a
+            // fresh id; the source may not be a take/comp member.
+            //
+            // OVERLAP POLICY (m13-b): the new clip lands through the ONE
+            // no-silent-overlap choke point as the active window — a duplicate
+            // dropped onto an occupied region TRIMS the ordinary residents it
+            // covers (never a silent +6 dB overlap); take members stack (exempt).
+            // ONE undo. clipNotFound/trackNotFound/midiClipsRequireInstrumentTrack/
+            // trackKindUnsupported surface via the LocalizedError mapping.
+            // Response: the NEW clip's fields (the track.add/clip.addMIDI unwrapped
+            // convention) PLUS additive `trimmed:[clipId…]` / `removed:[clipId…]`
+            // arrays naming the residents the overlap policy edited (the clip.move
+            // shape).
+            let dupClipID = try params.requireClipID()
+            let dupToStartBeat = params["toStartBeat"]?.doubleValue
+            if let dupToStartBeat, dupToStartBeat < 0 {
+                throw ControlError("'toStartBeat' must be >= 0")
+            }
+            let dupToTrackID: UUID?
+            switch params["toTrackId"] {
+            case .none:
+                dupToTrackID = nil
+            case .some(.string(let raw)):
+                guard let parsed = UUID(uuidString: raw) else {
+                    throw ControlError("'toTrackId' is not a valid UUID: \(raw)")
+                }
+                dupToTrackID = parsed
+            case .some:
+                throw ControlError("'toTrackId' must be a string")
+            }
+            let dupResult = try store.duplicateClip(
+                clipId: dupClipID, toStartBeat: dupToStartBeat, toTrackId: dupToTrackID)
+            var dupObject = try JSONValue(encoding: dupResult.clip).objectValue ?? [:]
+            dupObject["trimmed"] = .array(dupResult.trimmedClipIDs.map { .string($0.uuidString) })
+            dupObject["removed"] = .array(dupResult.removedClipIDs.map { .string($0.uuidString) })
+            return .success(request.id, .object(dupObject))
+
         case "clip.crossfade":
             // params: trackId (required), clipId (required), otherClipId
             // (required), lengthBeats (required, > 0). Crossfades two AUDIO clips
@@ -1134,6 +1355,27 @@ public final class CommandRouter {
             let gainedClip = try store.setClipGain(
                 trackId: gainTrackID, clipId: gainClipID, gainDb: gainDb)
             return .success(request.id, try JSONValue(encoding: gainedClip))
+
+        case "clip.setGainEnvelope":
+            // params: trackId (required), clipId (required), points (optional
+            // array of {beat, gainDb}). An OMITTED or EMPTY `points` CLEARS the
+            // envelope (back to static-gain-plus-fades). Each `beat` is
+            // CLIP-RELATIVE (>= 0, clamped into [0, lengthBeats]); each `gainDb`
+            // is clamped to Clip.gainDbRange -72..24. Points must be sorted
+            // strictly ASCENDING by beat with no duplicates (a teaching error
+            // names the offending index otherwise). The envelope MULTIPLIES on
+            // top of the static gain and fades. Audio clips only — a MIDI clip
+            // surfaces invalidClipEdit ("…gain envelopes apply to audio clips
+            // only") verbatim. Coalesces under clip.gainEnv:<clipId> so a
+            // breakpoint drag is one undo step. trackNotFound/clipNotFound
+            // surface via the LocalizedError mapping. Response: the updated clip
+            // (its stored, canonicalized envelope echoes back in gainEnvelope).
+            let envTrackID = try params.requireTrackID()
+            let envClipID = try params.requireClipID()
+            let envPoints = try parseGainEnvelope(params["points"])
+            let envelopedClip = try store.setClipGainEnvelope(
+                trackId: envTrackID, clipId: envClipID, points: envPoints)
+            return .success(request.id, try JSONValue(encoding: envelopedClip))
 
         case "clip.setFades":
             // params: trackId (required), clipId (required), fadeInBeats
@@ -1351,6 +1593,49 @@ public final class CommandRouter {
                 trackId: aqTrackID, clipId: aqClipID, settings: aqSettings)
             return .success(request.id, .object(["clips": try JSONValue(encoding: aqSlices)]))
 
+        case "arrange.insertBars":
+            // params: atBar (required int >= 1, 1-BASED — bar 1 is the first bar,
+            // beat 0), count (required int >= 1). PROJECT-WIDE: inserts `count`
+            // empty METER-AWARE bars before atBar and shifts everything from that
+            // barline rightward in ONE undo — every track's clips (a clip
+            // straddling the point SPLITS), markers, the tempo AND meter maps,
+            // automation, and the loop/punch regions. The inserted bars continue
+            // the meter of the bar before the insertion point (a 6/8 region
+            // inserts 6-beat bars). Refused mid-record and across a take group
+            // (invalidArrangeEdit → flatten first) via the LocalizedError mapping.
+            // Response: {atBeat, insertedBeats, beatsPerBar}.
+            let insAtBar = Int(try params.require("atBar", \.doubleValue))
+            let insCount = Int(try params.require("count", \.doubleValue))
+            let insResult = try store.insertBars(atBar: insAtBar, count: insCount)
+            return .success(request.id, .object([
+                "atBeat": .number(insResult.atBeat),
+                "insertedBeats": .number(insResult.insertedBeats),
+                "beatsPerBar": .number(Double(insResult.beatsPerBar)),
+            ]))
+
+        case "arrange.deleteBars":
+            // params: fromBar (required int >= 1, 1-BASED), count (required int
+            // >= 1). PROJECT-WIDE: removes `count` METER-AWARE bars starting at
+            // fromBar and closes the gap in ONE undo. Clips fully inside are
+            // removed (ids in `removedClipIds`); straddling clips are trimmed or
+            // split-and-closed; markers inside the range are removed (ids in
+            // `removedMarkerIds`); tempo/meter changes inside the range are
+            // removed and the rest pull left; a loop/punch region swallowed by the
+            // delete is disabled at the splice. A delete that would leave a meter
+            // change off its barline is refused with a teaching error. Refused
+            // mid-record and across a take group (invalidArrangeEdit) via the
+            // LocalizedError mapping. Response: {fromBeat, deletedBeats,
+            // removedClipIds, removedMarkerIds}.
+            let delFromBar = Int(try params.require("fromBar", \.doubleValue))
+            let delCount = Int(try params.require("count", \.doubleValue))
+            let delResult = try store.deleteBars(fromBar: delFromBar, count: delCount)
+            return .success(request.id, .object([
+                "fromBeat": .number(delResult.fromBeat),
+                "deletedBeats": .number(delResult.deletedBeats),
+                "removedClipIds": .array(delResult.removedClipIDs.map { .string($0.uuidString) }),
+                "removedMarkerIds": .array(delResult.removedMarkerIDs.map { .string($0.uuidString) }),
+            ]))
+
         case "take.group":
             // params: trackId (required), clipIds (required array of >= 2 clip id
             // strings), name? (string). Forms a take group from EXISTING
@@ -1562,6 +1847,14 @@ public final class CommandRouter {
         case "render.mixdown":
             // path optional (absolute or ~-prefixed .wav destination; the store
             // supplies a temp-dir default), fromBeat >= 0, durationSeconds > 0.
+            // durationSeconds omitted → the SHARED all-clips default window
+            // (m16-d/F4): the extent of every clip past fromBeat — audio AND
+            // instrument — plus a 2.0 s tail, byte-for-byte the window
+            // render.bounce / render.measureLoudness / render.stems default to
+            // (was an audio-only extent + 0.5 s tail, which falsely refused
+            // MIDI-only songs). No clips past fromBeat → nothingToRender,
+            // surfaced verbatim. Response: {path, durationSeconds, sampleRate,
+            // channels}.
             let path = params["path"]?.stringValue
             let fromBeat = params["fromBeat"]?.doubleValue ?? 0
             guard fromBeat >= 0 else {
@@ -1578,9 +1871,10 @@ public final class CommandRouter {
 
         case "render.measureLoudness":
             // params: fromBeat >= 0 (default 0), durationSeconds > 0 (default:
-            // extent of ALL tracks' clips — audio AND instrument, deliberately
-            // broader than render.mixdown's audio-only legacy default — plus a
-            // 2.0 s bus-reverb/release tail, spec §4.3). Renders OFFLINE and
+            // extent of ALL tracks' clips — audio AND instrument — plus a
+            // 2.0 s bus-reverb/release tail, spec §4.3; the SAME shared window
+            // render.mixdown/render.bounce/render.stems default to since m16-d).
+            // Renders OFFLINE and
             // measures (BS.1770-4 integrated + max momentary/short-term + 4×
             // oversampled true peak) — NOTHING is written to disk, unlike
             // render.bounce. nil measurement fields mean the program sits below
@@ -2170,6 +2464,14 @@ public final class CommandRouter {
 
         case "input.setDevice":
             // uid: string | null | omitted — null/omitted = system default.
+            //
+            // F5 HARDENING (m15-d): same "omit = destructive default" shape as
+            // track.setOutput — omitting `uid` RESETS the recording source to the
+            // system default, so a typo'd key would silently reset it and return
+            // ok. Unknown keys are rejected with a teaching error first.
+            try params.rejectUnknownKeys(
+                ["uid"], verb: "input.setDevice",
+                hint: "omit 'uid' (or pass it null) to select the system-default input")
             let uid: String?
             switch params["uid"] {
             case .none, .some(.null):
@@ -2543,6 +2845,29 @@ public final class CommandRouter {
         return .object(obj)
     }
 
+    /// `fxResult` twin for the MASTER chain (m13-d): echoes the `trackId:
+    /// "master"` sentinel so an agent re-orients, plus the resolved master
+    /// insert chain (same `effectsJSON` shape as the snapshot's top-level
+    /// `masterEffects`, with the master per-effect latency resolver).
+    private func masterFxResult(effectID: UUID? = nil) -> JSONValue {
+        var obj: [String: JSONValue] = [
+            "trackId": .string("master"),
+            "effects": masterEffectsJSON(),
+        ]
+        if let effectID { obj["effectId"] = .string(effectID.uuidString) }
+        return .object(obj)
+    }
+
+    /// Resolved wire JSON for the project master insert chain — the per-track
+    /// `effectsJSON` shape with a MASTER latency resolver (the limiter's 240 @
+    /// 48 kHz surfaces here just as it does per strip; 0 headless). Shared by
+    /// `masterFxResult` and the snapshot's top-level `masterEffects`.
+    private func masterEffectsJSON() -> JSONValue {
+        Self.effectsJSON(store.masterEffects) { effectID in
+            store.masterEffectLatencySamples(effectID: effectID)
+        }
+    }
+
     // MARK: - plugin.* helpers (M3 vi-b)
 
     /// Full validation for `plugin.openUI` (§5.3), performed BEFORE the seam
@@ -2558,6 +2883,103 @@ public final class CommandRouter {
             "name": .string(marker.name),
             "beat": .number(marker.beat),
         ])
+    }
+
+    /// The wire shape of a tempo/meter map read (m12-d) — shared by `tempo.map`
+    /// and the `tempo.setMap` echo so the shape never drifts. Reports the
+    /// RESOLVED maps (always >= 1 entry each; a single-tempo project reports its
+    /// synthesized single segment/change) plus the monotonic `mapRevision`.
+    private static func tempoMapJSON(_ store: ProjectStore) -> JSONValue {
+        let map = store.transport.tempoMap
+        let meter = store.transport.meterMap
+        // `startBeat` is the beat key everywhere (the model/persist/snapshot
+        // Codable shape + the MIDI-note `startBeat` wire convention), so a map
+        // read from project.snapshot copies straight into tempo.setMap.
+        return .object([
+            "segments": .array(map.segments.map {
+                .object(["startBeat": .number($0.startBeat), "bpm": .number($0.bpm)])
+            }),
+            "meterChanges": .array(meter.changes.map {
+                .object(["startBeat": .number($0.startBeat),
+                         "beatsPerBar": .number(Double($0.beatsPerBar)),
+                         "beatUnit": .number(Double($0.beatUnit))])
+            }),
+            "mapRevision": .number(Double(store.mapRevision)),
+        ])
+    }
+
+    /// Parses + validates `tempo.setMap`'s required `segments` into a `TempoMap`,
+    /// mapping the type's field-named `ValidationError`s to teaching strings.
+    private static func parseTempoMap(_ params: [String: JSONValue]) throws -> TempoMap {
+        guard let raw = params["segments"]?.arrayValue else {
+            throw ControlError("'segments' is required — an array of {startBeat, bpm}; segment 0 must start at beat 0")
+        }
+        guard !raw.isEmpty else {
+            throw ControlError("'segments' must have at least one entry — the base tempo at beat 0")
+        }
+        var segments: [TempoMap.Segment] = []
+        for (index, entry) in raw.enumerated() {
+            guard let object = entry.objectValue,
+                  let startBeat = object["startBeat"]?.doubleValue,
+                  let bpm = object["bpm"]?.doubleValue else {
+                throw ControlError("segments[\(index)] must be {startBeat: number, bpm: number}")
+            }
+            segments.append(TempoMap.Segment(startBeat: startBeat, bpm: bpm))
+        }
+        do {
+            return try TempoMap(segments: segments)
+        } catch let error as TempoMap.ValidationError {
+            throw ControlError(Self.tempoMapValidationMessage(error))
+        }
+    }
+
+    private static func tempoMapValidationMessage(_ error: TempoMap.ValidationError) -> String {
+        switch error {
+        case .emptySegments:
+            return "'segments' must have at least one entry — the base tempo at beat 0"
+        case .firstSegmentNotAtZero(let startBeat):
+            return "segments[0] must start at beat 0 (the base tempo) — got beat \(startBeat)"
+        case .unsortedOrDuplicateStartBeat(let index):
+            return "segments[\(index)] must have a beat strictly greater than the previous segment's — segments must be sorted by beat with no duplicates"
+        }
+    }
+
+    /// Parses `tempo.setMap`'s OPTIONAL `meterChanges`. Absent ⇒ nil (leave the
+    /// current meter map untouched); present-but-empty is a field-named error.
+    private static func parseMeterMap(_ params: [String: JSONValue]) throws -> MeterMap? {
+        guard let raw = params["meterChanges"]?.arrayValue else { return nil }
+        guard !raw.isEmpty else {
+            throw ControlError("'meterChanges' must have at least one entry (change 0 at beat 0) — omit the field entirely to leave the meter map unchanged")
+        }
+        var changes: [MeterMap.Change] = []
+        for (index, entry) in raw.enumerated() {
+            guard let object = entry.objectValue,
+                  let startBeat = object["startBeat"]?.doubleValue,
+                  let beatsPerBar = object["beatsPerBar"]?.doubleValue,
+                  let beatUnit = object["beatUnit"]?.doubleValue else {
+                throw ControlError("meterChanges[\(index)] must be {startBeat: number, beatsPerBar: number, beatUnit: number}")
+            }
+            changes.append(MeterMap.Change(startBeat: startBeat,
+                                           beatsPerBar: Int(beatsPerBar), beatUnit: Int(beatUnit)))
+        }
+        do {
+            return try MeterMap(changes: changes)
+        } catch let error as MeterMap.ValidationError {
+            throw ControlError(Self.meterMapValidationMessage(error))
+        }
+    }
+
+    private static func meterMapValidationMessage(_ error: MeterMap.ValidationError) -> String {
+        switch error {
+        case .emptyChanges:
+            return "'meterChanges' must have at least one entry — change 0 at beat 0"
+        case .firstChangeNotAtZero(let startBeat):
+            return "meterChanges[0] must start at beat 0 (the project meter) — got beat \(startBeat)"
+        case .unsortedOrDuplicateStartBeat(let index):
+            return "meterChanges[\(index)] must have a beat strictly greater than the previous change's — changes must be sorted by beat with no duplicates"
+        case .changeOffBarline(let index):
+            return "meterChanges[\(index)] must fall on a barline of the meter before it — its beat isn't a whole number of bars past the previous change"
+        }
     }
 
     /// Resolves a `transport.seek {marker}` token to its beat (m11-c). The token
@@ -2691,13 +3113,19 @@ public final class CommandRouter {
     static func effectsJSON(_ effects: [EffectDescriptor],
                             latencyFor: (UUID) -> Int) -> JSONValue {
         .array(effects.map { effect in
-            .object([
+            var obj: [String: JSONValue] = [
                 "id": .string(effect.id.uuidString),
                 "kind": .string(effect.kind.rawValue),
                 "isBypassed": .bool(effect.isBypassed),
                 "params": effectParamsJSON(effect),
                 "latencySamples": .number(Double(latencyFor(effect.id))),
-            ])
+            ]
+            // Omitted when nil (the disk rule): a keyed compressor/gate
+            // surfaces its sidechain source so snapshots stay honest.
+            if let key = effect.sidechainSourceTrackID {
+                obj["sidechainSourceTrackId"] = .string(key.uuidString)
+            }
+            return .object(obj)
         })
     }
 
@@ -2849,6 +3277,39 @@ public final class CommandRouter {
                                   startBeat: startBeat, lengthBeats: lengthBeats))
         }
         return notes
+    }
+
+    /// Parses a `points` param into `[ClipGainPoint]` for clip.setGainEnvelope.
+    /// nil (omitted) or an empty array both mean CLEAR the envelope. Each element
+    /// is `{beat, gainDb}`; `beat` must be a number >= 0 and the beats must be
+    /// strictly ASCENDING (a duplicate or out-of-order beat is a teaching error
+    /// naming the offending index — the store canonicalizes, but agents get a
+    /// clear signal). `gainDb` is any number (the store clamps to -72..24).
+    private func parseGainEnvelope(_ value: JSONValue?) throws -> [ClipGainPoint] {
+        guard let value else { return [] }
+        if case .null = value { return [] }
+        guard let array = value.arrayValue else {
+            throw ControlError("'points' must be an array of {beat, gainDb} (omit or pass [] to clear the envelope)")
+        }
+        var points: [ClipGainPoint] = []
+        points.reserveCapacity(array.count)
+        var previousBeat: Double?
+        for (i, element) in array.enumerated() {
+            guard let beat = element["beat"]?.doubleValue, beat >= 0 else {
+                throw ControlError("points[\(i)].beat must be a number >= 0 (beats, relative to the clip start)")
+            }
+            guard let gainDb = element["gainDb"]?.doubleValue else {
+                throw ControlError("points[\(i)].gainDb must be a number (decibels; clamped to -72..24)")
+            }
+            if let previousBeat {
+                guard beat > previousBeat else {
+                    throw ControlError("points[\(i)].beat (\(beat)) must be strictly greater than the previous point's beat (\(previousBeat)) — envelope points must be sorted ascending with no duplicate beats")
+                }
+            }
+            previousBeat = beat
+            points.append(ClipGainPoint(beat: beat, gainDb: gainDb))
+        }
+        return points
     }
 
     /// True when `value` is a finite whole number (no fractional part) — the
@@ -3559,13 +4020,20 @@ public final class CommandRouter {
             trackArray[i] = .object(trackObject)
         }
         root["tracks"] = .array(trackArray)
-        // Project-level totals: stage maxima, the global path latency, and
-        // the ruler-to-speaker output latency (= maxPath + master chain; the
-        // master strip carries no chain today, so the two coincide).
+        // The project MASTER insert chain (m13-d), post-fader — ALWAYS present
+        // (an empty array when the chain is empty), mirroring the per-track
+        // `effects` field. Resolved through the same `effectsJSON` shape with a
+        // master latency resolver (a limiter's 240 @ 48 kHz surfaces here).
+        root["masterEffects"] = masterEffectsJSON()
+        // Project-level totals: stage maxima, the global path latency, and the
+        // ruler-to-speaker output latency (= maxPath + the ACTIVE master-chain
+        // latency; m13-d made the master chain real, so the two diverge when a
+        // latent master effect — e.g. a limiter — is active).
         root["pdc"] = .object([
             "trackStageSamples": .number(Double(pdc?.trackStageSamples ?? 0)),
             "busStageSamples": .number(Double(pdc?.busStageSamples ?? 0)),
             "maxPathLatencySamples": .number(Double(pdc?.maxPathLatencySamples ?? 0)),
+            "masterChainLatencySamples": .number(Double(pdc?.masterChainLatencySamples ?? 0)),
             "outputLatencySamples": .number(Double(pdc?.outputLatencySamples ?? 0)),
         ])
         return .object(root)
@@ -3662,6 +4130,19 @@ public final class CommandRouter {
     }
 }
 
+/// The addressing target of a master-capable verb (m13-d, design §4): a
+/// track/bus by id, or the project-level MASTER (the `trackId:"master"`
+/// sentinel). Resolved by `parseFXTarget()` and used by EXACTLY the five
+/// chain verbs (`fx.add`/`fx.remove`/`fx.reorder`/`fx.setBypass`/
+/// `fx.setParam`) plus — m15-c — the four `automation.*` verbs (master
+/// VOLUME lane only; other targets throw the named teaching error).
+/// `fx.setSidechain` also parses it, only to REJECT `.master` with a named
+/// error (master cannot host a keyed effect).
+enum FXTarget: Equatable {
+    case track(UUID)
+    case master
+}
+
 struct ControlError: Error {
     let message: String
 
@@ -3682,12 +4163,49 @@ extension [String: JSONValue] {
         return value
     }
 
+    /// Rejects any parameter key not in `allowed` with a teaching error naming
+    /// the offending key(s) and the valid ones (m15-d, audit F5 hardening). Used
+    /// ONLY by the "omit = destructive default" verbs — `track.setOutput`
+    /// (omitting `busId` un-routes to master) and `input.setDevice` (omitting
+    /// `uid` resets to the system-default input) — where a typo'd key would
+    /// otherwise be silently ignored AND the real key's absence would apply the
+    /// destructive default. Verbs whose optional params keep the CURRENT value on
+    /// omission (partial updates like `track.setInstrument`, `clip.setStretch`)
+    /// deliberately do NOT call this: an ignored typo there is a harmless no-op.
+    /// `allowed` is sorted for a deterministic, contract-stable message.
+    func rejectUnknownKeys(_ allowed: Set<String>, verb: String, hint: String? = nil) throws {
+        let unknown = keys.filter { !allowed.contains($0) }.sorted()
+        guard !unknown.isEmpty else { return }
+        let named = unknown.map { "'\($0)'" }.joined(separator: ", ")
+        let valid = allowed.sorted().map { "'\($0)'" }.joined(separator: ", ")
+        var message = "\(verb): unknown parameter\(unknown.count > 1 ? "s" : "") \(named) — valid keys are \(valid)"
+        if let hint { message += ". \(hint)" }
+        throw ControlError(message)
+    }
+
     func requireTrackID() throws -> UUID {
         let raw = try require("trackId", \.stringValue)
         guard let id = UUID(uuidString: raw) else {
             throw ControlError("'trackId' is not a valid UUID: \(raw)")
         }
         return id
+    }
+
+    /// Resolves the `trackId` param of a master-capable verb into an
+    /// `FXTarget` (m13-d, design §4): the EXACT lowercase string `"master"`
+    /// (nothing fuzzy) targets the project master, any other value must be a
+    /// track UUID. Kept DELIBERATELY separate from `requireTrackID` so the
+    /// sentinel never leaks into the dozens of other verbs where "master" must
+    /// stay an invalid track id — used by only the five chain verbs, the four
+    /// `automation.*` verbs (m15-c), and `fx.setSidechain` (which parses it
+    /// solely to reject master).
+    func parseFXTarget() throws -> FXTarget {
+        let raw = try require("trackId", \.stringValue)
+        if raw == "master" { return .master }
+        guard let id = UUID(uuidString: raw) else {
+            throw ControlError("'trackId' is not a valid UUID: \(raw)")
+        }
+        return .track(id)
     }
 
     func requireClipID() throws -> UUID {

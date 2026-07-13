@@ -9,31 +9,92 @@ import Foundation
 /// effect id across chain edits (add/remove/reorder), so DSP state survives.
 ///
 /// Un-bypass sets `resetFlag`, so stale tails from before the bypass never
-/// replay. v0 accepts the bypass-toggle click (hard swap); a short crossfade
-/// ramp is an additive later change inside the walk.
+/// replay. A bypass toggle crossfades equal-power over ~10 ms at the swap
+/// point inside the walk (m15-f — the audit-m15 B3 click fix): the render
+/// side detects the flag change, keeps processing the unit through the fade,
+/// and mixes wet against a preallocated dry copy. Steady bypass states walk
+/// exactly the pre-m15f paths (bit-identical null when nothing toggles).
 final class ChainEffectUnit: @unchecked Sendable {
+    /// Dry-scratch bounds: the house max quantum (the `EffectChainState`
+    /// prepare bound) × stereo. Allocated once at init — control plane.
+    static let scratchFrames = 8_192
+    static let scratchChannels = 2
+    /// Bypass crossfade length: 10 ms equal-power. Why 10 ms: the audit gate
+    /// asks ≥ 5 ms of monotone ramp where today is a ≤ 2 ms step, 10 ms gives
+    /// 2× margin while staying well under the ~30 ms threshold where a swap
+    /// starts reading as two events; equal-power (sin/cos) because wet and
+    /// dry are distinct signals — a linear fade would dip −3 dB power at the
+    /// midpoint on decorrelated material (100 %-wet delays/reverbs), while
+    /// the correlated worst case overshoots ≤ +3 dB for 5 ms, inaudible next
+    /// to the click it replaces.
+    static let crossfadeSeconds = 0.010
+
     let id: UUID
     let kind: EffectDescriptor.Kind
     let instance: any EffectRendering
+    /// The instance's keyable face (m12-f), cast ONCE here on the control
+    /// plane — the render walk must never run a dynamic cast (the Swift
+    /// runtime's conformance lookup can allocate/lock on first use). nil for
+    /// non-keyable kinds; the walk then always takes the plain path.
+    let keyableInstance: (any KeyableEffectRendering)?
     /// 1 = skip this unit in the walk. Heap-allocated for a stable address.
     let bypassFlag: UnsafeMutablePointer<daw_atomic_u32>
-    /// 1 = call `instance.reset()` at the top of the next walk.
+    /// COUNTDOWN of `instance.reset()` passes, consumed one per walk (m15-f).
+    /// 1 = reset at the top of the next walk (un-bypass, stop-time tail cut).
+    /// 2 = the flush-family DOUBLE-ARM: live, the render thread can deliver
+    /// one in-flight pre-flush quantum AFTER the first reset consumes — the
+    /// ring is wiped and immediately re-dirtied by stale signal (the m14-d
+    /// edit-seam echo blip). The second pass survives to the NEXT walk, whose
+    /// input is post-flush silence, and wipes the leak for good.
     let resetFlag: UnsafeMutablePointer<daw_atomic_u32>
+    /// Preallocated dry copy for the bypass crossfade — written and read only
+    /// inside `renderCrossfade` (render thread), sized `scratchFrames ×
+    /// scratchChannels`, allocated at init (control plane).
+    private let dryScratch: UnsafeMutablePointer<Float>
+    /// Crossfade length in frames at the prepared rate. Control-plane write
+    /// window only (`StagePlacementBox` discipline): unit creation and the
+    /// quiesced rate-change re-prepare, both before the next render observes
+    /// it. Default = 10 ms @ 48 kHz for directly constructed test units.
+    private(set) var crossfadeFrames = 480
+
+    // Render-thread-only fade state (the DelayEffect field discipline:
+    // touched exclusively inside the walk).
+    private var renderBypassed: Bool
+    private var fadeTotal = 0     // 0 = no fade active
+    private var fadePosition = 0  // frames into the active fade
+    /// 1 = this unit's detector reads the strip's key buffer when the walk
+    /// receives one (m12-f, `Effect.sidechainSourceTrackID != nil`). Armed by
+    /// `EffectChainState.sync` like bypass — one atomic store, never a chain
+    /// republish. 0, or a walk with no key delivered, is the self-keyed
+    /// (bit-exact pre-sidechain) path.
+    let useKeyFlag: UnsafeMutablePointer<daw_atomic_u32>
 
     init(id: UUID, kind: EffectDescriptor.Kind,
          instance: any EffectRendering, isBypassed: Bool) {
         self.id = id
         self.kind = kind
         self.instance = instance
+        self.keyableInstance = instance as? any KeyableEffectRendering
         bypassFlag = .allocate(capacity: 1)
         daw_atomic_u32_store(bypassFlag, isBypassed ? 1 : 0)
         resetFlag = .allocate(capacity: 1)
         daw_atomic_u32_store(resetFlag, 0)
+        useKeyFlag = .allocate(capacity: 1)
+        daw_atomic_u32_store(useKeyFlag, 0)
+        dryScratch = .allocate(capacity: Self.scratchFrames * Self.scratchChannels)
+        dryScratch.initialize(repeating: 0,
+                              count: Self.scratchFrames * Self.scratchChannels)
+        // The render side starts in agreement with the flag: the first walk
+        // of a freshly built unit never fades (byte-identity for constant
+        // bypass states).
+        renderBypassed = isBypassed
     }
 
     deinit {
         bypassFlag.deallocate()
         resetFlag.deallocate()
+        useKeyFlag.deallocate()
+        dryScratch.deallocate()
     }
 
     @MainActor
@@ -49,9 +110,130 @@ final class ChainEffectUnit: @unchecked Sendable {
         }
     }
 
+    /// Arms `passes` reset walks (see `resetFlag`). 1 = the classic single
+    /// arm; 2 = the flush-family double-arm (m15-f). Clamped to 1...2.
     @MainActor
-    func requestReset() {
-        daw_atomic_u32_store(resetFlag, 1)
+    func requestReset(passes: UInt32 = 1) {
+        daw_atomic_u32_store(resetFlag, max(1, min(2, passes)))
+    }
+
+    /// Pending reset passes (test seam, @testable).
+    @MainActor
+    var pendingResetPasses: UInt32 { daw_atomic_u32_load(resetFlag) }
+
+    /// Sets the crossfade length for the prepared rate. Control-plane write
+    /// window only: `EffectChainState.sync` calls this at unit creation and
+    /// inside the quiesced rate-change re-prepare.
+    @MainActor
+    func setCrossfadeLength(sampleRate: Double) {
+        crossfadeFrames = max(1, Int(Self.crossfadeSeconds * sampleRate))
+    }
+
+    @MainActor
+    var usesKey: Bool { daw_atomic_u32_load(useKeyFlag) == 1 }
+
+    /// One atomic store (the bypass convention) — flipping the key never
+    /// republishes the chain and never rebuilds the unit (DSP state survives
+    /// a key set/clear; the graph edge itself is PlaybackGraph's business).
+    @MainActor
+    func setUsesKey(_ usesKey: Bool) {
+        daw_atomic_u32_store(useKeyFlag, usesKey ? 1 : 0)
+    }
+
+    // MARK: - Render surface (render thread, called only by the chain walk)
+
+    /// Equal-power crossfade gains at `progress` ∈ [0, 1]: `toward` rises
+    /// 0 → 1, `away` falls 1 → 0, `toward² + away² == 1` at every point (the
+    /// constant-power law). Pure libm — render-thread safe.
+    static func crossfadeGains(progress: Float) -> (toward: Float, away: Float) {
+        let theta = min(1, max(0, progress)) * (Float.pi / 2)
+        return (sinf(theta), cosf(theta))
+    }
+
+    /// True while a bypass crossfade is in flight.
+    var fadeActive: Bool { fadeTotal > 0 }
+
+    /// Reconciles the observed bypass flag with the render-side fade state:
+    /// a change starts a crossfade toward the new state; a change while a
+    /// fade is already running REVERSES it in place (position inversion —
+    /// the gain trajectory stays continuous because sin/cos mirror around
+    /// the midpoint). No-op while the flag is steady.
+    func observeBypass(_ bypassedNow: Bool) {
+        guard bypassedNow != renderBypassed else { return }
+        if fadeTotal > 0 {
+            fadePosition = fadeTotal - fadePosition
+        } else {
+            fadeTotal = max(1, crossfadeFrames)
+            fadePosition = 0
+        }
+        renderBypassed = bypassedNow
+    }
+
+    /// The steady-state active walk step: keyed iff a key buffer arrived AND
+    /// this unit's key flag is armed AND the instance is keyable — verbatim
+    /// the pre-m15f dispatch.
+    func processActive(buffers: UnsafeMutableAudioBufferListPointer,
+                       key: UnsafeMutableAudioBufferListPointer?,
+                       frameCount: Int) {
+        if let key, let keyable = keyableInstance,
+           daw_atomic_u32_load(useKeyFlag) == 1 {
+            keyable.process(buffers: buffers, key: key, frameCount: frameCount)
+        } else {
+            instance.process(buffers: buffers, frameCount: frameCount)
+        }
+    }
+
+    /// One crossfading walk step (m15-f): dry-copy into the preallocated
+    /// scratch, process wet in place, mix equal-power along the fade
+    /// position. The unit keeps processing through a fade-OUT so its tail
+    /// rings under the falling wet gain; a fade-IN starts on a clean ring
+    /// (un-bypass armed the reset, consumed at the top of this walk).
+    /// RENDER-THREAD CONTRACT: memcpy + pure libm only — no allocation, no
+    /// locks, no ObjC.
+    func renderCrossfade(buffers: UnsafeMutableAudioBufferListPointer,
+                         key: UnsafeMutableAudioBufferListPointer?,
+                         frameCount: Int) {
+        // Oversized quantum or channel layout (never expected — instances
+        // prepare at the same bounds): degrade to the pre-m15f hard swap.
+        guard frameCount <= Self.scratchFrames,
+              buffers.count <= Self.scratchChannels else {
+            fadeTotal = 0
+            fadePosition = 0
+            if !renderBypassed {
+                processActive(buffers: buffers, key: key, frameCount: frameCount)
+            }
+            return
+        }
+        let stride = MemoryLayout<Float>.stride
+        // 1. Dry copy (bounded memcpy per channel).
+        for (channel, buffer) in buffers.enumerated() {
+            guard let data = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
+            let frames = min(frameCount, Int(buffer.mDataByteSize) / stride)
+            (dryScratch + channel * Self.scratchFrames).update(from: data, count: frames)
+        }
+        // 2. Wet in place — the same dispatch as the steady path.
+        processActive(buffers: buffers, key: key, frameCount: frameCount)
+        // 3. Equal-power mix along the fade. Gains are a pure function of
+        //    the frame index, so channel-major iteration applies identical
+        //    gains per frame across channels.
+        let total = Float(fadeTotal)
+        for (channel, buffer) in buffers.enumerated() {
+            guard let data = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
+            let frames = min(frameCount, Int(buffer.mDataByteSize) / stride)
+            let dry = dryScratch + channel * Self.scratchFrames
+            for frame in 0..<frames {
+                let progress = (Float(fadePosition) + Float(frame)) / total
+                let (toward, away) = Self.crossfadeGains(progress: progress)
+                let wetGain = renderBypassed ? away : toward
+                let dryGain = renderBypassed ? toward : away
+                data[frame] = data[frame] * wetGain + dry[frame] * dryGain
+            }
+        }
+        fadePosition += frameCount
+        if fadePosition >= fadeTotal {
+            fadeTotal = 0
+            fadePosition = 0
+        }
     }
 }
 
@@ -116,13 +298,15 @@ final class EffectChainProcessor: @unchecked Sendable {
         }
     }
 
-    /// Arms every unit's reset flag — the stop-time tail-cut contract
+    /// Arms every unit's reset countdown — the stop-time tail-cut contract
     /// (`stopAllPlayers`), matching the v0-honest instrument flush.
+    /// `passes: 2` is the live flush-family double-arm (m15-f; see
+    /// `ChainEffectUnit.resetFlag`).
     @MainActor
-    func requestResetAll() {
+    func requestResetAll(passes: UInt32 = 1) {
         guard let snapshot = currentSnapshot else { return }
         for unit in snapshot.units {
-            unit.requestReset()
+            unit.requestReset(passes: passes)
         }
     }
 
@@ -145,19 +329,48 @@ final class EffectChainProcessor: @unchecked Sendable {
     }
 
     /// Walks the chain IN PLACE over `bufferList`. Per unit: honor the reset
-    /// flag, skip if bypassed, else process. No-op when nothing is published.
+    /// countdown, crossfade a just-toggled bypass, skip if steadily bypassed,
+    /// else process. No-op when nothing is published.
     func process(bufferList: UnsafeMutablePointer<AudioBufferList>, frameCount: Int) {
+        process(bufferList: bufferList, frameCount: frameCount, key: nil)
+    }
+
+    /// Keyed walk (m12-f): `key` is the strip's pulled sidechain buffer for
+    /// this quantum (ChainHostAU's preallocated key scratch), handed to any
+    /// unit whose `useKeyFlag` is armed and whose instance is keyable. nil —
+    /// no key connected, or the bus-1 pull degraded (§6.2) — walks every
+    /// unit self-keyed, bit-exact with the pre-sidechain walk.
+    func process(bufferList: UnsafeMutablePointer<AudioBufferList>, frameCount: Int,
+                 key: UnsafeMutableAudioBufferListPointer?) {
         guard let raw = daw_atomic_ptr_load(slot) else { return }
         let snapshot = Unmanaged<EffectChainSnapshot>.fromOpaque(raw).takeUnretainedValue()
         let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
         snapshot.units.withUnsafeBufferPointer { units in
             for index in 0..<units.count {
                 let unit = units[index]
-                if daw_atomic_u32_exchange(unit.resetFlag, 0) == 1 {
+                // Reset countdown (m15-f): consume one pass per walk; a
+                // double-armed flush re-arms the remainder so the NEXT walk
+                // wipes whatever an in-flight pre-flush quantum leaked into
+                // the just-cleared ring. The store-back race with a
+                // concurrent control-plane arm can only ADD resets, never
+                // lose the one in hand.
+                let pendingResets = daw_atomic_u32_exchange(unit.resetFlag, 0)
+                if pendingResets > 0 {
                     unit.instance.reset()
+                    if pendingResets > 1 {
+                        daw_atomic_u32_store(unit.resetFlag, pendingResets - 1)
+                    }
                 }
-                if daw_atomic_u32_load(unit.bypassFlag) == 1 { continue }
-                unit.instance.process(buffers: buffers, frameCount: frameCount)
+                // Bypass with equal-power crossfade (m15-f): a flag CHANGE
+                // fades over ~10 ms; steady states walk the pre-m15f paths
+                // verbatim (skip / keyed-or-plain process).
+                let bypassedNow = daw_atomic_u32_load(unit.bypassFlag) == 1
+                unit.observeBypass(bypassedNow)
+                if unit.fadeActive {
+                    unit.renderCrossfade(buffers: buffers, key: key, frameCount: frameCount)
+                } else if !bypassedNow {
+                    unit.processActive(buffers: buffers, key: key, frameCount: frameCount)
+                }
             }
         }
     }
@@ -207,6 +420,7 @@ final class EffectChainState {
                 unit.instance.prepare(sampleRate: sampleRate,
                                       maxFramesPerQuantum: Self.maxFramesPerQuantum,
                                       channelCount: 2)
+                unit.setCrossfadeLength(sampleRate: sampleRate)
             }
             preparedSampleRate = sampleRate
         }
@@ -236,10 +450,16 @@ final class EffectChainState {
                 unit = ChainEffectUnit(id: descriptor.id, kind: descriptor.kind,
                                        instance: instance,
                                        isBypassed: descriptor.isBypassed)
+                unit.setCrossfadeLength(sampleRate: sampleRate)
             }
             // Params + bypass land in place on every pass (both dedupe).
             EffectFactory.applyParams(descriptor, to: unit.instance)
             unit.setBypassed(descriptor.isBypassed)
+            // Sidechain key intent (m12-f): armed like bypass — an atomic
+            // flag, never a republish; the unit (and its DSP state) survives
+            // a key set/clear. The physical edge is PlaybackGraph's job; a
+            // flag armed with no key delivered stays self-keyed by contract.
+            unit.setUsesKey(descriptor.sidechainSourceTrackID != nil)
             next[descriptor.id] = unit
             ordered.append(unit)
         }
@@ -279,10 +499,11 @@ final class EffectChainState {
         }
     }
 
-    /// Arms every unit's reset flag (stop-time tail cut).
-    func requestResetAll() {
+    /// Arms every unit's reset countdown (stop-time tail cut). `passes: 2`
+    /// is the live flush-family double-arm (m15-f).
+    func requestResetAll(passes: UInt32 = 1) {
         for unit in units.values {
-            unit.requestReset()
+            unit.requestReset(passes: passes)
         }
     }
 

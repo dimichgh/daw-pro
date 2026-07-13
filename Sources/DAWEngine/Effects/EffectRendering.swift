@@ -66,6 +66,23 @@ extension EffectRendering {
     func storeAutomatedParam(slot: Int, value: Double) {}
 }
 
+/// Sidechain-keyable effect seam (m12-f S-2, design-m11f-sidechain §4-A):
+/// the detector reads `key` instead of the main buffer while gain still
+/// applies to the main buffer. Same RENDER-THREAD contract as `process`.
+///
+/// `key == nil` ⇒ self-keyed — MUST be bit-exact with the plain
+/// `process(buffers:frameCount:)` (design §10 condition 4, pinned by test);
+/// this is also the degrade path when the key bus pull fails (§6.2 — the
+/// chain walk simply hands nil). `key` frames beyond the delivered byte size
+/// read as silence, never garbage. v1 conformers: `CompressorEffect`,
+/// `GateEffect`.
+protocol KeyableEffectRendering: EffectRendering {
+    /// Process IN PLACE with an external key signal for the detector.
+    func process(buffers: UnsafeMutableAudioBufferListPointer,
+                 key: UnsafeMutableAudioBufferListPointer?,
+                 frameCount: Int)
+}
+
 /// Render-thread-only bookkeeping for automated built-in params (M4 vii-c),
 /// embedded BY VALUE in each built-in effect (`Params` is the effect's POD
 /// params payload — no allocation anywhere). The same render thread runs both

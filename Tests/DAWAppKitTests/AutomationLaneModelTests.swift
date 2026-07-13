@@ -208,4 +208,72 @@ struct AutomationLaneModelTests {
             target: .volume, points: [AutomationPoint(beat: 0, value: 1)], isEnabled: true)]
         #expect(AutomationLaneSelection.hasActiveLane(track))
     }
+
+    // MARK: - Master volume automation (m15-c)
+
+    @Test("masterVolumeLane finds the volume lane in a master-automation array, else nil")
+    func masterVolumeLaneLookup() {
+        let volume = AutomationLane(target: .volume)
+        // No lanes → nil (the strip shows its create button).
+        #expect(AutomationLaneSelection.masterVolumeLane(in: []) == nil)
+        // The volume lane is found regardless of position.
+        #expect(AutomationLaneSelection.masterVolumeLane(in: [volume])?.id == volume.id)
+    }
+
+    @Test("hasActiveMasterLane glows only for an enabled, non-empty volume lane")
+    func hasActiveMasterLane() {
+        // Empty lane → inert, no glow.
+        #expect(!AutomationLaneSelection.hasActiveMasterLane(
+            [AutomationLane(target: .volume, points: [], isEnabled: true)]))
+        // Disabled with points → no glow.
+        #expect(!AutomationLaneSelection.hasActiveMasterLane(
+            [AutomationLane(target: .volume, points: [AutomationPoint(beat: 0, value: 1)], isEnabled: false)]))
+        // Enabled with points → active glow.
+        #expect(AutomationLaneSelection.hasActiveMasterLane(
+            [AutomationLane(target: .volume, points: [AutomationPoint(beat: 0, value: 1)], isEnabled: true)]))
+    }
+
+    /// UI == wire (the m11-a / m13-g equivalence idiom): the master-strip editor
+    /// builds its breakpoint array through the SAME `AutomationEdit` primitives the
+    /// `AutomationLaneEditor` commits, then submits it through the SAME store method
+    /// the `automation.setPoints {trackId:"master"}` wire verb calls. So an
+    /// unsorted editor draft must canonicalize to the byte-identical master lane an
+    /// agent's already-ordered array produces.
+    @Test("master lane: the editor's AutomationEdit draft lands byte-identical to the wire's array")
+    @MainActor
+    func masterAutomationUIEqualsWire() throws {
+        let range = AutomationParam.volume.range
+
+        // UI editor path: two breakpoints APPENDED out of order (the editor adds to
+        // the draft's end and lets the store canonicalize), then a drag on the first.
+        var draft = AutomationEdit.addPoint([], atBeat: 16, value: 1.0, in: range)
+        draft = AutomationEdit.addPoint(draft, atBeat: 0, value: 1.0, in: range)     // [{16,1},{0,1}] — unsorted
+        draft = AutomationEdit.movePoint(draft, index: 0, toBeat: 16, value: 0.0, in: range) // end point → 0.0
+
+        // The wire's equivalent: an agent's already-ordered fade-out array.
+        let wireArray = [
+            AutomationPoint(beat: 0, value: 1.0),
+            AutomationPoint(beat: 16, value: 0.0),
+        ]
+
+        let store = ProjectStore()
+        let lane = try store.addMasterAutomationLane(target: .volume)
+
+        func encodedMaster() throws -> Data {
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.sortedKeys]
+            return try enc.encode(store.masterAutomation)
+        }
+
+        _ = try store.setMasterAutomationPoints(laneID: lane.id, points: draft)
+        let uiJSON = try encodedMaster()
+
+        _ = try store.setMasterAutomationPoints(laneID: lane.id, points: wireArray)
+        let wireJSON = try encodedMaster()
+
+        // Same store + same lane id: the JSON is byte-identical iff the two arrays
+        // canonicalize to the same curve — the equivalence.
+        #expect(uiJSON == wireJSON)
+        #expect(store.masterAutomation.first?.points == wireArray)
+    }
 }

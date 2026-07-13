@@ -202,7 +202,9 @@ struct BounceInPlaceTests {
             _ = try await store.bounceTrackInPlace(trackId: source.id)
             Issue.record("expected nothingToRender")
         } catch let error as ProjectError {
-            #expect(error.errorDescription == "nothing to render — project has no audio clips")
+            #expect(error.errorDescription
+                == "nothing to render — no clips found in the render range; "
+                + "add clips or pass an explicit durationSeconds")
         }
     }
 

@@ -14,7 +14,8 @@ struct AudioImportPlanTests {
                          atBeatRaw: Double = 0, snap: ClipSnap = .bar,
                          beatsPerBar: Int = 4) -> AudioImportContext {
         AudioImportContext(targetTrackID: target, targetTrackKind: kind,
-                           atBeatRaw: atBeatRaw, snap: snap, beatsPerBar: beatsPerBar)
+                           atBeatRaw: atBeatRaw, snap: snap,
+                           meterMap: MeterMap(constant: TimeSignature(beatsPerBar: beatsPerBar)))
     }
 
     private func url(_ name: String) -> URL { URL(fileURLWithPath: "/tmp/\(name)") }
@@ -152,6 +153,25 @@ struct AudioImportPlanTests {
         let plan = AudioImportPlan(urls: [url("a.wav")], context: context(atBeatRaw: 5, snap: .bar, beatsPerBar: 3))
         guard case .newTrack(_, let beat, _) = plan.actions[0] else { Issue.record("shape"); return }
         #expect(beat == 6)
+    }
+
+    @Test("Bar snap follows a meter change across the boundary (m13-h)")
+    func barSnapAcrossMeterChange() {
+        // 4/4 → 6/8 @ beat 16 (bpb 6): barlines …12,16,22,28…
+        let m = try! MeterMap(changes: [
+            .init(startBeat: 0, beatsPerBar: 4, beatUnit: 4),
+            .init(startBeat: 16, beatsPerBar: 6, beatUnit: 8),
+        ])
+        // A drop at raw beat 20 (in 6/8) snaps to the 6/8 barline 22, NOT a 4-beat grid.
+        let ctx = AudioImportContext(atBeatRaw: 20, snap: .bar, meterMap: m)
+        let plan = AudioImportPlan(urls: [url("a.wav")], context: ctx)
+        guard case .newTrack(_, let beat, _) = plan.actions[0] else { Issue.record("shape"); return }
+        #expect(beat == 22)
+        // Just left of the boundary (4/4) snaps to the shared barline 16.
+        let ctxLeft = AudioImportContext(atBeatRaw: 15, snap: .bar, meterMap: m)
+        guard case .newTrack(_, let beatL, _) = AudioImportPlan(urls: [url("a.wav")], context: ctxLeft).actions[0]
+        else { Issue.record("shape"); return }
+        #expect(beatL == 16)
     }
 
     @Test("Off snap keeps the raw beat (floored at zero)")

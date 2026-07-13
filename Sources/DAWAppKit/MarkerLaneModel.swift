@@ -70,16 +70,17 @@ public enum MarkerLaneEdit {
     /// caller passes the already-resolved `ClipSnap`) and clamps at 0, so a
     /// leftward drag past the start pins the flag at beat 0 (never negative).
     public static func movedBeat(
-        originBeat: Double, dragDeltaBeats: Double, snap: ClipSnap, beatsPerBar: Int
+        originBeat: Double, dragDeltaBeats: Double, snap: ClipSnap, meterMap: MeterMap
     ) -> Double {
-        snap.snap(beat: max(0, originBeat + dragDeltaBeats), beatsPerBar: beatsPerBar)
+        snap.snap(beat: max(0, originBeat + dragDeltaBeats), meterMap: meterMap)
     }
 
     /// Snapped beat for an "Add Marker Here" at content x — the same snap the drag
-    /// uses, so the flag lands on the grid the ruler shows.
+    /// uses, so the flag lands on the grid the ruler shows. Meter-aware (m13-h):
+    /// a `.bar` add in an odd-meter region lands on that region's barlines.
     public static func addBeat(
-        atContentX contentX: CGFloat, geometry: MarkerLaneGeometry, snap: ClipSnap, beatsPerBar: Int
+        atContentX contentX: CGFloat, geometry: MarkerLaneGeometry, snap: ClipSnap, meterMap: MeterMap
     ) -> Double {
-        snap.snap(beat: geometry.beat(forX: contentX), beatsPerBar: beatsPerBar)
+        snap.snap(beat: geometry.beat(forX: contentX), meterMap: meterMap)
     }
 }

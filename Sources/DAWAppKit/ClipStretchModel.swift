@@ -51,10 +51,10 @@ public enum ClipStretch {
     /// a trim), floored so the clip keeps at least `ClipEdit.minClipLengthBeats`.
     public static func targetLength(
         originalStart: Double, originalLength: Double, dragDeltaBeats: Double,
-        snap: ClipSnap, beatsPerBar: Int
+        snap: ClipSnap, meterMap: MeterMap
     ) -> Double {
         let rawEnd = originalStart + originalLength + dragDeltaBeats
-        let snapped = snap.snap(beat: max(0, rawEnd), beatsPerBar: beatsPerBar)
+        let snapped = snap.snap(beat: max(0, rawEnd), meterMap: meterMap)
         let end = max(snapped, originalStart + ClipEdit.minClipLengthBeats)
         return end - originalStart
     }

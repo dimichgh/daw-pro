@@ -164,9 +164,10 @@ public enum CopilotToolCatalog {
     ]
 
     /// The versioned catalog of commands exposed to the Copilot. `v1` is the
-    /// curated allow-list (design §3), now 44 commands: transport (6),
-    /// marker (5, m11-c), track (7), clip (12), take (2), mixer (1), render (2),
-    /// ai (6), discovery (2), edit (1).
+    /// curated allow-list (design §3), now 55 commands: transport (6),
+    /// tempo (2, m12-d), marker (5, m11-c), track (7), clip (14, m15-d added
+    /// duplicate), arrange (2, m15-d), take (2), mixer (1), fx (5, m13-d master
+    /// chain), render (2), ai (6), discovery (2), edit (1).
     public static let v1: [CopilotTool] = [
         // MARK: transport (6)
 
@@ -219,6 +220,33 @@ public enum CopilotToolCatalog {
                     "Number of bars of count-in clicks before recording starts, 0-4. Omit to keep the current value.",
                     minimum: 0, maximum: 4)),
             ], required: ["enabled"])
+        ),
+
+        // MARK: tempo (2, m12-d)
+
+        CopilotTool(
+            command: "tempo.map",
+            description: "Read the project's tempo map and time-signature (meter) map: {segments: [{startBeat, bpm}], meterChanges: [{startBeat, beatsPerBar, beatUnit}], mapRevision}. There is always at least one segment (the base tempo at beat 0) and one meter change, even for a single-tempo song. Use this before tempo.setMap to see the current shape, and to place tempo changes at section boundaries (marker.list gives the beats).",
+            schema: schemaObject([])
+        ),
+        CopilotTool(
+            command: "tempo.setMap",
+            description: "Replace the whole project tempo map (and optionally the meter map) — how you author tempo changes across a song (e.g. a slower intro, a faster drop). Pass the FULL list of segments, each a constant tempo starting at a beat; segment 0 MUST start at beat 0 and sets the base tempo. beats must be sorted and unique. Beats are the source of truth: notes and clips keep their beat positions, only their wall-clock timing changes. To set one project-wide tempo use transport.setTempo instead. One undoable step (edit.undo). Returns the resolved maps.",
+            schema: schemaObject([
+                ("segments", arraySchema(
+                    "Ordered tempo segments. Segment 0 must have startBeat 0. Each segment's tempo governs from its startBeat until the next segment's startBeat.",
+                    items: schemaObject([
+                        ("startBeat", numberSchema("Beat (quarter notes from timeline start) where this tempo begins. Segment 0 must be 0; later segments strictly increasing.", minimum: 0)),
+                        ("bpm", numberSchema("Tempo in beats per minute for this segment. Range 20-400.", minimum: 20, maximum: 400)),
+                    ], required: ["startBeat", "bpm"]))),
+                ("meterChanges", arraySchema(
+                    "Optional time-signature changes. Omit to leave the current meter unchanged. Change 0 must have startBeat 0; each later change must fall on a barline of the meter before it.",
+                    items: schemaObject([
+                        ("startBeat", numberSchema("Beat where this time signature begins. Change 0 must be 0.", minimum: 0)),
+                        ("beatsPerBar", integerSchema("Beats per bar (the top number, e.g. 3 for 3/4).", minimum: 1)),
+                        ("beatUnit", integerSchema("Beat unit (the bottom number, e.g. 4 for 3/4).", minimum: 1)),
+                    ], required: ["startBeat", "beatsPerBar", "beatUnit"]))),
+            ], required: ["segments"])
         ),
 
         // MARK: marker (5)
@@ -393,6 +421,18 @@ public enum CopilotToolCatalog {
             ], required: ["trackId", "clipId", "toStartBeat"])
         ),
         CopilotTool(
+            command: "clip.duplicate",
+            description: "Copy a clip — audio or MIDI — to a new spot, keeping everything about it (its notes or audio, gain, fades, gain envelope, stretch). Omit toStartBeat to drop the copy flush after the source clip (the fast way to repeat a riff or loop a bar); omit toTrackId to copy on the same track, or pass another track's id to copy across (a MIDI clip needs an instrument track, an audio clip an audio track). If the copy lands over existing clips it trims them (no silent overlap). Reversible with edit.undo. Returns the new clip.",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the clip to duplicate, from project.snapshot.")),
+                ("toStartBeat", numberSchema(
+                    "Timeline start beat for the copy. Must be >= 0. Omit to append flush after the source clip's end.",
+                    minimum: 0)),
+                ("toTrackId", stringSchema(
+                    "Id of the track to copy onto. Omit to copy on the source's own track. Must match the clip's kind (instrument track for MIDI, audio track for audio).")),
+            ], required: ["clipId"])
+        ),
+        CopilotTool(
             command: "clip.trim",
             description: "Change a clip's visible timeline window (start + length) while its underlying content stays fixed — drag either edge without moving the clip's content.",
             schema: schemaObject([
@@ -428,6 +468,24 @@ public enum CopilotToolCatalog {
                     "Clip gain in decibels. Clamped to -72..24; 0 = unity (no change).",
                     minimum: -72, maximum: 24)),
             ], required: ["trackId", "clipId", "gainDb"])
+        ),
+        CopilotTool(
+            command: "clip.setGainEnvelope",
+            description: "Draw a per-clip gain ENVELOPE — a curve of volume breakpoints along an AUDIO clip that fades and swells its level over time, on top of its fixed gain and fades. Reach for this (not clip.setGain, which is one flat number) to ride a vocal louder in the chorus, duck a phrase, or shape a build; use a track automation lane instead when the moves should follow the clip as you rearrange the whole track. Points are clip-relative beats in decibels, interpolated straight-line between them and held flat before the first / after the last. Pass an empty list (or omit points) to clear it. Audio clips only.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track that owns the clip, from project.snapshot.")),
+                ("clipId", stringSchema("Id of the AUDIO clip to shape, from project.snapshot.")),
+                ("points", arraySchema(
+                    "Gain breakpoints, sorted by beat ascending with no duplicate beats. Empty (or omitted) CLEARS the envelope.",
+                    items: schemaObject([
+                        ("beat", numberSchema(
+                            "Breakpoint position in beats, RELATIVE TO THE CLIP'S START (not the timeline). Clamped into 0..the clip's length.",
+                            minimum: 0)),
+                        ("gainDb", numberSchema(
+                            "Gain at this breakpoint in decibels. Clamped to -72..24; 0 = unity.",
+                            minimum: -72, maximum: 24)),
+                    ], required: ["beat", "gainDb"]))),
+            ], required: ["trackId", "clipId"])
         ),
         CopilotTool(
             command: "clip.crossfade",
@@ -467,6 +525,29 @@ public enum CopilotToolCatalog {
             ], required: ["clipId", "atBeat", "lengthBeats"])
         ),
 
+        // MARK: arrange (2, m15-d)
+
+        CopilotTool(
+            command: "arrange.insertBars",
+            description: "Insert empty bars across the WHOLE arrangement and push everything after them later, in one undoable step — the way to open up space (e.g. \"add 4 bars before the chorus for a build\"). Bars are 1-based (bar 1 is the first bar) and meter-aware (a bar in a 6/8 section is 6 beats). Every track's clips, the markers, the tempo and time-signature maps, and the loop all shift together; a clip straddling the insertion point is split. Use marker.list / tempo.map to find the bar of a section first. Returns {atBeat, insertedBeats, beatsPerBar}.",
+            schema: schemaObject([
+                ("atBar", integerSchema(
+                    "1-based bar number to insert BEFORE (bar 1 = the first bar). The empty bars appear here and everything from this bar onward moves later.",
+                    minimum: 1)),
+                ("count", integerSchema("How many empty bars to insert.", minimum: 1)),
+            ], required: ["atBar", "count"])
+        ),
+        CopilotTool(
+            command: "arrange.deleteBars",
+            description: "Delete a range of bars across the WHOLE arrangement and pull everything after them earlier, in one undoable step — the way to cut a section out (e.g. \"drop the 4-bar intro\"). Bars are 1-based and meter-aware. Clips fully inside the range are removed, ones straddling an edge are trimmed or split, markers inside are removed, and the tempo/meter maps close the gap. A delete that would leave a time-signature change off its barline is refused with a teaching error — delete within one meter region. Returns {fromBeat, deletedBeats, removedClipIds, removedMarkerIds}.",
+            schema: schemaObject([
+                ("fromBar", integerSchema(
+                    "1-based bar number where the deletion starts (bar 1 = the first bar).",
+                    minimum: 1)),
+                ("count", integerSchema("How many bars to delete.", minimum: 1)),
+            ], required: ["fromBar", "count"])
+        ),
+
         // MARK: take (2)
 
         CopilotTool(
@@ -497,6 +578,56 @@ public enum CopilotToolCatalog {
                     "Linear master gain, 0-2, where 1 = unity gain (0 dB). This is linear gain, not decibels.",
                     minimum: 0, maximum: 2)),
             ], required: ["volume"])
+        ),
+
+        // MARK: fx (5, m13-d)
+
+        CopilotTool(
+            command: "fx.add",
+            description: "Add a built-in effect to a track, a bus, OR the master output's insert chain. Pass trackId as a track/bus id from project.snapshot to insert on that strip, or the EXACT string \"master\" to insert on the master output chain — the whole mix's final stage, after the master fader, the last stop before the speakers. Effects process in array order (index 0 first); omit index to append at the end. The master chain hosts BUILT-IN effects only in v1 (no hosted plugins there). The go-to mastering recipe: add an eq then a limiter to \"master\", set the limiter's ceilingDb near -1, then call render.measureLoudness to check the level (aim for -14 LUFS for streaming). Adding an effect never interrupts playback. Returns {effectId, effects}. Reversible with edit.undo.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track or bus to add the effect to, OR the string \"master\" for the master output chain.")),
+                ("kind", stringSchema(
+                    "Which built-in effect to add. On the master chain only these built-ins are allowed.",
+                    enumValues: ["gain", "eq", "compressor", "limiter", "reverb", "delay", "saturator", "gate", "chorus"])),
+                ("index", integerSchema("Position in the chain, 0 = processed first. Omit to append at the end; out-of-range values clamp.", minimum: 0)),
+            ], required: ["trackId", "kind"])
+        ),
+        CopilotTool(
+            command: "fx.remove",
+            description: "Remove an effect from a track, a bus, or the master output chain by id, shifting later effects up. Pass trackId as a track/bus id from project.snapshot, or the string \"master\" for the master output chain. Never interrupts playback. Returns the updated insert chain. Reversible with edit.undo.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track or bus that owns the effect, OR the string \"master\" for the master output chain.")),
+                ("effectId", stringSchema("Id of the effect to remove, from fx.add's result or project.snapshot.")),
+            ], required: ["trackId", "effectId"])
+        ),
+        CopilotTool(
+            command: "fx.setParam",
+            description: "Change one named parameter of an effect on a track, a bus, or the master output chain — the way to ride an FX knob (e.g. a limiter's ceilingDb, a compressor's ratio, an eq band's gain). Pass trackId as a track/bus id from project.snapshot, or the string \"master\" for the master output chain. Call fx.describe first to see each kind's exact parameter names, ranges, defaults, and units. Out-of-range values clamp. Applies live without interrupting playback. Returns the updated insert chain.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track or bus that owns the effect, OR the string \"master\" for the master output chain.")),
+                ("effectId", stringSchema("Id of the effect to change, from fx.add's result or project.snapshot.")),
+                ("name", stringSchema("Parameter name, exactly as listed by fx.describe for this effect's kind.")),
+                ("value", numberSchema("New parameter value; out-of-range values clamp to the parameter's range (see fx.describe).")),
+            ], required: ["trackId", "effectId", "name", "value"])
+        ),
+        CopilotTool(
+            command: "fx.setBypass",
+            description: "Bypass (temporarily disable, passing audio through unprocessed) or re-enable an effect on a track, a bus, or the master output chain — keeps its parameters, so use it to A/B the effect's contribution. Pass trackId as a track/bus id from project.snapshot, or the string \"master\" for the master output chain. Takes effect instantly without interrupting playback. Returns the updated insert chain.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track or bus that owns the effect, OR the string \"master\" for the master output chain.")),
+                ("effectId", stringSchema("Id of the effect to bypass/re-enable, from fx.add's result or project.snapshot.")),
+                ("bypassed", booleanSchema("True to bypass (disable) the effect, false to re-enable it.")),
+            ], required: ["trackId", "effectId", "bypassed"])
+        ),
+        CopilotTool(
+            command: "fx.setSidechain",
+            description: "Key a built-in compressor or gate off ANOTHER track's signal — the classic sidechain pump. Add a compressor to the pad/bass, then key it from the kick so it ducks on every kick hit: fx.setSidechain {trackId: pad, effectId: comp, sourceTrackId: kick}. Pass sourceTrackId null (or omit it) to clear the key. Only compressor and gate inserts can be keyed; the keyed effect must be on an audio or bus track; the key source is another audio track; a key that would loop back on itself is rejected. The MASTER chain cannot host a sidechain-keyed effect and the master output cannot be a key source — key an effect on a track or bus instead. Returns the track's updated insert chain plus how far the key is delayed by latency (usually 0). Reversible with edit.undo.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track or bus whose compressor/gate is being keyed, from project.snapshot.")),
+                ("effectId", stringSchema("Id of the compressor or gate effect to key, from fx.add's result or project.snapshot.")),
+                ("sourceTrackId", stringSchema("Id of the audio track to key FROM (e.g. the kick). Omit or pass null to clear the key.")),
+            ], required: ["trackId", "effectId"])
         ),
 
         // MARK: render (2)

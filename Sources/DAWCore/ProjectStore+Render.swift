@@ -14,18 +14,25 @@ extension ProjectStore {
     /// measurement fields mean the program sits below the −70 LUFS gate
     /// (JSON has no −inf; nil is the honest encoding).
     ///
-    /// `durationSeconds` nil → the shared default window: extent of ALL
-    /// tracks' clips (audio AND instrument — deliberately broader than
-    /// `renderMixdown`'s audio-only legacy default, which stays untouched)
-    /// plus a 2.0 s bus-reverb/release tail. No clips past `fromBeat` →
+    /// `durationSeconds` nil → the shared default window (`renderWindowSeconds`):
+    /// extent of ALL tracks' clips (audio AND instrument) past `fromBeat` plus a
+    /// 2.0 s bus-reverb/release tail. Since m16-d `renderMixdown` defaults to
+    /// this SAME window — the audio-only legacy carve-out is retired (it was a
+    /// false-teaching bug, audit F4). No clips past `fromBeat` →
     /// `nothingToRender`.
     public func measureLoudness(fromBeat: Double = 0,
                                 durationSeconds: Double? = nil) async throws -> LoudnessMeasureResult {
         guard let engine else { throw ProjectError.engineUnavailable }
         let startBeat = max(0, fromBeat)
         let duration = try renderWindowSeconds(fromBeat: startBeat, requested: durationSeconds)
+        // MASTERED class (m13-d, design §2): measuring the PROGRAM is the
+        // whole point — the Copilot adds EQ+limiter to master, then measures.
+        // The master volume lane rides the class (m15-c): a programmed fade
+        // IS part of the measured program.
         let audio = try await engine.renderOffline(
             tracks: tracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects,
+            masterAutomation: masterAutomation,
             fromBeat: startBeat, durationSeconds: duration,
             forcedCompensationTargets: nil
         )
@@ -63,8 +70,14 @@ extension ProjectStore {
         guard let engine else { throw ProjectError.engineUnavailable }
         let startBeat = max(0, fromBeat)
         let duration = try renderWindowSeconds(fromBeat: startBeat, requested: durationSeconds)
+        // MASTERED class (m13-d, design §2): the deliverable bounce carries
+        // the master chain AND the master volume lane (m15-c — "fade out the
+        // song" lands in the deliverable); the loudness report measures the
+        // mastered file.
         var audio = try await engine.renderOffline(
             tracks: tracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects,
+            masterAutomation: masterAutomation,
             fromBeat: startBeat, durationSeconds: duration,
             forcedCompensationTargets: nil
         )
@@ -163,9 +176,18 @@ extension ProjectStore {
         var channels = 0
         var writtenDuration = 0.0
         for descriptor in descriptors {
+            // STEM class (m13-d, design §2 / S-3′): stems are PRE-master
+            // material — a nonlinear master chain does not distribute over
+            // the partition, so every pass renders chain-excluded. The master
+            // volume LANE is excluded too (m15-c, the S-3′ extension): a fade
+            // is master performance, not material — baking it into every stem
+            // would destroy the re-mixable partition (the static masterVolume
+            // stays included, exactly as ever).
             let audio = try await engine.renderOffline(
                 tracks: StemPlan.passTracks(for: descriptor, session: tracks),
                 tempoMap: transport.tempoMap, masterVolume: masterVolume,
+                masterEffects: [],
+                masterAutomation: [],
                 fromBeat: startBeat, durationSeconds: duration,
                 forcedCompensationTargets: targets
             )
@@ -184,8 +206,14 @@ extension ProjectStore {
 
         var mixdown: MixdownFile?
         if includeMixdown {
+            // STEM class too (m13-d, S-3′): "00 Mixdown.wav" is the stems'
+            // own chain-excluded (and lane-excluded, m15-c) reference — the
+            // null-check anchor Σ-stems compares against. A MASTERED file
+            // comes from `render.bounce`.
             let audio = try await engine.renderOffline(
                 tracks: tracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
+                masterEffects: [],
+                masterAutomation: [],
                 fromBeat: startBeat, durationSeconds: duration,
                 forcedCompensationTargets: targets
             )
@@ -197,7 +225,13 @@ extension ProjectStore {
 
         return StemExportResult(directory: dir.path, sampleRate: sampleRate,
                                 durationSeconds: writtenDuration, channels: channels,
-                                stems: stems, mixdown: mixdown)
+                                stems: stems, mixdown: mixdown,
+                                // Honesty field (m13-d, design §2): present —
+                                // as "excluded" — exactly when the project
+                                // carries a non-empty master chain, so an
+                                // agent cannot mistake stems for mastered
+                                // deliverables.
+                                masterChain: masterEffects.isEmpty ? nil : "excluded")
     }
 
     // MARK: - Shared window / destination policy

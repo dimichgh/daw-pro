@@ -63,8 +63,10 @@ public final class PianoRollModel {
     public static let defaultPixelsPerBeat: CGFloat = 32
     /// One semitone row's height.
     public static let defaultRowHeight: CGFloat = 14
-    /// MIDI pitches 0...127 → 128 rows.
-    public static let pitchCount = 128
+    /// MIDI pitches 0...127 → 128 rows. `nonisolated` so the pitch↔y affine mapping
+    /// can be reproduced inside `@Sendable` Canvas renderers (m16-a) — it is a
+    /// compile-time constant, never actor state.
+    public nonisolated static let pitchCount = 128
     /// Grab zone on a note's right edge that means "resize" not "move".
     public static let resizeHandleWidth: CGFloat = 8
 

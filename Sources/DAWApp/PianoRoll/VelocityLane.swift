@@ -12,7 +12,7 @@ struct VelocityLane: View {
     var onCommit: () -> Void
 
     static let height: CGFloat = 66
-    private static let stemWidth: CGFloat = 5
+    private nonisolated static let stemWidth: CGFloat = 5
 
     @State private var activeNote: UUID?
 
@@ -30,17 +30,25 @@ struct VelocityLane: View {
     }
 
     var body: some View {
-        Canvas { context, size in
+        // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+        // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+        // The beat↔x mapping is affine (`PianoRollModel.x(forBeat:)`), reproduced inline.
+        let draft = model.draft
+        let ppb = model.pixelsPerBeat
+        let selectedIDs = model.selection
+        let activeNoteID = activeNote
+        let noteColor = noteColor
+        return Canvas { @Sendable context, size in
             // Baseline.
             context.fill(
                 Path(CGRect(x: 0, y: size.height - 0.5, width: size.width, height: 0.5)),
                 with: .color(DAWTheme.hairline)
             )
-            for note in model.draft {
-                let x = model.x(forBeat: note.startBeat)
+            for note in draft {
+                let x = CGFloat(note.startBeat) * ppb
                 let fraction = CGFloat(note.velocity) / 127
                 let stemHeight = size.height * fraction
-                let selected = model.isSelected(note.id) || activeNote == note.id
+                let selected = selectedIDs.contains(note.id) || activeNoteID == note.id
                 let rect = CGRect(
                     x: x, y: size.height - stemHeight,
                     width: Self.stemWidth, height: stemHeight

@@ -235,10 +235,12 @@ server.registerTool(
   {
     title: "Set the project tempo",
     description:
-      "Set the project tempo in BPM (beats per minute), i.e. quarter notes " +
-      "per minute. Valid range 20-400 BPM (typical music ranges roughly " +
+      "Set ONE project-wide tempo in BPM (beats per minute), i.e. quarter " +
+      "notes per minute. Valid range 20-400 BPM (typical music ranges roughly " +
       "60-200 BPM; e.g. 60 = slow ballad, 120 = common pop/house tempo, " +
-      "174 = drum & bass).",
+      "174 = drum & bass). This is the single-tempo fast path: on a project " +
+      "that already has a MULTI-SEGMENT tempo map it is rejected with a message " +
+      "pointing at tempo_set_map (which edits the map without flattening it).",
     inputSchema: {
       bpm: z
         .number()
@@ -248,6 +250,91 @@ server.registerTool(
     },
   },
   async ({ bpm }) => toToolResult(() => bridge.send("transport.setTempo", { bpm }))
+);
+
+server.registerTool(
+  "tempo_map",
+  {
+    title: "Read the tempo & meter maps",
+    description:
+      "Read the project's tempo map and time-signature (meter) map: " +
+      "{segments: [{startBeat, bpm}], meterChanges: [{startBeat, beatsPerBar, beatUnit}], " +
+      "mapRevision}. There is always at least one tempo segment (the base tempo " +
+      "at beat 0) and one meter change, even for a single-tempo song. Call this " +
+      "before tempo_set_map to see the current shape; combine with marker_list " +
+      "to place tempo changes at section boundaries. No params.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("tempo.map", {}))
+);
+
+server.registerTool(
+  "tempo_set_map",
+  {
+    title: "Set the tempo & meter maps",
+    description:
+      "Replace the whole project tempo map, and — in the SAME call, via the " +
+      "optional meterChanges param — the time-signature (meter) map too: " +
+      "this is how you author tempo changes across a song (e.g. a slower " +
+      "intro then a faster drop) AND/OR time-signature changes (e.g. a 3/4 " +
+      "waltz section inside a 4/4 song). Pass the FULL ordered list of tempo " +
+      "segments: each segment is a constant tempo that starts at a beat and " +
+      "runs until the next segment. Segment 0 MUST start at beat 0 (the base " +
+      "tempo); beats must be strictly increasing. To change time signature " +
+      "as well, also pass meterChanges (see its param description below) — " +
+      "omit meterChanges entirely to leave the current meter untouched. " +
+      "Beats stay the source of truth — notes and clips keep their beat " +
+      "positions, only their wall-clock timing changes. For one project-wide " +
+      "tempo with no time-signature change use transport_set_tempo instead. " +
+      "One undoable step (edit_undo). Returns the resolved maps.",
+    inputSchema: {
+      segments: z
+        .array(
+          z.object({
+            startBeat: z
+              .number()
+              .min(0)
+              .describe("Beat where this tempo begins. Segment 0 must be 0; later segments strictly increasing."),
+            bpm: z
+              .number()
+              .min(20)
+              .max(400)
+              .describe("Tempo in BPM for this segment. Range 20-400."),
+          })
+        )
+        .min(1)
+        .describe("Ordered tempo segments; segment 0 at beat 0 sets the base tempo."),
+      meterChanges: z
+        .array(
+          z.object({
+            startBeat: z
+              .number()
+              .min(0)
+              .describe("Beat where this time signature begins. Change 0 must be 0."),
+            beatsPerBar: z
+              .number()
+              .int()
+              .min(1)
+              .describe("Beats per bar — the top number (e.g. 3 for 3/4)."),
+            beatUnit: z
+              .number()
+              .int()
+              .min(1)
+              .describe("Beat unit — the bottom number (e.g. 4 for 3/4)."),
+          })
+        )
+        .min(1)
+        .optional()
+        .describe(
+          "Optional time-signature changes; omit to leave the meter unchanged. " +
+            "Change 0 must be at beat 0; each later change must fall on a barline."
+        ),
+    },
+  },
+  async ({ segments, meterChanges }) =>
+    toToolResult(() =>
+      bridge.send("tempo.setMap", meterChanges ? { segments, meterChanges } : { segments })
+    )
 );
 
 server.registerTool(
@@ -273,7 +360,17 @@ server.registerTool(
       "succeeded, a string explains what went wrong (e.g. microphone " +
       "permission denied, no armed tracks, or an empty take). Requires " +
       "macOS microphone permission for audio tracks — the first recording " +
-      "may trigger the system permission prompt.",
+      "may trigger the system permission prompt. LOOP-CYCLE TAKES: if the " +
+      "loop is enabled (transport_set_loop) when you call this, recording " +
+      "jumps to the loop start first, plays the loop for real, and each " +
+      "full pass through the loop lands as its own take lane on ONE take " +
+      "group — comp with the existing take_* tools (the newest lane is " +
+      "comped by default). Stopping mid-cycle still lands an honest partial " +
+      "lane for whatever was captured; there is no separate flag for this, " +
+      "it's entirely decided by whether the loop is on, so disable the loop " +
+      "first if you want one plain linear take instead. This is rejected if " +
+      "a punch window is ALSO enabled (see transport_set_punch), or if the " +
+      "loop is shorter than 1 second per cycle.",
   },
   async () => toToolResult(() => bridge.send("transport.record"))
 );
@@ -288,7 +385,12 @@ server.registerTool(
       "the loop end back to the loop start during playback instead of playing " +
       "past it. endBeat must be greater than startBeat. When enabling the loop " +
       "for the first time, provide both startBeat and endBeat; if either is " +
-      "omitted, the previously set value is kept. Returns the updated transport " +
+      "omitted, the previously set value is kept. Enabling the loop before " +
+      "calling transport_record changes what recording does: it turns into " +
+      "loop-cycle take recording, where each pass through the loop lands as " +
+      "its own take lane (see transport_record for the details). Refused " +
+      "while a recording is in progress — the loop window is frozen for the " +
+      "whole take, so stop recording first. Returns the updated transport " +
       "state.",
     inputSchema: {
       enabled: z.boolean().describe("True to enable loop playback, false to disable it."),
@@ -328,7 +430,10 @@ server.registerTool(
       "outBeat; if either is omitted, the previously set value is kept. Cannot " +
       "be changed while recording is in progress. Starting a recording with " +
       "the punch window entirely behind the current playhead position is an " +
-      "error. Returns the updated transport state.",
+      "error. Punch and loop-cycle takes (see transport_set_loop, " +
+      "transport_record) cannot be combined — recording is rejected if both " +
+      "a punch window and the loop are enabled at once; disable one first. " +
+      "Returns the updated transport state.",
     inputSchema: {
       enabled: z.boolean().describe("True to enable punch recording, false to disable it."),
       inBeat: z
@@ -415,7 +520,10 @@ server.registerTool(
   "track_remove",
   {
     title: "Remove a track",
-    description: "Permanently remove a track (and its clips) from the session by id.",
+    description:
+      "Permanently remove a track (and its clips) from the session by id. " +
+      "Refused while a recording is in progress (it re-wires the audio graph, " +
+      "which would truncate the take) — stop recording first.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track to remove, from project_snapshot."),
     },
@@ -912,7 +1020,9 @@ server.registerTool(
       "parallel signal path (e.g. a shared reverb bus while the dry signal " +
       "still reaches its usual destination), use track_add_send instead. Bus " +
       "tracks themselves always output to the master bus (v0 has no nested/" +
-      "sub-bus chains) and reject being given an outputBusId. Returns the " +
+      "sub-bus chains) and reject being given an outputBusId. Refused while a " +
+      "recording is in progress (re-routing rebuilds the audio graph, which " +
+      "would truncate the take) — stop recording first. Returns the " +
       "track's full routing state: `{trackId, outputBusId, sends}`.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track whose output to route, from project_snapshot."),
@@ -947,7 +1057,10 @@ server.registerTool(
       "AND also feeds the bus. Only one send per destination bus per track is " +
       "allowed; adding a second send to the same busId is an error (use " +
       "track_set_send to change an existing send's level instead). `busId` " +
-      "must refer to a track with kind `bus`. Returns the track's full " +
+      "must refer to a track with kind `bus`. Refused while a recording is in " +
+      "progress (adding a send rebuilds the audio graph, which would truncate " +
+      "the take) — stop recording first; use track_set_send to ride an " +
+      "EXISTING send's level mid-take instead. Returns the track's full " +
       "routing state: `{trackId, outputBusId, sends}`, where the new send " +
       "appears in `sends` with a server-minted `id`.",
     inputSchema: {
@@ -1014,7 +1127,9 @@ server.registerTool(
     description:
       "Permanently remove an existing send from a track, by id — stops that " +
       "parallel feed into the destination bus entirely (the track's main " +
-      "output, set via track_set_output, is unaffected). Returns the track's " +
+      "output, set via track_set_output, is unaffected). Refused while a " +
+      "recording is in progress (it rebuilds the audio graph, which would " +
+      "truncate the take) — stop recording first. Returns the track's " +
       "full routing state: `{trackId, outputBusId, sends}`.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track that owns the send, from project_snapshot."),
@@ -1259,14 +1374,21 @@ server.registerTool(
       "by component triple and is REQUIRED when `kind` is `audioUnit` (call " +
       "fx_list_audio_units first to discover what's installed); it's ignored for every " +
       "other kind. Each track/bus's insert chain is capped at 16 effects (adding a 17th " +
-      "errors). Adding an effect never interrupts or glitches playback. Returns " +
+      "errors). Adding an effect never interrupts or glitches playback. " +
+      "MASTER CHAIN: pass `trackId` as the exact string \"master\" to insert on the whole " +
+      "mix's master output chain (post-fader, the last stop before the speakers) instead " +
+      "of a track/bus. The master chain hosts BUILT-IN effects only in v1 — `kind: " +
+      "\"audioUnit\"` on \"master\" is rejected (pick one of gain|eq|compressor|limiter|" +
+      "reverb|delay|saturator|gate|chorus). Classic mastering move: fx_add {trackId: " +
+      "\"master\", kind: \"eq\"} then {trackId: \"master\", kind: \"limiter\"}, then " +
+      "render_measure_loudness to check the level. Returns " +
       "`{effectId, effects}`: the new effect's server-minted id, and the track's full " +
       "updated insert chain (same shape as project_snapshot's per-track `effects` array).",
     inputSchema: {
       trackId: z
         .string()
         .min(1)
-        .describe("Id of the track or bus to add the effect to, from project_snapshot."),
+        .describe("Id of the track or bus to add the effect to, from project_snapshot, OR the exact string \"master\" for the master output chain (built-in kinds only there)."),
       kind: fxKindSchema.default("gain"),
       index: z
         .number()
@@ -1417,11 +1539,12 @@ server.registerTool(
     title: "Remove an effect from a track or bus's insert chain",
     description:
       "Permanently remove an effect from a track or bus's insert chain by id, shifting " +
-      "later effects up to fill the gap. Reversible with edit_undo. Never interrupts or " +
-      "glitches playback. Returns the track's full updated insert chain (`effects`, " +
-      "same shape as project_snapshot).",
+      "later effects up to fill the gap. Pass `trackId` as a track/bus id, or the exact " +
+      "string \"master\" to remove from the master output chain (m13-d). Reversible with " +
+      "edit_undo. Never interrupts or glitches playback. Returns the full updated insert " +
+      "chain (`effects`, same shape as project_snapshot).",
     inputSchema: {
-      trackId: z.string().min(1).describe("Id of the track or bus that owns the effect, from project_snapshot."),
+      trackId: z.string().min(1).describe("Id of the track or bus that owns the effect, from project_snapshot, OR \"master\" for the master output chain."),
       effectId: z
         .string()
         .min(1)
@@ -1439,11 +1562,13 @@ server.registerTool(
       "Move an existing effect to a new position within its track or bus's insert " +
       "chain. Array order IS processing order, so reordering changes what the signal " +
       "actually hears — e.g. moving an EQ before vs. after a compressor sounds " +
-      "different. `index` is the new zero-based position; out-of-range values clamp " +
-      "into range rather than erroring. Never interrupts or glitches playback. Returns " +
-      "the track's full updated insert chain (`effects`, same shape as project_snapshot).",
+      "different. Pass `trackId` as a track/bus id, or the exact string \"master\" to " +
+      "reorder the master output chain (m13-d). `index` is the new zero-based position; " +
+      "out-of-range values clamp into range rather than erroring. Never interrupts or " +
+      "glitches playback. Returns the full updated insert chain (`effects`, same shape " +
+      "as project_snapshot).",
     inputSchema: {
-      trackId: z.string().min(1).describe("Id of the track or bus that owns the effect, from project_snapshot."),
+      trackId: z.string().min(1).describe("Id of the track or bus that owns the effect, from project_snapshot, OR \"master\" for the master output chain."),
       effectId: z
         .string()
         .min(1)
@@ -1470,10 +1595,12 @@ server.registerTool(
       "Bypass (temporarily disable, passing audio through unprocessed) or re-enable an " +
       "effect already in a track or bus's insert chain, without removing it from the " +
       "chain or losing its parameter values — use this to A/B an effect's contribution. " +
-      "Bypass takes effect INSTANTLY and never interrupts or glitches playback. Returns " +
-      "the track's full updated insert chain (`effects`, same shape as project_snapshot).",
+      "Pass `trackId` as a track/bus id, or the exact string \"master\" to bypass an " +
+      "effect on the master output chain (m13-d). Bypass takes effect INSTANTLY and " +
+      "never interrupts or glitches playback. Returns the full updated insert chain " +
+      "(`effects`, same shape as project_snapshot).",
     inputSchema: {
-      trackId: z.string().min(1).describe("Id of the track or bus that owns the effect, from project_snapshot."),
+      trackId: z.string().min(1).describe("Id of the track or bus that owns the effect, from project_snapshot, OR \"master\" for the master output chain."),
       effectId: z
         .string()
         .min(1)
@@ -1492,14 +1619,16 @@ server.registerTool(
     description:
       "Change one parameter, by name, of an effect already in a track or bus's insert " +
       "chain — the way to ride an FX knob (e.g. turning up a gain stage's `gain`, tightening " +
-      "a compressor's `ratio`, or pulling down a limiter's `ceilingDb`). " +
+      "a compressor's `ratio`, or pulling down a limiter's `ceilingDb`). Pass `trackId` as " +
+      "a track/bus id, or the exact string \"master\" to ride a knob on the master output " +
+      "chain (m13-d — e.g. a mastering limiter's `ceilingDb`). " +
       "Parameter names, ranges, defaults, and units are discoverable per effect kind via " +
       "fx_describe — pass the exact `name` it lists. Out-of-range `value`s clamp to the " +
       "parameter's valid range rather than erroring. Edits apply LIVE, in place, without " +
-      "interrupting or glitching playback. Returns the track's full updated insert chain " +
+      "interrupting or glitching playback. Returns the full updated insert chain " +
       "(`effects`, same shape as project_snapshot).",
     inputSchema: {
-      trackId: z.string().min(1).describe("Id of the track or bus that owns the effect, from project_snapshot."),
+      trackId: z.string().min(1).describe("Id of the track or bus that owns the effect, from project_snapshot, OR \"master\" for the master output chain."),
       effectId: z
         .string()
         .min(1)
@@ -1518,6 +1647,55 @@ server.registerTool(
   },
   async ({ trackId, effectId, name, value }) =>
     toToolResult(() => bridge.send("fx.setParam", { trackId, effectId, name, value }))
+);
+
+server.registerTool(
+  "fx_set_sidechain",
+  {
+    title: "Key a compressor or gate from another track (sidechain)",
+    description:
+      "Set (or clear) the SIDECHAIN KEY of a built-in compressor or gate — make it react " +
+      "to ANOTHER track's signal instead of its own. This is how you get classic pumping: " +
+      "add a compressor to the pad/bass track, then key it from the kick so the pad ducks on " +
+      "every kick hit (`fx_set_sidechain {trackId: pad, effectId: comp, sourceTrackId: kick}`). " +
+      "Pass `sourceTrackId: null` (or omit it) to CLEAR the key and return the effect to " +
+      "self-keyed. Only compressor and gate inserts can be keyed (hosted Audio Unit sidechain " +
+      "inputs are a later phase); the keyed effect must live on an audio or bus track (route an " +
+      "instrument to a bus first); the key source is another audio track (bus key sources are a " +
+      "later phase); and a key that would form a feedback loop is rejected with the exact path. " +
+      "The MASTER chain cannot host a sidechain-keyed effect and the master output cannot be a " +
+      "key source: passing \"master\" as `trackId` or `sourceTrackId` is rejected — key an " +
+      "effect on a track or bus instead (unlike fx_add/fx_remove/fx_reorder/fx_set_bypass/" +
+      "fx_set_param, this tool takes NO \"master\" sentinel). " +
+      "Refused while a recording is in progress (a key edge rewires the audio graph, which would " +
+      "truncate the take) — stop recording first. " +
+      "Returns the track's full updated insert chain (`effects` — the keyed effect carries " +
+      "`sidechainSourceTrackId`) plus `sidechainSkewSamples` (how far the key is delayed by " +
+      "plugin latency, usually 0).",
+    inputSchema: {
+      trackId: z
+        .string()
+        .min(1)
+        .describe("Id of the track or bus whose compressor/gate is being keyed, from project_snapshot (not \"master\" — the master chain cannot be keyed)."),
+      effectId: z
+        .string()
+        .min(1)
+        .describe("Id of the compressor or gate effect to key, from fx_add's result or project_snapshot."),
+      sourceTrackId: z
+        .string()
+        .min(1)
+        .nullable()
+        .optional()
+        .describe(
+          "Id of the audio track to key FROM (e.g. the kick). Pass null or omit to CLEAR the " +
+            "key and return the effect to self-keyed."
+        ),
+    },
+  },
+  async ({ trackId, effectId, sourceTrackId }) =>
+    toToolResult(() =>
+      bridge.send("fx.setSidechain", { trackId, effectId, sourceTrackId: sourceTrackId ?? null })
+    )
 );
 
 server.registerTool(
@@ -1867,6 +2045,54 @@ server.registerTool(
 );
 
 server.registerTool(
+  "clip_duplicate",
+  {
+    title: "Duplicate a clip",
+    description:
+      "Copy a clip, value-copying EVERYTHING it carries — audio media or MIDI " +
+      "notes, gain, fades + curves, gain envelope, and stretch/pitch — under a " +
+      "brand-new id. Use this to repeat a phrase, stash a variation to edit " +
+      "separately, or seed a new section from an existing one, without re-building " +
+      "it note by note. Omit `toStartBeat` to land the copy FLUSH right after the " +
+      "source clip's own tail; omit `toTrackId` to duplicate onto the source's own " +
+      "track. A cross-track duplicate is type-checked by content, same as any other " +
+      "clip placement: a MIDI clip only lands on an instrument track, an audio clip " +
+      "only on an audio track. OVERLAP POLICY: identical to clip_move's — a copy " +
+      "dropped onto an occupied region TRIMS the ordinary resident clips it covers " +
+      "(their edge is trimmed, or they're removed if fully covered) so two clips " +
+      "never sound at once with no crossfade; use clip_crossfade instead to " +
+      "deliberately blend two audio clips. A comp/take-group member source is " +
+      "rejected — call take_flatten first, then duplicate the flattened clip. One " +
+      "undo step. Returns the new clip's fields (unwrapped, the track_add/" +
+      "clip_add_midi convention), plus additive `trimmed` and `removed` arrays " +
+      "listing the ids of any stationary clips the overlap policy edited (empty on " +
+      "a clean landing).",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the clip to duplicate, from project_snapshot."),
+      toStartBeat: z
+        .number()
+        .min(0)
+        .optional()
+        .describe(
+          "New timeline start in beats (quarter notes) for the copy. Must be >= 0. Omit to " +
+            "land the copy flush right after the source clip's own tail."
+        ),
+      toTrackId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Id of the track to land the copy on, from project_snapshot. Omit to duplicate onto " +
+            "the source clip's own track. A MIDI source needs an instrument track; an audio " +
+            "source needs an audio track — a mismatch errors readably."
+        ),
+    },
+  },
+  async ({ clipId, toStartBeat, toTrackId }) =>
+    toToolResult(() => bridge.send("clip.duplicate", { clipId, toStartBeat, toTrackId }))
+);
+
+server.registerTool(
   "clip_set_gain",
   {
     title: "Set a clip's per-clip gain",
@@ -1887,6 +2113,55 @@ server.registerTool(
   },
   async ({ trackId, clipId, gainDb }) =>
     toToolResult(() => bridge.send("clip.setGain", { trackId, clipId, gainDb }))
+);
+
+server.registerTool(
+  "clip_set_gain_envelope",
+  {
+    title: "Draw a clip's gain envelope",
+    description:
+      "Draw a per-clip GAIN ENVELOPE on an AUDIO clip — a curve of volume " +
+      "breakpoints that rides the clip's level UP AND DOWN OVER TIME, stacked on " +
+      "top of its fixed gain (clip_set_gain) and its fades (clip_set_fades). Use " +
+      "this — not clip_set_gain, which sets ONE flat number — to swell a phrase " +
+      "into a chorus, duck a word, or shape a build inside a single clip. Prefer a " +
+      "track automation lane instead when the level moves belong to the whole track " +
+      "and should follow it as you rearrange. Points are CLIP-RELATIVE beats (from " +
+      "the clip's own start, not the timeline) paired with a gain in DECIBELS; the " +
+      "curve interpolates in a straight line between adjacent points and holds flat " +
+      "before the first and after the last. Beats must be sorted ascending with no " +
+      "duplicates; each beat is clamped into 0..the clip's length and each gain to " +
+      "-72..24 dB (0 = unity). Pass an EMPTY list (or omit points) to CLEAR the " +
+      "envelope back to the plain gain-and-fades behavior. Repeated calls while " +
+      "dragging a breakpoint coalesce into one undo step. Audio clips only — a MIDI " +
+      "clip is rejected. Returns the updated clip.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the track that owns the clip, from project_snapshot."),
+      clipId: z.string().uuid().describe("Id of the AUDIO clip to shape, from project_snapshot."),
+      points: z
+        .array(
+          z.object({
+            beat: z
+              .number()
+              .min(0)
+              .describe(
+                "Breakpoint position in beats, RELATIVE TO THE CLIP'S START (not the " +
+                  "timeline). Clamped into 0..the clip's length."
+              ),
+            gainDb: z
+              .number()
+              .describe("Gain at this breakpoint in decibels. Clamped to -72..24; 0 = unity."),
+          })
+        )
+        .optional()
+        .describe(
+          "Gain breakpoints, sorted by beat ascending with no duplicate beats. " +
+            "Empty or omitted CLEARS the envelope."
+        ),
+    },
+  },
+  async ({ trackId, clipId, points }) =>
+    toToolResult(() => bridge.send("clip.setGainEnvelope", { trackId, clipId, points: points ?? [] }))
 );
 
 server.registerTool(
@@ -2394,6 +2669,88 @@ server.registerTool(
 );
 
 // ---------------------------------------------------------------------------
+// Project-wide arrangement bar edits (m15-d) — insert/delete whole bars
+// across the ENTIRE session, not just one clip. Meter-aware (a bar's length
+// in beats depends on which meter region it falls in) and touch every
+// timeline-anchored thing at once: clips, markers, the tempo AND meter maps,
+// automation, and the loop/punch regions.
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "arrange_insert_bars",
+  {
+    title: "Insert empty bars across the whole project",
+    description:
+      "Insert `count` empty bars PROJECT-WIDE at a 1-based bar number, pushing " +
+      "everything from that point rightward — the \"add space here\" move for " +
+      "restructuring a whole arrangement (opening up a section, adding a build), as " +
+      "opposed to clip_insert_time_range which only opens a gap inside one clip. " +
+      "METER-AWARE: bar length in beats depends on the meter in force there (a bar " +
+      "inside a 6/8 region is 6 beats, not 4) — the inserted bars continue the " +
+      "meter of the bar right before the insertion point. Shifts EVERY track's " +
+      "clips, every marker, the tempo map AND the meter map, every automation " +
+      "lane, and the loop/punch regions together, so local musical relationships " +
+      "are preserved (content governed by a given tempo/meter is still governed by " +
+      "it after the shift). A clip straddling the insertion point SPLITS rather " +
+      "than being torn. One undo step reverts the entire shift. Refused while a " +
+      "recording is in progress (it would re-anchor the timeline under a rolling " +
+      "capture) and refused if it would cut across a take group (flatten it first " +
+      "— v1 does not re-anchor comps). Returns `{atBeat, insertedBeats, " +
+      "beatsPerBar}` — the absolute beat the insertion happened at, how many beats " +
+      "were inserted, and the beats-per-bar used for that insertion.",
+    inputSchema: {
+      atBar: z
+        .number()
+        .int()
+        .min(1)
+        .describe(
+          "1-based bar number to insert before (bar 1 is the very start of the timeline, " +
+            "beat 0). The new bars land immediately before this bar; everything at or after " +
+            "it shifts right."
+        ),
+      count: z.number().int().min(1).describe("How many bars to insert. Whole number, >= 1."),
+    },
+  },
+  async ({ atBar, count }) => toToolResult(() => bridge.send("arrange.insertBars", { atBar, count }))
+);
+
+server.registerTool(
+  "arrange_delete_bars",
+  {
+    title: "Delete bars across the whole project",
+    description:
+      "Remove `count` bars PROJECT-WIDE starting at a 1-based bar number and close " +
+      "the gap — the whole-arrangement counterpart to arrange_insert_bars (and, " +
+      "unlike clip_delete_time_range, operates on the ENTIRE session rather than " +
+      "one clip). METER-AWARE, same as arrange_insert_bars. Clips fully inside the " +
+      "removed range are deleted outright (their ids come back in " +
+      "`removedClipIds`); a clip straddling either edge is trimmed or split-and-" +
+      "closed so it never leaves a hole. Markers inside the removed range are " +
+      "deleted (`removedMarkerIds`); tempo/meter map changes inside the range are " +
+      "removed and the rest pulls left; a loop or punch region swallowed by the " +
+      "delete is disabled at the splice point rather than left dangling. A delete " +
+      "that would leave a meter change sitting off its barline is REFUSED with a " +
+      "teaching error naming the conflict (tempo changes have no barline " +
+      "constraint and always splice cleanly). One undo step reverts the whole " +
+      "delete. Refused while a recording is in progress and refused if it would " +
+      "cut across a take group (flatten it first). Returns `{fromBeat, " +
+      "deletedBeats, removedClipIds, removedMarkerIds}`.",
+    inputSchema: {
+      fromBar: z
+        .number()
+        .int()
+        .min(1)
+        .describe(
+          "1-based bar number to start deleting from (bar 1 is the very start of the " +
+            "timeline, beat 0)."
+        ),
+      count: z.number().int().min(1).describe("How many bars to delete. Whole number, >= 1."),
+    },
+  },
+  async ({ fromBar, count }) => toToolResult(() => bridge.send("arrange.deleteBars", { fromBar, count }))
+);
+
+// ---------------------------------------------------------------------------
 // Take comping (M5 iii-b)
 //
 // The model, in brief (see docs/ARCHITECTURE.md for the full spec): a TAKE
@@ -2405,8 +2762,9 @@ server.registerTool(
 // CLIPS (ordinary ids in project_snapshot's `clips`, marked with
 // `takeGroupID`) — that's what actually plays. Member clips REJECT the
 // normal per-clip edit tools (clip_trim, clip_move, clip_set_gain,
-// clip_set_fades, clip_set_stretch, clip_stretch_to_length, clip_set_notes,
-// clip_remove, clip_quantize) with a readable error telling you to change the
+// clip_set_gain_envelope, clip_set_fades, clip_set_stretch,
+// clip_stretch_to_length, clip_set_notes, clip_remove, clip_quantize) with a
+// readable error telling you to change the
 // comp (take_set_comp / take_select) or call take_flatten first — flattening
 // dissolves the group, turning the CURRENT members into ordinary, fully
 // editable clips (any non-comped lane material is discarded). Recording a
@@ -3183,9 +3541,26 @@ server.registerTool(
       "no audible effect until points are added. `target: {type: \"sendLevel\", ...}` " +
       "and `{type: \"effectParam\", ...}` on a hosted Audio Unit effect are rejected in " +
       "v0 with a readable error (no render path/parameter surface yet — see `target`'s " +
-      "own description). Returns `{lane: {id, target, points, isEnabled}}`.",
+      "own description). " +
+      "MASTER VOLUME: pass `trackId` as the exact string \"master\" (m15-c) to automate the " +
+      "whole mix's master output volume instead of a track. The master lane accepts the " +
+      "`volume` target ONLY — a `pan`, `sendLevel`, or `effectParam` target on \"master\" is " +
+      "rejected with a readable error (those lanes live on tracks — pass a track UUID). A " +
+      "master volume lane is how you draw a final fade-out/fade-in or a level ride across the " +
+      "whole mix; it applies PRE-limiter (the fade feeds the master insert chain), and — like " +
+      "every master move — it is NOT baked into exported stems or a bounce, which stay " +
+      "fade-free by design (the master fade belongs to the mastered deliverable only, so stems " +
+      "hand off clean). The master lane rides project_snapshot's top-level `masterAutomation` " +
+      "array (same lane shape), absent when empty. " +
+      "Returns `{lane: {id, target, points, isEnabled}}`.",
     inputSchema: {
-      trackId: z.string().min(1).describe("Id of the track to add the lane to, from project_snapshot."),
+      trackId: z
+        .string()
+        .min(1)
+        .describe(
+          "Id of the track to add the lane to, from project_snapshot, OR the exact string " +
+            "\"master\" for the whole-mix master volume lane (the `volume` target only there)."
+        ),
       target: automationTargetSchema,
     },
   },
@@ -3198,9 +3573,16 @@ server.registerTool(
     title: "Remove an automation lane",
     description:
       "Permanently delete an automation lane — and the curve drawn into it — from a " +
-      "track by id. Reversible with edit_undo.",
+      "track by id. Reversible with edit_undo. Pass `trackId` as the exact string " +
+      "\"master\" (m15-c) to delete the whole-mix master VOLUME lane instead of a track lane.",
     inputSchema: {
-      trackId: z.string().min(1).describe("Id of the track that owns the lane, from project_snapshot."),
+      trackId: z
+        .string()
+        .min(1)
+        .describe(
+          "Id of the track that owns the lane, from project_snapshot, OR the exact string " +
+            "\"master\" for the master volume lane."
+        ),
       laneId: z
         .string()
         .min(1)
@@ -3231,10 +3613,21 @@ server.registerTool(
       "from fx_describe); points are automatically reordered by `beat` (equal-beat " +
       "duplicates keep the later one) and the array is capped at 4096 points (oldest " +
       "points beyond the cap are dropped). Pass an empty array to clear the lane back to " +
-      "inert. Returns `{lane: {id, target, points, isEnabled}}` with the lane exactly as " +
+      "inert. " +
+      "MASTER: pass `trackId` as the exact string \"master\" (m15-c) to draw the whole-mix " +
+      "master VOLUME curve — a final fade or level ride; values clamp to 0-2 (the master " +
+      "fader range) exactly like a track volume lane. The master fade applies pre-limiter and " +
+      "is NOT baked into exported stems or a bounce (they stay fade-free by design). " +
+      "Returns `{lane: {id, target, points, isEnabled}}` with the lane exactly as " +
       "stored (reordered/clamped/capped).",
     inputSchema: {
-      trackId: z.string().min(1).describe("Id of the track that owns the lane, from project_snapshot."),
+      trackId: z
+        .string()
+        .min(1)
+        .describe(
+          "Id of the track that owns the lane, from project_snapshot, OR the exact string " +
+            "\"master\" for the master volume lane."
+        ),
       laneId: z
         .string()
         .min(1)
@@ -3262,10 +3655,17 @@ server.registerTool(
       "instead, e.g. track_set_volume/track_set_pan for a `volume`/`pan` lane; the " +
       "drawn curve is left untouched and simply ignored while disabled, so re-enabling " +
       "restores it exactly). Use this to A/B a drawn automation move without deleting " +
-      "it. Never touches the lane's points. Returns `{lane: {id, target, points, " +
-      "isEnabled}}`.",
+      "it. Never touches the lane's points. Pass `trackId` as the exact string \"master\" " +
+      "(m15-c) to toggle the whole-mix master VOLUME lane between its drawn fade and the " +
+      "manual master fader. Returns `{lane: {id, target, points, isEnabled}}`.",
     inputSchema: {
-      trackId: z.string().min(1).describe("Id of the track that owns the lane, from project_snapshot."),
+      trackId: z
+        .string()
+        .min(1)
+        .describe(
+          "Id of the track that owns the lane, from project_snapshot, OR the exact string " +
+            "\"master\" for the master volume lane."
+        ),
       laneId: z
         .string()
         .min(1)
@@ -3296,9 +3696,10 @@ server.registerTool(
       "realtime playback. Returns `{path, durationSeconds, sampleRate, " +
       "channels}`; use the returned absolute `path` to reference the bounced " +
       "audio afterwards (e.g. to import it elsewhere or ship it as a " +
-      "deliverable). Errors if the project has no audio clips and no explicit " +
-      "`durationSeconds` was given, since there would be nothing to render and " +
-      "no way to infer a render length.",
+      "deliverable). Errors only if the render range holds no clips at all — " +
+      "of ANY kind, audio or MIDI — and no explicit `durationSeconds` was " +
+      "given, since there would be nothing to render and no way to infer a " +
+      "render length.",
     inputSchema: {
       path: z
         .string()
@@ -3325,7 +3726,9 @@ server.registerTool(
         .describe(
           "How many seconds of audio to render, starting at fromBeat. Must be " +
             "> 0. When omitted, defaults to the project's length at the current " +
-            "tempo (through the end of the last clip) plus a 0.5 s tail."
+            "tempo — through the end of the last clip of ANY kind, audio or " +
+            "MIDI — plus a 2.0 s tail (the same default window as " +
+            "render_bounce, render_measure_loudness, and render_stems)."
         ),
     },
   },
@@ -3868,6 +4271,27 @@ server.registerTool(
       "most kinds; `limiter`'s lookahead adds some), capped at " +
       "16 entries — see fx_add/fx_remove/fx_reorder/fx_set_bypass/fx_set_param " +
       "to edit it and fx_describe for each kind's parameter names/ranges/units. " +
+      "May also include `masterAutomation` (m15-c): the whole-mix master VOLUME " +
+      "automation lanes as a top-level `[{id, target, points, isEnabled}]` array (same " +
+      "lane shape as a track's, driven by automation_add_lane/_set_points/_set_lane_" +
+      "enabled/_remove_lane with `trackId: \"master\"`) — ABSENT when there is no master " +
+      "lane; the master fade it draws is pre-limiter and is NOT baked into stems or a bounce. " +
+      "May also include `engineNotices` (m15-e): a top-level array of schedule-time " +
+      "DEGRADATION reports — cases where playback proceeded on time but not exactly as " +
+      "the project describes (e.g. a fade or gain envelope that couldn't be prepared in " +
+      "time so the clip played without it, or a clip still time-stretching that played as " +
+      "silence). Each entry is `{code, message, beat, count, lastAt}`: `code` is a stable " +
+      "machine key naming the degradation family (the current ones are " +
+      "`clip-fades-skipped`, `clip-envelope-skipped`, `clip-stretch-pending`) that events " +
+      "are COALESCED by — a recurrence increments `count` and refreshes the entry rather " +
+      "than appending; `message` is a human-readable description naming the clip; `beat` " +
+      "is the affected clip's start beat (may be null); `count` is how many times this " +
+      "code has occurred; `lastAt` is a monotonic sequence token (bigger = more recent, " +
+      "NOT a wall-clock time) for ordering. The notices are SESSION-TRANSIENT diagnostics: " +
+      "never saved to disk, not touched by undo/redo, and CLEARED on project_new / " +
+      "project_open. The KEY IS ABSENT when there are no notices — its absence means " +
+      "playback has been healthy, so poll it after transport_play to check whether " +
+      "anything sounded off. " +
       "MIDI clips (from " +
       "clip_add_midi) carry a `notes` array (pitch, velocity, startBeat relative " +
       "to the clip, lengthBeats); audio clips do not. Also includes a " +

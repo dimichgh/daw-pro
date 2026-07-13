@@ -127,8 +127,13 @@ extension ProjectStore {
         //    transient temp WAV (the ACE-Step client stages its own sidecar
         //    copy, v-a behavior).
         let syntheticTrack = Track(name: "AI Fix Bounce", kind: .audio, clips: bounceClips)
+        // STEM class (m13-d, design §2): region material for the repaint is
+        // dry by contract ("master untouched") — never mastered, never
+        // master-lane-faded (m15-c).
         let rendered = try await engine.renderOffline(
             tracks: [syntheticTrack], tempoMap: tempoMap, masterVolume: 1,
+            masterEffects: [],
+            masterAutomation: [],
             fromBeat: windowStartBeat, durationSeconds: bounceSeconds,
             forcedCompensationTargets: nil)
         let bounceURL = Self.fixBounceDestination()
@@ -150,7 +155,8 @@ extension ProjectStore {
             windowStartBeat: windowStartBeat,
             windowLengthBeats: windowEndBeat - windowStartBeat,
             regionStartBeat: startBeat, regionEndBeat: endBeat,
-            tempoMap: tempoMap, submittedAt: Date())
+            mapRevision: mapRevision, regionBPM: tempoMap.bpm(atBeat: startBeat),
+            submittedAt: Date())
 
         return ClipFixSubmission(
             jobID: receipt.jobID, state: "queued", queuePosition: receipt.queuePosition,
@@ -193,12 +199,13 @@ extension ProjectStore {
             throw ProjectError.clipFixStale(
                 "the track for this fix no longer exists — submit again with ai.fixClipRegion")
         }
-        // Map compare (m12-b, design row 29): Phase A freezes the whole map
-        // value; Phase C swaps this for the cheaper `mapRevision` integer
-        // when real map mutations (and a revision producer) exist. The error
-        // text keeps the bpm-at-region numbers agents already parse.
-        guard transport.tempoMap == pending.tempoMap else {
-            let was = pending.tempoMap.bpm(atBeat: pending.regionStartBeat)
+        // Map compare (m12-d, design row 29): the cheap `mapRevision` integer
+        // — any map mutation (scalar tempo, tempo.setMap, undo/redo) climbs it,
+        // so a mismatch means the bounced material's beats↔seconds mapping no
+        // longer lines up. The error keeps the bpm-at-region numbers agents
+        // already parse (frozen `regionBPM` → current).
+        guard mapRevision == pending.mapRevision else {
+            let was = pending.regionBPM
             let now = transport.tempoMap.bpm(atBeat: pending.regionStartBeat)
             throw ProjectError.clipFixStale(
                 "the project tempo changed (\(was) → \(now) BPM) since this "
@@ -377,6 +384,9 @@ extension ProjectStore {
         }
         if old.gainDb != new.gainDb {
             changes.append("gain (\(old.gainDb) → \(new.gainDb) dB)")
+        }
+        if old.gainEnvelope != new.gainEnvelope {
+            changes.append("gain envelope (\(old.gainEnvelope.count) → \(new.gainEnvelope.count) points)")
         }
         let what = changes.isEmpty ? "geometry" : changes.joined(separator: ", ")
         return "the original clip's \(what) changed since this fix was requested — the bounced "

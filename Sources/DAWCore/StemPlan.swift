@@ -68,15 +68,23 @@ public struct StemExportResult: Codable, Sendable, Equatable {
     public var channels: Int
     public var stems: [StemFile]
     public var mixdown: MixdownFile?
+    /// Honesty field (m13-d, design §2): `"excluded"` when — and ONLY when —
+    /// the project carries a non-empty master insert chain, so an agent can
+    /// never mistake stems (pre-master material, S-3′) for mastered
+    /// deliverables. nil (key omitted on the wire) for a chain-free project,
+    /// keeping pre-m13-d results byte-identical.
+    public var masterChain: String?
 
     public init(directory: String, sampleRate: Double, durationSeconds: Double,
-                channels: Int, stems: [StemFile], mixdown: MixdownFile? = nil) {
+                channels: Int, stems: [StemFile], mixdown: MixdownFile? = nil,
+                masterChain: String? = nil) {
         self.directory = directory
         self.sampleRate = sampleRate
         self.durationSeconds = durationSeconds
         self.channels = channels
         self.stems = stems
         self.mixdown = mixdown
+        self.masterChain = masterChain
     }
 }
 
@@ -161,7 +169,13 @@ public enum StemPlan {
                 return []
             }
             track.sends = []
-            return [track]
+            let dummy = Track(name: "Stem Dummy", kind: .bus, volume: 0)
+            var needsDummy = false
+            var pass = [track]
+            appendKeySources(to: &pass, session: session,
+                             dummy: dummy, needsDummy: &needsDummy)
+            if needsDummy { pass.append(dummy) }
+            return pass
 
         case .bus:
             let dummy = Track(name: "Stem Dummy", kind: .bus, volume: 0)
@@ -184,8 +198,47 @@ public enum StemPlan {
                 }
                 pass.append(contributor)
             }
+            appendKeySources(to: &pass, session: session,
+                             dummy: dummy, needsDummy: &needsDummy)
             if needsDummy { pass.append(dummy) }
             return pass
+        }
+    }
+
+    /// Sidechain key-source closure (m12-f, design-m11f-sidechain §4-A):
+    /// every pass whose strips host a keyed effect must ALSO carry the key
+    /// source track — routed to the SILENT dummy bus so its signal exists to
+    /// key the detector yet adds nothing to the stem's audio — or the pass
+    /// would render a different gain-reduction curve than the mixdown and
+    /// break Σ stems ≡ mixdown. Transitive (a key source's own keyed effect
+    /// pulls ITS source in too — cycle-free by store validation, and the
+    /// visited set makes even a hostile model terminate). Sends are dropped
+    /// from added sources: sends are post-fader FAN-OUT (the direct signal
+    /// is untouched), and by construction an added key source neither routes
+    /// nor sends into the stem bus (it would already be a contributor).
+    /// Sources that are buses or missing are SKIPPED — mirrors
+    /// `SidechainGraph.keySourceTrackIDs` (no engine edge forms for them).
+    /// No keyed effects anywhere → `pass` is untouched, bit-identical to the
+    /// pre-sidechain transform.
+    private static func appendKeySources(to pass: inout [Track], session: [Track],
+                                         dummy: Track, needsDummy: inout Bool) {
+        var included = Set(pass.map(\.id))
+        var index = 0
+        while index < pass.count {
+            let effects = pass[index].effects
+            index += 1
+            for effect in effects {
+                guard let sourceID = effect.sidechainSourceTrackID,
+                      !included.contains(sourceID),
+                      let source = session.first(where: { $0.id == sourceID }),
+                      source.kind != .bus else { continue }
+                var keySource = source
+                keySource.sends = []
+                keySource.outputBusID = dummy.id
+                pass.append(keySource)
+                included.insert(sourceID)
+                needsDummy = true
+            }
         }
     }
 

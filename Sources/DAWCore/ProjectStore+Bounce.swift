@@ -101,9 +101,16 @@ extension ProjectStore {
         //    full-session compensation plan (probed once) — byte-parity with
         //    render.stems' one-track pass.
         let targets = await engine.offlineCompensationTargets(tracks: tracks)
+        // STEM class (m13-d, design §2): a track bounce must never bake the
+        // master bus into clip material — byte==stem stays BY CONSTRUCTION.
+        // The master volume lane is excluded too (m15-c, S-3′ extension): a
+        // baked fade would double-apply when the landed clip plays back
+        // through the live master fade.
         let audio = try await engine.renderOffline(
             tracks: StemPlan.passTracks(for: descriptor, session: tracks),
             tempoMap: transport.tempoMap, masterVolume: masterVolume,
+            masterEffects: [],
+            masterAutomation: [],
             fromBeat: startBeat, durationSeconds: duration,
             forcedCompensationTargets: targets
         )

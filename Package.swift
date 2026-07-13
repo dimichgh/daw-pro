@@ -18,6 +18,18 @@ let package = Package(
         // macOS 14 floor has no RT-safe atomics in the SDK). DAWCore must NOT
         // depend on this — the domain stays dependency-free.
         .target(name: "CAtomics"),
+        // ObjC @try/@catch barrier for the engine seam (m16-a Leg 1, the
+        // CAtomics-target precedent — tiny, dependency-free, plain SwiftPM/
+        // CLT). Swift cannot unwind NSExceptions; AVFAudio raises on
+        // control-plane entry points are caught here and handed back as
+        // values (see DAWEngine's `withObjCExceptionBarrier`). DAWCore must
+        // NOT depend on this — the domain stays dependency-free.
+        .target(
+            name: "ObjCExceptionGuard",
+            linkerSettings: [
+                .linkedFramework("Foundation")
+            ]
+        ),
         // Flat-C shim over the vendored signalsmith-stretch header-only C++
         // (offline time-stretch/pitch-shift, M5 ii). shim.cpp is the only C++
         // TU in the package; vendored headers + licenses live in vendor/
@@ -39,7 +51,7 @@ let package = Package(
                 .linkedFramework("Accelerate")
             ]
         ),
-        .target(name: "DAWEngine", dependencies: ["DAWCore", "CAtomics", "CSignalsmithStretch"]),
+        .target(name: "DAWEngine", dependencies: ["DAWCore", "CAtomics", "CSignalsmithStretch", "ObjCExceptionGuard"]),
         // AIServices dependency added M6 (i): the `ai.sidecarStatus|Start|Stop`
         // control commands route to AIServices' SidecarManager/SidecarStatus
         // (the local ACE-Step sidecar's lifecycle manager) — no cycle, since

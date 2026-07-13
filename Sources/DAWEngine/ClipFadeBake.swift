@@ -72,6 +72,22 @@ enum ClipFadeBake {
         clip: Clip, tempoMap: TempoMap, fileRate: Double,
         segmentStart: Int64, segmentFrameCount: Int64
     ) -> PiecePlan {
+        // Gain envelope (m13-e): a non-empty breakpoint envelope makes the
+        // whole-region bake the CONSERVATIVE meaning of this three-piece plan
+        // — ONE full-region "fade-in" piece (middle = 0, fade-out = 0) whose
+        // `applyEnvelope` folds the fade-in, the envelope, AND the fade-out.
+        // The scheduler does NOT take this path anymore: `scheduleAll` routes
+        // enveloped clips through `envelopedPiecePlan` (m13-h2), which bakes
+        // only the spans the envelope actually shapes. This branch stays as
+        // the safe fallback contract for any caller that treats PiecePlan as
+        // the single plan shape. When the envelope is EMPTY this branch is
+        // skipped and the fade-only three-piece plan below stays
+        // byte-identical to the pre-m13-e era — the null-case byte gate.
+        if !clip.gainEnvelope.isEmpty {
+            let segEnvEnd = segmentStart + max(0, segmentFrameCount)
+            return PiecePlan(segmentStart: segmentStart, fadeInEnd: segEnvEnd,
+                             fadeOutStart: segEnvEnd, segmentEnd: segEnvEnd)
+        }
         let inLenBeats = min(max(0, clip.fadeInBeats), clip.lengthBeats)
         let outLenBeats = min(max(0, clip.fadeOutBeats), clip.lengthBeats)
         let clipLengthFrames: Int64
@@ -110,6 +126,148 @@ enum ClipFadeBake {
         let b2 = min(max(outStart, b1), segEnd)
         return PiecePlan(segmentStart: segStart, fadeInEnd: b1,
                          fadeOutStart: b2, segmentEnd: segEnd)
+    }
+
+    /// One piece of an ENVELOPED clip's scheduled region (m13-h2), in
+    /// clip-relative file-rate frames: either baked through `bakePiece`
+    /// (the envelope or a fade shapes it) or streamed straight off the file.
+    /// A streamed piece is only ever emitted where the envelope evaluates to
+    /// EXACTLY unity, so its file bytes pass through bit-identical to what
+    /// the old full-region bake produced there (a `× 1.0` multiply is an
+    /// IEEE-754 identity).
+    struct EnvelopedPiece: Equatable {
+        /// Clip-relative first frame.
+        let start: Int64
+        let frameCount: Int64
+        let bake: Bool
+    }
+
+    /// No streamed piece shorter than this may appear in an enveloped plan
+    /// (~170 ms at 48 kHz): a sliver gap between two shaped spans folds into
+    /// the surrounding bake instead of costing an extra player-queue entry.
+    /// Folding is always byte-safe — baked frames evaluate the true envelope,
+    /// so a folded unity frame multiplies by exactly 1.0.
+    static let minStreamRunFrames: Int64 = 8_192
+
+    /// Splits an ENVELOPED clip's scheduled region into alternating
+    /// baked/streamed pieces (m13-h2 — the perf fix for the m13-e whole-region
+    /// bake): only the spans where `Clip.envelopeGain` can differ from unity
+    /// are baked. Requires `!clip.gainEnvelope.isEmpty` (empty envelopes take
+    /// the fade-only `piecePlan`, byte-identical to the pre-m13-e era).
+    ///
+    /// Baked spans are the union of:
+    ///  - the fade-in window `[0, fadeInFrames)` and fade-out window
+    ///    `[outStart, clipEnd)` (same beats→frames math as `piecePlan`), and
+    ///  - every inter-breakpoint span whose linear-in-dB interpolation is not
+    ///    identically 0 dB — i.e. either endpoint's `gainDb != 0` — plus the
+    ///    constant head (before the first point) / tail (after the last) when
+    ///    that point's `gainDb != 0`. Between two 0 dB points the
+    ///    interpolation is `0 + 0·t == 0` exactly, and `pow(10, 0) == 1`
+    ///    exactly, so those spans are provably unity.
+    ///
+    /// Each shaped span's frame window is expanded by ONE guard frame on both
+    /// sides (`floor − 1` / `ceil + 1`): correctness only requires STREAMED
+    /// frames to be provably unity — over-baking a boundary frame is byte-
+    /// neutral (the bake evaluates the true envelope there), while the guard
+    /// makes the streamed side's frame→beat inversion (`applyEnvelope`'s own
+    /// mapping) land strictly inside the unity beat interval regardless of
+    /// `.rounded()` boundary placement. Spans are then clamped to the region,
+    /// merged (any streamed gap `< minStreamRunFrames` folds), and emitted as
+    /// a contiguous exact partition of
+    /// `[segmentStart, segmentStart + segmentFrameCount)`.
+    static func envelopedPiecePlan(
+        clip: Clip, tempoMap: TempoMap, fileRate: Double,
+        segmentStart: Int64, segmentFrameCount: Int64
+    ) -> [EnvelopedPiece] {
+        let segStart = segmentStart
+        let segEnd = segmentStart + max(0, segmentFrameCount)
+        guard segEnd > segStart else { return [] }
+        // A zero-length clip evaluates `envelopeGain` to the static gain
+        // (normalized: exactly 1.0) at every frame — stream everything.
+        guard clip.lengthBeats > 0 else {
+            return [EnvelopedPiece(start: segStart,
+                                   frameCount: segEnd - segStart, bake: false)]
+        }
+
+        // Beat → clip-relative frame, the same convention `piecePlan` uses:
+        // constant-tempo clips use the verbatim `framesPerBeat` product, a
+        // boundary-crossing clip integrates the map from the clip's start.
+        let constantTempo = tempoMap.isConstant(
+            from: clip.startBeat, to: clip.startBeat + clip.lengthBeats)
+        let perBeat = constantTempo
+            ? tempoMap.framesPerBeat(atBeat: clip.startBeat, sampleRate: fileRate)
+            : 0
+        func frames(atBeat beat: Double) -> Double {
+            constantTempo
+                ? beat * perBeat
+                : tempoMap.seconds(from: clip.startBeat,
+                                   to: clip.startBeat + beat) * fileRate
+        }
+        // Guard-framed span edges (see doc comment): baked windows round
+        // OUTWARD by one extra frame so every possibly-shaped frame bakes.
+        func bakedLo(_ beat: Double) -> Int64 { Int64(frames(atBeat: beat).rounded(.down)) - 1 }
+        func bakedHi(_ beat: Double) -> Int64 { Int64(frames(atBeat: beat).rounded(.up)) + 1 }
+
+        // Shaped intervals in clip-relative frames, unclamped.
+        var shaped: [(lo: Int64, hi: Int64)] = []
+        let inLen = min(max(0, clip.fadeInBeats), clip.lengthBeats)
+        if inLen > 0 { shaped.append((lo: segStart, hi: bakedHi(inLen))) }
+        let outLen = min(max(0, clip.fadeOutBeats), clip.lengthBeats)
+        if outLen > 0 { shaped.append((lo: bakedLo(clip.lengthBeats - outLen), hi: segEnd)) }
+        let points = clip.gainEnvelope
+        if let first = points.first, first.gainDb != 0 {
+            shaped.append((lo: segStart, hi: bakedHi(first.beat)))
+        }
+        for i in 0..<max(0, points.count - 1)
+        where points[i].gainDb != 0 || points[i + 1].gainDb != 0 {
+            shaped.append((lo: bakedLo(points[i].beat), hi: bakedHi(points[i + 1].beat)))
+        }
+        if let last = points.last, last.gainDb != 0 {
+            shaped.append((lo: bakedLo(last.beat), hi: segEnd))
+        }
+
+        // Clamp to the region, sort, merge — folding overlaps AND any streamed
+        // gap too short to be worth a separate player-queue entry.
+        var merged: [(lo: Int64, hi: Int64)] = []
+        for span in shaped
+            .map({ (lo: max($0.lo, segStart), hi: min($0.hi, segEnd)) })
+            .filter({ $0.hi > $0.lo })
+            .sorted(by: { $0.lo < $1.lo }) {
+            if var current = merged.last, span.lo - current.hi < minStreamRunFrames {
+                current.hi = max(current.hi, span.hi)
+                merged[merged.count - 1] = current
+            } else {
+                merged.append(span)
+            }
+        }
+        // Head/tail streamed runs obey the same floor: a sliver before the
+        // first baked span (or after the last) folds into it.
+        if var head = merged.first, head.lo - segStart < minStreamRunFrames, head.lo > segStart {
+            head.lo = segStart
+            merged[0] = head
+        }
+        if var tail = merged.last, segEnd - tail.hi < minStreamRunFrames, tail.hi < segEnd {
+            tail.hi = segEnd
+            merged[merged.count - 1] = tail
+        }
+
+        // Emit the exact partition, alternating streamed gaps and baked spans.
+        var pieces: [EnvelopedPiece] = []
+        var cursor = segStart
+        for span in merged {
+            if span.lo > cursor {
+                pieces.append(EnvelopedPiece(start: cursor,
+                                             frameCount: span.lo - cursor, bake: false))
+            }
+            pieces.append(EnvelopedPiece(start: span.lo,
+                                         frameCount: span.hi - span.lo, bake: true))
+            cursor = span.hi
+        }
+        if cursor < segEnd {
+            pieces.append(EnvelopedPiece(start: cursor,
+                                         frameCount: segEnd - cursor, bake: false))
+        }
+        return pieces
     }
 
     /// Multiplies `buffer` in place by the clip's NORMALIZED fade shape,

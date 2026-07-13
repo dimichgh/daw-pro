@@ -111,6 +111,19 @@ final class AppModel {
     /// command; the picker renders as a centered overlay over the workspace.
     var instrumentPickerTrackID: UUID?
 
+    /// The mixer AU-effect picker's headless model (m13-g, audit F6): the searchable
+    /// installed-AU-effects list + the `AudioUnitConfig` a selection applies. Owned
+    /// here (like `instrumentPicker`) so `debug.effectPicker` can drive it and
+    /// `debug.captureUI` renders the same instance the live overlay shows. Selection
+    /// converges on `ProjectStore.addEffect(kind:.audioUnit)` — the SAME store call
+    /// the wire's `fx.add kind:"audioUnit"` uses.
+    let effectPicker: EffectPickerModel
+
+    /// The track the AU-effect picker is adding to (nil = closed). Set by the Pro
+    /// inserts add-menu's "Audio Units…" item and `debug.effectPicker`; the picker
+    /// renders as a centered overlay. Never a MASTER target (built-ins only, v1).
+    var effectPickerTrackID: UUID?
+
     /// The Quantize & Groove panel's headless model (m11-a): the grid/strength/
     /// swing/ends state, the groove picker (built-in swings + saved templates), and
     /// the extract affordance. Owned here (like `instrumentPicker`) so the
@@ -142,6 +155,20 @@ final class AppModel {
     /// chip and the `debug.undoHistory` staging command; the panel renders as a
     /// centered overlay over the workspace.
     var showUndoHistory = false
+
+    /// Whether the engine-notices popover is open (m15-e, audit F6). Driven by the
+    /// transport-bar notices chip and the `debug.postEngineNotice` staging command;
+    /// the list renders as a bottom-anchored in-window overlay (the notices ring
+    /// itself lives on `store.engineNotices`, so this is pure presentation state).
+    var showEngineNotices = false
+
+    /// The arrange tempo-lane's headless model (m12-d): reads the RESOLVED tempo/
+    /// meter maps and applies every edit through `ProjectStore.setTempoMap` (ONE
+    /// undo via the "tempo.map" coalescing key — a drag folds to a single step).
+    /// Owned here (like `quantizeModel`) so the `debug.tempoLane` capture command
+    /// drives it and the timeline ruler renders the same instance (shared selection
+    /// + teaching-error state). UI-only — no parallel mutation path.
+    let tempoLaneModel: TempoLaneModel
 
     /// The in-app AI Copilot (M6 rail-c): a chat rail that drives the project
     /// through the SAME control-command surface as the WebSocket, in-process.
@@ -188,6 +215,17 @@ final class AppModel {
     /// out of ContentView's @State so `debug.captureUI` renders with the same
     /// selection as the live window. Only MIDI clips open the editor.
     var selectedClipID: UUID?
+
+    /// Deep-scroll staging for the pinned-ruler proof (m13-g): the track id the
+    /// shared arrange scroll should jump to (via ContentView's `ScrollViewReader`),
+    /// so a headless capture can frame the bottom of a deep session with the ruler
+    /// block still pinned. nil in normal use. Driven ONLY by `debug.arrangeScroll`.
+    var arrangeScrollTarget: UUID?
+    /// Whether `arrangeScrollTarget` anchors at the BOTTOM (deep-scroll) or the top.
+    var arrangeScrollToBottom = false
+    /// Bumped on every `debug.arrangeScroll` call so ContentView's `.onChange`
+    /// fires even when the target repeats (SwiftUI dedups equal values).
+    var arrangeScrollNonce = 0
 
     /// Active workspace (Arrange or Mix). Driven by the header toggle and by the
     /// `ui.showMixer` control command (for headless UI verification).
@@ -470,6 +508,14 @@ final class AppModel {
                 return try store.importSoundBank(from: url)
             })
 
+        // The AU-effect picker model (m13-g): the installed AU EFFECTS flow in
+        // through a store-backed provider (the SAME `availableAudioUnitEffects`
+        // registry the wire's `fx.listAudioUnits` / `fx.add` use), so the headless
+        // model stays off the engine bridge; selection is applied by the view via
+        // `applyEffectChoice` → `store.addEffect(kind:.audioUnit)`.
+        self.effectPicker = EffectPickerModel(
+            audioUnits: { [weak store] in store?.availableAudioUnitEffects() ?? [] })
+
         // The Quantize & Groove model (m11-a): the built-in MPC swings are computed
         // once; the saved-template list, Apply, and Extract all route through the
         // store methods the wire uses (`quantizeClipNotes` = ONE undo step via its
@@ -501,6 +547,21 @@ final class AppModel {
             redoStep: { [weak store] in
                 guard let store else { return false }
                 return (try? store.redo()) != nil
+            })
+
+        // The tempo-lane model (m12-d): reads the store's RESOLVED tempo/meter maps
+        // and applies every edit through the SAME `setTempoMap` the `tempo.setMap`
+        // wire uses (ONE undo via the "tempo.map" coalescing key). UI-only — no
+        // parallel mutation path; the wire and the lane stay equivalent by
+        // construction.
+        self.tempoLaneModel = TempoLaneModel(
+            map: { [weak store] in
+                let transport = store?.transport
+                return (transport?.tempoMap ?? TempoMap(constantBPM: 120),
+                        transport?.meterMap ?? MeterMap(constant: TimeSignature()))
+            },
+            apply: { [weak store] tempo, meter in
+                try store?.setTempoMap(tempo, meterMap: meter)
             })
 
         // API-key management over the system Keychain (M6). Env vars still win
@@ -689,6 +750,12 @@ final class AppModel {
                 return self.setPanelLayout(params)
             case "debug.windowFrame":
                 return self.setWindowFrame(params)
+            case "debug.arrangeScroll":
+                return self.setArrangeScroll(params)
+            case "debug.mixerAddAU":
+                return self.mixerAddAUDebug(params)
+            case "debug.effectPicker":
+                return self.effectPickerDebug(params)
             case "debug.explainMode":
                 return try self.setExplainMode(params)
             case "debug.vibeSeed":
@@ -699,8 +766,10 @@ final class AppModel {
                 return self.setRecoveryOffer(params)
             case "debug.importAudio":
                 return try self.importAudioDebug(params)
-            case "debug.tempoMap":
-                return try self.tempoMapDebug(params)
+            case "debug.masterCapture":
+                return try self.masterCaptureDebug(params)
+            case "debug.postEngineNotice":
+                return self.postEngineNoticeDebug(params)
             case "ui.showAutomation":
                 return try self.showAutomation(params)
             case "ui.showTakes":
@@ -729,6 +798,8 @@ final class AppModel {
                 return self.instrumentPickerDebug(params)
             case "debug.quantizePanel":
                 return self.quantizePanelDebug(params)
+            case "debug.tempoLane":
+                return self.tempoLaneDebug(params)
             case "debug.undoHistory":
                 return self.undoHistoryDebug(params)
             case "debug.markerRename":
@@ -874,6 +945,90 @@ final class AppModel {
             "y": .number(Double(window.frame.minY)),
             "minWidth": .number(Double(WindowFloor.minWidth)),
             "minHeight": .number(Double(WindowFloor.minHeight)),
+        ])
+    }
+
+    /// `debug.arrangeScroll {trackId?, index?, bottom?, reset?}` — jumps the shared
+    /// arrange vertical scroll to a track so a capture can frame the BOTTOM of a
+    /// deep session with the ruler block still pinned (m13-g G3). App-level, debug
+    /// tier ONLY (off `allCommands`/MCP — a chrome/verification affordance, the
+    /// `debug.windowFrame` precedent). `trackId` names the target directly; `index`
+    /// picks the Nth track (default: the LAST, i.e. scroll to the bottom); `bottom`
+    /// (default true) anchors the target at the viewport bottom; `reset` scrolls back
+    /// to the first track (top). Echoes the resolved target.
+    private func setArrangeScroll(_ params: [String: JSONValue]) -> JSONValue {
+        workspaceMode = .arrange
+        let tracks = store.tracks
+        guard !tracks.isEmpty else {
+            arrangeScrollTarget = nil
+            return .object(["ok": .bool(false), "reason": .string("no tracks")])
+        }
+        if params["reset"]?.boolValue == true {
+            arrangeScrollToBottom = false
+            arrangeScrollTarget = tracks.first?.id
+            arrangeScrollNonce += 1
+            return arrangeScrollResponse()
+        }
+        let target: Track
+        if let raw = params["trackId"]?.stringValue, let id = UUID(uuidString: raw),
+           let match = tracks.first(where: { $0.id == id }) {
+            target = match
+        } else if let idx = params["index"]?.doubleValue.map({ Int($0) }),
+                  tracks.indices.contains(idx) {
+            target = tracks[idx]
+        } else {
+            target = tracks[tracks.count - 1]   // default: the bottom of the session
+        }
+        arrangeScrollToBottom = params["bottom"]?.boolValue ?? true
+        arrangeScrollTarget = target.id
+        arrangeScrollNonce += 1
+        return arrangeScrollResponse()
+    }
+
+    private func arrangeScrollResponse() -> JSONValue {
+        .object([
+            "ok": .bool(true),
+            "trackId": arrangeScrollTarget.map { JSONValue.string($0.uuidString) } ?? .null,
+            "bottom": .bool(arrangeScrollToBottom),
+        ])
+    }
+
+    /// `debug.mixerAddAU {trackId, index?, subType?}` — drives the EXACT store call
+    /// the mixer inserts add-menu's "Audio Units" branch invokes (m13-g G2), so a
+    /// gate can prove UI == wire without a nested-menu click-driver. Resolves the AU
+    /// from the SAME `store.availableAudioUnitEffects()` registry the wire's
+    /// `fx.add kind:"audioUnit"` uses, builds the config via `EffectPickerModel`
+    /// (the picker modal's helper), and calls `store.addEffect(kind:.audioUnit,audioUnit:)`.
+    /// App-level, debug tier ONLY (off `allCommands`/MCP). Echoes the new effectId.
+    private func mixerAddAUDebug(_ params: [String: JSONValue]) -> JSONValue {
+        guard let raw = params["trackId"]?.stringValue, let trackID = UUID(uuidString: raw),
+              store.tracks.contains(where: { $0.id == trackID }) else {
+            return .object(["ok": .bool(false), "reason": .string("track not found")])
+        }
+        let units = store.availableAudioUnitEffects()
+        let unit: AudioUnitComponentInfo?
+        if let subType = params["subType"]?.stringValue {
+            unit = units.first { $0.component.subType.trimmingCharacters(in: .whitespaces)
+                                  == subType.trimmingCharacters(in: .whitespaces) }
+        } else {
+            let idx = params["index"]?.doubleValue.map { Int($0) } ?? 0
+            unit = units.indices.contains(idx) ? units[idx] : units.first
+        }
+        guard let unit else {
+            return .object(["ok": .bool(false), "reason": .string("no AU effects installed")])
+        }
+        // The literal UI path: the modal builds the config via EffectPickerModel and
+        // hands it to applyEffectChoice → store.addEffect(kind:.audioUnit).
+        let config = effectPicker.config(for: unit)
+        guard let effect = try? store.addEffect(toTrack: trackID, kind: .audioUnit,
+                                                audioUnit: config) else {
+            return .object(["ok": .bool(false), "reason": .string("addEffect failed")])
+        }
+        return .object([
+            "ok": .bool(true),
+            "trackId": .string(trackID.uuidString),
+            "effectId": .string(effect.id.uuidString),
+            "name": .string(unit.name),
         ])
     }
 
@@ -1054,7 +1209,7 @@ final class AppModel {
         let context = AudioImportContext(
             targetTrackID: targetTrackID, targetTrackKind: targetKind,
             atBeatRaw: atBeatRaw, snap: snap,
-            beatsPerBar: store.transport.timeSignature.beatsPerBar)
+            meterMap: store.transport.meterMap)
         let plan = AudioImportPlan(urls: urls, context: context)
 
         let requests: [AudioImportRequest] = plan.actions.map { action in
@@ -1129,50 +1284,37 @@ final class AppModel {
         })])
     }
 
-    /// `debug.tempoMap {segments?: [{beat, bpm}], clear?}` — Phase-B staging
-    /// seam — replaced by tempo.setMap in Phase C. Installs a session-only
-    /// multi-segment tempo map through `store.installSessionTempoMap` (the
-    /// same engine `setTempo` restart seam a scalar change uses; mid-play the
-    /// engine re-anchors from its own derived beats). `clear: true` (or an
-    /// omitted/empty `segments`) reverts to the scalar-derived trivial map.
-    /// App-level, debug tier ONLY — off `allCommands`/MCP (the
-    /// `debug.importAudio` precedent): never persisted, never snapshotted,
-    /// never undoable, reset by project open/new. Returns
-    /// `{installed, segments: [{beat, bpm}]}` (the EFFECTIVE map).
-    private func tempoMapDebug(_ params: [String: JSONValue]) throws -> JSONValue {
-        func effectiveMapResponse(installed: Bool) -> JSONValue {
-            .object([
-                "installed": .bool(installed),
-                "segments": .array(store.transport.tempoMap.segments.map { segment in
-                    .object(["beat": .number(segment.startBeat),
-                             "bpm": .number(segment.bpm)])
-                }),
-            ])
+    /// Debug master-bus sample capture (m14-d, the C5 live gate): start/stop
+    /// a tap-fed Float32 capture of the master summing bus so verification
+    /// gates can analyze live seams at sample level (a chain tail crossing
+    /// the loop wrap; the absence of the old 60 ms zero-run; the post-stop
+    /// flush). App `debug.*` tier by the established convention — NOT in
+    /// `allCommands`, no MCP tool, zero wire growth. Params:
+    /// `action` "start"|"stop"; "start" also takes `path` (required, the
+    /// capture file to write — .caf recommended). "stop" returns
+    /// `{frames}` written (0 when nothing was armed).
+    private func masterCaptureDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        guard let action = params["action"]?.stringValue else {
+            throw DebugError("debug.masterCapture requires 'action' (start|stop)")
         }
-        let clear = params["clear"]?.boolValue ?? false
-        let rawSegments = params["segments"]?.arrayValue ?? []
-        if clear || rawSegments.isEmpty {
-            try store.installSessionTempoMap(nil)
-            return effectiveMapResponse(installed: false)
-        }
-        var segments: [TempoMap.Segment] = []
-        for (index, raw) in rawSegments.enumerated() {
-            guard let object = raw.objectValue,
-                  let beat = object["beat"]?.doubleValue,
-                  let bpm = object["bpm"]?.doubleValue else {
-                throw DebugError(
-                    "debug.tempoMap segments[\(index)] must be {beat: number, bpm: number}")
+        switch action {
+        case "start":
+            guard let rawPath = params["path"]?.stringValue else {
+                throw DebugError("debug.masterCapture start requires 'path'")
             }
-            segments.append(TempoMap.Segment(startBeat: beat, bpm: bpm))
+            let path = (rawPath as NSString).expandingTildeInPath
+            do {
+                try engine.startDebugMasterCapture(toPath: path)
+            } catch {
+                throw DebugError("debug.masterCapture start failed: \(error.localizedDescription)")
+            }
+            return .object(["capturing": .bool(true), "path": .string(path)])
+        case "stop":
+            let frames = engine.stopDebugMasterCapture() ?? 0
+            return .object(["capturing": .bool(false), "frames": .number(Double(frames))])
+        default:
+            throw DebugError("debug.masterCapture 'action' must be start|stop, got '\(action)'")
         }
-        let map: TempoMap
-        do {
-            map = try TempoMap(segments: segments)
-        } catch {
-            throw DebugError("debug.tempoMap invalid segments: \(error)")
-        }
-        try store.installSessionTempoMap(map)
-        return effectiveMapResponse(installed: true)
     }
 
     /// Opens a track's arrange automation row (Arrange workspace, disclosure
@@ -1571,6 +1713,73 @@ final class AppModel {
                                        status: store.audioUnitStatus(forTrack: trackID))
     }
 
+    // MARK: - AU-effect picker (m13-g, audit F6)
+
+    /// Opens the AU-effect picker for a track/bus (the Pro inserts "Audio Units…"
+    /// item), reloading the installed-AU list. Never called for master (the item is
+    /// hidden there — built-ins only, v1).
+    func openEffectPicker(trackID: UUID) {
+        effectPicker.prepare(trackID: trackID)
+        effectPickerTrackID = trackID
+    }
+
+    /// Closes the AU-effect picker.
+    func closeEffectPicker() {
+        effectPickerTrackID = nil
+    }
+
+    /// Applies a chosen AU effect to the open track through the SAME store call the
+    /// wire's `fx.add kind:"audioUnit"` makes (`addEffect(kind:.audioUnit)`), then
+    /// closes — a single decisive add. The current track name for the picker header
+    /// comes from the store.
+    func applyEffectChoice(_ config: AudioUnitConfig) {
+        guard let trackID = effectPickerTrackID else { return }
+        _ = try? store.addEffect(toTrack: trackID, kind: .audioUnit, audioUnit: config)
+        closeEffectPicker()
+    }
+
+    /// The open picker's target track name (for the modal header). Empty when closed.
+    var effectPickerTrackName: String {
+        guard let id = effectPickerTrackID else { return "" }
+        return store.tracks.first { $0.id == id }?.name ?? ""
+    }
+
+    /// `debug.effectPicker {trackId?, open?, search?, close?}` — stages the AU-effect
+    /// picker for a capture the wire alone can't reach (the picker is UI chrome, off
+    /// `allCommands`/MCP — the `debug.instrumentPicker` precedent). Opens the picker
+    /// on a track (the given one, else the first audio/instrument track); `search`
+    /// presets the filter; `close:true` dismisses it. Switches to the Mix workspace
+    /// so a capture frames the console behind the modal. Echoes the picker state.
+    private func effectPickerDebug(_ params: [String: JSONValue]) -> JSONValue {
+        if params["close"]?.boolValue == true {
+            closeEffectPicker()
+            return effectPickerStateResponse()
+        }
+        let trackID: UUID
+        if let raw = params["trackId"]?.stringValue, let id = UUID(uuidString: raw),
+           store.tracks.contains(where: { $0.id == id }) {
+            trackID = id
+        } else if let track = store.tracks.first(where: { $0.kind != .bus }) {
+            trackID = track.id
+        } else {
+            trackID = store.addTrack(kind: .audio).id
+        }
+        workspaceMode = .mix
+        panelDensity.setDensity(.pro, forPanel: MixerView.panelID)
+        openEffectPicker(trackID: trackID)
+        if let search = params["search"]?.stringValue { effectPicker.searchText = search }
+        return effectPickerStateResponse()
+    }
+
+    private func effectPickerStateResponse() -> JSONValue {
+        .object([
+            "visible": .bool(effectPickerTrackID != nil),
+            "trackId": effectPickerTrackID.map { JSONValue.string($0.uuidString) } ?? .null,
+            "count": .number(Double(effectPicker.filteredAudioUnits.count)),
+            "search": .string(effectPicker.searchText),
+        ])
+    }
+
     /// Imports a SoundFont/DLS via NSOpenPanel (not headless — the app view drives
     /// it), then refreshes the picker's bank list. Errors surface inline in the
     /// Sound Banks section (`model.importError`). A cancelled panel is a no-op.
@@ -1752,6 +1961,89 @@ final class AppModel {
         ])
     }
 
+    // MARK: - Tempo lane (m12-d)
+
+    /// `debug.tempoLane {mode?, selectSegment?, dragBoundaryIndex?+dragBoundaryToBeat?,
+    /// dragBpmIndex?+dragBpmToBpm?, addSegmentAt?(+addSegmentBpm?), removeSegment?,
+    /// setMeterBeat?(+setMeterBeatsPerBar?/setMeterBeatUnit?), removeMeterAt?}` — drives
+    /// the arrange tempo lane headlessly for captures + gates (the `debug.quantizePanel`
+    /// precedent; app-tier ONLY, off `allCommands`/MCP). Every edit routes through the
+    /// SAME `tempoLaneModel` the live ruler renders, whose closures apply through
+    /// `ProjectStore.setTempoMap` — so the UI mutation and the `tempo.map` wire state
+    /// agree by construction and a drag coalesces to ONE undo. A BARE call is READ-ONLY
+    /// (echoes state). `mode` sets the arrange density (Simple = read-only lane; Pro =
+    /// editable). Returns the lane state to poll.
+    private func tempoLaneDebug(_ params: [String: JSONValue]) -> JSONValue {
+        workspaceMode = .arrange
+        if let modeRaw = params["mode"]?.stringValue, let density = PanelDensity(rawValue: modeRaw) {
+            panelDensity.setDensity(density, forPanel: TimelineLanesView.panelID)
+        }
+        let model = tempoLaneModel
+        let snap = ClipSnap.effective(
+            density: panelDensity.density(forPanel: TimelineLanesView.panelID), picked: clipSnap)
+
+        if params["deselect"]?.boolValue == true {
+            model.selectSegment(nil)
+        } else if let i = params["selectSegment"]?.doubleValue {
+            model.selectSegment(Int(i))
+        }
+        if let beat = params["dragBoundaryToBeat"]?.doubleValue,
+           let idx = params["dragBoundaryIndex"]?.doubleValue {
+            model.dragBoundary(index: Int(idx), toBeat: beat, snap: snap)
+        }
+        if let bpm = params["dragBpmToBpm"]?.doubleValue,
+           let idx = params["dragBpmIndex"]?.doubleValue {
+            model.scrubBPM(index: Int(idx), toBPM: bpm)
+        }
+        if let beat = params["addSegmentAt"]?.doubleValue {
+            model.addSegment(atBeat: beat, snap: snap, bpm: params["addSegmentBpm"]?.doubleValue)
+        }
+        if let idx = params["removeSegment"]?.doubleValue {
+            model.removeSegment(index: Int(idx))
+        }
+        if let beat = params["setMeterBeat"]?.doubleValue {
+            model.setMeter(
+                atBeat: beat,
+                beatsPerBar: Int(params["setMeterBeatsPerBar"]?.doubleValue ?? 4),
+                beatUnit: Int(params["setMeterBeatUnit"]?.doubleValue ?? 4))
+        }
+        if let beat = params["removeMeterAt"]?.doubleValue {
+            model.removeMeter(atBeat: beat)
+        }
+        return tempoLaneStateResponse()
+    }
+
+    /// Read-only snapshot of the tempo lane so a capture/gate flow can poll — the
+    /// RESOLVED maps (what the wire `tempo.map` reports), the selection, the
+    /// `mapRevision`, and the count of audio clips currently carrying the amber
+    /// tempo-boundary hint (§3.5) so a gate can assert the hint flips.
+    private func tempoLaneStateResponse() -> JSONValue {
+        let model = tempoLaneModel
+        let tempo = model.tempoMap
+        let meter = model.meterMap
+        let amberClipCount = store.tracks.flatMap(\.clips).filter {
+            TempoLaneHint.audioClipCrossesBoundary(
+                startBeat: $0.startBeat, lengthBeats: $0.lengthBeats,
+                isMIDI: $0.isMIDI, tempoMap: tempo)
+        }.count
+        return .object([
+            "mode": .string(panelDensity.density(forPanel: TimelineLanesView.panelID).rawValue),
+            "isTrivial": .bool(model.isTrivial),
+            "selectedSegment": model.selectedSegmentIndex.map { JSONValue.number(Double($0)) } ?? .null,
+            "segments": .array(tempo.segments.map {
+                .object(["startBeat": .number($0.startBeat), "bpm": .number($0.bpm)])
+            }),
+            "meterChanges": .array(meter.changes.map {
+                .object(["startBeat": .number($0.startBeat),
+                         "beatsPerBar": .number(Double($0.beatsPerBar)),
+                         "beatUnit": .number(Double($0.beatUnit))])
+            }),
+            "mapRevision": .number(Double(store.mapRevision)),
+            "amberClipCount": .number(Double(amberClipCount)),
+            "lastError": model.lastErrorMessage.map { JSONValue.string($0) } ?? .null,
+        ])
+    }
+
     // MARK: - Undo-history panel (m11-b)
 
     /// Opens the Undo-history panel (the arrange-toolbar HISTORY chip). The panel is
@@ -1791,6 +2083,59 @@ final class AppModel {
             undoHistoryModel.stepToRedoIndex(Int(j))
         }
         return undoHistoryStateResponse()
+    }
+
+    // MARK: - Engine notices (m15-e)
+
+    /// `debug.postEngineNotice {code?, message?, beat?, open?}` — stages the
+    /// engine-notices surface for captures/E2E the wire alone can't reach cheaply
+    /// (posting a real degradation needs a mid-session bake failure). Debug tier
+    /// ONLY — off `allCommands`/MCP (the `debug.masterCapture` precedent). It routes
+    /// a synthetic `EngineNoticeEvent` through the SAME `engineNoticeHandler` the
+    /// real engine pushes on (engine → store ring), so the store's coalescing /
+    /// ordering path is exercised exactly as in production — this never pokes the
+    /// ring directly. `message` defaults to real-shape copy for the three known
+    /// codes (a capture may pass an explicit string to reproduce a site verbatim);
+    /// `open` toggles the popover. A bare call only echoes state. Returns the ring.
+    private func postEngineNoticeDebug(_ params: [String: JSONValue]) -> JSONValue {
+        if let code = params["code"]?.stringValue, !code.isEmpty {
+            let message = params["message"]?.stringValue ?? Self.sampleEngineNoticeMessage(for: code)
+            let beat = params["beat"]?.doubleValue
+            engine.engineNoticeHandler?(EngineNoticeEvent(code: code, message: message, beat: beat))
+        }
+        if let open = params["open"]?.boolValue {
+            showEngineNotices = open
+        }
+        return .object([
+            "count": .number(Double(store.engineNotices.count)),
+            "open": .bool(showEngineNotices),
+            "notices": .array(store.engineNotices.map { notice in
+                .object([
+                    "code": .string(notice.code),
+                    "message": .string(notice.message),
+                    "beat": notice.beat.map { JSONValue.number($0) } ?? .null,
+                    "count": .number(Double(notice.count)),
+                    "lastAt": .number(Double(notice.lastAt)),
+                ])
+            }),
+        ])
+    }
+
+    /// Beginner-readable fallback copy for the three engine-notice codes the
+    /// PlaybackGraph posts (m15-e) — mirrors those inline message shapes so a bare
+    /// `debug.postEngineNotice {code}` still renders real-shape copy; captures pass
+    /// an explicit `message` when they want a production string byte-for-byte.
+    private static func sampleEngineNoticeMessage(for code: String) -> String {
+        switch code {
+        case "clip-fades-skipped":
+            return "Fades on 'Vocal' couldn't be applied this pass — the clip played on time, without its fades."
+        case "clip-envelope-skipped":
+            return "The gain envelope on 'Pad' couldn't be applied this pass — the clip played on time, without its envelope or fades."
+        case "clip-stretch-pending":
+            return "'Guitar' is still being time-stretched — it plays as silence until the stretch is ready."
+        default:
+            return "Playback ran with a schedule-time change (\(code))."
+        }
     }
 
     /// Staging for the arrange marker-lane inline rename capture (m11-c): opens the

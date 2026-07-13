@@ -30,9 +30,44 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
     /// is reused directly (like `grooveTemplates`): it carries no media/URLs, so
     /// its Codable IS the disk shape.
     public var markers: [Marker]?
+    /// Non-trivial project TEMPO MAP segments (m12-d). Additive and optional;
+    /// nil when the project has a single project-wide tempo — the trivial map is
+    /// synthesized from `transport.tempoBPM` on load, so a single-tempo project
+    /// stays byte-identical (the `markers` omit-when-trivial rule, no
+    /// schemaVersion bump). `TransportDocument.tempoBPM` stays authoritative for
+    /// segment 0. `TempoMap.Segment` persists directly (it carries no media —
+    /// its Codable IS the disk shape, the `markers`/`automation` precedent).
+    public var tempoMap: [TempoMap.Segment]?
+    /// Non-trivial project METER MAP changes (m12-d) — the meter twin of
+    /// `tempoMap`; nil when the project has a single time signature (synthesized
+    /// from `transport.timeSignature` on load). Same omit-when-trivial rule.
+    public var meterChanges: [MeterMap.Change]?
+    /// Monotonic map revision (m12-d, design row 29) — persisted ONLY alongside
+    /// a non-trivial map (nil otherwise), so a trivial project stays
+    /// byte-identical and a reopened non-trivial map resumes a stable count for
+    /// Clip-Fix staleness / round-trip continuity.
+    public var tempoMapRevision: UInt64?
+    /// MASTER insert chain (m13-d). Additive and optional; nil when the chain
+    /// is empty (the key is omitted on encode — the `grooveTemplates`/`markers`
+    /// omit-when-empty rule, so a pre-m13-d project stays byte-identical, no
+    /// schemaVersion bump). REUSES `EffectDocument` — the m12-f-repaired DTO
+    /// that round-trips every field incl. `sidechainSourceTrackID` (which for
+    /// master stays nil forever: sanitized on load, unreachable at the store).
+    public var masterEffects: [EffectDocument]?
+    /// MASTER volume automation (m15-c). Additive and optional; nil when there
+    /// is no master lane (the key is omitted on encode — the `masterEffects`
+    /// omit-when-empty rule, so a pre-m15-c project stays byte-identical, no
+    /// schemaVersion bump). REUSES `AutomationLane` directly (the
+    /// `TrackDocument.automation` precedent: it carries no media/URLs, so its
+    /// Codable IS the disk shape). v1 invariants (volume target only, one lane)
+    /// are SANITIZED on load, not trusted from disk.
+    public var masterAutomation: [AutomationLane]?
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, savedAt, name, masterVolume, transport, tracks, grooveTemplates, markers
+        case tempoMap, meterChanges, tempoMapRevision
+        case masterEffects
+        case masterAutomation
     }
 
     /// Builds a document from runtime state. `mediaRefs` maps each clip id to
@@ -46,7 +81,10 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         masterVolume: Double,
         mediaRefs: [UUID: String?],
         grooveTemplates: [GrooveTemplate] = [],
-        markers: [Marker] = []
+        markers: [Marker] = [],
+        tempoMapRevision: UInt64 = 0,
+        masterEffects: [EffectDescriptor] = [],
+        masterAutomation: [AutomationLane] = []
     ) {
         self.schemaVersion = ProjectBundle.currentSchemaVersion
         self.savedAt = Date()
@@ -60,6 +98,26 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         // Empty markers persist as nil (same rule) → a pre-marker project stays
         // byte-identical.
         self.markers = markers.isEmpty ? nil : markers
+        // Tempo/meter maps (m12-d): a trivial project carries no override → nil
+        // fields → the synthesized `encodeIfPresent` omits the keys, keeping a
+        // single-tempo project byte-identical. `tempoBPM`/`timeSignature` in
+        // `TransportDocument` stay authoritative for segment/change 0.
+        self.tempoMap = transport.tempoMapOverride?.segments
+        self.meterChanges = transport.meterMapOverride?.changes
+        // Persist the revision ONLY with a non-trivial map (else omit, so a
+        // project that once had a map but was flattened back to trivial does not
+        // grow a stray key).
+        let hasMap = transport.tempoMapOverride != nil || transport.meterMapOverride != nil
+        self.tempoMapRevision = (hasMap && tempoMapRevision > 0) ? tempoMapRevision : nil
+        // Master chain (m13-d): empty persists as nil → the synthesized
+        // `encodeIfPresent` omits the key and pre-m13-d saves stay
+        // byte-identical (C5).
+        self.masterEffects = masterEffects.isEmpty
+            ? nil : masterEffects.map(EffectDocument.init(from:))
+        // Master volume automation (m15-c): empty persists as nil → the
+        // synthesized `encodeIfPresent` omits the key and pre-m15-c saves stay
+        // byte-identical (the masterEffects rule).
+        self.masterAutomation = masterAutomation.isEmpty ? nil : masterAutomation
     }
 
     public init(from decoder: any Decoder) throws {
@@ -77,6 +135,20 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         grooveTemplates = try c.decodeIfPresent([GrooveTemplate].self, forKey: .grooveTemplates)
         // Additive optional (m11-c): a pre-marker project has no key → nil.
         markers = try c.decodeIfPresent([Marker].self, forKey: .markers)
+        // Additive optional (m12-d): a single-tempo project has no key → nil ⇒
+        // the trivial map is synthesized from tempoBPM/timeSignature on
+        // `runtimeState`. Structurally invalid segment/change arrays surface as
+        // a decoding error via the element types' own Codable.
+        tempoMap = try c.decodeIfPresent([TempoMap.Segment].self, forKey: .tempoMap)
+        meterChanges = try c.decodeIfPresent([MeterMap.Change].self, forKey: .meterChanges)
+        tempoMapRevision = try c.decodeIfPresent(UInt64.self, forKey: .tempoMapRevision)
+        // Additive optional (m13-d): a pre-master-chain project has no key → nil.
+        masterEffects = try c.decodeIfPresent([EffectDocument].self, forKey: .masterEffects)
+        // Additive optional (m15-c): a pre-master-automation project has no
+        // key → nil. Lane payloads heal through AutomationLane's own Codable
+        // (canonical point order, clamped beats); v1 invariants sanitize in
+        // `runtimeState`.
+        masterAutomation = try c.decodeIfPresent([AutomationLane].self, forKey: .masterAutomation)
     }
 
     /// Restores runtime state, resolving each clip's media reference against
@@ -88,7 +160,9 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
     /// value clamps re-apply on load.
     public func runtimeState(
         bundleURL: URL
-    ) -> (tracks: [Track], transport: TransportState, masterVolume: Double, warnings: [String]) {
+    ) -> (tracks: [Track], transport: TransportState, masterVolume: Double,
+          masterEffects: [EffectDescriptor], masterAutomation: [AutomationLane],
+          warnings: [String]) {
         var warnings: [String] = []
         // Valid routing destinations are exactly the bus tracks in this document.
         let busIDs = Set(tracks.filter { $0.kind == .bus }.map(\.id))
@@ -117,6 +191,9 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                     stretchRatio: cd.stretchRatio ?? 1,
                     pitchShiftSemitones: cd.pitchShiftSemitones ?? 0,
                     formantPreserve: cd.formantPreserve ?? false,
+                    // Gain envelope (m13-e): absent reads as no envelope; the
+                    // points re-clamp and re-canonicalize through `Clip.init`.
+                    gainEnvelope: cd.gainEnvelope ?? [],
                     // Take-group marker (M5 iii-a): restores comp members as
                     // store-managed clips; nil for ordinary clips.
                     takeGroupID: cd.takeGroupId
@@ -188,7 +265,60 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                 takeGroups: takeGroups
             )
         }
-        return (runtimeTracks, transport.transportState(), masterVolume, warnings)
+        // Attach the non-trivial tempo/meter maps (m12-d) onto the runtime
+        // transport. A stored map is reconstructed through its validating
+        // initializer; a structurally bad (or hand-edited single-entry) array
+        // collapses to nil so `tempoBPM`/`timeSignature` stay authoritative for
+        // segment/change 0. The store's mutation only ever writes ≥2-entry maps,
+        // so the collapse is the belt-and-suspenders path.
+        var runtimeTransport = transport.transportState()
+        if let tempoMap, let map = try? TempoMap(segments: tempoMap), map.segments.count > 1 {
+            runtimeTransport.tempoMapOverride = map
+        }
+        if let meterChanges, let meter = try? MeterMap(changes: meterChanges), meter.changes.count > 1 {
+            runtimeTransport.meterMapOverride = meter
+        }
+        // Master insert chain (m13-d): resolve like a track chain (unknown
+        // kind → dropped with a warning), then SANITIZE the v1 invariants on
+        // load (design §4): an `audioUnit`-kind entry is DROPPED (the master
+        // hosts built-ins only — D4a), and a stray sidechain key is CLEARED
+        // (a master effect can never be keyed) — each with a warning, so a
+        // hand-edited file degrades readably instead of smuggling state the
+        // store could never have produced.
+        let runtimeMasterEffects: [EffectDescriptor] = (masterEffects ?? []).compactMap { ed in
+            guard let effect = ed.effectDescriptor() else {
+                warnings.append("unknown effect kind '\(ed.kind)' on the master chain — effect dropped")
+                return nil
+            }
+            if effect.kind == .audioUnit {
+                warnings.append("audioUnit effect on the master chain — dropped (the master chain hosts built-in effects only in v1)")
+                return nil
+            }
+            var sanitized = effect
+            if sanitized.sidechainSourceTrackID != nil {
+                warnings.append("sidechain key on master \(ed.kind) effect — cleared (the master chain cannot host a sidechain-keyed effect)")
+                sanitized.sidechainSourceTrackID = nil
+            }
+            return sanitized
+        }
+        // Master volume automation (m15-c): SANITIZE the v1 invariants on load
+        // (the master-chain rule above) — only `.volume` lanes survive, and at
+        // most ONE (the store enforces one lane per target; a hand-edited
+        // duplicate would break `addMasterAutomationLane`'s idempotency).
+        var runtimeMasterAutomation: [AutomationLane] = []
+        for lane in masterAutomation ?? [] {
+            guard lane.target == .volume else {
+                warnings.append("non-volume master automation lane — dropped (master automation supports the volume target only in v1)")
+                continue
+            }
+            guard runtimeMasterAutomation.isEmpty else {
+                warnings.append("duplicate master volume automation lane — dropped (the master holds one volume lane)")
+                continue
+            }
+            runtimeMasterAutomation.append(lane)
+        }
+        return (runtimeTracks, runtimeTransport, masterVolume, runtimeMasterEffects,
+                runtimeMasterAutomation, warnings)
     }
 
     /// Resolves one persisted media reference to a runtime URL. Returns the URL
@@ -453,10 +583,14 @@ public struct EffectDocument: Codable, Sendable, Equatable {
     /// mirror. Additive optional: pre-M4 (v) files have no key and stay
     /// byte-identical across a round trip.
     public var audioUnit: AudioUnitConfig?
+    /// Sidechain key source (m12-f). Additive optional, omitted when nil —
+    /// pre-sidechain files stay byte-identical across a round trip.
+    public var sidechainSourceTrackID: UUID?
 
     private enum CodingKeys: String, CodingKey {
         case id, kind, bypassed, gain, eq, compressor, limiter
         case reverb, delay, saturator, gate, chorus, audioUnit
+        case sidechainSourceTrackID
     }
 
     init(from effect: EffectDescriptor) {
@@ -476,6 +610,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         gate = effect.gate
         chorus = effect.chorus
         audioUnit = effect.audioUnit
+        sidechainSourceTrackID = effect.sidechainSourceTrackID
     }
 
     public init(from decoder: any Decoder) throws {
@@ -493,6 +628,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         gate = try c.decodeIfPresent(GateParams.self, forKey: .gate)
         chorus = try c.decodeIfPresent(ChorusParams.self, forKey: .chorus)
         audioUnit = try c.decodeIfPresent(AudioUnitConfig.self, forKey: .audioUnit)
+        sidechainSourceTrackID = try c.decodeIfPresent(UUID.self, forKey: .sidechainSourceTrackID)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -513,6 +649,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(gate, forKey: .gate)
         try c.encodeIfPresent(chorus, forKey: .chorus)
         try c.encodeIfPresent(audioUnit, forKey: .audioUnit)
+        try c.encodeIfPresent(sidechainSourceTrackID, forKey: .sidechainSourceTrackID)
     }
 
     /// Rebuilds a runtime `EffectDescriptor`, routing params through the clamping
@@ -524,7 +661,8 @@ public struct EffectDocument: Codable, Sendable, Equatable {
                                 isBypassed: bypassed ?? false, gain: gain,
                                 eq: eq, compressor: compressor, limiter: limiter,
                                 reverb: reverb, delay: delay, saturator: saturator,
-                                gate: gate, chorus: chorus, audioUnit: audioUnit)
+                                gate: gate, chorus: chorus, audioUnit: audioUnit,
+                                sidechainSourceTrackID: sidechainSourceTrackID)
     }
 }
 
@@ -722,6 +860,14 @@ public struct ClipDocument: Codable, Sendable, Equatable {
     public var stretchRatio: Double?
     public var pitchShiftSemitones: Double?
     public var formantPreserve: Bool?
+    /// Breakpoint gain envelope (m13-e) — additive optional, same omit-when-empty
+    /// rule: stored ONLY when the clip carries a non-empty envelope, so a
+    /// pre-m13-e project stays byte-identical across a round trip. `nil`/absent
+    /// reads as no envelope on load. NOTE (the m12-f mirror-DTO lesson): the disk
+    /// path is THIS DTO, not `Clip`'s own Codable — this field must be threaded
+    /// through `init(from clip:)`, encode, decode, AND `runtimeState`, or every
+    /// envelope silently vanishes on reopen.
+    public var gainEnvelope: [ClipGainPoint]?
     /// Take-group marker (M5 iii-a) — additive optional, same omit-when-nil rule.
     /// Set only on comp member clips; a pre-take clip has no key and stays
     /// byte-identical across a round trip.
@@ -730,7 +876,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, name, startBeat, lengthBeats, media, notes, isAIGenerated
         case startOffsetSeconds, gainDb, fadeInBeats, fadeOutBeats, fadeInCurve, fadeOutCurve
-        case stretchRatio, pitchShiftSemitones, formantPreserve, takeGroupId
+        case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, takeGroupId
     }
 
     init(from clip: Clip, media: String?) {
@@ -752,6 +898,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         stretchRatio = clip.stretchRatio != 1 ? clip.stretchRatio : nil
         pitchShiftSemitones = clip.pitchShiftSemitones != 0 ? clip.pitchShiftSemitones : nil
         formantPreserve = clip.formantPreserve ? true : nil
+        gainEnvelope = clip.gainEnvelope.isEmpty ? nil : clip.gainEnvelope
         takeGroupId = clip.takeGroupID
     }
 
@@ -773,6 +920,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         stretchRatio = try c.decodeIfPresent(Double.self, forKey: .stretchRatio)
         pitchShiftSemitones = try c.decodeIfPresent(Double.self, forKey: .pitchShiftSemitones)
         formantPreserve = try c.decodeIfPresent(Bool.self, forKey: .formantPreserve)
+        gainEnvelope = try c.decodeIfPresent([ClipGainPoint].self, forKey: .gainEnvelope)
         takeGroupId = try c.decodeIfPresent(UUID.self, forKey: .takeGroupId)
     }
 
@@ -801,6 +949,9 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(stretchRatio, forKey: .stretchRatio)
         try c.encodeIfPresent(pitchShiftSemitones, forKey: .pitchShiftSemitones)
         try c.encodeIfPresent(formantPreserve, forKey: .formantPreserve)
+        // Gain envelope (m13-e): omitted when nil/absent (the clip had none), so
+        // a pre-m13-e clip never grows a key.
+        try c.encodeIfPresent(gainEnvelope, forKey: .gainEnvelope)
         try c.encodeIfPresent(takeGroupId, forKey: .takeGroupId)
     }
 }

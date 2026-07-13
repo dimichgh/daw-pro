@@ -40,6 +40,25 @@ public final class ProjectStore {
     public private(set) var masterMeter: MeterFrame = .silence
     /// Master output gain 0...2 (1 = unity), applied to the main mix bus.
     public private(set) var masterVolume: Double = 1
+    /// The MASTER insert chain (m13-d): project-level effects processing the
+    /// whole mix, post-fader between the main mix and the output
+    /// (design-m13d §1-B — the C0 verdict). Built-in kinds only in v1
+    /// (design D4a: `.audioUnit` is rejected at add and sanitized on load);
+    /// a master effect can never carry `sidechainSourceTrackID` (no store
+    /// path sets one — `setSidechain` addresses tracks only — and load
+    /// sanitization clears strays). Rides `EditState` (undo covers every
+    /// mutation) and persists additively, omit-when-empty.
+    public private(set) var masterEffects: [EffectDescriptor] = []
+    /// MASTER volume automation (m15-c, the M4 vii-f "master lanes" slice):
+    /// project-level `AutomationLane`s whose owner is the MASTER, not a track —
+    /// at most ONE lane, target `.volume` (every other target is rejected with
+    /// `masterAutomationVolumeOnly`; load sanitizes strays). The lane REPLACES
+    /// the manual `masterVolume` fader while active (the vii-b override rule,
+    /// applied by the engine at the same graph point `setMasterVolume` drives).
+    /// Rides `EditState` (undo covers every mutation) and persists additively,
+    /// omit-when-empty — the `masterEffects` triple-mirror discipline (store +
+    /// snapshot + disk DTO, m12-f).
+    public private(set) var masterAutomation: [AutomationLane] = []
     /// Project-level GROOVE palette (M5 iii-g, spec §6): extracted templates,
     /// referenced BY VALUE at quantize time (so deleting one never dangles a
     /// reference). Default empty; undo covers add/remove (it rides `EditState`).
@@ -56,6 +75,18 @@ public final class ProjectStore {
     /// the mutation helpers below (and the load boundary) can rebuild it inside
     /// `performEdit` bodies while external callers go through the named methods.
     public internal(set) var markers: [Marker] = []
+    /// Monotonic tempo/meter-map revision (m12-d, design row 29). Bumped on
+    /// EVERY mutation that changes the effective tempo or meter map — scalar
+    /// `setTempo`, `tempo.setMap`, and an undo/redo that swaps the map — and
+    /// NEVER decremented, so an in-flight Clip-Fix job that froze an earlier
+    /// revision always detects the change (the freeze/compare is one integer,
+    /// not a whole-map equality). Deliberately NOT part of `EditState`: undo
+    /// restores the map but the revision keeps climbing (staleness is about
+    /// "did anything change", not "what is the map now"). Persisted additively
+    /// (ProjectDocument.tempoMapRevision) ONLY alongside a non-trivial map, so a
+    /// reopened project resumes its count and a trivial project stays
+    /// byte-identical.
+    public private(set) var mapRevision: UInt64 = 0
     /// Latest per-track meter frame, keyed by track ID. Entries appear when a
     /// track first meters and are dropped when the track is removed.
     public private(set) var trackMeters: [UUID: MeterFrame] = [:]
@@ -183,6 +214,87 @@ public final class ProjectStore {
             engine?.playheadHandler = { [weak self] beats in
                 self?.transport.positionBeats = beats
             }
+            // Schedule-time degradations land in the store's coalescing ring
+            // (m15-e) — the one source of truth the wire snapshot and the UI
+            // chip both read. Always pushed on the main actor.
+            engine?.engineNoticeHandler = { [weak self] event in
+                self?.recordEngineNotice(event)
+            }
+        }
+    }
+
+    // MARK: Engine notices (m15-e)
+
+    /// Bounded ring of schedule-time degradations, COALESCED BY CODE (a
+    /// repeat of an existing code increments its `count` and refreshes
+    /// `message`/`beat`/`lastAt`; distinct codes append in first-post order).
+    /// Session-transient DIAGNOSTICS, not project state: never persisted to
+    /// disk, never journaled — undo/redo deliberately leaves the ring alone
+    /// (reverting an edit does not un-happen a degraded playback pass).
+    /// Cleared on `project.new`/`project.open`/`project.recover` (every
+    /// session replacement — m16-c extended the clear law to recover).
+    /// Surfaced on `project.snapshot` as `engineNotices` (key omitted while
+    /// empty).
+    public private(set) var engineNotices: [EngineNotice] = []
+
+    /// Ring bound: at most this many DISTINCT codes are retained (16 — the
+    /// engine currently posts 6 codes, so the cap is generous headroom, and
+    /// the popover list stays readable). Overflow evicts the STALEST entry
+    /// (smallest `lastAt` — the least-recently-posted code), keeping live
+    /// problems visible.
+    public static let engineNoticeCap = 16
+
+    /// Session-monotonic post sequence backing `EngineNotice.lastAt`
+    /// (deterministic — see that field's doc). Resets with the ring.
+    private var engineNoticeSequence = 0
+
+    /// The single ring mutation funnel — installed as the engine's
+    /// `engineNoticeHandler` when an engine is attached.
+    private func recordEngineNotice(_ event: EngineNoticeEvent) {
+        engineNoticeSequence += 1
+        if let index = engineNotices.firstIndex(where: { $0.code == event.code }) {
+            engineNotices[index].count += 1
+            engineNotices[index].message = event.message
+            engineNotices[index].beat = event.beat
+            engineNotices[index].lastAt = engineNoticeSequence
+            return
+        }
+        engineNotices.append(EngineNotice(
+            code: event.code, message: event.message, beat: event.beat,
+            count: 1, lastAt: engineNoticeSequence))
+        if engineNotices.count > Self.engineNoticeCap,
+           let stalest = engineNotices.indices.min(by: {
+               engineNotices[$0].lastAt < engineNotices[$1].lastAt
+           }) {
+            engineNotices.remove(at: stalest)
+        }
+    }
+
+    /// m16-c (audit F2): the open/recover missing-media ECHO — every audio
+    /// clip whose resolved media file is absent on disk lands in the notices
+    /// ring AT OPEN TIME, so an agent polling `project.snapshot` after an
+    /// open/recover sees the same facts the open response's `warnings` carry
+    /// without replaying that response. Derived from the freshly loaded MODEL
+    /// (one `fileExists` per audio clip), not by parsing warning strings —
+    /// same facts plus an honest beat, and it also covers absolute-ref
+    /// recovery bundles, which `ProjectDocument.resolveMedia` deliberately
+    /// accepts WITHOUT a warning (the audit-m16 §2-B3 recipe is exactly this
+    /// case). Posts the SAME `clip-file-missing` code as the graph's
+    /// build-time open catch, so open-time and play-time detections of one
+    /// missing file coalesce into a single ring entry. Ordering law (m15-e):
+    /// callers clear the ring FIRST (session replacement), then this echo
+    /// posts the NEW session's facts. Control-plane, main-actor only — zero
+    /// render-thread surface.
+    private func echoMissingMediaNotices() {
+        for track in tracks {
+            for clip in track.clips {
+                guard let url = clip.audioFileURL,
+                      !FileManager.default.fileExists(atPath: url.path) else { continue }
+                recordEngineNotice(EngineNoticeEvent(
+                    code: "clip-file-missing",
+                    message: "'\(clip.name)' will be silent — its audio file is missing (\(url.path)). Restore or re-link the file to hear this clip.",
+                    beat: clip.startBeat))
+            }
         }
     }
 
@@ -245,6 +357,24 @@ public final class ProjectStore {
         /// per take, `setTempo` refuses mid-take, so the freeze is exact).
         let tempoMap: TempoMap
         let takeNumber: Int
+        /// Loop-cycle take window frozen at record start (m15-b, design-m15b
+        /// §3/§4): non-nil exactly when the loop was enabled at `record()` —
+        /// the take then rolled with the playback loop live (the engine
+        /// schedules WITH the window after the seek to the loop start) and
+        /// `finishTake` slices the ONE linear capture into per-cycle lanes.
+        /// nil = today's linear take, landed verbatim. `transport.setLoop`
+        /// refuses mid-record, so the freeze is exact like the map's.
+        let loop: LoopTakeWindow?
+    }
+
+    /// The frozen loop window of a loop-cycle take (m15-b). `cycleSeconds` is
+    /// the SAME map integral the engine's `LoopContext` computes
+    /// (`tempoMap.seconds(from:to:)` over the window) — store-side slicing
+    /// and engine-side wrapping share one timeline by construction.
+    private struct LoopTakeWindow {
+        let startBeat: Double
+        let endBeat: Double
+        let cycleSeconds: Double
     }
 
     @ObservationIgnored private var pendingTake: PendingTake?
@@ -345,27 +475,57 @@ public final class ProjectStore {
         try seek(toBeats: 0)
     }
 
+    /// Sets a single project-wide tempo — the single-segment FAST PATH (m12-d,
+    /// design §3.6). Refused while recording, and refused with guidance on a
+    /// project that carries a MULTI-SEGMENT tempo map (silently flattening an
+    /// authored map is a destructive surprise; the error names `tempo.setMap`).
+    /// On a trivial project it behaves byte-identically to the scalar era.
     public func setTempo(_ bpm: Double) throws {
         guard !transport.isRecording else {
             throw ProjectError.transportBusy("cannot change tempo while recording — stop first")
+        }
+        guard transport.tempoMapOverride == nil else {
+            throw ProjectError.tempoMapMultiSegment
         }
         performEdit("Set Tempo", key: "transport.tempo") {
             applyTempoChange(bpm)
         }
     }
 
-    /// Sets the transport tempo (clamped), pushes it to the engine, and
-    /// re-flattens every take group — members were windowed at the previous
-    /// tempo (their source offsets are tempo-derived), so this keeps them
-    /// coherent. Does NOT open its own `performEdit`: `setTempo` wraps it in
-    /// one, and `importGeneration` (M6 iii-a) folds it into the SAME "Import
-    /// Generation" edit so a single undo restores the tempo with the track.
-    /// Kept here (not an extension) because `transport` has a private setter.
-    /// m12-b (design row 8): still the scalar segment-0 edit — Phase C turns
-    /// this into the map-mutation entry point; the re-flatten hook (which now
-    /// flattens through `transport.tempoMap`) is retained unchanged.
+    /// Replaces the whole tempo map (m12-d, design §3.6) — the full-set,
+    /// idempotent, agent-friendly shape (the `take.setComp` precedent). ONE
+    /// `performEdit` with the `tempo.map` coalescing key, so a UI tempo-lane
+    /// drag folds into a single undo step. `meterMap == nil` leaves the current
+    /// meter map untouched (the wire's optional `meterChanges`). Refused while
+    /// recording (MIDI capture / take fan-out assume a fixed tempo per take).
+    /// Maps arrive already validated (built through their throwing initializers
+    /// at the wire/UI boundary). A single-segment map collapses to the scalar
+    /// fast path (override cleared) so a trivial project stays byte-identical on
+    /// disk and in snapshots.
+    public func setTempoMap(_ tempoMap: TempoMap, meterMap: MeterMap? = nil) throws {
+        guard !transport.isRecording else {
+            throw ProjectError.transportBusy("cannot change the tempo map while recording — stop first")
+        }
+        performEdit("Change Tempo Map", key: "tempo.map") {
+            applyTempoMap(tempoMap, meterMap: meterMap)
+        }
+    }
+
+    /// Sets the transport tempo (clamped), pushes it to the engine, re-flattens
+    /// every take group — members were windowed at the previous tempo (their
+    /// source offsets are tempo-derived), so this keeps them coherent — and
+    /// bumps `mapRevision` when the tempo actually moved (Clip-Fix staleness).
+    /// Does NOT open its own `performEdit`: `setTempo` wraps it in one, and
+    /// `importGeneration` (M6 iii-a) folds it into the SAME "Import Generation"
+    /// edit so a single undo restores the tempo with the track. Kept here (not
+    /// an extension) because `transport` has a private setter. m12-d: still the
+    /// scalar segment-0 entry point (`importGeneration` bypasses `setTempo`'s
+    /// multi-segment guard by design — tempo adoption is an internal fold); the
+    /// re-flatten hook flattens through `transport.tempoMap`.
     func applyTempoChange(_ bpm: Double) {
+        let previousMap = transport.tempoMap
         transport.tempoBPM = bpm.clamped(to: TransportState.tempoRange)
+        if transport.tempoMap != previousMap { mapRevision &+= 1 }
         engine?.setTempo(transport)
         for t in tracks.indices {
             for g in tracks[t].takeGroups.indices {
@@ -374,23 +534,53 @@ public final class ProjectStore {
         }
     }
 
-    /// Phase-B staging seam — replaced by tempo.setMap in Phase C. Installs a
-    /// session-only multi-segment tempo map (nil ⇒ back to the scalar-derived
-    /// trivial map) and pushes it to the engine through the SAME `setTempo`
-    /// restart seam a scalar tempo change uses — mid-play the engine restarts
-    /// from its OWN derived beats under the new map (the live-gate contract).
-    /// Deliberately NOT an edit: no `performEdit`, no undo journal entry, no
-    /// dirty mark, never persisted or snapshotted (the override is excluded
-    /// from `TransportState.CodingKeys` and normalized out of undo capture),
-    /// and it resets with the transport on project open/new. Take-group
-    /// re-flattening is NOT triggered (staging-only; Phase C's real map
-    /// mutation owns that hook). Refused while recording, like `setTempo`.
-    public func installSessionTempoMap(_ map: TempoMap?) throws {
-        guard !transport.isRecording else {
-            throw ProjectError.transportBusy("cannot change the tempo map while recording — stop first")
+    /// The map-mutation core (m12-d). Normalizes the incoming maps onto the
+    /// (scalar tempoBPM/timeSignature + optional override) representation so a
+    /// trivial map never persists a key, keeps `tempoBPM`/`timeSignature` ==
+    /// segment/change 0, bumps `mapRevision` on any effective change, pushes the
+    /// tempo change through the SAME `engine.setTempo` restart seam a scalar
+    /// change uses (mid-play the engine re-anchors from its OWN derived beats
+    /// under the new map), and re-flattens take groups. Does NOT open its own
+    /// `performEdit` — `setTempoMap` wraps it. Meter never enters engine
+    /// TIMING math (design §3.2), but since m15-a it IS the live click
+    /// scheduler's downbeat source, so a meter-only change refreshes the
+    /// click run through the click-player-local `metronomeChanged` intent —
+    /// clip players and the transport are never touched. A tempo change needs
+    /// no extra push: `setTempo`'s restart re-caches and reschedules clicks.
+    func applyTempoMap(_ tempoMap: TempoMap, meterMap newMeterMap: MeterMap?) {
+        let previousTempoMap = transport.tempoMap
+        let previousMeterMap = transport.meterMap
+        // Tempo: a single-segment map collapses to the scalar fast path.
+        if tempoMap.segments.count == 1 {
+            transport.tempoBPM = tempoMap.segments[0].bpm
+            transport.tempoMapOverride = nil
+        } else {
+            transport.tempoBPM = tempoMap.segments[0].bpm
+            transport.tempoMapOverride = tempoMap
         }
-        transport.sessionTempoMapOverride = map
-        engine?.setTempo(transport)
+        // Meter (optional): a single change at beat 0 collapses to the scalar.
+        if let newMeterMap {
+            let change0 = newMeterMap.changes[0]
+            transport.timeSignature = TimeSignature(
+                beatsPerBar: change0.beatsPerBar, beatUnit: change0.beatUnit)
+            transport.meterMapOverride = newMeterMap.changes.count == 1 ? nil : newMeterMap
+        }
+        if transport.tempoMap != previousTempoMap || transport.meterMap != previousMeterMap {
+            mapRevision &+= 1
+        }
+        if transport.tempoMap != previousTempoMap {
+            engine?.setTempo(transport)
+        } else if transport.meterMap != previousMeterMap {
+            // m15-a: meter-only change — refresh the click schedule (stopped
+            // transport ⇒ the intent is cache-only; state is read at the
+            // next start).
+            engine?.metronomeChanged(transport)
+        }
+        for t in tracks.indices {
+            for g in tracks[t].takeGroups.indices {
+                rebuildCompMembers(trackIndex: t, groupIndex: g)
+            }
+        }
     }
 
     /// Sets the loop region fields and notifies the engine WITHOUT opening its
@@ -454,6 +644,14 @@ public final class ProjectStore {
     /// trimmed by the punch window (v0: notes are individually editable after
     /// the fact). Microphone permission gates run only when audio tracks are
     /// armed. Every throw also lands in `lastRecordingError`.
+    ///
+    /// LOOP-CYCLE TAKES (m15-b, design-m15b-loop-record): with the loop
+    /// enabled, record seeks to the loop start, playback wraps gaplessly for
+    /// real (no silent linear roll), and stop lands ONE take group with one
+    /// lane per loop pass — newest lane comped, mid-cycle stop = an honest
+    /// partial last lane. Loop state alone decides (no flag); loop × punch
+    /// and sub-1-second cycles refuse with teaching errors; the loop region
+    /// itself is frozen for the take (`setLoop` refuses mid-record).
     public func record() throws {
         guard let engine else {
             throw recordFailure(.engineUnavailable)
@@ -467,6 +665,34 @@ public final class ProjectStore {
         let armedInstrumentIDs = tracks.filter { $0.kind == .instrument && $0.isArmed }.map(\.id)
         guard !armedAudioIDs.isEmpty || !armedInstrumentIDs.isEmpty else {
             throw recordFailure(.noArmedTracks)
+        }
+        // Loop-cycle take shape gates (m15-b, design-m15b §6) — checked before
+        // the audio gates so the transport-shape teaching errors come first.
+        // With a loop enabled, record ALWAYS loop-records (seek to the loop
+        // start, wrap live, land per-cycle lanes) or refuses — never a silent
+        // linear roll (the audit-m15 B2 dishonesty).
+        var loopWindow: LoopTakeWindow?
+        if transport.isLoopEnabled {
+            // (i) Punch × loop is refused in v1: the writer's accept window is
+            // single-window machinery; per-cycle punch would be new capture
+            // machinery for a rare combination (design-m15b §7).
+            guard !transport.isPunchEnabled else {
+                throw recordFailure(.invalidPunchRange(
+                    "recording with both a loop and a punch window is not supported — disable one: loop-cycle takes (transport.setLoop) or punch (transport.setPunch)"
+                ))
+            }
+            // (ii) Cycle floor: the SAME integral the engine's LoopContext
+            // computes — store and engine eligibility agree by construction.
+            let cycleSeconds = transport.tempoMap.seconds(
+                from: transport.loopStartBeat, to: transport.loopEndBeat)
+            guard cycleSeconds >= TakeGroup.minLoopRecordCycleSeconds else {
+                throw recordFailure(.invalidLoopRange(
+                    "loop is too short for take recording — use a loop of at least 1 second per cycle"
+                ))
+            }
+            loopWindow = LoopTakeWindow(startBeat: transport.loopStartBeat,
+                                        endBeat: transport.loopEndBeat,
+                                        cycleSeconds: cycleSeconds)
         }
         // Audio-capture gates apply only when audio tracks are armed — a
         // MIDI-only take needs no punch sanity (punch never trims MIDI) and
@@ -491,6 +717,16 @@ public final class ProjectStore {
             }
         }
 
+        // The §3 seek (m15-b): a loop record starts AT the loop start — the
+        // user framed the loop to record over it (the Logic/Live convention),
+        // count-in supplies any pickup, and every cycle boundary becomes the
+        // uniform absolute integral k·cycleSeconds. Done after every throwing
+        // gate above, so a refused record never moves the playhead. Visible
+        // in the transport.record response (`positionBeats == loopStartBeat`).
+        if let loopWindow {
+            transport.positionBeats = loopWindow.startBeat
+        }
+
         // Snapshot destinations and timing NOW: arm toggles mid-take must not
         // change where the finished take lands.
         let take = takeCounter + 1
@@ -499,7 +735,8 @@ public final class ProjectStore {
             armedInstrumentTrackIDs: armedInstrumentIDs,
             recordStartBeats: transport.positionBeats,
             tempoMap: transport.tempoMap,
-            takeNumber: take
+            takeNumber: take,
+            loop: loopWindow
         )
         takeCounter = take
         // MIDI-only takes create no capture file at all.
@@ -544,6 +781,13 @@ public final class ProjectStore {
         switch result {
         case .success(let take):
             guard let pending else { return }  // no take in flight — stale completion
+            // Loop-cycle take (m15-b): the ONE linear capture slices into
+            // per-cycle lanes — the linear path below stays byte-identical
+            // for every non-loop take (the G3 era pin).
+            if let loop = pending.loop {
+                finishLoopTake(take, pending: pending, loop: loop)
+                return
+            }
             let audio = take.audio
             // Land geometry through the take's FROZEN map (m12-b, design rows
             // 9–10): the clip start is the inverse integral of the writer's
@@ -617,6 +861,189 @@ public final class ProjectStore {
         }
     }
 
+    /// One landed audio lane of a loop take: timeline geometry plus the read
+    /// position into the ONE shared take file (m15-b, design-m15b §4 — all
+    /// lanes window the same capture at different offsets).
+    private struct LoopAudioSlice {
+        let startBeat: Double
+        let lengthBeats: Double
+        let fileOffsetSeconds: Double
+    }
+
+    /// Lands a finished LOOP-CYCLE take (m15-b, design-m15b §4): slice the one
+    /// linear capture at the absolute integrals `k·cycleSeconds`, fan the audio
+    /// slices through `autoGroupRecordedTake` IN CYCLE ORDER (slice 1 lands
+    /// plain or joins existing material, slice 2 forms the group, 3..N append
+    /// lanes — final comp = newest lane), and land MIDI cycle lanes through the
+    /// explicit MIDI lander. Everything inside ONE
+    /// `performEdit("Record Take N")`. A take that never reached cycle 2
+    /// degrades to EXACTLY the linear landing (same formulas, same names).
+    private func finishLoopTake(_ take: TakeResult, pending: PendingTake, loop: LoopTakeWindow) {
+        let map = pending.tempoMap
+        let L = loop.cycleSeconds
+
+        // ---- Audio: slice the file's elapsed cover [lag, lag + D) at the
+        // cycle boundaries. THE INTEGRAL LAW (m12-c / G1): every boundary is
+        // the absolute integral (k − 1)·L, never `previous + L`; every map
+        // inverse is evaluated INSIDE the loop window (within-cycle seconds
+        // < L — the timeline law, segments past the loop end never leak in).
+        var audioSlices: [LoopAudioSlice] = []
+        if let audio = take.audio, audio.info.durationSeconds > 0 {
+            let lag = audio.startOffsetSeconds
+            let end = lag + audio.info.durationSeconds
+            if end <= L {
+                // Stopped inside cycle 1 (N == 1): today's landing formulas
+                // VERBATIM — start from the anchor-relative lag, length from
+                // the file duration (the two-step inverse integral, not the
+                // one-step equivalent, so the arithmetic is bit-identical).
+                let startBeat = map.beat(from: loop.startBeat, elapsedSeconds: lag)
+                let lengthBeats = map.beat(from: startBeat,
+                                           elapsedSeconds: audio.info.durationSeconds) - startBeat
+                if lengthBeats > 0 {
+                    audioSlices.append(LoopAudioSlice(
+                        startBeat: startBeat, lengthBeats: lengthBeats, fileOffsetSeconds: 0))
+                }
+            } else {
+                let cycleCount = Int((end / L).rounded(.up))
+                for k in 1...cycleCount {
+                    let cycleStart = Double(k - 1) * L   // absolute integral
+                    let cycleEnd = Double(k) * L
+                    let windowStart = max(lag, cycleStart)
+                    let windowEnd = min(end, cycleEnd)
+                    guard windowEnd > windowStart else { continue }
+                    // Lane k: cycle-relative seconds → beat inside the window;
+                    // a full cycle ends AT the loop end exactly (no inverse
+                    // round trip); the honest partial last lane inverts only
+                    // its remaining seconds.
+                    let startBeat = map.beat(from: loop.startBeat,
+                                             elapsedSeconds: windowStart - cycleStart)
+                    let endBeat = windowEnd == cycleEnd
+                        ? loop.endBeat
+                        : map.beat(from: loop.startBeat, elapsedSeconds: windowEnd - cycleStart)
+                    let lengthBeats = endBeat - startBeat
+                    guard lengthBeats > 0 else { continue }
+                    audioSlices.append(LoopAudioSlice(
+                        startBeat: startBeat, lengthBeats: lengthBeats,
+                        fileOffsetSeconds: windowStart - lag))
+                }
+            }
+        }
+
+        // ---- MIDI: slice in the SECONDS domain by EXACT INVERSION of the
+        // capture session's linear map conversion (design-m15b §4): the
+        // session stamped `beat = map.beat(from: recordStart, elapsed)`, so
+        // `elapsed = map.seconds(from: recordStart, to: recordStart + beat)`.
+        // A note belongs to its ONSET cycle and clamps at that cycle's end
+        // (v1 policy — matches the audio slice exactly at the boundary).
+        // Cycle count comes from the engine's LINEAR stop beat
+        // (`TakeResult.stopBeats`); the rounded `lengthBeats` is only a
+        // legacy fallback (it would fabricate a phantom cycle at a wrap).
+        let midiNotes = take.midi?.notes ?? []
+        var midiCycles = 1
+        var midiLanes: [[MIDINote]] = []
+        var midiLaneLengths: [Double] = []
+        if let midi = take.midi {
+            let stopLinear = take.stopBeats ?? (pending.recordStartBeats + midi.lengthBeats)
+            let stopE = max(0, map.seconds(from: pending.recordStartBeats,
+                                           to: max(pending.recordStartBeats, stopLinear)))
+            midiCycles = max(1, Int((stopE / L).rounded(.up)))
+            if midiCycles > 1 {
+                let cycleBeats = loop.endBeat - loop.startBeat
+                midiLanes = Array(repeating: [], count: midiCycles)
+                for note in midiNotes {
+                    let onE = map.seconds(from: pending.recordStartBeats,
+                                          to: pending.recordStartBeats + note.startBeat)
+                    let k = min(max(Int((onE / L).rounded(.down)), 0), midiCycles - 1)
+                    let withinOn = onE - Double(k) * L          // absolute integral
+                    let offE = map.seconds(from: pending.recordStartBeats,
+                                           to: pending.recordStartBeats + note.endBeat)
+                    let withinOff = min(offE - Double(k) * L, L)  // onset-cycle clamp
+                    let onBeat = map.beat(from: loop.startBeat,
+                                          elapsedSeconds: withinOn) - loop.startBeat
+                    let offBeat = withinOff >= L
+                        ? cycleBeats
+                        : map.beat(from: loop.startBeat,
+                                   elapsedSeconds: withinOff) - loop.startBeat
+                    midiLanes[k].append(MIDINote(
+                        id: note.id, pitch: note.pitch, velocity: note.velocity,
+                        startBeat: onBeat, lengthBeats: offBeat - onBeat))
+                }
+                midiLanes = midiLanes.map(MIDINote.canonicallyOrdered)
+                // Full cycles span the whole window; the last lane is the
+                // honest partial when the stop fell mid-cycle. An empty cycle
+                // still lands an empty lane (lane index == cycle index).
+                midiLaneLengths = (1...midiCycles).map { k in
+                    if k < midiCycles || stopE >= Double(midiCycles) * L { return cycleBeats }
+                    let remaining = stopE - Double(midiCycles - 1) * L
+                    return map.beat(from: loop.startBeat,
+                                    elapsedSeconds: remaining) - loop.startBeat
+                }
+            }
+        }
+
+        let audioLands = !audioSlices.isEmpty
+        let midiLands = !midiNotes.isEmpty
+        guard audioLands || midiLands else {
+            // Same discard surface as the linear path: a take with zero notes
+            // overall is discarded exactly as today, however many cycles ran.
+            lastRecordingError = take.audio == nil && take.midi != nil
+                ? "empty take discarded — no MIDI notes received"
+                : "empty take discarded"
+            return
+        }
+
+        performEdit("Record Take \(pending.takeNumber)") {
+            if let audio = take.audio, audioLands {
+                for trackID in pending.armedTrackIDs {
+                    guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { continue }
+                    for (i, slice) in audioSlices.enumerated() {
+                        // Lane names "<track> Take <n>.<k>"; a single-cycle
+                        // take keeps today's "<track> Take <n>".
+                        let name = audioSlices.count == 1
+                            ? "\(tracks[index].name) Take \(pending.takeNumber)"
+                            : "\(tracks[index].name) Take \(pending.takeNumber).\(i + 1)"
+                        let newClip = Clip(
+                            name: name,
+                            startBeat: slice.startBeat,
+                            lengthBeats: slice.lengthBeats,
+                            audioFileURL: audio.fileURL,
+                            isAIGenerated: false,
+                            startOffsetSeconds: slice.fileOffsetSeconds
+                        )
+                        if !autoGroupRecordedTake(trackIndex: index, newClip: newClip) {
+                            tracks[index].clips.append(newClip)
+                        }
+                    }
+                }
+            }
+            if let midi = take.midi, midiLands {
+                for trackID in pending.armedInstrumentTrackIDs {
+                    guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { continue }
+                    if midiCycles == 1 {
+                        // Single cycle: today's landing verbatim.
+                        tracks[index].clips.append(Clip(
+                            name: "\(tracks[index].name) Take \(pending.takeNumber)",
+                            startBeat: pending.recordStartBeats,
+                            lengthBeats: midi.lengthBeats,
+                            notes: midi.notes
+                        ))
+                    } else {
+                        let laneClips = midiLanes.indices.map { k in
+                            Clip(
+                                name: "\(tracks[index].name) Take \(pending.takeNumber).\(k + 1)",
+                                startBeat: loop.startBeat,
+                                lengthBeats: midiLaneLengths[k],
+                                notes: midiLanes[k]
+                            )
+                        }
+                        landLoopMIDITakeLanes(trackIndex: index, laneClips: laneClips)
+                    }
+                }
+            }
+            engine?.tracksDidChange(tracks)
+        }
+    }
+
     // MARK: - Master-mix analysis (M8 vm-a)
 
     /// Latest master-mix analysis snapshot as the engine reports it —
@@ -674,7 +1101,15 @@ public final class ProjectStore {
     /// nil for a beat keeps the current value, so the UI can toggle looping
     /// without re-stating the range. Throws when the resulting region is empty
     /// or inverted; the engine is only notified after validation passes.
+    /// Refused mid-record (m15-b, design-m15b §5.2): a rolling take's slicing
+    /// window and the engine's scheduled loop are frozen at record start — a
+    /// mid-take bounds edit would reach `loopChanged`'s restart and kill the
+    /// capture writer's anchor mid-take. This guard is what keeps the old
+    /// record-path loop suppression closed for good (the lift ships WITH it).
     public func setLoop(enabled: Bool, startBeat: Double? = nil, endBeat: Double? = nil) throws {
+        guard !transport.isRecording else {
+            throw ProjectError.transportBusy("cannot change the loop while recording — stop first")
+        }
         let start = max(0, startBeat ?? transport.loopStartBeat)
         let end = endBeat ?? transport.loopEndBeat
         guard end > start else {
@@ -713,15 +1148,15 @@ public final class ProjectStore {
     /// Enables/disables the metronome click and optionally sets the count-in
     /// length in bars (clamped to `TransportState.countInBarsRange`; nil keeps
     /// the current value). Refused mid-take: the rolling take's click schedule
-    /// is already committed. No dedicated engine intent exists — the engine
-    /// reads metronome state from the TransportState handed to each
-    /// start/restart, so a change while STOPPED simply applies on the next
-    /// start. While PLAYING (not recording) we reuse the existing seek/restart
-    /// path so the click audibly starts/stops now: `transport.positionBeats`
-    /// is engine-pushed (the authoritative current position), so `seek`
-    /// restarts from "here" with the new metronome state. Costs the restart
-    /// primitive's ~60 ms lead-in seam — acceptable v0 (documented tradeoff;
-    /// gapless click toggling needs live player scheduling).
+    /// is already committed. A change while STOPPED simply applies on the
+    /// next start (the engine reads metronome state from the TransportState
+    /// handed to each start/restart). While PLAYING, `metronomeChanged`
+    /// starts/stops the CLICK PLAYER only — gapless live player scheduling
+    /// (m14-c L-3, design-m13f-gapless-loop §6): clip playback is
+    /// byte-identical through the toggle. The pre-m14-c seek/restart fallback
+    /// (and its ~60 ms lead-in seam) is RETIRED — the v0 "gapless click
+    /// toggling needs live player scheduling" tradeoff note resolved exactly
+    /// as written.
     public func setMetronome(enabled: Bool, countInBars: Int? = nil) throws {
         guard !transport.isRecording else {
             throw ProjectError.transportBusy("cannot change metronome while recording — stop first")
@@ -732,7 +1167,7 @@ public final class ProjectStore {
                 transport.countInBars = countInBars.clamped(to: TransportState.countInBarsRange)
             }
             if transport.isPlaying {
-                engine?.seek(transport)
+                engine?.metronomeChanged(transport)
             }
         }
     }
@@ -824,6 +1259,212 @@ public final class ProjectStore {
         }
     }
 
+    // MARK: - Master insert chain (m13-d)
+    //
+    // The track chain verbs mirrored onto the project-level master chain
+    // (design-m13d §4). Every method is a CHAIN PUBLISH engine-side — never
+    // topology, never announce-capable, LEGAL mid-recording (design D3; the
+    // recording guard is deliberately absent, pinned by
+    // `legalVerbsRemainUnguarded`). Guards sit OUTSIDE the edit bodies (the
+    // track-chain precedent); every mutation pushes
+    // `engine?.masterEffectsChanged(_:)` inside its edit body (the
+    // `setMasterVolume` shape), and the undo/redo/project-boundary restore
+    // funnel pushes the same twin.
+
+    /// Appends (or inserts at `index`) a new effect on the MASTER chain and
+    /// returns its descriptor. Built-in kinds only in v1 (design D4a):
+    /// `.audioUnit` throws the named teaching error. Shares the track cap —
+    /// a full chain (16) throws `chainFull`. `index` clamps into
+    /// `[0, chain length]`; nil appends.
+    @discardableResult
+    public func addMasterEffect(kind: EffectDescriptor.Kind, at index: Int? = nil)
+        throws -> EffectDescriptor {
+        guard kind != .audioUnit else {
+            throw ProjectError.masterChainBuiltInOnly
+        }
+        guard masterEffects.count < Self.maxEffectsPerChain else {
+            throw ProjectError.chainFull(Self.maxEffectsPerChain)
+        }
+        let effect = EffectDescriptor(kind: kind)
+        let count = masterEffects.count
+        let insertAt = min(max(0, index ?? count), count)
+        performEdit("Add \(Self.effectDisplayName(kind)) to Master") {
+            masterEffects.insert(effect, at: min(insertAt, masterEffects.count))
+            engine?.masterEffectsChanged(masterEffects)
+        }
+        return effect
+    }
+
+    /// Removes a master effect by id. Unknown effect → `effectNotFound`. A
+    /// master removal is NEVER announce-capable (no master effect can carry
+    /// a sidechain key — the keyed-removal guard class cannot arise here).
+    public func removeMasterEffect(effectID: UUID) throws {
+        guard let ei = masterEffects.firstIndex(where: { $0.id == effectID }) else {
+            throw ProjectError.effectNotFound(effectID)
+        }
+        let kind = masterEffects[ei].kind
+        performEdit("Remove \(Self.effectDisplayName(kind)) from Master") {
+            masterEffects.removeAll { $0.id == effectID }
+            engine?.masterEffectsChanged(masterEffects)
+        }
+    }
+
+    /// Moves a master effect to a new position (final-index semantics,
+    /// clamped) — the `reorderEffect` mirror.
+    public func reorderMasterEffect(effectID: UUID, toIndex: Int) throws {
+        guard masterEffects.contains(where: { $0.id == effectID }) else {
+            throw ProjectError.effectNotFound(effectID)
+        }
+        let dest = min(max(0, toIndex), masterEffects.count - 1)
+        performEdit("Reorder Master Effects") {
+            guard let from = masterEffects.firstIndex(where: { $0.id == effectID }) else { return }
+            let effect = masterEffects.remove(at: from)
+            masterEffects.insert(effect, at: min(dest, masterEffects.count))
+            engine?.masterEffectsChanged(masterEffects)
+        }
+    }
+
+    /// Bypasses (or re-enables) one master effect — an atomic flag toggle,
+    /// never coalesced (the track-chain rule: a deliberate on/off is its own
+    /// undo step).
+    public func setMasterEffectBypassed(effectID: UUID, bypassed: Bool) throws {
+        guard let ei = masterEffects.firstIndex(where: { $0.id == effectID }) else {
+            throw ProjectError.effectNotFound(effectID)
+        }
+        let kind = masterEffects[ei].kind
+        let verb = bypassed ? "Bypass" : "Unbypass"
+        performEdit("\(verb) \(Self.effectDisplayName(kind)) on Master") {
+            if let ei = masterEffects.firstIndex(where: { $0.id == effectID }) {
+                masterEffects[ei].isBypassed = bypassed
+            }
+            engine?.masterEffectsChanged(masterEffects)
+        }
+    }
+
+    /// Sets one named parameter on a master effect — `setEffectParam`
+    /// verbatim (spec-validated name, silent range clamp), coalescing per
+    /// (effect, name) under the track key shape with the master sentinel in
+    /// the trackId slot, so a knob scrub is one undo step. Returns the
+    /// updated descriptor.
+    @discardableResult
+    public func setMasterEffectParam(effectID: UUID, name: String, value: Double)
+        throws -> EffectDescriptor {
+        guard let ei = masterEffects.firstIndex(where: { $0.id == effectID }) else {
+            throw ProjectError.effectNotFound(effectID)
+        }
+        let kind = masterEffects[ei].kind
+        let specs = EffectParamSpec.specs(for: kind)
+        guard let spec = specs.first(where: { $0.name == name }) else {
+            let valid = specs.map(\.name).joined(separator: ", ")
+            throw ProjectError.unknownEffectParam(
+                "unknown parameter '\(name)' for \(kind.rawValue) effect — valid: \(valid)")
+        }
+        let clamped = value.clamped(to: spec.range)
+        performEdit("Set \(Self.effectDisplayName(kind)) Parameter",
+                    key: "fx.param:master:\(effectID.uuidString):\(name)") {
+            if let ei = masterEffects.firstIndex(where: { $0.id == effectID }) {
+                Self.applyEffectParam(&masterEffects[ei], name: name, value: clamped)
+            }
+            engine?.masterEffectsChanged(masterEffects)
+        }
+        return masterEffects[ei]
+    }
+
+    // MARK: - Master volume automation (m15-c)
+    //
+    // The track automation verbs mirrored onto the project-level master
+    // (the m13-d master-chain shape): every method is a parameter-plane
+    // publish engine-side — never topology, never announce-capable, LEGAL
+    // mid-recording (pinned by `legalVerbsRemainUnguarded`; the capture path
+    // is a separate input-only engine, so a master fade can never color a
+    // take). Guards sit OUTSIDE the edit bodies; every mutation pushes
+    // `engine?.masterAutomationChanged(_:)` inside its edit body (the
+    // `masterEffectsChanged` shape), and the undo/redo restore funnel pushes
+    // the same twin.
+
+    /// Adds — or returns the EXISTING — master automation lane for `target`.
+    /// v1 supports `.volume` ONLY (any other target →
+    /// `masterAutomationVolumeOnly`, an honest deferral naming where those
+    /// lanes live). Idempotent per target, like `addAutomationLane`.
+    @discardableResult
+    public func addMasterAutomationLane(target: AutomationTarget) throws -> AutomationLane {
+        guard target == .volume else {
+            throw ProjectError.masterAutomationVolumeOnly
+        }
+        if let existing = masterAutomation.first(where: { $0.target == target }) {
+            return existing
+        }
+        let lane = AutomationLane(target: target)
+        performEdit("Add Master Automation") {
+            masterAutomation.append(lane)
+            engine?.masterAutomationChanged(masterAutomation)
+        }
+        return lane
+    }
+
+    /// Removes a master automation lane by id. Unknown lane →
+    /// `automationLaneNotFound` (reused verbatim — the m13-d rule of reusing
+    /// the track-worded error for master ids, like `effectNotFound`).
+    public func removeMasterAutomationLane(laneID: UUID) throws {
+        guard masterAutomation.contains(where: { $0.id == laneID }) else {
+            throw ProjectError.automationLaneNotFound(laneID)
+        }
+        performEdit("Remove Master Automation") {
+            masterAutomation.removeAll { $0.id == laneID }
+            engine?.masterAutomationChanged(masterAutomation)
+        }
+    }
+
+    /// Replaces a master lane's breakpoints WHOLESALE — `setAutomationPoints`
+    /// verbatim: every value clamps to `Track.volumeRange` (the SAME range
+    /// `setMasterVolume` clamps through, so a flat lane value can never
+    /// diverge from a legal fader value), canonicalize, cap, and coalesce
+    /// under the shared `automation.points:<laneID>` key (lane ids are
+    /// unique, so the key space never collides with track lanes).
+    @discardableResult
+    public func setMasterAutomationPoints(laneID: UUID, points: [AutomationPoint])
+        throws -> AutomationLane {
+        guard let li = masterAutomation.firstIndex(where: { $0.id == laneID }) else {
+            throw ProjectError.automationLaneNotFound(laneID)
+        }
+        let clamped = points.map { point in
+            AutomationPoint(beat: point.beat,
+                            value: point.value.clamped(to: Track.volumeRange),
+                            curve: point.curve)
+        }
+        var canonical = AutomationLane.canonicalize(clamped)
+        if canonical.count > Self.maxAutomationPoints {
+            canonical = Array(canonical.suffix(Self.maxAutomationPoints))
+        }
+        performEdit("Edit Master Automation",
+                    key: "automation.points:\(laneID.uuidString)") {
+            if let li = masterAutomation.firstIndex(where: { $0.id == laneID }) {
+                masterAutomation[li].points = canonical
+            }
+            engine?.masterAutomationChanged(masterAutomation)
+        }
+        return masterAutomation[li]
+    }
+
+    /// Toggles a master lane between read (enabled) and manual (disabled) —
+    /// `setAutomationLaneEnabled` verbatim, under the shared
+    /// `automation.enable:<laneID>` coalescing key.
+    @discardableResult
+    public func setMasterAutomationLaneEnabled(laneID: UUID, _ isEnabled: Bool)
+        throws -> AutomationLane {
+        guard let li = masterAutomation.firstIndex(where: { $0.id == laneID }) else {
+            throw ProjectError.automationLaneNotFound(laneID)
+        }
+        performEdit(isEnabled ? "Enable Master Automation" : "Disable Master Automation",
+                    key: "automation.enable:\(laneID.uuidString)") {
+            if let li = masterAutomation.firstIndex(where: { $0.id == laneID }) {
+                masterAutomation[li].isEnabled = isEnabled
+            }
+            engine?.masterAutomationChanged(masterAutomation)
+        }
+        return masterAutomation[li]
+    }
+
     // MARK: - Tracks
 
     @discardableResult
@@ -838,7 +1479,10 @@ public final class ProjectStore {
     }
 
     @discardableResult
-    public func removeTrack(id: UUID) -> Bool {
+    public func removeTrack(id: UUID) throws -> Bool {
+        // m13-c: a routed strip's teardown announces (engine rebuild) — refuse
+        // mid-take before the not-found check so the class is uniform.
+        try requireRoutingMutationAllowed("remove a track")
         guard let index = tracks.firstIndex(where: { $0.id == id }) else { return false }
         let name = tracks[index].name
         let isBus = tracks[index].kind == .bus
@@ -867,10 +1511,101 @@ public final class ProjectStore {
                     }
                 }
             }
+            // Sidechain dangling-clear (m12-f): any effect keyed from the
+            // removed track reverts to self-keyed inside this SAME edit (one
+            // undo restores the track AND every key that pointed at it) —
+            // the dangling-send precedent above, for the key-edge class.
+            for i in tracks.indices {
+                for ei in tracks[i].effects.indices
+                where tracks[i].effects[ei].sidechainSourceTrackID == id {
+                    tracks[i].effects[ei].sidechainSourceTrackID = nil
+                }
+            }
             trackMeters.removeValue(forKey: id)
             engine?.tracksDidChange(tracks)
         }
         return true
+    }
+
+    // MARK: - Recording guard for routing-topology mutations (m13-c)
+
+    /// Refuses an announce-class ROUTING mutation while a take is rolling.
+    ///
+    /// Since m13-a a routing rewire that reaches `PlaybackGraph`'s announce
+    /// hook (`announceRoutingMutation` → `willMutateRoutingTopology`) on a
+    /// once-rendered engine ABORTS reconcile and drives
+    /// `AudioEngine.rebuildEngine(reason:)`, which discards and cold-rebuilds
+    /// the WHOLE `AVAudioEngine`. Mid-recording that would tear the engine out
+    /// from under the in-flight capture — the take's host-time anchor dies, so
+    /// the file truncates/misaligns while `transport.isRecording` still reads
+    /// true. So every mutation that CAN announce refuses here with a
+    /// `transportBusy` teaching error (the `setPunch`/`setMetronome`/`seek`/
+    /// `setTempoMap` precedent — plain-language, names the operation, says stop
+    /// first). Param-only edits (volume/pan/mute/solo/send LEVEL, fx param/
+    /// bypass, clip edits, transport) never announce and stay legal mid-take.
+    ///
+    /// GUARDED SET, decided by ANNOUNCE-CAPABILITY (the `PlaybackGraph.reconcile`
+    /// announce sites), NOT by verb name:
+    ///   • `addSend` / `removeSend` / `setTrackOutput` — mutate a source's
+    ///     `RoutingKey` (send or output-bus edge) → the step-5 fan-out
+    ///     announces.  → GUARDED (unconditional).
+    ///   • `removeTrack` — a routed strip's teardown announces (step 1; a bus
+    ///     removal announces at step 6). Guarded UNCONDITIONALLY: the whole
+    ///     verb class is topology and mid-take structural removal is
+    ///     destructive regardless of the strip's triviality.  → GUARDED.
+    ///   • `setSidechain` — sets/clears a key edge → the routing signature
+    ///     changes → step 5 announces.  → GUARDED (unconditional).
+    ///   • `removeEffect` — CONDITIONAL: only removing a *keyed* effect clears
+    ///     a key edge (announce); a plain-chain removal is a param-class chain
+    ///     publish and never announces → guarded ONLY when the target effect
+    ///     carries `sidechainSourceTrackID`.
+    ///   • `setInstrument` — CONDITIONAL: only an instrument-NODE rebuild
+    ///     (kind / sampler zones / AU component / sound-bank change — the
+    ///     `InstrumentTrackKey` teardown trigger) on a ROUTED strip announces;
+    ///     a poly-synth param overlay maps to the SAME node and never
+    ///     announces → guarded ONLY when both hold.
+    /// LEGAL (never announce, documented — future guards must not overreach):
+    ///   • `addTrack` — a fresh strip wires TRIVIALLY to master (no sends, no
+    ///     key): the ONE live-proven attach-only case that step 5 skips.
+    ///   • `addEffect` — a fresh effect carries no key → chain publish, no
+    ///     routing change.
+    ///   • `reorderEffect` — reordering leaves the key SOURCE set unchanged →
+    ///     chain publish, no routing change.
+    private func requireRoutingMutationAllowed(_ action: String) throws {
+        guard !transport.isRecording else {
+            throw ProjectError.transportBusy(
+                "cannot \(action) while recording — stop first")
+        }
+    }
+
+    /// True when a strip participates in routing beyond the pre-M4 trivial
+    /// shape (straight to master, no sends, not a sidechain SOURCE) — i.e. a
+    /// change that rebuilds its source node would drive
+    /// `PlaybackGraph.announceRoutingMutation`. Mirrors the engine's
+    /// `isTrivial` + `oldKeyInvolvedStrips` announce condition (reconcile
+    /// step 1 / the instrument-teardown branch). Instrument strips are never
+    /// key DESTINATIONS (`setSidechain` rejects them), so only the source case
+    /// matters here.
+    private func trackHasNonTrivialRouting(_ track: Track) -> Bool {
+        if track.outputBusID != nil || !track.sends.isEmpty { return true }
+        return tracks.contains { other in
+            other.effects.contains { $0.sidechainSourceTrackID == track.id }
+        }
+    }
+
+    /// True when two instrument descriptors map to DIFFERENT engine nodes —
+    /// the `PlaybackGraph` `InstrumentTrackKey` rebuild trigger (kind, sampler
+    /// zones, AU component, sound-bank address). A poly-synth/test-tone param
+    /// overlay maps to the SAME node (no teardown, no announce).
+    private static func instrumentNodeIdentityChanged(
+        from a: InstrumentDescriptor, to b: InstrumentDescriptor) -> Bool {
+        if a.kind != b.kind { return true }
+        switch b.kind {
+        case .sampler:   return a.resolvedSampler.zones != b.resolvedSampler.zones
+        case .audioUnit: return a.audioUnit?.component != b.audioUnit?.component
+        case .soundBank: return a.soundBank?.address != b.soundBank?.address
+        case .testTone, .polySynth: return false
+        }
     }
 
     /// Mutation core for every single-track edit: looks up the track, runs the
@@ -937,6 +1672,7 @@ public final class ProjectStore {
     /// source → `busRoutingFixed` (buses always output to master in v0); a
     /// missing destination → `trackNotFound`; a non-bus destination → `notABus`.
     public func setTrackOutput(id: UUID, busID: UUID?) throws {
+        try requireRoutingMutationAllowed("change a track's output")  // m13-c
         guard let index = tracks.firstIndex(where: { $0.id == id }) else {
             throw ProjectError.trackNotFound(id)
         }
@@ -958,6 +1694,7 @@ public final class ProjectStore {
     /// by bus count). `level` clamps to `Send.levelRange` through `Send.init`.
     @discardableResult
     public func addSend(toTrack id: UUID, busID: UUID, level: Double = 1) throws -> Send {
+        try requireRoutingMutationAllowed("add a send")  // m13-c
         guard let index = tracks.firstIndex(where: { $0.id == id }) else {
             throw ProjectError.trackNotFound(id)
         }
@@ -1004,6 +1741,7 @@ public final class ProjectStore {
     /// `trackNotFound`; a bus source → `busRoutingFixed`; unknown send →
     /// `sendNotFound`.
     public func removeSend(trackID: UUID, sendID: UUID) throws {
+        try requireRoutingMutationAllowed("remove a send")  // m13-c
         guard let index = tracks.firstIndex(where: { $0.id == trackID }) else {
             throw ProjectError.trackNotFound(trackID)
         }
@@ -1082,6 +1820,13 @@ public final class ProjectStore {
         }
         guard let ei = tracks[ti].effects.firstIndex(where: { $0.id == effectID }) else {
             throw ProjectError.effectNotFound(effectID)
+        }
+        // m13-c: removing a KEYED effect clears a sidechain key edge → the
+        // source strip's routing signature changes → reconcile announces →
+        // engine rebuild. Refuse mid-take. A plain-chain removal never
+        // announces (chain-state publish only) and stays legal.
+        if tracks[ti].effects[ei].sidechainSourceTrackID != nil {
+            try requireRoutingMutationAllowed("remove a sidechain-keyed effect")
         }
         let kind = tracks[ti].effects[ei].kind
         let name = tracks[ti].name
@@ -1166,6 +1911,85 @@ public final class ProjectStore {
                   key: "fx.param:\(trackID.uuidString):\(effectID.uuidString):\(name)") {
             if let ei = $0.effects.firstIndex(where: { $0.id == effectID }) {
                 Self.applyEffectParam(&$0.effects[ei], name: name, value: clamped)
+            }
+        }
+        return tracks[ti].effects[ei]
+    }
+
+    /// Sets (or clears, `sourceTrackID` nil) one effect's sidechain key
+    /// source (m12-f S-1, design-m11f-sidechain §7). Guards OUTSIDE the edit
+    /// body (sends/FX precedent), all teaching (design §7 error surface):
+    /// unknown track/effect → `trackNotFound`/`effectNotFound`; a non-
+    /// compressor/gate kind → `sidechainUnsupportedEffect`; an instrument
+    /// destination strip → `sidechainUnsupportedTrack` (no `ChainHostAU` to
+    /// receive the key edge); a bus source → `sidechainUnsupportedSource`
+    /// (v1 deferral — bus outputs are hardwired to master, so stem passes
+    /// cannot carry a bus key source silently); a feedback loop →
+    /// `sidechainWouldCreateCycle` naming the existing path; a second keyed
+    /// effect on one strip → `sidechainOneSourcePerStrip` naming the first
+    /// (one key input bus per strip in v1, design §5). ONE discrete
+    /// `performEdit` ("Set Sidechain" — no coalescing key); the engine edge
+    /// rewires through the normal `tracksDidChange` reconcile with the
+    /// documented routing-rewire bounce. Returns the updated descriptor.
+    @discardableResult
+    public func setSidechain(trackID: UUID, effectID: UUID,
+                             sourceTrackID: UUID?) throws -> EffectDescriptor {
+        try requireRoutingMutationAllowed("change a sidechain")  // m13-c
+        guard let ti = tracks.firstIndex(where: { $0.id == trackID }) else {
+            throw ProjectError.trackNotFound(trackID)
+        }
+        guard let ei = tracks[ti].effects.firstIndex(where: { $0.id == effectID }) else {
+            throw ProjectError.effectNotFound(effectID)
+        }
+        let kind = tracks[ti].effects[ei].kind
+        guard kind == .compressor || kind == .gate else {
+            throw ProjectError.sidechainUnsupportedEffect(kind)
+        }
+        if let sourceTrackID {
+            // Destination strip must physically own a ChainHostAU insert
+            // point (audio/bus sandwich) — instrument strips walk their chain
+            // inside the source node, which has no input bus for a key edge.
+            guard tracks[ti].kind == .audio || tracks[ti].kind == .bus else {
+                throw ProjectError.sidechainUnsupportedTrack(tracks[ti].kind)
+            }
+            guard let si = tracks.firstIndex(where: { $0.id == sourceTrackID }) else {
+                throw ProjectError.trackNotFound(sourceTrackID)
+            }
+            guard tracks[si].kind != .bus else {
+                throw ProjectError.sidechainUnsupportedSource(
+                    "'\(tracks[si].name)' is a bus — bus key sources are deferred in v1; key from a source track feeding it instead")
+            }
+            // One key input per strip (v1): a DIFFERENT effect already keyed
+            // on this strip rejects; re-keying the same effect is fine.
+            if let taken = tracks[ti].effects.first(where: {
+                $0.id != effectID && $0.sidechainSourceTrackID != nil
+            }) {
+                throw ProjectError.sidechainOneSourcePerStrip(
+                    "strip '\(tracks[ti].name)' already has a keyed \(taken.kind.rawValue) (effect \(taken.id.uuidString)) — one sidechain key per strip in v1; clear it first")
+            }
+            // Cycle validation BEFORE the edit commits: the new key edge
+            // source → destination must not close an existing signal path
+            // destination → … → source (AVAudioEngine graph cycles are
+            // undefined behavior; rejected here, never discovered there).
+            if let cycle = SidechainGraph.cyclePath(
+                ifKeying: trackID, from: sourceTrackID, tracks: tracks) {
+                let names = cycle.map { id in
+                    tracks.first(where: { $0.id == id })?.name ?? id.uuidString
+                }
+                let sourceName = tracks[si].name
+                // `names` runs destination → … → source; the new key edge
+                // source → destination closes it — show the full loop.
+                let path = (names + [tracks[ti].name]).joined(separator: " → ")
+                throw ProjectError.sidechainWouldCreateCycle(
+                    trackID == sourceTrackID
+                        ? "a strip cannot key itself — '\(sourceName)' is the keyed strip"
+                        : "sidechain would create a feedback cycle: '\(tracks[ti].name)' already feeds '\(sourceName)' (\(path)) — keying it from '\(sourceName)' closes the loop")
+            }
+        }
+        let name = tracks[ti].name
+        editTrack(id: trackID, label: "Set Sidechain on '\(name)'") {
+            if let ei = $0.effects.firstIndex(where: { $0.id == effectID }) {
+                $0.effects[ei].sidechainSourceTrackID = sourceTrackID
             }
         }
         return tracks[ti].effects[ei]
@@ -1481,6 +2305,15 @@ public final class ProjectStore {
             audioUnit: audioUnit ?? current.audioUnit,
             soundBank: soundBank ?? current.soundBank
         )
+        // m13-c: an instrument-NODE rebuild (kind/zones/AU/sound-bank change)
+        // on a ROUTED strip tears the node down through the reconcile
+        // instrument branch, which announces → engine rebuild — refuse
+        // mid-take. A poly-synth param overlay (same node) and a swap on a
+        // trivially-routed strip never announce and stay legal.
+        if Self.instrumentNodeIdentityChanged(from: current, to: resolved),
+           trackHasNonTrivialRouting(tracks[index]) {
+            try requireRoutingMutationAllowed("change a routed track's instrument")
+        }
         editTrack(id: id, label: "Change Instrument",
                   key: "track.instrument:\(id.uuidString)") { $0.instrument = resolved }
         return resolved
@@ -1598,6 +2431,15 @@ public final class ProjectStore {
         engine?.effectLatencySamples(trackID: trackID, effectID: effectID) ?? 0
     }
 
+    /// Fixed latency of ONE live MASTER-chain effect instance (m13-d), as the
+    /// engine reports it (240 @ 48 kHz for a limiter's lookahead, 0 otherwise
+    /// or when running headless). The `effectLatencySamples` twin — DAWControl
+    /// reads this to populate the per-effect `latencySamples` in the wire
+    /// snapshot's `masterEffects` array while staying engine-free itself.
+    public func masterEffectLatencySamples(effectID: UUID) -> Int {
+        engine?.masterEffectLatencySamples(effectID: effectID) ?? 0
+    }
+
     /// The engine's latest PDC report (M4 viii-c) — per-strip chain latency
     /// + applied compensation plus the global stage maxima; nil when running
     /// headless. DAWControl attaches the additive snapshot fields from this
@@ -1641,6 +2483,13 @@ public final class ProjectStore {
         )
         performEdit("Import '\(clip.name)'") {
             tracks[index].clips.append(clip)
+            // Landing over an occupied region resolves through the ONE
+            // no-silent-overlap choke point (m13-b) — the same trim rule the
+            // ⌘I import batch and clip.move use — folded into this one edit.
+            tracks[index].clips = Self.resolvingOverlaps(
+                in: tracks[index].clips, activeIDs: [clip.id],
+                start: startBeat, end: startBeat + lengthBeats,
+                tempoMap: transport.tempoMap).clips
             engine?.tracksDidChange(tracks)
         }
         return clip
@@ -1696,6 +2545,14 @@ public final class ProjectStore {
         )
         performEdit("Add MIDI Clip '\(clip.name)'") {
             tracks[index].clips.append(clip)
+            // Landing over an occupied region resolves through the ONE
+            // no-silent-overlap choke point (m13-b): a MIDI resident's covered
+            // region trims via the same note drop/truncate window semantics —
+            // no double-note scheduling — folded into this one edit.
+            tracks[index].clips = Self.resolvingOverlaps(
+                in: tracks[index].clips, activeIDs: [clip.id],
+                start: startBeat, end: startBeat + length,
+                tempoMap: transport.tempoMap).clips
             engine?.tracksDidChange(tracks)
         }
         return clip
@@ -1867,13 +2724,22 @@ public final class ProjectStore {
         }
         let ordered = MIDINote.canonicallyOrdered(shifted)
         let newClipLength = clipLength + lengthBeats
+        let clipStartBeat = tracks[t].clips[c].startBeat
 
         performEdit("Insert Time Range") {
             tracks[t].clips[c].notes = ordered
             tracks[t].clips[c].lengthBeats = newClipLength
+            // Inserting silence GROWS the clip's trailing edge, which can push it
+            // over a same-track neighbour → resolve through the ONE no-silent-
+            // overlap choke point (m13-b). Residents removed are strictly to the
+            // right of this clip, so it keeps its slot; folded into this one edit.
+            tracks[t].clips = Self.resolvingOverlaps(
+                in: tracks[t].clips, activeIDs: [clipID],
+                start: clipStartBeat, end: clipStartBeat + newClipLength,
+                tempoMap: transport.tempoMap).clips
             engine?.tracksDidChange(tracks)
         }
-        return tracks[t].clips[c]
+        return tracks[t].clips.first { $0.id == clipID } ?? tracks[t].clips[c]
     }
 
     /// Removes a clip (audio or MIDI) by id, from whichever track holds it.
@@ -2010,6 +2876,13 @@ public final class ProjectStore {
         let (secondIn, secondOut) = Self.clampedFades(
             fadeIn: 0, fadeOut: clip.fadeOutBeats, length: secondLength)
 
+        // Gain envelope (m13-e): the two halves are the windows [0, relBeat] and
+        // [relBeat, length]; both pin an interpolated boundary point at the
+        // split seam, so the shared value at the junction is identical by
+        // construction — the gain is continuous across the cut. Empty → empty.
+        let firstEnv = Clip.windowedGainEnvelope(clip.gainEnvelope, delta: 0, newLength: firstLength)
+        let secondEnv = Clip.windowedGainEnvelope(clip.gainEnvelope, delta: relBeat, newLength: secondLength)
+
         // Stretch params (M5 ii-c) copy verbatim to BOTH halves: the engine's
         // render (ii-d) covers the WHOLE source file, so both halves read the
         // same stretched material — the split junction is seamless by
@@ -2024,7 +2897,7 @@ public final class ProjectStore {
             fadeInBeats: firstIn, fadeOutBeats: firstOut,
             fadeInCurve: clip.fadeInCurve, fadeOutCurve: .linear,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
-            formantPreserve: clip.formantPreserve)
+            formantPreserve: clip.formantPreserve, gainEnvelope: firstEnv)
         let second = Clip(
             id: UUID(), name: clip.name,
             startBeat: clip.startBeat + firstLength, lengthBeats: secondLength,
@@ -2034,7 +2907,7 @@ public final class ProjectStore {
             fadeInBeats: secondIn, fadeOutBeats: secondOut,
             fadeInCurve: .linear, fadeOutCurve: clip.fadeOutCurve,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
-            formantPreserve: clip.formantPreserve)
+            formantPreserve: clip.formantPreserve, gainEnvelope: secondEnv)
 
         performEdit("Split Clip '\(clip.name)'") {
             tracks[t].clips[c] = first
@@ -2090,6 +2963,10 @@ public final class ProjectStore {
 
         let (fin, fout) = Self.clampedFades(
             fadeIn: clip.fadeInBeats, fadeOut: clip.fadeOutBeats, length: newLength)
+        // Gain envelope (m13-e): re-window it for the moved head — points outside
+        // the new visible span drop, edge boundaries are pinned interpolated so
+        // the audible gain is continuous with the pre-trim curve. Empty → empty.
+        let newEnv = Clip.windowedGainEnvelope(clip.gainEnvelope, delta: delta, newLength: newLength)
         let rebuilt = Clip(
             id: clip.id, name: clip.name,
             startBeat: newStart, lengthBeats: newLength,
@@ -2101,13 +2978,20 @@ public final class ProjectStore {
             // Trim is geometry-free w.r.t. stretch (spec §1): the ratio/pitch/
             // formant carry through unchanged — only the visible window moves.
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
-            formantPreserve: clip.formantPreserve)
+            formantPreserve: clip.formantPreserve, gainEnvelope: newEnv)
 
         performEdit("Trim Clip '\(clip.name)'", key: "clip.trim:\(clipId.uuidString)") {
             tracks[t].clips[c] = rebuilt
+            // Extending either edge over a same-track neighbour resolves through
+            // the ONE no-silent-overlap choke point (m13-b), folded into this
+            // edit so a single undo restores both the trim and any resident trim.
+            tracks[t].clips = Self.resolvingOverlaps(
+                in: tracks[t].clips, activeIDs: [clipId],
+                start: newStart, end: newStart + newLength,
+                tempoMap: transport.tempoMap).clips
             engine?.tracksDidChange(tracks)
         }
-        return tracks[t].clips[c]
+        return tracks[t].clips.first { $0.id == clipId } ?? rebuilt
     }
 
     /// Moves a clip to a new timeline start (clamped >= 0), then RESOLVES any
@@ -2147,30 +3031,107 @@ public final class ProjectStore {
         var trimmedIDs: [UUID] = []
         var removedIDs: [UUID] = []
         performEdit("Move Clip '\(name)'", key: "clip.move:\(clipId.uuidString)") {
-            var rebuilt: [Clip] = []
-            rebuilt.reserveCapacity(tracks[t].clips.count)
-            for existing in tracks[t].clips {
-                if existing.id == clipId {
-                    var m = existing
-                    m.startBeat = newStart
-                    rebuilt.append(m)
-                    continue
-                }
-                // Comp members keep their existing guards — never trimmed here.
-                if existing.takeGroupID != nil { rebuilt.append(existing); continue }
-                let resolved = Self.resolveOverlap(
-                    stationary: existing, activeStart: aStart, activeEnd: aEnd, tempoMap: tempoMap)
-                if resolved.isEmpty {
-                    removedIDs.append(existing.id)
-                } else if resolved != [existing] {
-                    trimmedIDs.append(existing.id)
-                }
-                rebuilt.append(contentsOf: resolved)
-            }
-            tracks[t].clips = rebuilt
+            tracks[t].clips[c].startBeat = newStart
+            let resolved = Self.resolvingOverlaps(
+                in: tracks[t].clips, activeIDs: [clipId],
+                start: aStart, end: aEnd, tempoMap: tempoMap)
+            tracks[t].clips = resolved.clips
+            trimmedIDs = resolved.trimmedIDs
+            removedIDs = resolved.removedIDs
             engine?.tracksDidChange(tracks)
         }
         let final = tracks[t].clips.first { $0.id == clipId } ?? moved
+        return ClipMoveResult(clip: final, trimmedClipIDs: trimmedIDs, removedClipIDs: removedIDs)
+    }
+
+    /// Rebuilds `clip` under a FRESH identity/position, VALUE-COPYING every
+    /// content field (media/notes, gain, fades + their curves, gain envelope,
+    /// stretch/pitch/formant, AI flag) but never the `takeGroupID` — a
+    /// duplicated / split-off piece is always an ORDINARY clip (a comp member's
+    /// geometry is store-managed and would be overwritten). Pure, no journaling;
+    /// `Clip.init` re-heals notes + envelope to their canonical form. Shared by
+    /// `duplicateClip` and the split-off tail pieces `arrange.insertBars` /
+    /// `arrange.deleteBars` produce.
+    static func reidentified(_ clip: Clip, id: UUID, startBeat: Double) -> Clip {
+        Clip(
+            id: id, name: clip.name,
+            startBeat: startBeat, lengthBeats: clip.lengthBeats,
+            audioFileURL: clip.audioFileURL, notes: clip.notes,
+            isAIGenerated: clip.isAIGenerated,
+            startOffsetSeconds: clip.startOffsetSeconds, gainDb: clip.gainDb,
+            fadeInBeats: clip.fadeInBeats, fadeOutBeats: clip.fadeOutBeats,
+            fadeInCurve: clip.fadeInCurve, fadeOutCurve: clip.fadeOutCurve,
+            stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
+            formantPreserve: clip.formantPreserve, gainEnvelope: clip.gainEnvelope,
+            takeGroupID: nil)
+    }
+
+    /// Duplicates a clip (m15-d) — a VALUE-COPY of everything (`reidentified`)
+    /// under a fresh id, landed at `toStartBeat` (default: appended flush after
+    /// the SOURCE clip's tail) on `toTrackId` (default: the source's own track).
+    ///
+    /// Cross-track duplication type-checks by content, reusing the clip-add
+    /// rules: a MIDI clip lands only on an instrument track
+    /// (`midiClipsRequireInstrumentTrack`), an audio clip only on an audio track
+    /// (`trackKindUnsupported`). The source clip may not be a take/comp member
+    /// (`requireNotCompMember` — its geometry is store-managed).
+    ///
+    /// OVERLAP: the new clip lands through the ONE no-silent-overlap choke point
+    /// (`resolvingOverlaps`, m13-b) as the active window's claimant — so a
+    /// duplicate dropped onto an occupied region TRIMS the ordinary residents it
+    /// covers (audio source offset advances / MIDI notes drop-truncate; a
+    /// fully-covered resident is removed), never a silent +6 dB overlap. Take
+    /// members on the target track are exempt (they intentionally stack). When
+    /// `toStartBeat` is omitted the append point is past the source's tail, so
+    /// no overlap arises. ONE `performEdit` ("Duplicate Clip '…'") — a single
+    /// undo restores both the new clip AND every resident trim. Returns the new
+    /// clip PLUS the `ClipMoveResult` trimmed/removed ids (the clip.move honesty
+    /// shape).
+    @discardableResult
+    public func duplicateClip(clipId: UUID, toStartBeat: Double? = nil,
+                              toTrackId: UUID? = nil) throws -> ClipMoveResult {
+        guard let (st, sc) = locateClip(clipId) else {
+            throw ProjectError.clipNotFound(clipId)
+        }
+        try requireNotCompMember(trackIndex: st, clipIndex: sc)
+        let source = tracks[st].clips[sc]
+        // Destination track: named target, else the source's own track.
+        let dt: Int
+        if let toTrackId {
+            guard let index = tracks.firstIndex(where: { $0.id == toTrackId }) else {
+                throw ProjectError.trackNotFound(toTrackId)
+            }
+            dt = index
+        } else {
+            dt = st
+        }
+        // Type-check by content against the destination track's kind (the
+        // clip-add rules, reused verbatim).
+        if source.isMIDI {
+            guard tracks[dt].kind == .instrument else {
+                throw ProjectError.midiClipsRequireInstrumentTrack(tracks[dt].kind)
+            }
+        } else {
+            guard tracks[dt].kind == .audio else {
+                throw ProjectError.trackKindUnsupported(tracks[dt].kind)
+            }
+        }
+        let landing = max(0, toStartBeat ?? (source.startBeat + source.lengthBeats))
+        let dup = Self.reidentified(source, id: UUID(), startBeat: landing)
+        let tempoMap = transport.tempoMap
+        var trimmedIDs: [UUID] = []
+        var removedIDs: [UUID] = []
+        performEdit("Duplicate Clip '\(dup.name)'") {
+            tracks[dt].clips.append(dup)
+            let resolved = Self.resolvingOverlaps(
+                in: tracks[dt].clips, activeIDs: [dup.id],
+                start: landing, end: landing + dup.lengthBeats, tempoMap: tempoMap)
+            tracks[dt].clips = resolved.clips
+            trimmedIDs = resolved.trimmedIDs
+            removedIDs = resolved.removedIDs
+            engine?.tracksDidChange(tracks)
+        }
+        let final = tracks[dt].clips.first { $0.id == dup.id } ?? dup
         return ClipMoveResult(clip: final, trimmedClipIDs: trimmedIDs, removedClipIDs: removedIDs)
     }
 
@@ -2204,6 +3165,10 @@ public final class ProjectStore {
             }
         }
         let (fin, fout) = clampedFades(fadeIn: clip.fadeInBeats, fadeOut: clip.fadeOutBeats, length: newLength)
+        // Gain envelope (m13-e): the same trim-window semantics as trimClip, so
+        // an overlap-trimmed resident keeps its (continuous) envelope instead of
+        // silently losing it. Empty → empty.
+        let newEnv = Clip.windowedGainEnvelope(clip.gainEnvelope, delta: delta, newLength: newLength)
         return Clip(
             id: clip.id, name: clip.name,
             startBeat: start, lengthBeats: newLength,
@@ -2213,7 +3178,7 @@ public final class ProjectStore {
             fadeInBeats: fin, fadeOutBeats: fout,
             fadeInCurve: clip.fadeInCurve, fadeOutCurve: clip.fadeOutCurve,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
-            formantPreserve: clip.formantPreserve)
+            formantPreserve: clip.formantPreserve, gainEnvelope: newEnv)
     }
 
     /// Resolves how one STATIONARY same-track clip must change so it no longer
@@ -2241,6 +3206,439 @@ public final class ProjectStore {
         // the active left edge (keep the stationary clip's head).
         return clipTrimmedToWindow(stationary, newStart: sStart,
                                    newLength: activeStart - sStart, tempoMap: tempoMap).map { [$0] } ?? []
+    }
+
+    /// The SINGLE no-silent-overlap policy choke point (m11-d, completed in
+    /// m13-b). Rebuilds `clips` so every ORDINARY same-track resident yields
+    /// whatever region the active window `[start, end)` silently covers, via
+    /// `resolveOverlap` (head/tail edge trim, or removal when the window fully
+    /// covers it or the remnant would fall below `minClipLengthBeats`). The
+    /// window's claimant(s) — the clip ids in `activeIDs`, i.e. the just-moved /
+    /// trimmed / stretched / added / grown clip — and every take/comp member
+    /// (`takeGroupID != nil`; takes intentionally STACK) pass through untouched.
+    /// Array order is preserved: a trimmed resident keeps its slot, a fully-
+    /// covered one drops out. PURE — no journaling; every geometry-committing
+    /// verb folds the returned list into its ONE `performEdit`, so a single undo
+    /// restores both the geometry change and every resident trim. This is the
+    /// ONE site all such verbs route through — the m13 audit takeaway is that the
+    /// invariant died verb-by-verb precisely because it had been landed
+    /// verb-by-verb.
+    static func resolvingOverlaps(in clips: [Clip], activeIDs: Set<UUID>,
+                                  start: Double, end: Double, tempoMap: TempoMap)
+        -> (clips: [Clip], trimmedIDs: [UUID], removedIDs: [UUID]) {
+        var rebuilt: [Clip] = []
+        rebuilt.reserveCapacity(clips.count)
+        var trimmedIDs: [UUID] = []
+        var removedIDs: [UUID] = []
+        for existing in clips {
+            // The window's claimant(s) and take/comp members are never trimmed.
+            if activeIDs.contains(existing.id) || existing.takeGroupID != nil {
+                rebuilt.append(existing)
+                continue
+            }
+            let resolved = resolveOverlap(stationary: existing, activeStart: start,
+                                          activeEnd: end, tempoMap: tempoMap)
+            if resolved.isEmpty {
+                removedIDs.append(existing.id)
+            } else if resolved != [existing] {
+                trimmedIDs.append(existing.id)
+            }
+            rebuilt.append(contentsOf: resolved)
+        }
+        return (rebuilt, trimmedIDs, removedIDs)
+    }
+
+    // MARK: - Arrangement bars (m15-d)
+    //
+    // PROJECT-WIDE `insertBars`/`deleteBars`: a RIGID timeline translation of a
+    // chunk of the arrangement — every track's clips, the markers, the tempo AND
+    // meter maps, per-track + master automation, and the loop/punch regions all
+    // shift by the SAME meter-aware bar amount inside ONE `performEdit`, so a
+    // single undo restores the whole section op. Because the content AND the
+    // tempo/meter maps translate together, every local musical relationship
+    // (a clip's beats↔seconds, a note's position, a marker's section) is
+    // preserved; content that was governed by tempo T at beat B is still
+    // governed by T after it moves to B±delta (its map segment moved with it).
+    //
+    // BAR NUMBERS ARE 1-BASED on the API surface (bar 1 = the first bar, beat 0)
+    // and METER-AWARE: the bar↔beat conversion is the real `MeterMap` (a bar in
+    // a 6/8 region is 6 beats), so a delete range that crosses meter changes
+    // sums the right number of beats. The no-silent-overlap invariant holds by
+    // CONSTRUCTION (a rigid suffix shift never makes one ordinary clip cross
+    // another; a clip straddling an edit point SPLITS at that point), so these
+    // verbs do not — and need not — route through the `resolvingOverlaps` choke
+    // point (which resolves ACTIVE-window overlaps from move/add/import).
+
+    /// Inserts `count` empty bars BEFORE 1-based `atBar`, pushing everything from
+    /// that barline rightward (m15-d). The inserted bars CONTINUE the meter
+    /// governing the bars just before the insertion point (Option A): a
+    /// tempo/meter change sitting exactly at the insertion barline moves right
+    /// with the content that follows it, so the empty region stays in the
+    /// preceding time signature and `count` × that meter's beats-per-bar beats
+    /// are inserted. Policies (each pinned):
+    ///  - **Clips**: a clip STARTING at/after the insertion point shifts right
+    ///    whole; a clip ENDING at/before it is untouched; a clip STRADDLING it
+    ///    SPLITS at the insertion barline (head keeps the clip id + its left
+    ///    part, the tail becomes a fresh ordinary clip pushed right — Pro-Tools
+    ///    "insert silence").
+    ///  - **Markers** at/after the insertion point shift right (a marker stays
+    ///    attached to the content it named).
+    ///  - **Tempo/meter maps**: segments/changes at/after the insertion point
+    ///    shift right by the inserted beats (segment/change 0 at beat 0 is
+    ///    pinned); the shifted meter map stays barline-valid by construction.
+    ///  - **Loop/punch**: a region wholly at/after shifts; a region STRADDLING
+    ///    the point GROWS to include the inserted bars (its exclusive right edge
+    ///    extends); a region wholly before is untouched.
+    /// Refused mid-record (`transportBusy`) — an insert re-anchors the timeline
+    /// under a rolling capture; a take group whose content reaches the insertion
+    /// point is refused (`take.flatten` first — v1 does not re-anchor comps).
+    /// ONE undo. Returns the insertion beat + inserted beats + the bar length.
+    @discardableResult
+    public func insertBars(atBar: Int, count: Int) throws -> InsertBarsResult {
+        guard !transport.isRecording else {
+            throw ProjectError.transportBusy("cannot insert bars while recording — stop first")
+        }
+        guard atBar >= 1 else {
+            throw ProjectError.invalidArrangeEdit("'atBar' must be >= 1 (bar 1 is the first bar)")
+        }
+        guard count >= 1 else {
+            throw ProjectError.invalidArrangeEdit("'count' must be >= 1")
+        }
+        let meterMap = transport.meterMap
+        let tempoMap = transport.tempoMap
+        let bar0 = atBar - 1
+        let pivot = meterMap.beat(ofBar: bar0)
+        // Option A: the inserted bars continue the meter of the bar BEFORE the
+        // insertion point (== the meter AT the pivot unless a change sits exactly
+        // there, in which case that change moves right and the preceding meter
+        // governs the empty region).
+        let bpb = bar0 == 0
+            ? meterMap.beatsPerBar(atBeat: 0)
+            : meterMap.beatsPerBar(atBeat: meterMap.beat(ofBar: bar0 - 1))
+        let delta = Double(count) * Double(bpb)
+
+        try requireNoTakeGroupsAtOrAfter(pivot, verb: "insert bars")
+        // Build + validate the shifted maps OUTSIDE the edit body (a validation
+        // failure aborts with no partial mutation — the routing-guard precedent).
+        let newTempo = try shiftMapForInsert(tempoMap, pivot: pivot, delta: delta)
+        let newMeter = try shiftMeterForInsert(meterMap, pivot: pivot, delta: delta)
+
+        performEdit("Insert \(count) Bar\(count == 1 ? "" : "s")") {
+            shiftClipsForInsert(pivot: pivot, delta: delta, tempoMap: tempoMap)
+            shiftMarkersForInsert(pivot: pivot, delta: delta)
+            shiftRegionsForInsert(pivot: pivot, delta: delta)
+            if newTempo != tempoMap || newMeter != meterMap {
+                applyTempoMap(newTempo, meterMap: newMeter)
+            }
+            engine?.tracksDidChange(tracks)
+            engine?.loopChanged(transport)
+        }
+        return InsertBarsResult(atBeat: pivot, insertedBeats: delta, beatsPerBar: bpb)
+    }
+
+    /// Deletes `count` bars starting at 1-based `fromBar`, closing the gap
+    /// (m15-d). The span is meter-aware (`MeterMap.beat(ofBar:)` walks any meter
+    /// changes inside the range). Policies (each pinned):
+    ///  - **Clips**: fully inside the range → REMOVED (id listed in the result);
+    ///    fully after → shifts left; fully before → untouched; straddling the
+    ///    LEFT edge → tail trimmed off at the range start (keeps head); straddling
+    ///    the RIGHT edge → head trimmed off, remainder pulled left to the splice;
+    ///    straddling BOTH edges → SPLIT-then-close (head keeps the id, the far
+    ///    tail becomes a fresh clip abutted at the splice — the excised middle is
+    ///    gone).
+    ///  - **Markers** inside `[start, end)` → REMOVED (ids listed); markers at/
+    ///    after `end` shift left. A marker exactly at the range start is inside
+    ///    the half-open window, so it is removed.
+    ///  - **Tempo/meter maps**: changes INSIDE the range are REMOVED; changes
+    ///    at/after `end` shift left; the surviving content's meter/tempo is
+    ///    re-seated at the splice. Tempo (no barline constraint) always splices;
+    ///    a meter delete that would leave a change off its barline (a boundary
+    ///    the range crosses that can't cleanly rejoin) is REFUSED with a teaching
+    ///    error rather than corrupting the grid.
+    ///  - **Loop/punch**: each endpoint maps through the splice (before → same;
+    ///    inside → the splice point; after → shifted left); a region swallowed
+    ///    below its minimum length is DISABLED at the splice point.
+    /// Refused mid-record; a take group reaching the range is refused (flatten
+    /// first). ONE undo. Returns the range start + deleted beats + removed ids.
+    @discardableResult
+    public func deleteBars(fromBar: Int, count: Int) throws -> DeleteBarsResult {
+        guard !transport.isRecording else {
+            throw ProjectError.transportBusy("cannot delete bars while recording — stop first")
+        }
+        guard fromBar >= 1 else {
+            throw ProjectError.invalidArrangeEdit("'fromBar' must be >= 1 (bar 1 is the first bar)")
+        }
+        guard count >= 1 else {
+            throw ProjectError.invalidArrangeEdit("'count' must be >= 1")
+        }
+        let meterMap = transport.meterMap
+        let tempoMap = transport.tempoMap
+        let bar0 = fromBar - 1
+        let deleteStart = meterMap.beat(ofBar: bar0)
+        let deleteEnd = meterMap.beat(ofBar: bar0 + count)
+        let delta = deleteEnd - deleteStart
+        guard delta > 0 else {
+            throw ProjectError.invalidArrangeEdit("delete range is empty")
+        }
+
+        try requireNoTakeGroupsAtOrAfter(deleteStart, verb: "delete bars")
+        let newTempo = try spliceMapForDelete(tempoMap, start: deleteStart, end: deleteEnd, delta: delta)
+        let newMeter = try spliceMeterForDelete(meterMap, start: deleteStart, end: deleteEnd, delta: delta)
+
+        var removedClipIDs: [UUID] = []
+        var removedMarkerIDs: [UUID] = []
+        performEdit("Delete \(count) Bar\(count == 1 ? "" : "s")") {
+            removedClipIDs = deleteClips(start: deleteStart, end: deleteEnd, delta: delta, tempoMap: tempoMap)
+            removedMarkerIDs = deleteMarkers(start: deleteStart, end: deleteEnd, delta: delta)
+            deleteRegions(start: deleteStart, end: deleteEnd, delta: delta)
+            if newTempo != tempoMap || newMeter != meterMap {
+                applyTempoMap(newTempo, meterMap: newMeter)
+            }
+            engine?.tracksDidChange(tracks)
+            engine?.loopChanged(transport)
+        }
+        return DeleteBarsResult(fromBeat: deleteStart, deletedBeats: delta,
+                                removedClipIDs: removedClipIDs, removedMarkerIDs: removedMarkerIDs)
+    }
+
+    // MARK: Arrangement bars — guards + mutators (m15-d)
+
+    /// A take group whose content reaches the edit point can't be re-anchored in
+    /// v1 (its comp geometry is store-managed and rebuilt every comp edit), so
+    /// the bar edit is refused with a flatten-first teaching error. Groups wholly
+    /// before the edit point (upper extent at/before it) never move and are fine.
+    private func requireNoTakeGroupsAtOrAfter(_ editStart: Double, verb: String) throws {
+        for track in tracks {
+            for group in track.takeGroups where group.rangeBeats.upperBound > editStart {
+                throw ProjectError.invalidArrangeEdit(
+                    "cannot \(verb) across take group '\(group.name)' on track '\(track.name)' — flatten it first (take.flatten)")
+            }
+        }
+    }
+
+    private func shiftClipsForInsert(pivot: Double, delta: Double, tempoMap: TempoMap) {
+        for t in tracks.indices {
+            var rebuilt: [Clip] = []
+            rebuilt.reserveCapacity(tracks[t].clips.count)
+            for clip in tracks[t].clips {
+                if clip.takeGroupID != nil { rebuilt.append(clip); continue }  // store-managed comp member
+                rebuilt.append(contentsOf: Self.clipAfterInsert(
+                    clip, pivot: pivot, delta: delta, tempoMap: tempoMap))
+            }
+            tracks[t].clips = rebuilt
+            tracks[t].automation = Self.shiftedAutomationForInsert(
+                tracks[t].automation, pivot: pivot, delta: delta)
+        }
+        masterAutomation = Self.shiftedAutomationForInsert(masterAutomation, pivot: pivot, delta: delta)
+    }
+
+    private func shiftMarkersForInsert(pivot: Double, delta: Double) {
+        markers = Self.markersSortedByBeat(markers.map {
+            $0.beat >= pivot ? Marker(id: $0.id, name: $0.name, beat: $0.beat + delta) : $0
+        })
+    }
+
+    private func shiftRegionsForInsert(pivot: Double, delta: Double) {
+        // Half-open region math: a START at/after the pivot shifts; an END
+        // strictly after it shifts (a region ending exactly at the pivot does not
+        // grow — the inserted bars sit outside its exclusive right edge). A region
+        // straddling the pivot therefore GROWS to include the inserted bars.
+        if transport.loopStartBeat >= pivot { transport.loopStartBeat += delta }
+        if transport.loopEndBeat > pivot { transport.loopEndBeat += delta }
+        if transport.punchInBeat >= pivot { transport.punchInBeat += delta }
+        if transport.punchOutBeat > pivot { transport.punchOutBeat += delta }
+    }
+
+    private func deleteClips(start: Double, end: Double, delta: Double, tempoMap: TempoMap) -> [UUID] {
+        var removed: [UUID] = []
+        for t in tracks.indices {
+            var rebuilt: [Clip] = []
+            rebuilt.reserveCapacity(tracks[t].clips.count)
+            for clip in tracks[t].clips {
+                if clip.takeGroupID != nil { rebuilt.append(clip); continue }
+                let pieces = Self.clipAfterDelete(
+                    clip, deleteStart: start, deleteEnd: end, delta: delta, tempoMap: tempoMap)
+                if pieces.isEmpty { removed.append(clip.id) }
+                rebuilt.append(contentsOf: pieces)
+            }
+            tracks[t].clips = rebuilt
+            tracks[t].automation = Self.shiftedAutomationForDelete(
+                tracks[t].automation, start: start, end: end, delta: delta)
+        }
+        masterAutomation = Self.shiftedAutomationForDelete(masterAutomation, start: start, end: end, delta: delta)
+        return removed
+    }
+
+    private func deleteMarkers(start: Double, end: Double, delta: Double) -> [UUID] {
+        var removed: [UUID] = []
+        let kept = markers.compactMap { m -> Marker? in
+            if m.beat < start { return m }
+            if m.beat < end { removed.append(m.id); return nil }
+            return Marker(id: m.id, name: m.name, beat: m.beat - delta)
+        }
+        markers = Self.markersSortedByBeat(kept)
+        return removed
+    }
+
+    private func deleteRegions(start: Double, end: Double, delta: Double) {
+        func mapped(_ b: Double) -> Double {
+            if b < start { return b }
+            if b < end { return start }  // interior collapses to the splice point
+            return b - delta
+        }
+        let ls = mapped(transport.loopStartBeat)
+        var le = mapped(transport.loopEndBeat)
+        if le - ls < TransportState.minLoopLengthBeats {
+            le = ls + TransportState.minLoopLengthBeats
+            transport.isLoopEnabled = false  // the loop was swallowed by the delete
+        }
+        transport.loopStartBeat = ls
+        transport.loopEndBeat = le
+        let ps = mapped(transport.punchInBeat)
+        var pe = mapped(transport.punchOutBeat)
+        if pe - ps < TransportState.minPunchLengthBeats {
+            pe = ps + TransportState.minPunchLengthBeats
+            transport.isPunchEnabled = false
+        }
+        transport.punchInBeat = ps
+        transport.punchOutBeat = pe
+    }
+
+    // MARK: Arrangement bars — pure geometry (m15-d)
+
+    /// The 1 or 2 clips that replace `clip` under an insert at `pivot` by
+    /// `delta > 0`. Comp members must be filtered by the caller.
+    static func clipAfterInsert(_ clip: Clip, pivot: Double, delta: Double,
+                                tempoMap: TempoMap) -> [Clip] {
+        let start = clip.startBeat
+        let end = clip.startBeat + clip.lengthBeats
+        if start >= pivot {
+            var shifted = clip
+            shifted.startBeat = start + delta
+            return [shifted]
+        }
+        if end <= pivot { return [clip] }
+        // Straddles → split at the insertion barline; head keeps the id, the tail
+        // is a fresh ordinary clip windowed to [pivot, end) and pushed right.
+        var pieces: [Clip] = []
+        if let head = clipTrimmedToWindow(clip, newStart: start, newLength: pivot - start, tempoMap: tempoMap) {
+            pieces.append(head)
+        }
+        if let tail = clipTrimmedToWindow(clip, newStart: pivot, newLength: end - pivot, tempoMap: tempoMap) {
+            pieces.append(reidentified(tail, id: UUID(), startBeat: pivot + delta))
+        }
+        return pieces
+    }
+
+    /// The 0, 1, or 2 clips that replace `clip` under a delete of
+    /// `[deleteStart, deleteEnd)` by `delta` (= the range length). Comp members
+    /// must be filtered by the caller.
+    static func clipAfterDelete(_ clip: Clip, deleteStart: Double, deleteEnd: Double,
+                                delta: Double, tempoMap: TempoMap) -> [Clip] {
+        let start = clip.startBeat
+        let end = clip.startBeat + clip.lengthBeats
+        if start >= deleteEnd {
+            var shifted = clip
+            shifted.startBeat = start - delta
+            return [shifted]
+        }
+        if end <= deleteStart { return [clip] }
+        if start >= deleteStart, end <= deleteEnd { return [] }  // fully inside → gone
+        var pieces: [Clip] = []
+        if start < deleteStart,
+           let head = clipTrimmedToWindow(clip, newStart: start, newLength: deleteStart - start, tempoMap: tempoMap) {
+            pieces.append(head)  // keeps the id, stays at `start`
+        }
+        if end > deleteEnd,
+           let tail = clipTrimmedToWindow(clip, newStart: deleteEnd, newLength: end - deleteEnd, tempoMap: tempoMap) {
+            // Pull left to abut at the splice. If a head also survived, the tail
+            // is a fresh clip (a genuine split); otherwise it keeps the clip id.
+            let tailID = pieces.isEmpty ? clip.id : UUID()
+            pieces.append(reidentified(tail, id: tailID, startBeat: deleteEnd - delta))
+        }
+        return pieces
+    }
+
+    /// Automation-point shift for an insert: a point at/after `pivot` moves right
+    /// by `delta`. Rebuilt through `AutomationLane.init` (re-canonicalizes).
+    static func shiftedAutomationForInsert(_ lanes: [AutomationLane], pivot: Double,
+                                           delta: Double) -> [AutomationLane] {
+        lanes.map { lane in
+            AutomationLane(id: lane.id, target: lane.target,
+                           points: lane.points.map {
+                               $0.beat >= pivot
+                                   ? AutomationPoint(beat: $0.beat + delta, value: $0.value, curve: $0.curve)
+                                   : $0
+                           },
+                           isEnabled: lane.isEnabled)
+        }
+    }
+
+    /// Automation-point shift for a delete: points inside `[start, end)` are
+    /// dropped, points at/after `end` move left by `delta`.
+    static func shiftedAutomationForDelete(_ lanes: [AutomationLane], start: Double,
+                                           end: Double, delta: Double) -> [AutomationLane] {
+        lanes.map { lane in
+            AutomationLane(id: lane.id, target: lane.target,
+                           points: lane.points.compactMap { p in
+                               if p.beat < start { return p }
+                               if p.beat < end { return nil }
+                               return AutomationPoint(beat: p.beat - delta, value: p.value, curve: p.curve)
+                           },
+                           isEnabled: lane.isEnabled)
+        }
+    }
+
+    // MARK: Arrangement bars — map splicing (m15-d)
+
+    private func shiftMapForInsert(_ map: TempoMap, pivot: Double, delta: Double) throws -> TempoMap {
+        let segs = map.segments.map { seg -> TempoMap.Segment in
+            (seg.startBeat > 0 && seg.startBeat >= pivot)
+                ? TempoMap.Segment(startBeat: seg.startBeat + delta, bpm: seg.bpm) : seg
+        }
+        do { return try TempoMap(segments: segs) }
+        catch { throw ProjectError.invalidArrangeEdit("insert bars would corrupt the tempo map (\(error))") }
+    }
+
+    private func shiftMeterForInsert(_ map: MeterMap, pivot: Double, delta: Double) throws -> MeterMap {
+        let changes = map.changes.map { ch -> MeterMap.Change in
+            (ch.startBeat > 0 && ch.startBeat >= pivot)
+                ? MeterMap.Change(startBeat: ch.startBeat + delta, beatsPerBar: ch.beatsPerBar, beatUnit: ch.beatUnit) : ch
+        }
+        do { return try MeterMap(changes: changes) }
+        catch { throw ProjectError.invalidArrangeEdit("insert bars would leave a meter change off its barline (\(error))") }
+    }
+
+    private func spliceMapForDelete(_ map: TempoMap, start: Double, end: Double, delta: Double) throws -> TempoMap {
+        var segs: [TempoMap.Segment] = map.segments.compactMap { seg in
+            if seg.startBeat < start { return seg }
+            if seg.startBeat < end { return nil }  // inside → dropped
+            return TempoMap.Segment(startBeat: seg.startBeat - delta, bpm: seg.bpm)
+        }
+        // A delete from bar 1 can drop the original base segment; re-seat the
+        // surviving content's tempo at beat 0.
+        if segs.first?.startBeat != 0 {
+            segs.insert(TempoMap.Segment(startBeat: 0, bpm: map.bpm(atBeat: end)), at: 0)
+        }
+        do { return try TempoMap(segments: segs) }
+        catch { throw ProjectError.invalidArrangeEdit("delete bars would corrupt the tempo map (\(error))") }
+    }
+
+    private func spliceMeterForDelete(_ map: MeterMap, start: Double, end: Double, delta: Double) throws -> MeterMap {
+        var changes: [MeterMap.Change] = map.changes.compactMap { ch in
+            if ch.startBeat < start { return ch }
+            if ch.startBeat < end { return nil }
+            return MeterMap.Change(startBeat: ch.startBeat - delta, beatsPerBar: ch.beatsPerBar, beatUnit: ch.beatUnit)
+        }
+        if changes.first?.startBeat != 0 {
+            let base = map.changes.last { $0.startBeat <= end } ?? map.changes[0]
+            changes.insert(MeterMap.Change(startBeat: 0, beatsPerBar: base.beatsPerBar, beatUnit: base.beatUnit), at: 0)
+        }
+        do { return try MeterMap(changes: changes) }
+        catch {
+            throw ProjectError.invalidArrangeEdit(
+                "deleting these bars would leave a meter change off its barline — delete within a single time-signature region, or remove the meter change first")
+        }
     }
 
     /// Crossfades two AUDIO clips on ONE track (m11-d) — the explicit tool that
@@ -2370,6 +3768,18 @@ public final class ProjectStore {
             newRight.startBeat = right.startBeat - half
             newRight.lengthBeats = right.lengthBeats + half
             newRight.startOffsetSeconds = max(0, right.startOffsetSeconds - rightHeadSource)
+            // The right clip's head extends left by `half`, revealing earlier
+            // material — its clip-relative gain envelope (m13-e) shifts by +half
+            // to stay pinned to the same content. The left clip's tail extends
+            // (head fixed), so its envelope needs no shift; both re-canonicalize
+            // to the new lengths. Empty → empty.
+            if !newRight.gainEnvelope.isEmpty {
+                newRight.gainEnvelope = Clip.canonicalGainEnvelope(
+                    newRight.gainEnvelope.map {
+                        ClipGainPoint(beat: $0.beat + half, gainDb: $0.gainDb)
+                    },
+                    lengthBeats: newRight.lengthBeats)
+            }
             finalOverlap = lengthBeats
         }
 
@@ -2413,6 +3823,45 @@ public final class ProjectStore {
             // so it never triggers a restart — its parameter pass just
             // re-writes the same volume).
             engine?.clipGainChanged(trackID: trackId, clipID: clipId, gainDb: clamped)
+            engine?.tracksDidChange(tracks)
+        }
+        return tracks[t].clips[c]
+    }
+
+    /// Sets a clip's breakpoint GAIN ENVELOPE WHOLESALE (m13-e; the
+    /// `setClipFades` / `setAutomationPoints` precedent): the given points are
+    /// clamped (each `beat` into `[0, lengthBeats]`, each `gainDb` into
+    /// `Clip.gainDbRange`) and canonicalized (sorted ascending, equal-beat
+    /// duplicates deduped last-wins) through `Clip.canonicalGainEnvelope`. An
+    /// EMPTY array CLEARS the envelope (back to today's static-gain-plus-fades
+    /// behavior exactly). The envelope MULTIPLIES on top of the static gain and
+    /// fades — it does not replace them.
+    ///
+    /// Audio clips only: the envelope is realized in the offline audio fade-bake
+    /// (a MIDI clip has no per-clip player to bake onto, the gain/fades/stretch
+    /// family rule) — a MIDI clip throws `invalidClipEdit`. Unlike a plain gain
+    /// edit, changing the envelope is a SCHEDULE-key change (it re-bakes), so it
+    /// rides `tracksDidChange` (the fades path), not the live `clipGainChanged`
+    /// parameter write. Coalesces under `clip.gainEnv:<clipId>` so a breakpoint
+    /// drag is one undo step (>800 ms gap = a separate entry, the established
+    /// coalescing boundary).
+    @discardableResult
+    public func setClipGainEnvelope(trackId: UUID, clipId: UUID,
+                                    points: [ClipGainPoint]) throws -> Clip {
+        let (t, c) = try locateClip(trackID: trackId, clipID: clipId)
+        try requireNotCompMember(trackIndex: t, clipIndex: c)
+        let clip = tracks[t].clips[c]
+        guard !clip.isMIDI else {
+            throw ProjectError.invalidClipEdit(
+                "clip '\(clip.name)' is a MIDI clip — gain envelopes apply to audio clips only")
+        }
+        let canon = Clip.canonicalGainEnvelope(points, lengthBeats: clip.lengthBeats)
+        performEdit("Set Clip Gain Envelope", key: "clip.gainEnv:\(clipId.uuidString)") {
+            tracks[t].clips[c].gainEnvelope = canon
+            // A ClipKey-affecting edit: the envelope bakes into the scheduled
+            // buffers, so the engine must re-schedule (re-bake) — the fade-edit
+            // seam (stop-reschedule-resume). tracksDidChange triggers reconcile,
+            // and gainEnvelope is in the ClipKey signature so it reschedules.
             engine?.tracksDidChange(tracks)
         }
         return tracks[t].clips[c]
@@ -2512,9 +3961,13 @@ public final class ProjectStore {
                 tracks[t].clips[c].lengthBeats = targetLength
                 tracks[t].clips[c].fadeInBeats = fin0
                 tracks[t].clips[c].fadeOutBeats = fout0
+                tracks[t].clips = Self.resolvingOverlaps(
+                    in: tracks[t].clips, activeIDs: [clipId],
+                    start: clip.startBeat, end: clip.startBeat + targetLength,
+                    tempoMap: transport.tempoMap).clips
                 engine?.tracksDidChange(tracks)
             }
-            return tracks[t].clips[c]
+            return tracks[t].clips.first { $0.id == clipId } ?? clip
         }
         // Window invariance: lengthBeats / ratio stays constant. Scale the ratio
         // by the length change, then clamp; on clamp, re-derive the length from
@@ -2532,19 +3985,35 @@ public final class ProjectStore {
             tracks[t].clips[c].stretchRatio = newRatio
             tracks[t].clips[c].fadeInBeats = fin
             tracks[t].clips[c].fadeOutBeats = fout
+            // The retarget only ever grows/shrinks the trailing edge — resolve
+            // any resulting overlap through the ONE choke point (m13-b).
+            tracks[t].clips = Self.resolvingOverlaps(
+                in: tracks[t].clips, activeIDs: [clipId],
+                start: clip.startBeat, end: clip.startBeat + newLength,
+                tempoMap: transport.tempoMap).clips
             engine?.tracksDidChange(tracks)
         }
-        return tracks[t].clips[c]
+        return tracks[t].clips.first { $0.id == clipId } ?? clip
     }
 
     // MARK: - Mixdown
 
     /// Bounces the current session to a WAV file through the injected engine's
     /// offline render path. Blocking; v0 accepts the main-actor stall for
-    /// typical song lengths. When `durationSeconds` is nil, the bounce runs
-    /// from `fromBeat` to the last audio clip's end at the current tempo plus
-    /// a 0.5 s tail; with no clips (or `fromBeat` past all of them) that
-    /// default is meaningless and the call throws `nothingToRender`.
+    /// typical song lengths.
+    ///
+    /// `durationSeconds` nil → the SHARED default window (`renderWindowSeconds`,
+    /// m16-d): from `fromBeat` to the end of the last clip of ANY kind — audio
+    /// AND instrument — at the current tempo, plus the 2.0 s bus-reverb/release
+    /// tail. This is byte-for-byte the window `render.bounce`,
+    /// `render.measureLoudness`, and `render.stems` default to, so "render my
+    /// song" on a MIDI-only project renders the song instead of dead-ending on
+    /// a false teaching error. (It USED to be an audio-only extent with a 0.5 s
+    /// tail — the "legacy default stays untouched" carve-out audit F4 measured
+    /// as the bug; the carve-out is retired, not documented — a defensive
+    /// comment dies with the bug it defends.) No clips past `fromBeat` →
+    /// `nothingToRender`. Explicit `durationSeconds` renders that exact window,
+    /// untouched (era-pinned byte-identity — the extent seam is bypassed).
     public func renderMixdown(
         toPath path: String? = nil,
         fromBeat: Double = 0,
@@ -2552,30 +4021,18 @@ public final class ProjectStore {
     ) async throws -> MixdownResult {
         guard let engine else { throw ProjectError.engineUnavailable }
         let startBeat = max(0, fromBeat)
-
-        let duration: Double
-        if let durationSeconds {
-            duration = durationSeconds
-        } else {
-            let clipEnds = tracks.filter { $0.kind == .audio }
-                .flatMap(\.clips)
-                .map { $0.startBeat + $0.lengthBeats }
-            guard let lastEndBeat = clipEnds.max() else {
-                throw ProjectError.nothingToRender
-            }
-            // Default window = the integral over [startBeat, lastEndBeat]
-            // (m12-b, design row 18 family — the mixdown's audio-only legacy
-            // default; the shared broader default is `renderWindowSeconds`).
-            let contentSeconds = transport.tempoMap.seconds(from: startBeat, to: lastEndBeat)
-            guard contentSeconds > 0 else { throw ProjectError.nothingToRender }
-            duration = contentSeconds + 0.5  // release/reverb tail headroom
-        }
+        // The ONE default-window seam (m16-d): explicit duration wins untouched;
+        // nil → the shared all-clips extent + 2.0 s tail, identical to bounce/
+        // stems/measure. No clips past `fromBeat` throws `nothingToRender`.
+        let duration = try renderWindowSeconds(fromBeat: startBeat, requested: durationSeconds)
 
         let url = Self.mixdownDestination(from: path)
         let info = try await engine.renderMixdown(
             tracks: tracks,
             tempoMap: transport.tempoMap,
             masterVolume: masterVolume,
+            masterEffects: masterEffects,  // MASTERED class (m13-d, design §2)
+            masterAutomation: masterAutomation,  // rides the class (m15-c)
             fromBeat: startBeat,
             durationSeconds: duration,
             to: url
@@ -2657,13 +4114,13 @@ public final class ProjectStore {
         t.isPlaying = false
         t.isRecording = false
         t.positionBeats = 0
-        // Phase-B staging seam — replaced by tempo.setMap in Phase C: the
-        // session map override is NON-undoable, so it is normalized out here
-        // (installing/clearing it never registers as an edit and journal
-        // entries never carry it) and preserved across restore below.
-        t.sessionTempoMapOverride = nil
+        // Tempo/meter map overrides (m12-d) ride the transport here: a
+        // `tempo.setMap` mutation is undoable, so — unlike playhead/play state —
+        // they are NOT normalized out, and undo/redo restore them exactly.
         return EditState(tracks: tracks, masterVolume: masterVolume, transport: t,
-                         grooveTemplates: grooveTemplates, markers: markers)
+                         grooveTemplates: grooveTemplates, markers: markers,
+                         masterEffects: masterEffects,
+                         masterAutomation: masterAutomation)
     }
 
     /// The single funnel every undoable mutation passes through. Captures the
@@ -2701,14 +4158,19 @@ public final class ProjectStore {
         // Compute what changed BEFORE overwriting, to target engine intents.
         let tracksChanged = tracks != target.tracks
         let masterChanged = masterVolume != target.masterVolume
-        // Map compare (m12-b, design row 36). Both sides are compared in
-        // captured form (session override normalized out — target already is,
-        // by captureEditState), so an installed Phase-B staging map neither
-        // masks a real scalar-tempo undo nor forces a spurious restart on
-        // every unrelated undo.
-        var liveCaptured = transport
-        liveCaptured.sessionTempoMapOverride = nil
-        let tempoChanged = liveCaptured.tempoMap != target.transport.tempoMap
+        // Master chain (m13-d): the masterVolume twin — restore pushes the
+        // engine intent only when the chain actually moved.
+        let masterFXChanged = masterEffects != target.masterEffects
+        // Master volume automation (m15-c): the masterEffects twin.
+        let masterAutoChanged = masterAutomation != target.masterAutomation
+        // Tempo/meter map compare (m12-d, design row 36). Both the live
+        // transport and the target carry their map overrides (undoable, no
+        // normalization), so this catches a `tempo.setMap` undo exactly as it
+        // catches a scalar-tempo undo. Meter bumps the revision (Clip-Fix
+        // staleness) and — m15-a — refreshes the live click schedule (the
+        // meter map is the click scheduler's downbeat source).
+        let tempoChanged = transport.tempoMap != target.transport.tempoMap
+        let meterChanged = transport.meterMap != target.transport.meterMap
         let loopChanged = transport.isLoopEnabled != target.transport.isLoopEnabled
             || transport.loopStartBeat != target.transport.loopStartBeat
             || transport.loopEndBeat != target.transport.loopEndBeat
@@ -2717,6 +4179,8 @@ public final class ProjectStore {
 
         tracks = target.tracks
         masterVolume = target.masterVolume
+        masterEffects = target.masterEffects
+        masterAutomation = target.masterAutomation
         // Groove palette rides the same snapshot (no engine involvement — grooves
         // are pure data applied at quantize time).
         grooveTemplates = target.grooveTemplates
@@ -2728,9 +4192,8 @@ public final class ProjectStore {
         restored.isPlaying = transport.isPlaying
         restored.positionBeats = transport.positionBeats
         restored.isRecording = false
-        // Phase-B staging seam — replaced by tempo.setMap in Phase C: the
-        // session map override survives undo/redo untouched (non-undoable).
-        restored.sessionTempoMapOverride = transport.sessionTempoMapOverride
+        // Tempo/meter map overrides (m12-d) ride `target.transport` — undo/redo
+        // restore them with the rest of the persistable transport fields.
         transport = restored
 
         for id in vanishedTrackIDs {
@@ -2739,9 +4202,21 @@ public final class ProjectStore {
 
         if tracksChanged { engine?.tracksDidChange(tracks) }
         if masterChanged { engine?.masterVolumeChanged(masterVolume) }
+        if masterFXChanged { engine?.masterEffectsChanged(masterEffects) }
+        if masterAutoChanged { engine?.masterAutomationChanged(masterAutomation) }
+        // A map swap by undo/redo counts as a change for Clip-Fix staleness
+        // (mapRevision only ever climbs), and re-anchors the engine's tempo.
+        if tempoChanged || meterChanged { mapRevision &+= 1 }
         if tempoChanged { engine?.setTempo(transport) }
         if loopChanged { engine?.loopChanged(transport) }
-        if metronomeChanged, transport.isPlaying { engine?.seek(transport) }
+        // m14-c: click-player-local, like the setMetronome intent — an
+        // undo/redo of a metronome toggle never restarts the transport.
+        // m15-a: a meter-map swap rides the SAME intent (the meter map is the
+        // click scheduler's downbeat source) — unless a tempo change already
+        // restarted the transport, which re-caches and reschedules clicks.
+        if metronomeChanged || (meterChanged && !tempoChanged), transport.isPlaying {
+            engine?.metronomeChanged(transport)
+        }
     }
 
     /// Saves the session to a `.dawproj` bundle.
@@ -2801,7 +4276,10 @@ public final class ProjectStore {
             masterVolume: masterVolume,
             mediaRefs: plan.refs,
             grooveTemplates: grooveTemplates,
-            markers: markers
+            markers: markers,
+            tempoMapRevision: mapRevision,
+            masterEffects: masterEffects,
+            masterAutomation: masterAutomation
         )
         do {
             try ProjectBundle.write(document: document, plan: plan, to: bundleURL)
@@ -2930,19 +4408,32 @@ public final class ProjectStore {
         tracks = []
         transport = TransportState()
         masterVolume = 1
+        masterEffects = []  // m13-d: a fresh session carries no master chain
+        masterAutomation = []  // m15-c: … and no master automation
         grooveTemplates = []
         markers = []
+        // Fresh session → the map is trivial and its revision resets (m12-d).
+        mapRevision = 0
         masterMeter = .silence
         trackMeters = [:]
         lastRecordingError = nil
         // Stale pending fixes point into the old project (M6 v-b).
         pendingClipFixes = [:]
+        // Engine notices describe the OLD session's playback (m15-e).
+        engineNotices = []
+        engineNoticeSequence = 0
         resetRecordingScratch()
         // A new session starts with empty history; prior edits no longer apply.
         journal.clear()
 
+        // m13-a (A1): a project boundary retires the engine's whole graph —
+        // a once-rendered engine rebuilds from the new (empty) model inside
+        // the tracksDidChange below instead of tearing nodes down one by one.
+        engine?.projectWillReplace()
         engine?.tracksDidChange(tracks)
         engine?.masterVolumeChanged(masterVolume)
+        engine?.masterEffectsChanged(masterEffects)
+        engine?.masterAutomationChanged(masterAutomation)
         engine?.loopChanged(transport)
 
         projectPath = nil
@@ -2964,6 +4455,11 @@ public final class ProjectStore {
         tracks = runtime.tracks
         transport = runtime.transport
         masterVolume = runtime.masterVolume
+        masterEffects = runtime.masterEffects
+        masterAutomation = runtime.masterAutomation
+        // Resume the persisted map revision (m12-d) so a reopened non-trivial
+        // map keeps a stable, monotonic identity; trivial projects load 0.
+        mapRevision = document.tempoMapRevision ?? 0
         // Groove palette (M5 iii-g) restores directly — no media to resolve.
         grooveTemplates = document.grooveTemplates ?? []
         // Markers (m11-c) restore directly — no media; re-sort so a hand-edited
@@ -2975,19 +4471,33 @@ public final class ProjectStore {
         lastRecordingError = nil
         // Stale pending fixes point into the previous project (M6 v-b).
         pendingClipFixes = [:]
+        // Engine notices describe the PREVIOUS session's playback (m15-e).
+        engineNotices = []
+        engineNoticeSequence = 0
         resetRecordingScratch()
         // History belongs to the previous session — the newly loaded one starts
         // fresh (undo must never reach across a load boundary).
         journal.clear()
 
+        // m13-a (A1): a project boundary retires the engine's whole graph —
+        // a once-rendered engine rebuilds from the opened model inside the
+        // tracksDidChange below instead of tearing nodes down one by one.
+        engine?.projectWillReplace()
         engine?.tracksDidChange(tracks)
         engine?.masterVolumeChanged(masterVolume)
+        engine?.masterEffectsChanged(masterEffects)
+        engine?.masterAutomationChanged(masterAutomation)
         engine?.loopChanged(transport)
 
         projectPath = bundleURL.path
         isDirty = false
         // Opening another project supersedes any crash-recovery snapshot (crash-b).
         invalidateCrashRecovery()
+        // m16-c: AFTER the clear above (and after tracksDidChange, whose graph
+        // build may already have posted the same code for the same clips —
+        // coalesced by construction), the opened session's missing-media facts
+        // land in the ring so the snapshot agrees with the warnings returned.
+        echoMissingMediaNotices()
         return runtime.warnings
     }
 
@@ -3084,7 +4594,10 @@ public final class ProjectStore {
             masterVolume: masterVolume,
             mediaRefs: refs,
             grooveTemplates: grooveTemplates,
-            markers: markers
+            markers: markers,
+            tempoMapRevision: mapRevision,
+            masterEffects: masterEffects,
+            masterAutomation: masterAutomation
         )
     }
 
@@ -3211,6 +4724,10 @@ public final class ProjectStore {
         tracks = runtime.tracks
         transport = runtime.transport
         masterVolume = runtime.masterVolume
+        masterEffects = runtime.masterEffects
+        masterAutomation = runtime.masterAutomation
+        // Resume the persisted map revision (m12-d), like the open path.
+        mapRevision = document.tempoMapRevision ?? 0
         grooveTemplates = document.grooveTemplates ?? []
         markers = Self.markersSortedByBeat(document.markers ?? [])
 
@@ -3218,15 +4735,27 @@ public final class ProjectStore {
         trackMeters = [:]
         lastRecordingError = nil
         pendingClipFixes = [:]
+        // Engine notices describe the PREVIOUS session's playback (m15-e;
+        // m16-c extends the clear law to recover — a recover is a session
+        // replacement like open, and the echo below re-posts what still holds).
+        engineNotices = []
+        engineNoticeSequence = 0
         resetRecordingScratch()
         journal.clear()
 
         engine?.tracksDidChange(tracks)
         engine?.masterVolumeChanged(masterVolume)
+        engine?.masterEffectsChanged(masterEffects)
+        engine?.masterAutomationChanged(masterAutomation)
         engine?.loopChanged(transport)
 
         projectPath = sourcePath
         isDirty = true
+        // m16-c: clear-then-echo, the open-path ordering — recovery bundles
+        // record ABSOLUTE media refs, which resolveMedia accepts without a
+        // warning, so this echo is the ONLY open-time honesty the recovered
+        // session gets (the audit §2-B3 recipe).
+        echoMissingMediaNotices()
         return runtime.warnings
     }
 
@@ -3357,8 +4886,12 @@ public final class ProjectStore {
             transport: transport,
             tracks: tracks.map(Self.snapshotResolved),
             masterVolume: masterVolume,
+            masterEffects: masterEffects,
+            masterAutomation: masterAutomation,
             grooveTemplates: grooveTemplates,
             markers: markers,
+            tempoMap: transport.tempoMapOverride?.segments,
+            meterChanges: transport.meterMapOverride?.changes,
             meters: SessionMeters(
                 master: masterMeter,
                 tracks: Dictionary(uniqueKeysWithValues: trackMeters.map { ($0.key.uuidString, $0.value) })
@@ -3370,7 +4903,8 @@ public final class ProjectStore {
             undoLabel: journal.undoLabel,
             redoLabel: journal.redoLabel,
             midiInputs: engine?.availableMIDIInputs(),
-            midiEventCount: engine?.midiEventCount()
+            midiEventCount: engine?.midiEventCount(),
+            engineNotices: engineNotices
         )
     }
 

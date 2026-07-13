@@ -199,6 +199,35 @@ struct CompFlattenerTests {
         #expect(members.count == 2)
         #expect(members.allSatisfy { $0.fadeInBeats == 0 && $0.fadeOutBeats == 0 })
     }
+
+    @Test("D1 review fix: a lane clip's gain envelope is WINDOWED into each flattened member (not dropped)")
+    func gainEnvelopeSurvivesFlatten() {
+        // 8-beat lane clip with a V-shaped envelope: 0 dB → −12 dB @ beat 4 → 0 dB.
+        var laneClip = Clip(name: "A", startBeat: 0, lengthBeats: 8,
+                            audioFileURL: URL(fileURLWithPath: "/a.wav"),
+                            gainEnvelope: [ClipGainPoint(beat: 0, gainDb: 0),
+                                           ClipGainPoint(beat: 4, gainDb: -12),
+                                           ClipGainPoint(beat: 8, gainDb: 0)])
+        laneClip.fadeInBeats = 0
+        let lane = TakeLane(name: "A", clip: laneClip)
+        var group = TakeGroup(id: UUID(), name: "G", lanes: [lane])
+        // A single interior segment [2,6] → member re-anchored at delta 2, length 4.
+        group.comp = [CompSegment(laneID: lane.id, startBeat: 2, endBeat: 6)]
+
+        let members = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120))
+        #expect(members.count == 1)
+        let env = members[0].gainEnvelope
+        // Windowed to [2,6] → clip-relative [0,4]: edge values interpolated at the
+        // seam (−6 dB at both ends), the interior −12 dB point rebased to beat 2.
+        #expect(env.count == 3)
+        #expect(env.first.map { abs($0.beat - 0) < 1e-9 && abs($0.gainDb + 6) < 1e-9 } == true)
+        #expect(env.contains { abs($0.beat - 2) < 1e-9 && abs($0.gainDb + 12) < 1e-9 })
+        #expect(env.last.map { abs($0.beat - 4) < 1e-9 && abs($0.gainDb + 6) < 1e-9 } == true)
+        // The bug this pins: BEFORE the fix, flatten copied gainDb/stretch/pitch
+        // but omitted gainEnvelope → members defaulted to [] and the envelope was
+        // silently muted on every comp/second-take/ClipFix materialization.
+        #expect(!env.isEmpty, "a materialized take member must inherit the lane's gain envelope")
+    }
 }
 
 // MARK: - Model

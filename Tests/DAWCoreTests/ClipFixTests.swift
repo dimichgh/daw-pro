@@ -72,12 +72,16 @@ final class FakeRenderEngine: AudioEngineControlling {
     func stopRecording() {}
 
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
         AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
     }
 
     func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         renderCalls.append(RenderCall(tracks: tracks, fromBeat: fromBeat,
@@ -630,6 +634,29 @@ struct ClipFixStoreTests {
         (store, _, _, _, jobID) = try await submittedStore()
         store.tracks[0].clips.removeAll()
         await expectStale(store, jobID)
+    }
+
+    @Test("D2 review fix: a gain-envelope edit mid-ClipFix-job rejects with clipFixStale (the bounce baked the OLD envelope)")
+    func staleGainEnvelopeEditMidJob() async throws {
+        let wav = try writeTinyWAV()
+        let clip = audioClip("Vox", start: 0, length: 100)
+        let track = Track(name: "Vox", kind: .audio, clips: [clip])
+        let source = FakeClipFixSource()
+        let engine = FakeRenderEngine()
+        let store = makeStore(source: source, engine: engine, tracks: [track])
+        let sub = try await store.fixClipRegion(trackId: track.id, clipId: clip.id, startBeat: 40, endBeat: 50)
+        withExtendedLifetime(engine) {}  // engine is weak on the store — pin it through the submit
+        await source.setFetchResult(.success(GeneratedSongResult(state: "succeeded", audioPath: wav.path)))
+
+        // The submit-time dry copy froze the (empty) envelope into the bounce, so
+        // adding an envelope now makes the bounced material stale — exactly like a
+        // gainDb edit. BEFORE the fix, the fingerprint ignored gainEnvelope and
+        // this slipped through as a "pure move", silently landing a fix rendered
+        // against the wrong gain curve.
+        _ = try store.setClipGainEnvelope(trackId: track.id, clipId: clip.id,
+                                          points: [ClipGainPoint(beat: 0, gainDb: 0),
+                                                   ClipGainPoint(beat: 100, gainDb: -6)])
+        await #expect(throws: ProjectError.self) { _ = try await store.importClipFix(jobID: sub.jobID) }
     }
 
     @Test("stale: a shrunk group range (non-uniform) rejects with clipFixStale")

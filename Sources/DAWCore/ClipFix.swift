@@ -119,6 +119,7 @@ public struct ClipGeometryFingerprint: Sendable, Equatable {
     public var stretchRatio: Double
     public var pitchShiftSemitones: Double
     public var gainDb: Double
+    public var gainEnvelope: [ClipGainPoint]
 
     public init(of clip: Clip) {
         self.startBeat = clip.startBeat
@@ -127,6 +128,7 @@ public struct ClipGeometryFingerprint: Sendable, Equatable {
         self.stretchRatio = clip.stretchRatio
         self.pitchShiftSemitones = clip.pitchShiftSemitones
         self.gainDb = clip.gainDb
+        self.gainEnvelope = clip.gainEnvelope
     }
 
     /// The `startBeat` delta from `self` to `current` when every OTHER field is
@@ -138,7 +140,10 @@ public struct ClipGeometryFingerprint: Sendable, Equatable {
               startOffsetSeconds == current.startOffsetSeconds,
               stretchRatio == current.stretchRatio,
               pitchShiftSemitones == current.pitchShiftSemitones,
-              gainDb == current.gainDb
+              gainDb == current.gainDb,
+              // The bounce bakes the envelope in (ProjectStore+ClipFix.swift:80),
+              // so an envelope edit mid-job is exactly as stale as a gainDb edit.
+              gainEnvelope == current.gainEnvelope
         else { return nil }
         return current.startBeat - startBeat
     }
@@ -163,11 +168,15 @@ public struct PendingClipFix: Sendable, Equatable, Identifiable {
     public var windowLengthBeats: Double
     public var regionStartBeat: Double
     public var regionEndBeat: Double
-    /// Tempo map frozen at submit — a mid-job change breaks the bounced
-    /// material's beats↔seconds mapping (no safe rebase). m12-b freezes the
-    /// whole map VALUE; Phase C replaces the equality check with the design's
-    /// `mapRevision` integer once real map mutations exist (design row 29).
-    public var tempoMap: TempoMap
+    /// Tempo/meter map REVISION frozen at submit (m12-d, design row 29) — a
+    /// mid-job map change breaks the bounced material's beats↔seconds mapping
+    /// (no safe rebase). The staleness check is now this one integer instead of
+    /// a whole-map equality: `store.mapRevision` climbs on every map mutation
+    /// (undo/redo included), so import rejects with `clipFixStale` whenever it
+    /// no longer matches. `regionBPM` is the tempo at the region start frozen at
+    /// submit, kept only to render the "was → now BPM" teaching error.
+    public var mapRevision: UInt64
+    public var regionBPM: Double
     public var submittedAt: Date
 
     public init(
@@ -178,7 +187,8 @@ public struct PendingClipFix: Sendable, Equatable, Identifiable {
         windowLengthBeats: Double,
         regionStartBeat: Double,
         regionEndBeat: Double,
-        tempoMap: TempoMap,
+        mapRevision: UInt64,
+        regionBPM: Double,
         submittedAt: Date
     ) {
         self.jobID = jobID
@@ -188,7 +198,8 @@ public struct PendingClipFix: Sendable, Equatable, Identifiable {
         self.windowLengthBeats = windowLengthBeats
         self.regionStartBeat = regionStartBeat
         self.regionEndBeat = regionEndBeat
-        self.tempoMap = tempoMap
+        self.mapRevision = mapRevision
+        self.regionBPM = regionBPM
         self.submittedAt = submittedAt
     }
 }

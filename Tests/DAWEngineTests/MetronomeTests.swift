@@ -84,7 +84,8 @@ struct MetronomeTests {
     func threeFourDownbeats() throws {
         let audio = try OfflineRenderer().render(
             tracks: [], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 2.5,
-            metronomeEnabled: true, beatsPerBar: 3
+            metronomeEnabled: true,
+            meterMap: MeterMap(constant: TimeSignature(beatsPerBar: 3, beatUnit: 4))
         )
         let left = audio.channelData[0]
 
@@ -125,23 +126,45 @@ struct MetronomeTests {
 
     /// Count-in arithmetic (pure): the delayed-anchor gap and click count the
     /// live engine derives in startPlayers. The full count-in path (delayed
-    /// writer anchor + audible pre-roll) is covered by live E2E.
-    @Test("countInPlan: delay = bars × beatsPerBar × 60/tempo, one click per beat")
-    func countInPlan() {
-        let two44 = Metronome.countInPlan(countInBars: 2, beatsPerBar: 4, tempoMap: TempoMap(constantBPM: 120), atBeat: 0)
+    /// writer anchor + audible pre-roll) is covered by live E2E. m15-a: bar
+    /// length comes from the METER MAP at the record beat (the same LOOKUP
+    /// policy as the tempo — count-in precedes the record beat in wall time;
+    /// the beat domain does not extend backward across it).
+    @Test("countInPlan: delay = bars × beatsPerBar(at record beat) × 60/tempo, one click per beat")
+    func countInPlan() throws {
+        let const44 = MeterMap(constant: TimeSignature())
+        let two44 = Metronome.countInPlan(countInBars: 2, meterMap: const44, tempoMap: TempoMap(constantBPM: 120), atBeat: 0)
         #expect(two44.delaySeconds == 4.0)  // 8 beats × 0.5 s
         #expect(two44.clickBeats == 8)
 
-        let one34 = Metronome.countInPlan(countInBars: 1, beatsPerBar: 3, tempoMap: TempoMap(constantBPM: 90), atBeat: 0)
+        // In 3/4, one count-in bar is THREE beats, not four (m15-a gate 4).
+        let const34 = MeterMap(constant: TimeSignature(beatsPerBar: 3, beatUnit: 4))
+        let one34 = Metronome.countInPlan(countInBars: 1, meterMap: const34, tempoMap: TempoMap(constantBPM: 90), atBeat: 0)
         #expect(abs(one34.delaySeconds - 2.0) < 1e-12)  // 3 beats × ⅔ s
         #expect(one34.clickBeats == 3)
 
-        let zero = Metronome.countInPlan(countInBars: 0, beatsPerBar: 4, tempoMap: TempoMap(constantBPM: 120), atBeat: 0)
+        // m15-a: a MULTI-METER map anchors to the meter AT the record beat —
+        // the audit scenario (4/4 → 3/4 at beat 8). Recording at beat 9 sits
+        // in the 3/4 region: one bar = 3 clicks; at beat 0 (4/4): 4 clicks;
+        // beat 8 exactly (right-continuous lookup): already 3/4.
+        let audit = try MeterMap(changes: [
+            MeterMap.Change(startBeat: 0, beatsPerBar: 4, beatUnit: 4),
+            MeterMap.Change(startBeat: 8, beatsPerBar: 3, beatUnit: 4),
+        ])
+        let at9 = Metronome.countInPlan(countInBars: 1, meterMap: audit, tempoMap: TempoMap(constantBPM: 120), atBeat: 9)
+        #expect(at9.clickBeats == 3)
+        #expect(at9.delaySeconds == 1.5)  // 3 beats × 0.5 s
+        let at0 = Metronome.countInPlan(countInBars: 1, meterMap: audit, tempoMap: TempoMap(constantBPM: 120), atBeat: 0)
+        #expect(at0.clickBeats == 4)
+        let at8 = Metronome.countInPlan(countInBars: 1, meterMap: audit, tempoMap: TempoMap(constantBPM: 120), atBeat: 8)
+        #expect(at8.clickBeats == 3)
+
+        let zero = Metronome.countInPlan(countInBars: 0, meterMap: const44, tempoMap: TempoMap(constantBPM: 120), atBeat: 0)
         #expect(zero.delaySeconds == 0)
         #expect(zero.clickBeats == 0)
 
         // Defensive: nonsense inputs never produce a negative delay.
-        let negative = Metronome.countInPlan(countInBars: -2, beatsPerBar: 4, tempoMap: TempoMap(constantBPM: 120), atBeat: 0)
+        let negative = Metronome.countInPlan(countInBars: -2, meterMap: const44, tempoMap: TempoMap(constantBPM: 120), atBeat: 0)
         #expect(negative.delaySeconds == 0)
         #expect(negative.clickBeats == 0)
     }

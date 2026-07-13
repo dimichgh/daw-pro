@@ -234,4 +234,23 @@ public enum AutomationLaneSelection {
     public static func hasActiveLane(_ track: Track) -> Bool {
         track.automation.contains { $0.isEnabled && !$0.points.isEmpty }
     }
+
+    // MARK: - Master volume automation (m15-c)
+
+    /// The master VOLUME lane in a `masterAutomation` array, or nil when the
+    /// mix has no master lane yet. v1 keeps AT MOST one master lane (volume — the
+    /// only master target the store accepts), so this single lookup is the whole
+    /// master-automation surface the mixer strip drives. Shared by the strip's
+    /// create-vs-edit branch and its enable/remove controls so they never disagree
+    /// about which lane is live.
+    public static func masterVolumeLane(in lanes: [AutomationLane]) -> AutomationLane? {
+        lanes.first { $0.target == .volume }
+    }
+
+    /// True when the master has an enabled, NON-empty volume lane — the state the
+    /// master strip's automation affordance glows for (mirrors `hasActiveLane` for
+    /// a track: an empty or disabled lane is inert, so it earns no glow).
+    public static func hasActiveMasterLane(_ lanes: [AutomationLane]) -> Bool {
+        lanes.contains { $0.target == .volume && $0.isEnabled && !$0.points.isEmpty }
+    }
 }

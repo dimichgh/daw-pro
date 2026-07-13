@@ -49,6 +49,16 @@ struct EditState: Equatable {
     /// move. Defaults to `[]` so entries captured before this field existed still
     /// compare equal.
     var markers: [Marker] = []
+    /// The MASTER insert chain (m13-d). Additive — undo covers every master
+    /// chain mutation; the restore funnel pushes `masterEffectsChanged` when
+    /// it moved (the masterVolume twin). Defaults to `[]` so entries captured
+    /// before this field existed still compare equal.
+    var masterEffects: [EffectDescriptor] = []
+    /// MASTER volume automation (m15-c). Additive — undo covers every master
+    /// lane mutation; the restore funnel pushes `masterAutomationChanged` when
+    /// it moved (the masterEffects twin). Defaults to `[]` so entries captured
+    /// before this field existed still compare equal.
+    var masterAutomation: [AutomationLane] = []
 }
 
 /// One undo (or redo) record: the state captured BEFORE an edit, a

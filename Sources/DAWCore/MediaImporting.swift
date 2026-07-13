@@ -77,6 +77,9 @@ public enum ProjectError: Error, LocalizedError {
     case audioQuantizeNoTransients(UUID)
     // Audio quantize under a multi-segment tempo map (m12-c).
     case audioQuantizeTempoBoundaryUnsupported(UUID)
+    // Tempo map (m12-d): transport.setTempo refuses on a multi-segment map,
+    // pointing the caller at tempo.setMap (silently flattening is destructive).
+    case tempoMapMultiSegment
     // Groove templates (M5 iii-g).
     case grooveNotFound(UUID)
     // Session markers (m11-c).
@@ -102,6 +105,30 @@ public enum ProjectError: Error, LocalizedError {
     // Arrange-level crossfade (m11-d): messages built at throw time (field-named).
     case crossfadeNotEligible(String)   // clips not same-track / not audio / gap / over-overlap
     case crossfadeNeedsMaterial(String) // names WHICH clip/side lacks source material to extend
+    // Sidechain routing (m12-f, S-1): teaching errors, messages built at
+    // throw time where they depend on session state (names, paths).
+    case sidechainUnsupportedEffect(EffectDescriptor.Kind)
+    case sidechainUnsupportedTrack(TrackKind)   // keyed strip must own a ChainHostAU
+    case sidechainUnsupportedSource(String)     // v1: bus key sources deferred (message names the bus)
+    case sidechainWouldCreateCycle(String)      // names the existing feedback path
+    case sidechainOneSourcePerStrip(String)     // names the already-keyed effect
+    // Master insert chain (m13-d, design D4a): built-in effects only in v1.
+    case masterChainBuiltInOnly
+    // Master insert chain (m13-d, design §4): the master chain cannot host a
+    // sidechain-keyed effect (the wire's `trackId:"master"` sentinel on
+    // `fx.setSidechain` maps here). The master output likewise cannot be a KEY
+    // SOURCE, but that rejection is wire-level (Commands.swift) since the store
+    // never receives "master" as a source id.
+    case sidechainMasterUnsupported
+    // Master volume automation (m15-c): the `trackId:"master"` sentinel on the
+    // automation verbs carries the VOLUME target only in v1 — every other
+    // target names where it does live.
+    case masterAutomationVolumeOnly
+    // Arrangement bar edits (m15-d, arrange.insertBars/deleteBars): field-named
+    // validation and policy refusals (a take group in the shift range, a
+    // meter-boundary-crossing delete that can't splice) built at throw time —
+    // the invalidClipEdit precedent for a case carrying a ready-to-show string.
+    case invalidArrangeEdit(String)
 
     public var errorDescription: String? {
         switch self {
@@ -191,8 +218,12 @@ public enum ProjectError: Error, LocalizedError {
             return "audio engine not available"
         case .nothingToRender:
             // Exact wording is contract: the control protocol and MCP tool
-            // surface this string verbatim.
-            return "nothing to render — project has no audio clips"
+            // surface this string verbatim. Names what is actually empty — the
+            // render range holds no clips of ANY kind (m16-d/F4: the old copy
+            // falsely claimed "no audio clips" and dead-ended MIDI-only songs);
+            // teaches the two ways forward.
+            return "nothing to render — no clips found in the render range; "
+                + "add clips or pass an explicit durationSeconds"
         case .noArmedTracks:
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "no armed audio or instrument tracks — arm a track (track.setArm) before recording"
@@ -273,6 +304,11 @@ public enum ProjectError: Error, LocalizedError {
             // verbatim). m12-c cut: slice-and-nudge assumes one constant
             // tempo across the clip (AudioQuantizePlan.compute).
             return "clip \(id.uuidString) spans a tempo change — audio quantize needs one constant tempo across the clip; split the clip at the tempo boundary (clip.split) and quantize each part"
+        case .tempoMapMultiSegment:
+            // Exact wording is contract (control protocol + MCP surface it
+            // verbatim). transport.setTempo is the single-tempo fast path; a
+            // project with a multi-segment map must edit it via tempo.setMap.
+            return "this project has a multi-segment tempo map — use tempo.setMap to edit it (transport.setTempo sets a single project-wide tempo and would flatten the map)"
         case .grooveNotFound(let id):
             // Exact wording is contract (control protocol + MCP surface it
             // verbatim). Groove ids come from groove.list / groove.extract.
@@ -333,6 +369,48 @@ public enum ProjectError: Error, LocalizedError {
             // The store builds the message at throw time (which clip and which
             // edge has no source audio left to extend into the overlap);
             // surfaced verbatim — the invalidClipEdit precedent.
+            return message
+        case .sidechainUnsupportedEffect(let kind):
+            // Exact wording is contract (m12-g surfaces it verbatim on the wire).
+            return "a \(kind.rawValue) effect cannot take a sidechain key — only compressor and gate support sidechain in v1 (hosted Audio Unit sidechain inputs are a later phase)"
+        case .sidechainUnsupportedTrack(let kind):
+            // Exact wording is contract. Instrument strips walk their insert
+            // chain inside the instrument source node — no input bus exists to
+            // receive a key edge (design-m11f-sidechain §2), so the teaching
+            // path is: route the instrument into a bus and key the bus effect.
+            return "effects on an \(kind.rawValue) track cannot take a sidechain key in v1 — route the track to a bus and put the keyed compressor/gate on the bus instead"
+        case .sidechainUnsupportedSource(let message):
+            // Built at throw time (names the offending bus) — bus key sources
+            // are deferred in v1 because a bus output is hardwired to master,
+            // so stem passes could not carry one silently (Σ stems ≡ mixdown
+            // is release-blocking, design §10 condition 3).
+            return message
+        case .sidechainWouldCreateCycle(let message):
+            // Built at throw time — names the existing signal path that the
+            // new key edge would close into a feedback loop.
+            return message
+        case .sidechainOneSourcePerStrip(let message):
+            // Built at throw time — names the effect already keyed on this
+            // strip (one key input per strip in v1, design §5).
+            return message
+        case .masterChainBuiltInOnly:
+            // Exact wording is contract (design-m13d §4; control protocol +
+            // MCP surface it verbatim, gate-checked in C6).
+            return "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus"
+        case .sidechainMasterUnsupported:
+            // Exact wording is contract (design-m13d §4; surfaced verbatim over
+            // the wire on `fx.setSidechain {trackId:"master"}`, gate-checked in
+            // C6).
+            return "the master chain cannot host a sidechain-keyed effect — key an effect on a track or bus instead"
+        case .masterAutomationVolumeOnly:
+            // Exact wording is contract (m15-c; surfaced verbatim over the wire
+            // on `automation.addLane {trackId:"master"}` for any non-volume
+            // target).
+            return "master automation supports the volume target only in v1 — pan, sendLevel, and effectParam lanes live on tracks (pass a track UUID)"
+        case .invalidArrangeEdit(let message):
+            // Built at throw time (which policy blocked the bar edit, naming the
+            // offending group / meter boundary); surfaced verbatim — the
+            // invalidClipEdit precedent for a ready-to-show string.
             return message
         }
     }

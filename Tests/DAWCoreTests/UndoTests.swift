@@ -107,7 +107,7 @@ struct UndoRoundTripTests {
     func removeTrack() throws {
         let store = ProjectStore()
         let track = store.addTrack(name: "Snare")
-        store.removeTrack(id: track.id)
+        try store.removeTrack(id: track.id)
         #expect(store.undoLabel == "Remove Track 'Snare'")
         #expect(store.tracks.isEmpty)
         try store.undo()

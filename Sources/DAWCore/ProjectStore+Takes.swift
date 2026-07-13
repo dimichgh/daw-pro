@@ -227,8 +227,11 @@ extension ProjectStore {
     /// mutates `tracks` directly (no `performEdit` of its own; nesting one
     /// would split the recording into two undo entries) and shares the
     /// `rebuildCompMembers` seam with the explicit `take.*` commands. AUDIO
-    /// ONLY in v0: MIDI re-recording is unaffected (explicit `take.group`
-    /// still works on MIDI clips). Loop-cycle recording is out of scope.
+    /// ONLY: non-loop MIDI re-recording is unaffected (explicit `take.group`
+    /// still works on MIDI clips). Loop-cycle recording (m15-b) fans its
+    /// audio slices through here IN CYCLE ORDER — slice 2 overlapping slice 1
+    /// is exactly case 2, slices 3..N are case 1 — and lands its MIDI cycle
+    /// lanes via `landLoopMIDITakeLanes` below.
     ///
     /// Three cases, checked in order:
     /// 1. `newClip`'s range overlaps an EXISTING take group's range on this
@@ -285,6 +288,45 @@ extension ProjectStore {
         tracks[t].takeGroups.append(group)
         rebuildCompMembers(trackIndex: t, groupIndex: tracks[t].takeGroups.count - 1)
         return true
+    }
+
+    /// Lands a loop-cycle MIDI take (m15-b, design-m15b §4): N ≥ 2 cycle-lane
+    /// clips as ONE all-MIDI take group — the small explicit lander (all-MIDI
+    /// groups are legal; `groupTakes` rejects only MIXED). The non-loop v0
+    /// MIDI stacking policy is untouched: only loop takes route here. Mirrors
+    /// `autoGroupRecordedTake`'s case 1 for re-records (lanes append to an
+    /// existing overlapping group — the comping workflow), else forms a new
+    /// group. Comp := the newest lane across the full range (newest wins).
+    /// MUST run inside a `performEdit` body (no nested edit — a loop take
+    /// stays ONE undo step).
+    func landLoopMIDITakeLanes(trackIndex t: Int, laneClips: [Clip]) {
+        guard !laneClips.isEmpty else { return }
+        let newLanes = laneClips.map { TakeLane(name: $0.name, clip: $0) }
+        let newStart = laneClips.map(\.startBeat).min() ?? 0
+        let newEnd = laneClips.map { $0.startBeat + $0.lengthBeats }.max() ?? newStart
+
+        // Case 1 analog: the take overlaps an existing group's range → append
+        // every cycle lane; comp := the newest appended lane.
+        if let g = tracks[t].takeGroups.firstIndex(where: { group in
+            let r = group.rangeBeats
+            return newStart < r.upperBound && newEnd > r.lowerBound
+        }) {
+            tracks[t].takeGroups[g].lanes.append(contentsOf: newLanes)
+            let range = tracks[t].takeGroups[g].rangeBeats
+            tracks[t].takeGroups[g].comp = [
+                CompSegment(laneID: newLanes[newLanes.count - 1].id,
+                            startBeat: range.lowerBound, endBeat: range.upperBound),
+            ]
+            rebuildCompMembers(trackIndex: t, groupIndex: g)
+            return
+        }
+
+        var group = TakeGroup(id: UUID(), name: "\(tracks[t].name) Takes", lanes: newLanes)
+        let range = group.rangeBeats
+        group.comp = [CompSegment(laneID: newLanes[newLanes.count - 1].id,
+                                  startBeat: range.lowerBound, endBeat: range.upperBound)]
+        tracks[t].takeGroups.append(group)
+        rebuildCompMembers(trackIndex: t, groupIndex: tracks[t].takeGroups.count - 1)
     }
 
     /// Sets the join crossfade width (seconds, clamped to
