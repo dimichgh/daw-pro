@@ -222,4 +222,231 @@ struct EngineRebuildTests {
         #expect(engine.hostedInstrumentAudioUnit(forTrack: keys.id) === instrumentBefore)
         engine.shutdown()
     }
+
+    // MARK: - m16-h: the deep post-start reconfig defect
+    // (docs/research/design-m16h-reconfig.md — C7 pins a–d.)
+    // A strip sandwich born on a RUNNING engine hosts permanently
+    // unstartable players (AVFAudio's running-engine reconfig does not
+    // propagate player-start eligibility across a ≥2-deep post-start
+    // subtree). Leg 2: strip birth on a running once-rendered engine is
+    // announce-class. Leg 1: `rebuildEngine` defers `engine.start()` unless
+    // a resume is pending or an armed instrument needs live-thru.
+
+    /// 1 s of low-amplitude DC as a stereo Float32 WAV in a fresh temp dir
+    /// (the ExceptionArmorTests fixture, verbatim).
+    private func wavFixture() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("daw-pro-m16h-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("tone.wav")
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 48_000.0,
+            AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings,
+                                   commonFormat: .pcmFormatFloat32, interleaved: false)
+        let format = try #require(AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                                sampleRate: 48_000, channels: 2,
+                                                interleaved: false))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format,
+                                                   frameCapacity: 48_000))
+        let channels = try #require(buffer.floatChannelData)
+        for frame in 0..<48_000 {
+            channels[0][frame] = 0.05
+            channels[1][frame] = 0.05
+        }
+        buffer.frameLength = 48_000
+        try file.write(from: buffer)
+        return url
+    }
+
+    @Test("m16-h C7a: AUDIO strip birth on a running once-rendered engine announces and aborts BEFORE any node of the sandwich attaches")
+    func audioStripBirthOnRunningOnceRenderedEngineAborts() throws {
+        let (engine, graph) = try makeManualEngine()
+        var announces = 0
+        graph.willMutateRoutingTopology = { announces += 1 }
+        let keeper = Track(name: "A", kind: .audio)
+        #expect(graph.reconcile(tracks: [keeper]))
+        try engine.start()
+        graph.engineHasRun = true  // exactly what AudioEngine.prepare() sets
+        try renderOneBlock(engine)
+
+        let attachedBefore = engine.attachedNodes.count
+        #expect(graph.reconcile(tracks: [keeper, Track(name: "B", kind: .audio)]))
+
+        #expect(graph.needsEngineRebuild)
+        #expect(announces == 1)  // the birth announced (quiescence hook fired)
+        // Announce-before-attach: not one node of the new sandwich exists on
+        // the doomed engine — it is discarded wholesale and the fresh
+        // engine cold-builds the strip start-era.
+        #expect(engine.attachedNodes.count == attachedBefore)
+        #expect(graph.trackIDs.count == 1)
+        engine.stop()
+    }
+
+    @Test("m16-h C7a: BUS strip birth on a running once-rendered engine announces and aborts before any attach")
+    func busBirthOnRunningOnceRenderedEngineAborts() throws {
+        let (engine, graph) = try makeManualEngine()
+        var announces = 0
+        graph.willMutateRoutingTopology = { announces += 1 }
+        let keeper = Track(name: "A", kind: .audio)
+        #expect(graph.reconcile(tracks: [keeper]))
+        try engine.start()
+        graph.engineHasRun = true
+        try renderOneBlock(engine)
+
+        let attachedBefore = engine.attachedNodes.count
+        #expect(graph.reconcile(tracks: [keeper, Track(name: "FX", kind: .bus)]))
+
+        #expect(graph.needsEngineRebuild)
+        #expect(announces == 1)
+        #expect(engine.attachedNodes.count == attachedBefore)
+        #expect(graph.trackIDs.count == 1)
+        engine.stop()
+    }
+
+    @Test("m16-h C7b: never-run engine strip birth attaches directly (the cold build order, unchanged)")
+    func neverRunEngineStripBirthAttachesDirectly() throws {
+        let (engine, graph) = try makeManualEngine()
+        var announces = 0
+        graph.willMutateRoutingTopology = { announces += 1 }
+        #expect(graph.reconcile(tracks: [Track(name: "A", kind: .audio)]))
+        let attachedAfterFirst = engine.attachedNodes.count
+        #expect(graph.reconcile(tracks: [Track(name: "A", kind: .audio),
+                                         Track(name: "B", kind: .audio)]))
+
+        #expect(!graph.needsEngineRebuild)
+        #expect(announces == 0)  // trivial cold attaches never announce
+        // The second strip sandwich (sumMixer + chainHost + mixer) attached.
+        #expect(engine.attachedNodes.count == attachedAfterFirst + 3)
+        #expect(graph.trackIDs.count == 2)
+    }
+
+    @Test("m16-h C7d: a clip added to an EXISTING (start-era) strip while running flags NO rebuild and never announces")
+    func clipOntoExistingStripWhileRunningFlagsNoRebuild() throws {
+        let (engine, graph) = try makeManualEngine()
+        var announces = 0
+        graph.willMutateRoutingTopology = { announces += 1 }
+        let trackID = UUID()
+        #expect(graph.reconcile(tracks: [Track(id: trackID, name: "A", kind: .audio)]))
+        try engine.start()
+        graph.engineHasRun = true
+        try renderOneBlock(engine)
+
+        let attachedBefore = engine.attachedNodes.count
+        let clip = Clip(name: "c", startBeat: 0, lengthBeats: 2,
+                        audioFileURL: try wavFixture())
+        // Signature changed (caller restarts players) but the daily
+        // import-onto-existing-track flow stays zero-cost: a depth-1 player
+        // attach onto a start-era strip is clean (design-m16h §2-E9).
+        #expect(graph.reconcile(tracks: [
+            Track(id: trackID, name: "A", kind: .audio, clips: [clip]),
+        ]))
+        #expect(!graph.needsEngineRebuild)
+        #expect(announces == 0)
+        #expect(engine.attachedNodes.count == attachedBefore + 1)  // the player
+        engine.stop()
+    }
+
+    @Test("m16-h C7c: a project-boundary rebuild with no resume and no armed instrument leaves the engine STOPPED and NEVER-RUN; later strip birth attaches cold, once per storm")
+    func deferredRebuildLeavesEngineStoppedAndNeverRun() {
+        let engine = AudioEngine()
+        engine.tracksDidChange([Track(name: "A", kind: .audio)])
+        engine.graph.engineHasRun = true  // exactly what prepare() sets
+        let graphBefore = ObjectIdentifier(engine.graph)
+
+        engine.projectWillReplace()
+        engine.tracksDidChange([Track(name: "B", kind: .audio)])
+
+        // The engine was replaced (A1) but Leg 1 DEFERRED the start: the
+        // fresh engine is stopped and never-run — the fresh-launch cold
+        // regime — so everything added next attaches before the first start.
+        #expect(ObjectIdentifier(engine.graph) != graphBefore)
+        #expect(!engine.isRunning)
+        #expect(!engine.graph.engineHasRun)
+        #expect(!engine.graph.needsEngineRebuild)
+
+        // A post-boundary storm costs NOTHING further: more strips attach
+        // directly to the same never-run engine (no announce, no rebuild).
+        let graphAfterBoundary = ObjectIdentifier(engine.graph)
+        engine.tracksDidChange([Track(name: "B", kind: .audio),
+                                Track(name: "C", kind: .audio),
+                                Track(name: "D", kind: .bus)])
+        #expect(ObjectIdentifier(engine.graph) == graphAfterBoundary)
+        #expect(!engine.isRunning)
+        #expect(!engine.graph.engineHasRun)
+        #expect(!engine.graph.needsEngineRebuild)
+        #expect(engine.graph.trackIDs.count == 3)
+        engine.shutdown()
+    }
+
+    @Test("m16-h C7c: a rebuild with an ARMED instrument track starts the engine (live-thru must keep sounding)")
+    func rebuildWithArmedInstrumentStartsEngine() throws {
+        let engine = AudioEngine()
+        do {
+            try engine.prepare()
+        } catch {
+            // Headless machine without an output device — the deferred-start
+            // half is pinned above; the live half runs where hardware exists
+            // (the liveSmoke idiom).
+            return
+        }
+        let armed = Track(name: "Keys", kind: .instrument, isArmed: true,
+                          instrument: InstrumentDescriptor(kind: .testTone))
+        engine.projectWillReplace()  // prepare() set engineHasRun — A1 fires
+        engine.tracksDidChange([armed])
+
+        #expect(engine.isRunning)
+        #expect(engine.graph.engineHasRun)
+        #expect(!engine.graph.needsEngineRebuild)
+        engine.shutdown()
+    }
+
+    @Test("m16-h C7c + Leg 2 live: mid-play strip birth rebuilds, RESUMES playback, and the engine runs")
+    func midPlayStripBirthRebuildsAndResumes() async throws {
+        let engine = AudioEngine()
+        do {
+            try engine.prepare()
+        } catch {
+            return  // headless machine — liveSmoke idiom
+        }
+        let keys = Track(name: "Keys", kind: .instrument,
+                         clips: [Clip(name: "midi", startBeat: 0, lengthBeats: 64, notes: [
+                             MIDINote(pitch: 69, velocity: 100, startBeat: 0, lengthBeats: 64),
+                         ])],
+                         instrument: InstrumentDescriptor(kind: .testTone))
+        engine.tracksDidChange([keys])
+        var pushes: [Double] = []
+        engine.playheadHandler = { pushes.append($0) }
+        var transport = TransportState()
+        transport.isPlaying = true
+        engine.startPlayback(transport)
+        try await Task.sleep(for: .milliseconds(250))
+        let graphBefore = ObjectIdentifier(engine.graph)
+
+        // track.add during playback: Leg 2 announces the strip birth, the
+        // hook winds playback down capturing resume state, rebuildEngine
+        // cold-builds WITH the new strip and Leg 1's resume condition
+        // starts + resumes — the m13-a send-add interruption class.
+        engine.tracksDidChange([keys, Track(name: "Gtr", kind: .audio)])
+
+        #expect(ObjectIdentifier(engine.graph) != graphBefore)  // rebuilt
+        #expect(engine.isRunning)
+        #expect(engine.graph.engineHasRun)
+        #expect(!engine.graph.needsEngineRebuild)
+
+        // Playback resumed: the playhead keeps advancing monotonically.
+        let pushesAtRebuild = pushes.count
+        let lastBeat = pushes.last ?? 0
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(pushes.count > pushesAtRebuild)
+        #expect((pushes.last ?? 0) >= lastBeat)
+
+        engine.stopPlayback()
+        engine.shutdown()
+    }
 }

@@ -211,6 +211,42 @@ struct MIDIRecordingStoreTests {
         #expect(store.tracks[0].clips.count == 1)
     }
 
+    @Test("m16-b3: a linear MIDI take lands its captured controller lanes on the clip")
+    func midiTakeLandsControllerLanesOnClip() throws {
+        let engine = FakeTakeEngine()
+        let store = ProjectStore()
+        store.engine = engine
+        let inst = store.addTrack(name: "Keys", kind: .instrument)
+        try store.setTrackArm(id: inst.id, armed: true)
+
+        let lanes = [
+            MIDIControllerLane(type: .cc(controller: 87), points: [
+                MIDIControllerPoint(beat: 0, value: 10),
+                MIDIControllerPoint(beat: 2, value: 99),
+            ]),
+        ]
+        try store.record()
+        store.stop()
+        engine.finishTake(.success(TakeResult(
+            audio: nil,
+            midi: MIDIRecordingResult(notes: arpeggio(), lengthBeats: 4,
+                                      controllerLanes: lanes))))
+
+        let clip = try #require(store.tracks[0].clips.first)
+        #expect(clip.controllerLanes == lanes)     // captured lanes ride the clip
+        #expect(clip.notes?.count == 3)            // alongside the notes, untouched
+        // Era: a take WITHOUT lanes still lands a clip whose encoding has no
+        // controllerLanes key (omit-when-empty — the pre-CC byte shape).
+        try store.record()
+        store.stop()
+        engine.finishTake(.success(TakeResult(
+            audio: nil, midi: midiResult(notes: arpeggio(), lengthBeats: 4))))
+        let plain = try #require(store.tracks[0].clips.last)
+        #expect(plain.controllerLanes.isEmpty)
+        let json = try #require(String(data: try JSONEncoder().encode(plain), encoding: .utf8))
+        #expect(!json.contains("controllerLanes"))
+    }
+
     @Test("an empty MIDI-only take sets a readable lastRecordingError")
     func emptyMIDIOnlyTakeSetsLastRecordingError() throws {
         let engine = FakeTakeEngine()

@@ -849,7 +849,10 @@ public final class ProjectStore {
                             name: "\(tracks[index].name) Take \(pending.takeNumber)",
                             startBeat: pending.recordStartBeats,
                             lengthBeats: midi.lengthBeats,
-                            notes: midi.notes
+                            notes: midi.notes,
+                            // Captured controller lanes (m16-b3) ride the same
+                            // clip-relative beat domain as the notes.
+                            controllerLanes: midi.controllerLanes
                         ))
                     }
                 }
@@ -942,6 +945,7 @@ public final class ProjectStore {
         var midiCycles = 1
         var midiLanes: [[MIDINote]] = []
         var midiLaneLengths: [Double] = []
+        var midiCycleControllerLanes: [[MIDIControllerLane]] = []
         if let midi = take.midi {
             let stopLinear = take.stopBeats ?? (pending.recordStartBeats + midi.lengthBeats)
             let stopE = max(0, map.seconds(from: pending.recordStartBeats,
@@ -950,6 +954,12 @@ public final class ProjectStore {
             if midiCycles > 1 {
                 let cycleBeats = loop.endBeat - loop.startBeat
                 midiLanes = Array(repeating: [], count: midiCycles)
+                // Controller lanes slice with the SAME seconds-domain law
+                // (m16-b3, design-m16b §8.5) plus per-cycle state injection.
+                midiCycleControllerLanes = Self.sliceLoopControllerLanes(
+                    midi.controllerLanes, cycles: midiCycles, map: map,
+                    recordStartBeats: pending.recordStartBeats,
+                    loopStartBeat: loop.startBeat, cycleSeconds: L)
                 for note in midiNotes {
                     let onE = map.seconds(from: pending.recordStartBeats,
                                           to: pending.recordStartBeats + note.startBeat)
@@ -1020,12 +1030,14 @@ public final class ProjectStore {
                 for trackID in pending.armedInstrumentTrackIDs {
                     guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { continue }
                     if midiCycles == 1 {
-                        // Single cycle: today's landing verbatim.
+                        // Single cycle: today's landing verbatim (controller
+                        // lanes ride whole, like the notes — m16-b3).
                         tracks[index].clips.append(Clip(
                             name: "\(tracks[index].name) Take \(pending.takeNumber)",
                             startBeat: pending.recordStartBeats,
                             lengthBeats: midi.lengthBeats,
-                            notes: midi.notes
+                            notes: midi.notes,
+                            controllerLanes: midi.controllerLanes
                         ))
                     } else {
                         let laneClips = midiLanes.indices.map { k in
@@ -1033,7 +1045,8 @@ public final class ProjectStore {
                                 name: "\(tracks[index].name) Take \(pending.takeNumber).\(k + 1)",
                                 startBeat: loop.startBeat,
                                 lengthBeats: midiLaneLengths[k],
-                                notes: midiLanes[k]
+                                notes: midiLanes[k],
+                                controllerLanes: midiCycleControllerLanes[k]
                             )
                         }
                         landLoopMIDITakeLanes(trackIndex: index, laneClips: laneClips)
@@ -1042,6 +1055,57 @@ public final class ProjectStore {
             }
             engine?.tracksDidChange(tracks)
         }
+    }
+
+    /// Slices a linear capture's controller lanes into per-cycle lanes
+    /// (m16-b3, design-m16b §8.5) — the m15-b seconds-domain law VERBATIM:
+    /// each point maps `e = seconds(recordStart → recordStart + beat)`, cycle
+    /// `k = ⌊e/L⌋` (absolute integrals, never `previous + L`), within-cycle
+    /// beat = `beat(from: loopStart, elapsedSeconds: e − k·L)`. PLUS the
+    /// state-injection cousin of the m15-b §5.3 modular stop-clamp: every
+    /// cycle k ≥ 1 lane OPENS with an injected beat-0 point carrying the
+    /// linear stream's value at elapsed `k·L` — read through
+    /// `MIDIControllerLane.value(atBeat:)`, THE one "latest value ≤ t" scan
+    /// (never a second subtly-different one) — so a pedal held across the
+    /// cycle boundary can't vanish from the next cycle's lane. No injection
+    /// when the lane has no state established by the boundary (no spurious
+    /// point). Injection is appended FIRST, so a literal point landing
+    /// exactly at within-cycle beat 0 wins the equal-beat last-wins dedupe
+    /// (same value by construction — the scan includes it). Pure main-actor
+    /// math; `Clip.init` re-canonicalizes each cycle's lanes.
+    private static func sliceLoopControllerLanes(
+        _ lanes: [MIDIControllerLane], cycles: Int, map: TempoMap,
+        recordStartBeats: Double, loopStartBeat: Double, cycleSeconds L: Double
+    ) -> [[MIDIControllerLane]] {
+        var out = Array(repeating: [MIDIControllerLane](), count: cycles)
+        guard !lanes.isEmpty else { return out }
+        for lane in lanes {
+            var perCycle = Array(repeating: [MIDIControllerPoint](), count: cycles)
+            for k in 1..<cycles {
+                // Boundary in the LINEAR clip-relative beat domain (the lane's
+                // own domain): the inverse integral of the absolute k·L.
+                let boundaryBeat = map.beat(from: recordStartBeats,
+                                            elapsedSeconds: Double(k) * L) - recordStartBeats
+                if let value = lane.value(atBeat: boundaryBeat) {
+                    perCycle[k].append(MIDIControllerPoint(beat: 0, value: value))
+                }
+            }
+            for point in lane.points {
+                // Exact inversion of the capture session's linear conversion
+                // (the note-slicing law above, byte-for-byte).
+                let e = map.seconds(from: recordStartBeats,
+                                    to: recordStartBeats + point.beat)
+                let k = min(max(Int((e / L).rounded(.down)), 0), cycles - 1)
+                let within = e - Double(k) * L          // absolute integral
+                let beat = map.beat(from: loopStartBeat,
+                                    elapsedSeconds: within) - loopStartBeat
+                perCycle[k].append(MIDIControllerPoint(beat: beat, value: point.value))
+            }
+            for k in 0..<cycles where !perCycle[k].isEmpty {
+                out[k].append(MIDIControllerLane(type: lane.type, points: perCycle[k]))
+            }
+        }
+        return out
     }
 
     // MARK: - Master-mix analysis (M8 vm-a)

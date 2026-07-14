@@ -199,13 +199,23 @@ struct MasterSandwichTransparencyTests {
 
         // Idempotent across further reconciles — and across the
         // once-rendered boundary (the m13-a poison precondition).
-        graph.reconcile(tracks: [Track(name: "A", kind: .audio)])
+        //
+        // EXPECTATION REPLACEMENT (m16-h): this pass used to birth strips
+        // on the RUNNING once-rendered engine and assert no announce — the
+        // exact shape the reconfig defect rode (a post-start strip sandwich
+        // hosts permanently unstartable players), which reconcile now
+        // announces BY DESIGN (design-m16h-reconfig.md Leg 2; pinned in
+        // EngineRebuildTests C7a). The sandwich-transparency target of this
+        // pin is preserved: the post-boundary reconcile keeps the SAME
+        // track (no birth) and ensureMasterSandwich runs again directly —
+        // still zero announces, zero rebuild debt, stable host identity.
+        let trackA = Track(name: "A", kind: .audio)
+        graph.reconcile(tracks: [trackA])
         try engine.start()
         graph.engineHasRun = true
         try renderOneBlock(engine)
         graph.ensureMasterSandwich()
-        graph.reconcile(tracks: [Track(name: "A", kind: .audio),
-                                 Track(name: "B", kind: .audio)])
+        graph.reconcile(tracks: [trackA])
 
         #expect(!graph.needsEngineRebuild)
         #expect(announces == 0)

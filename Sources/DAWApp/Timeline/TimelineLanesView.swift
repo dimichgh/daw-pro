@@ -1728,7 +1728,8 @@ private struct ClipBlock: View {
                 notes: notes,
                 lengthBeats: clip.lengthBeats,
                 pixelsPerBeat: ppb,
-                tint: tint
+                tint: tint,
+                controllerLanes: clip.controllerLanes
             )
             .clipShape(RoundedRectangle(cornerRadius: 5))
         }

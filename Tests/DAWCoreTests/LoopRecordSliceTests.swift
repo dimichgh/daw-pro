@@ -383,4 +383,169 @@ struct LoopRecordSliceTests {
         #expect(store.tracks[0].clips.isEmpty)
         #expect(store.lastRecordingError == "empty take discarded — no MIDI notes received")
     }
+
+    // MARK: - m16-b3: controller lanes slice per cycle (design-m16b §8.5, C13)
+
+    /// Values pin EXACT; beats pin to ≤ 1e-9 (the G1 tolerance idiom).
+    private func expectPoints(_ points: [MIDIControllerPoint],
+                              _ expected: [(beat: Double, value: Int)]) {
+        #expect(points.count == expected.count)
+        for (point, want) in zip(points, expected) {
+            #expect(point.value == want.value)
+            #expect(abs(point.beat - want.beat) <= 1e-9)
+        }
+    }
+
+    private func laneOfType(_ clip: Clip, _ type: MIDIControllerType) -> MIDIControllerLane? {
+        clip.controllerLanes.first { $0.type == type }
+    }
+
+    @Test("C13: CC lanes slice to their cycles at the seconds-domain integrals; every cycle k ≥ 1 opens with the injected boundary state")
+    func midiLoopTakeControllerLanesSliceWithBoundaryInjection() throws {
+        let (store, engine, _) = try loopStore(kind: .instrument)
+        try store.record()
+        store.stop()
+        // Same three-cycle geometry as midiThreeCycleSlices (stop at elapsed
+        // 5.0 s ⇒ linear stop beat 11.75 ⇒ 3 cycles, cycle 3 partial).
+        // Linear capture domain, clip-relative to record start (beat 2):
+        //  · CC 87 = 10 at beat 0.5 (elapsed 0.25 s → cycle 1, within 0.25 s
+        //    @120 = 0.5 beats).
+        //  · CC 87 = 64 at beat 6.625 (elapsed 3.75 s → cycle 2, within
+        //    1.5 s = 1.0 s @120 + 0.5 s @96 = 2.8 beats — the note-B math).
+        //  · CC 87 = 100 at beat 9.125 (elapsed 4.75 s → cycle 3, within
+        //    0.25 s = 0.5 beats).
+        //  · pitchBend = 16000 at beat 0.5 (cycle 1 ONLY — cycles 2/3 must
+        //    still open with the held bend via injection alone).
+        // Boundary injections (the linear stream's value at k·L, read through
+        // MIDIControllerLane.value(atBeat:) — THE one chase scan):
+        //  · cycle 2 boundary: elapsed 2.25 s → linear beat 4 → cc87 = 10.
+        //  · cycle 3 boundary: elapsed 4.5 s → linear beat 8.5 → cc87 = 64.
+        let notes = [MIDINote(pitch: 60, velocity: 100, startBeat: 1.0, lengthBeats: 0.5)]
+        let lanes = [
+            MIDIControllerLane(type: .cc(controller: 87), points: [
+                MIDIControllerPoint(beat: 0.5, value: 10),
+                MIDIControllerPoint(beat: 6.625, value: 64),
+                MIDIControllerPoint(beat: 9.125, value: 100),
+            ]),
+            MIDIControllerLane(type: .pitchBend, points: [
+                MIDIControllerPoint(beat: 0.5, value: 16_000),
+            ]),
+        ]
+        engine.finishTake(.success(TakeResult(
+            audio: nil,
+            midi: MIDIRecordingResult(notes: notes, lengthBeats: 10,
+                                      controllerLanes: lanes),
+            stopBeats: 11.75)))
+
+        let group = try #require(store.tracks[0].takeGroups.first)
+        #expect(group.lanes.count == 3)
+        let cycle1 = group.lanes[0].clip
+        let cycle2 = group.lanes[1].clip
+        let cycle3 = group.lanes[2].clip
+
+        // Cycle 1: literal points only (no injection at k = 0).
+        expectPoints(try #require(laneOfType(cycle1, .cc(controller: 87))).points,
+                     [(0.5, 10)])
+        expectPoints(try #require(laneOfType(cycle1, .pitchBend)).points,
+                     [(0.5, 16_000)])
+
+        // Cycle 2: opens with the boundary state, then its literal point.
+        let cc2 = try #require(laneOfType(cycle2, .cc(controller: 87)))
+        #expect(cc2.points.first?.beat == 0)          // injected EXACTLY at 0
+        expectPoints(cc2.points, [(0, 10), (2.8, 64)])
+        // The bend lane exists in cycle 2 PURELY by injection — a pedal/bend
+        // held across the wrap can't vanish from the next cycle's lane.
+        expectPoints(try #require(laneOfType(cycle2, .pitchBend)).points,
+                     [(0, 16_000)])
+
+        // Cycle 3 (the honest partial): boundary state + its literal point.
+        let cc3 = try #require(laneOfType(cycle3, .cc(controller: 87)))
+        #expect(cc3.points.first?.beat == 0)
+        expectPoints(cc3.points, [(0, 64), (0.5, 100)])
+        expectPoints(try #require(laneOfType(cycle3, .pitchBend)).points,
+                     [(0, 16_000)])
+
+        // Notes sliced exactly as before — lanes ride alongside, never instead.
+        #expect((cycle1.notes ?? []).count == 1)
+        #expect(store.undoLabel == "Record Take 1")
+    }
+
+    @Test("C13: a literal point exactly ON the cycle boundary dedupes with the injection (one beat-0 point, one value)")
+    func midiLoopTakeBoundaryLiteralPointDedupes() throws {
+        let (store, engine, _) = try loopStore(kind: .instrument)
+        try store.record()
+        store.stop()
+        // Linear beat 4 == elapsed exactly 2.25 s == the cycle-2 boundary:
+        // ⌊e/L⌋ = 1 → within-cycle beat 0; the injection reads the SAME point
+        // (value(atBeat:) is ≤-inclusive) — equal beat, equal value, deduped.
+        let lanes = [
+            MIDIControllerLane(type: .cc(controller: 87), points: [
+                MIDIControllerPoint(beat: 4, value: 77),
+            ]),
+        ]
+        engine.finishTake(.success(TakeResult(
+            audio: nil,
+            midi: MIDIRecordingResult(
+                notes: [MIDINote(pitch: 60, velocity: 100, startBeat: 1.0, lengthBeats: 0.5)],
+                lengthBeats: 9, controllerLanes: lanes),
+            stopBeats: 10.5)))                        // elapsed 4.5 s ⇒ exactly 2 cycles
+
+        let group = try #require(store.tracks[0].takeGroups.first)
+        #expect(group.lanes.count == 2)
+        let cc2 = try #require(laneOfType(group.lanes[1].clip, .cc(controller: 87)))
+        #expect(cc2.points == [MIDIControllerPoint(beat: 0, value: 77)])  // ONE point
+        // Cycle 1 has no state before the point — no spurious lane.
+        #expect(laneOfType(group.lanes[0].clip, .cc(controller: 87)) == nil)
+    }
+
+    @Test("C13 era: a note-only loop take lands lane clips with EMPTY controllerLanes and no controllerLanes key on disk")
+    func noteOnlyLoopTakeLandsEmptyLanes() throws {
+        let (store, engine, _) = try loopStore(kind: .instrument)
+        try store.record()
+        store.stop()
+        // The midiThreeCycleSlices fixture VERBATIM, no lanes (the default) —
+        // that unmodified test is the arithmetic era; this pins the null side.
+        let notes = [
+            MIDINote(pitch: 60, velocity: 100, startBeat: 1.0, lengthBeats: 0.5),
+            MIDINote(pitch: 64, velocity: 90, startBeat: 6.625, lengthBeats: 2.5),
+        ]
+        engine.finishTake(.success(TakeResult(
+            audio: nil,
+            midi: MIDIRecordingResult(notes: notes, lengthBeats: 10),
+            stopBeats: 11.75)))
+
+        let group = try #require(store.tracks[0].takeGroups.first)
+        #expect(group.lanes.count == 3)
+        for lane in group.lanes {
+            #expect(lane.clip.controllerLanes.isEmpty)
+            // Omit-when-empty Codable: the landed clip encodes WITHOUT the
+            // key — a note-only take is byte-identical to the pre-CC era.
+            let json = try #require(String(
+                data: try JSONEncoder().encode(lane.clip), encoding: .utf8))
+            #expect(!json.contains("controllerLanes"))
+        }
+    }
+
+    @Test("C13: a single-cycle loop take carries its lanes whole (today's landing verbatim + lanes)")
+    func midiSingleCycleCarriesLanesWhole() throws {
+        let (store, engine, _) = try loopStore(kind: .instrument)
+        try store.record()
+        store.stop()
+        let lanes = [
+            MIDIControllerLane(type: .cc(controller: 87), points: [
+                MIDIControllerPoint(beat: 0.25, value: 42),
+            ]),
+        ]
+        engine.finishTake(.success(TakeResult(
+            audio: nil,
+            midi: MIDIRecordingResult(
+                notes: [MIDINote(pitch: 60, velocity: 100, startBeat: 0.25, lengthBeats: 1.0)],
+                lengthBeats: 2, controllerLanes: lanes),
+            stopBeats: 4.0)))                          // elapsed 1.0 s < L
+
+        let track = store.tracks[0]
+        #expect(track.takeGroups.isEmpty)
+        #expect(track.clips.count == 1)
+        #expect(track.clips[0].controllerLanes == lanes)   // whole, unsliced
+    }
 }

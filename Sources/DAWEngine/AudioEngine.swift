@@ -770,6 +770,14 @@ public final class AudioEngine: AudioEngineControlling {
     /// RT-safety (design §5): main-actor only, zero render-thread changes.
     /// The old engine's last reference dies AFTER `stop()` returns (render
     /// callbacks quiesced) — the ordinary dealloc contract.
+    ///
+    /// m16-h Leg 1: the rebuilt engine STARTS only when something needs a
+    /// running engine right now (pending playback resume, armed-instrument
+    /// live-thru). Otherwise it is left stopped and never-run — strips and
+    /// clips added after a project boundary then attach in the cold regime
+    /// instead of onto a running engine, where a deep post-start strip
+    /// sandwich could never start its players (the named AVFoundation
+    /// reconfig defect, docs/research/design-m16h-reconfig.md).
     private func rebuildEngine(reason: String) {
         // 1. Quiesce: if playback is still anchored (a project boundary can
         //    arrive without the announce hook having wound down), capture
@@ -826,22 +834,40 @@ public final class AudioEngine: AudioEngineControlling {
         graph.reconcile(tracks: lastTracks)
         mixer.outputVolume = Float(masterVolume)
         graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
-        engine.prepare()
-        do {
-            try engine.start()
-            isRunning = true
-            graph.engineHasRun = true
-            graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
-            // A successful start re-arms the watchdog exactly like prepare().
-            watchdog.reset()
-            startWatchdog()
-        } catch {
-            // Start refused (device gone mid-rebuild): the fresh graph is
-            // NEVER-RUN, so every subsequent operation is the offline-safe
-            // cold build order; the next prepare() (transport start, config
-            // recovery, watchdog restart) brings the hardware back up.
-            FileHandle.standardError.write(Data(
-                "AudioEngine: rebuild (\(reason)) could not start hardware: \(error)\n".utf8))
+        // m16-h Leg 1: DEFER the hardware start unless something needs a
+        // running engine RIGHT NOW. On this OS a strip sandwich born on a
+        // RUNNING engine hosts permanently unstartable players (the deep
+        // post-start reconfig defect — docs/research/design-m16h-reconfig.md
+        // §3), so the rebuilt engine stays STOPPED and NEVER-RUN whenever it
+        // can: every later strip/clip attach runs the offline/cold regime
+        // (`engineHasRun == false`, the fresh-launch shape — the most-proven
+        // state in the tree) and the eventual `prepare()` (transport start,
+        // record, test tone, watchdog restart — every other consumer starts
+        // lazily) brings the hardware up with everything start-era. The two
+        // consumers that DO need a running engine here are playback resume
+        // (the announce hook wound a live transport down) and
+        // armed-instrument live-thru; for those the start block below is
+        // today's behavior verbatim.
+        let mustStart = resumeAfterRoutingRewire != nil
+            || lastTracks.contains { $0.kind == .instrument && $0.isArmed }
+        if mustStart {
+            engine.prepare()
+            do {
+                try engine.start()
+                isRunning = true
+                graph.engineHasRun = true
+                graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+                // A successful start re-arms the watchdog exactly like prepare().
+                watchdog.reset()
+                startWatchdog()
+            } catch {
+                // Start refused (device gone mid-rebuild): the fresh graph is
+                // NEVER-RUN, so every subsequent operation is the offline-safe
+                // cold build order; the next prepare() (transport start, config
+                // recovery, watchdog restart) brings the hardware back up.
+                FileHandle.standardError.write(Data(
+                    "AudioEngine: rebuild (\(reason)) could not start hardware: \(error)\n".utf8))
+            }
         }
         // 5. The live-thru fanout re-syncs against the REBUILT renderers —
         //    fresh instances; the old ones get the all-notes-off flush.

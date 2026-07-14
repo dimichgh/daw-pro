@@ -44,9 +44,18 @@ struct PianoRollView: View {
     /// own density, so this affordance shows in both piano-roll modes (tightening
     /// timing is a beginner action; the panel's Simple mode is grid + strength).
     var onOpenQuantize: () -> Void
+    /// Commits the visible controller lane (m16-b4) through
+    /// `ProjectStore.setControllerLane` — the SAME store call the
+    /// `clip.setControllerLane` wire verb uses — and returns the updated clip so
+    /// the strip can reseed its edit model (the bar-ops reseed idiom). Store-free
+    /// closure (the `onCommit` precedent) so the view stays previewable.
+    var onCommitControllerLane: (_ type: MIDIControllerType, _ points: [MIDIControllerPoint]) -> Clip?
     var onClose: () -> Void
 
     @State private var model: PianoRollModel
+    /// Edit model for the Pro controller strip (m16-b4), seeded from the clip's
+    /// lanes. Recreated with the view on a clip switch (`.id(clip.id)`).
+    @State private var controllerModel: ControllerStripModel
     @State private var snap: SnapResolution = .beat
     @State private var activeDrag: ActiveDrag = .none
     @State private var didMove = false
@@ -72,6 +81,7 @@ struct PianoRollView: View {
          onDeleteTimeRange: @escaping (_ startBeat: Double, _ lengthBeats: Double) -> Clip?,
          onInsertTimeRange: @escaping (_ atBeat: Double, _ lengthBeats: Double) -> Clip?,
          onOpenQuantize: @escaping () -> Void,
+         onCommitControllerLane: @escaping (_ type: MIDIControllerType, _ points: [MIDIControllerPoint]) -> Clip?,
          onClose: @escaping () -> Void) {
         self.clip = clip
         self.beatsPerBar = beatsPerBar
@@ -82,9 +92,14 @@ struct PianoRollView: View {
         self.onDeleteTimeRange = onDeleteTimeRange
         self.onInsertTimeRange = onInsertTimeRange
         self.onOpenQuantize = onOpenQuantize
+        self.onCommitControllerLane = onCommitControllerLane
         self.onClose = onClose
         _model = State(initialValue: PianoRollModel(
             notes: clip.notes ?? [],
+            clipLengthBeats: clip.lengthBeats
+        ))
+        _controllerModel = State(initialValue: ControllerStripModel(
+            lanes: clip.controllerLanes,
             clipLengthBeats: clip.lengthBeats
         ))
     }
@@ -115,6 +130,9 @@ struct PianoRollView: View {
                 Divider().overlay(DAWTheme.hairline)
                 velocitySection
                     .explainable(.pianoRollVelocity)
+                Divider().overlay(DAWTheme.hairline)
+                controllerSection
+                    .explainable(.pianoRollControllers)
             }
         }
         .glassPanel()
@@ -163,10 +181,36 @@ struct PianoRollView: View {
                 .explainable(.quantize)
             barOpsCluster
                 .explainable(.pianoRollBarOps)
+            controllerLaneSummaryChip
             closeButton
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    /// Passive Simple-density chip announcing the clip's controller lanes when it
+    /// has any (m16-b4, the m15-c master-lane Pro-only precedent): data is never
+    /// hidden, but EDITING controllers is a Pro surface — the full strip appears in
+    /// Pro. NOT a button in v1 (no earned accent, Rule 3). Absent in Pro (the strip
+    /// is shown instead) and when the clip has no lanes.
+    @ViewBuilder
+    private var controllerLaneSummaryChip: some View {
+        if mode == .simple,
+           let summary = ControllerStripModel.laneCountSummary(count: clip.controllerLanes.count) {
+            HStack(spacing: 4) {
+                Image(systemName: "dial.min")
+                    .font(.system(size: 9, weight: .semibold))
+                Text(summary)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+            }
+            .foregroundStyle(DAWTheme.textDim)
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+            .help("This part has controller data (mod wheel, sustain, pitch bend). Switch to Pro to edit it.")
+        }
     }
 
     // MARK: - Bar ops (insert / delete a measure, beta m10-h)
@@ -246,6 +290,10 @@ struct PianoRollView: View {
     private func insertBar() {
         if let updated = onInsertTimeRange(targetBarStart, Double(beatsPerBar)) {
             model.load(notes: updated.notes ?? [], clipLengthBeats: updated.lengthBeats)
+            // Clip-local bar edits leave controller lanes untouched (design-m16b
+            // §14 A4) but change the clip length — reseed so the strip's drawn
+            // width tracks.
+            controllerModel.load(lanes: updated.controllerLanes, clipLengthBeats: updated.lengthBeats)
         }
     }
 
@@ -253,6 +301,7 @@ struct PianoRollView: View {
     private func deleteBar() {
         if let updated = onDeleteTimeRange(targetBarStart, Double(beatsPerBar)) {
             model.load(notes: updated.notes ?? [], clipLengthBeats: updated.lengthBeats)
+            controllerModel.load(lanes: updated.controllerLanes, clipLengthBeats: updated.lengthBeats)
         }
     }
 
@@ -565,6 +614,30 @@ struct PianoRollView: View {
                 .glow(DAWTheme.playback, radius: 5, intensity: 0.7)
                 .offset(x: x)
                 .allowsHitTesting(false)
+        }
+    }
+
+    // MARK: - Controller strip (Pro, m16-b4)
+
+    /// The Pro controller strip directly under the velocity lane — bend, mod,
+    /// sustain, expression, pressure, and any CC as a stepped value line. Thin over
+    /// `ControllerStripModel`; commits through `onCommitControllerLane`.
+    private var controllerSection: some View {
+        ControllerLaneStrip(
+            model: controllerModel,
+            accent: noteColor,
+            snap: effectiveSnap,
+            onCommit: commitControllerLane
+        )
+    }
+
+    /// Commits the visible controller lane and reseeds the strip model from the
+    /// updated clip (canonicalized stored lanes; keeps chips + selection live).
+    private func commitControllerLane() {
+        guard let type = controllerModel.selectedType else { return }
+        let points = controllerModel.buildSubmission()
+        if let updated = onCommitControllerLane(type, points) {
+            controllerModel.load(lanes: updated.controllerLanes, clipLengthBeats: updated.lengthBeats)
         }
     }
 }

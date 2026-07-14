@@ -556,6 +556,27 @@ final class PlaybackGraph {
         // render. Idempotent, attach-only — never an announce, never a
         // rebuild.
         ensureMasterSandwich()
+        // Once-per-pass announcement to `willMutateRoutingTopology`, made
+        // immediately before the FIRST routing-topology mutation. m13-a: for
+        // a once-rendered engine the announce marks the graph for rebuild —
+        // every call site checks `needsEngineRebuild` right after and
+        // ABORTS the pass (still before the first topology mutation, so the
+        // announce contract holds); the hook itself only winds active
+        // playback down (capturing resume state) — it no longer stops the
+        // engine, because the rebuild discards it. Never-run engines
+        // (offline renders, headless tests, pre-start builds) proceed
+        // through the pass exactly as before. (Declared up here since m16-h:
+        // the earliest announce site is now strip birth in step 0a below.)
+        var announcedRoutingMutation = false
+        func announceRoutingMutation() {
+            guard !announcedRoutingMutation else { return }
+            announcedRoutingMutation = true
+            willMutateRoutingTopology?()
+            if engineHasRun {
+                needsEngineRebuild = true
+            }
+        }
+
         // 0. Bus + routing signatures up front — the step ORDER below is
         // load-bearing: bus nodes are added before any source track wires
         // into them, and removed only after every ex-feeder is rewired.
@@ -605,6 +626,21 @@ final class PlaybackGraph {
         // rate, meter tap on the bus mixer only.
         var addedBuses: Set<UUID> = []
         for busID in newBusSignature where busNodes[busID] == nil {
+            // m16-h Leg 2: a strip sandwich born on a RUNNING once-rendered
+            // engine hosts permanently unstartable players — AVFAudio's
+            // running-engine reconfig does not propagate player-start
+            // eligibility across a ≥2-deep post-start subtree, while the
+            // public connection points report healthy edges (named from a
+            // pure-AVFoundation standalone matrix,
+            // docs/research/design-m16h-reconfig.md §3). Announce and abort
+            // BEFORE any node of the new sandwich attaches; the whole-engine
+            // rebuild then cold-builds this strip start-era. Never-run
+            // engines (offline renders, headless tests, `rebuildEngine`'s
+            // own cold build) attach directly — the proven cold order.
+            if engineHasRun && engine.isRunning {
+                announceRoutingMutation()
+                if needsEngineRebuild { return true }  // m13-a: engine rebuilds instead
+            }
             let node = makeStripSandwich(for: busID)
             // m13-d §1-B: strips keep feeding mainMixerNode — the master
             // chain sits POST-fader, downstream of the main mixer.
@@ -621,25 +657,6 @@ final class PlaybackGraph {
         // their RoutingKey matches the stored signature.
         var freshSourceNodes: Set<UUID> = []
 
-        // Once-per-pass announcement to `willMutateRoutingTopology`, made
-        // immediately before the FIRST routing-topology mutation. m13-a: for
-        // a once-rendered engine the announce marks the graph for rebuild —
-        // every call site checks `needsEngineRebuild` right after and
-        // ABORTS the pass (still before the first topology mutation, so the
-        // announce contract holds); the hook itself only winds active
-        // playback down (capturing resume state) — it no longer stops the
-        // engine, because the rebuild discards it. Never-run engines
-        // (offline renders, headless tests, pre-start builds) proceed
-        // through the pass exactly as before.
-        var announcedRoutingMutation = false
-        func announceRoutingMutation() {
-            guard !announcedRoutingMutation else { return }
-            announcedRoutingMutation = true
-            willMutateRoutingTopology?()
-            if engineHasRun {
-                needsEngineRebuild = true
-            }
-        }
         // A stored key is "trivial" when the node's wiring is the pre-M4,
         // live-proven shape: one connection straight to master, no sends —
         // and (m12-f) no sidechain key edges.
@@ -696,6 +713,15 @@ final class PlaybackGraph {
             if let existing = trackNodes[track.id] {
                 node = existing
             } else {
+                // m16-h Leg 2: same announce-before-attach as bus birth in
+                // step 0a — see the comment there. Clip players joining an
+                // EXISTING (start-era) strip below stay zero-cost: a depth-1
+                // attach onto a start-era subtree is proven clean (design
+                // §2-E9/standalone cell G) and never announces.
+                if engineHasRun && engine.isRunning {
+                    announceRoutingMutation()
+                    if needsEngineRebuild { return true }  // m13-a: engine rebuilds instead
+                }
                 node = addTrackNode(for: track.id)
                 freshSourceNodes.insert(track.id)
             }
@@ -842,6 +868,13 @@ final class PlaybackGraph {
         }
 
         // Added instrument tracks; existing ones refresh their clip copy.
+        // m16-h Leg 2 EXCLUSION (deliberate): instrument-strip birth on a
+        // running engine does NOT announce. The reconfig defect is
+        // player-start-specific — deep post-start `AVAudioSourceNode`
+        // subtrees render fine (measured live, design-m16h §2-E6) and
+        // instrument strips host no `AVAudioPlayerNode`s. Keeping this path
+        // attach-only keeps arming/live-thru bring-up cheap (no rebuild
+        // bounce to add an instrument mid-session).
         for track in instrumentTracks {
             if let node = instrumentNodes[track.id] {
                 node.clips = track.clips
@@ -2597,7 +2630,12 @@ final class PlaybackGraph {
     /// is origin-agnostic by design: missing media, reconcile races — m16-c
     /// owns fixing the missing-media CAUSE at open time; this guard makes
     /// play safe regardless of cause. O(clips) once per transport start —
-    /// control-plane only, zero render-thread surface.
+    /// control-plane only, zero render-thread surface. NOTE (m16-h): this
+    /// public check can also report a FALSE POSITIVE — a player on a deep
+    /// post-start subtree passes here yet still raises (the named reconfig
+    /// defect, docs/research/design-m16h-reconfig.md §3). m16-h removed the
+    /// paths that create such players; the per-node barrier below catches
+    /// any survivor honestly.
     private func isPlayable(_ node: ClipNode) -> Bool {
         guard let host = node.player.engine else { return false }
         return !host.outputConnectionPoints(for: node.player, outputBus: 0).isEmpty
@@ -2663,20 +2701,22 @@ final class PlaybackGraph {
         // `isPlayable`). A skipped clip posts one honest notice; every other
         // player starts against the shared anchor exactly as before.
         //
-        // The predicate alone is NOT sufficient (measured in the C1 gate,
-        // 2026-07-13): a strip wired onto a just-REBUILT engine that is
-        // already running passes the public connection-points check yet
-        // still raises "player started when in a disconnected state" —
-        // AVFAudio's internal active-render-graph state has no public
-        // mirror. Hence the per-node barrier: the failing clip converts to
-        // the SAME honest notice and every other player still starts. This
-        // is exactly why iteration 1 of the poisoner recipe always survived
-        // (never-run engine: strips wired BEFORE the first start) while
-        // iteration 2 always raised (rebuildEngine starts the fresh empty
-        // engine first, strips attach while it runs) — the audit's
-        // "materializes one project.new/reconcile cycle later", mechanism
-        // now named. Chasing the exact AVFoundation reconfig defect stays
-        // rider R3; both halves of this guard are origin-agnostic.
+        // The predicate alone is NOT sufficient: AVFAudio's player-start
+        // bookkeeping has no public mirror — a player whose path to the
+        // pre-existing active render graph crosses ≥2 nodes attached while
+        // the engine was RUNNING raises "player started when in a
+        // disconnected state" on every pass, permanently, while
+        // `outputConnectionPoints` reports healthy edges. The mechanism was
+        // NAMED by m16-h from a pure-AVFoundation standalone matrix
+        // (docs/research/design-m16h-reconfig.md §3 — formerly m16-a rider
+        // R3, resolved there). m16-h removed every in-tree path that births
+        // a strip sandwich on a running engine (`rebuildEngine` defers its
+        // start; `reconcile` announces strip birth on a running
+        // once-rendered engine into a whole-engine rebuild), so the raise
+        // class is extinct by construction. The per-node barrier stays as
+        // origin-agnostic defense-in-depth: a failing clip converts to the
+        // SAME honest notice and every other player still starts — never a
+        // crash, never a silent skip.
         forEachClip { node in
             guard isPlayable(node) else {
                 postClipUnplayable(node)

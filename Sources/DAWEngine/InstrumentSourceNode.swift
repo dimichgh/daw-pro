@@ -212,8 +212,10 @@ final class InstrumentRenderer: @unchecked Sendable {
             instrument.reset()
             pitchToLiveID.update(repeating: 0, count: 128)
         }
-        // 1b. Thru-ring overflow dropped an event — possibly a note-off, and a
-        // stuck voice is worse than a cut one: all-notes-off.
+        // 1b. Thru-ring overflow dropped an event — possibly a note-off (or,
+        // since m16-b3, a pedal-up / bend-return), and stuck state is worse
+        // than cut state: all-notes-off. `reset()` also re-centers bend and
+        // lifts the pedal on every instrument (design-m16b §4.3/§8.3, C15).
         if daw_atomic_u32_exchange(thruRing.droppedFlag, 0) == 1 {
             instrument.reset()
             pitchToLiveID.update(repeating: 0, count: 128)
@@ -306,7 +308,15 @@ final class InstrumentRenderer: @unchecked Sendable {
             let take = min(queued, Self.thruRingCapacity)
             while liveCount < take, let event = thruRing.pop() {
                 let id: UInt64
-                if event.kind == ScheduledMIDIEvent.noteOn {
+                if event.kind >= ScheduledMIDIEvent.controlChange {
+                    // Kind ≥ 2 (CC / bend / pressure, m16-b3): controller
+                    // events pair with nothing — mint a fresh ID (sort/trace
+                    // determinism) and NEVER touch the pitch map, so an
+                    // interleaved CC whose data1 equals an open note's pitch
+                    // can't corrupt that note's on/off pairing (§4.3, C11).
+                    id = nextLiveNoteID
+                    nextLiveNoteID &+= 1
+                } else if event.kind == ScheduledMIDIEvent.noteOn {
                     id = nextLiveNoteID
                     nextLiveNoteID &+= 1
                     pitchToLiveID[Int(event.pitch & 0x7F)] = id

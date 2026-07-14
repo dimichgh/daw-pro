@@ -411,6 +411,12 @@ struct ContentView: View {
                     try? store.insertTimeRange(clipID: clip.id, atBeat: at, lengthBeats: len)
                 },
                 onOpenQuantize: { model.openQuantizePanel(clipID: clip.id) },
+                // Controller strip (m16-b4) commits through the same store call the
+                // clip.setControllerLane wire verb uses; returns the updated clip so
+                // the strip reseeds its edit model.
+                onCommitControllerLane: { type, points in
+                    try? store.setControllerLane(clipID: clip.id, type: type, points: points)
+                },
                 onClose: { selectedClipID = nil }
             )
             .id(clip.id)

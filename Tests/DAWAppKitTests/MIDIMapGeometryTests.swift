@@ -140,4 +140,63 @@ struct MIDIMapGeometryTests {
         #expect(MIDIMapGeometry(pixelsPerBeat: 16) == MIDIMapGeometry(pixelsPerBeat: 16))
         #expect(MIDIMapGeometry(pixelsPerBeat: 16) != MIDIMapGeometry(pixelsPerBeat: 32))
     }
+
+    // MARK: - controllerTrace (m16-b4 arrange mini-map)
+
+    // 12. Empty lane → no trace (nothing to draw; the caller skips the stroke so a
+    //     laneless clip is pixel-identical).
+    @Test("an empty controller lane produces no trace points")
+    func controllerTraceEmpty() {
+        let g = MIDIMapGeometry(pixelsPerBeat: ppb)
+        let empty = MIDIControllerLane(type: .cc(controller: 1), points: [])
+        #expect(g.controllerTrace(empty, clipLengthBeats: 8, height: 30).isEmpty)
+    }
+
+    // 13. A stepped CC trace holds each value until the next point, then steps —
+    //     never an interpolated slope — and maps into the bottom 20% band with
+    //     higher values nearer the top of the band. Extends the last value out to
+    //     the clip's right edge.
+    @Test("controllerTrace steps in the bottom band and holds to the right edge")
+    func controllerTraceStepped() {
+        let g = MIDIMapGeometry(pixelsPerBeat: ppb)   // 16 pt/beat
+        let height: CGFloat = 30                       // band = 6 pt (bottom 20%)
+        // CC 0 @0, CC 127 @2 in a 4-beat clip (contentWidth 64).
+        let lane = MIDIControllerLane(type: .cc(controller: 1), points: [
+            MIDIControllerPoint(beat: 0, value: 0),
+            MIDIControllerPoint(beat: 2, value: 127),
+        ])
+        let pts = g.controllerTrace(lane, clipLengthBeats: 4, height: height)
+        // value 0 → y = height = 30 (bottom edge); value 127 → y = 30 - 6 = 24.
+        // Trace: (0,30) → hold (32,30) → step (32,24) → hold to right edge (64,24).
+        #expect(pts == [
+            CGPoint(x: 0, y: 30),
+            CGPoint(x: 32, y: 30),
+            CGPoint(x: 32, y: 24),
+            CGPoint(x: 64, y: 24),
+        ])
+        // Every segment is axis-aligned (stepwise, never a diagonal ramp).
+        for i in 1..<pts.count {
+            let horizontal = pts[i].y == pts[i - 1].y
+            let vertical = pts[i].x == pts[i - 1].x
+            #expect(horizontal || vertical)
+        }
+    }
+
+    // 14. Bend uses the wider 16383 domain and clamps x to the clip's right edge; a
+    //     point past the clip end never draws beyond the block.
+    @Test("controllerTrace uses the lane's value domain and clamps x to the clip end")
+    func controllerTraceBendDomainAndClamp() {
+        let g = MIDIMapGeometry(pixelsPerBeat: ppb)
+        let height: CGFloat = 40                       // band = 8 pt
+        // Bend center (8192) then a point past the 2-beat clip end (contentWidth 32).
+        let lane = MIDIControllerLane(type: .pitchBend, points: [
+            MIDIControllerPoint(beat: 0, value: 8192),
+            MIDIControllerPoint(beat: 5, value: 16383),
+        ])
+        let pts = g.controllerTrace(lane, clipLengthBeats: 2, height: height)
+        // center 8192/16383 ≈ 0.5 → y ≈ 40 - 8·0.5 = 36; max 16383 → y = 40 - 8 = 32.
+        #expect(abs(pts[0].y - 36) < 0.01)             // bend center in the band
+        // The out-of-clip point's x clamps to the right edge (32), never past it.
+        #expect(pts.map(\.x).max() == 32)
+    }
 }

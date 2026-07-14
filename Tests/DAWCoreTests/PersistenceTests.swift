@@ -825,4 +825,61 @@ struct PersistenceTests {
         #expect(reopened.tracks[0].clips[0].isMIDI)
         #expect(reopened.tracks[0].clips[0].audioFileURL == nil)
     }
+
+    // MARK: - 23 (m16-b3, C13a). Take-lane DTO preserves gainEnvelope + controllerLanes
+
+    @Test("C13a: a take-lane clip preserves controllerLanes AND gainEnvelope across the TakeGroupDocument round trip")
+    func takeLaneDTORoundTripPreservesEnvelopeAndLanes() throws {
+        // The design-m16b §14 amendment A1: `takeGroup(bundleURL:)` rebuilt
+        // lane clips WITHOUT `gainEnvelope` (a pre-existing m13-e gap) and
+        // without `controllerLanes` — both silently lost on every disk round
+        // trip. One audio lane with an envelope + one MIDI lane with lanes
+        // pins BOTH threads.
+        let envelope = [
+            ClipGainPoint(beat: 0, gainDb: -6),
+            ClipGainPoint(beat: 2, gainDb: 3),
+            ClipGainPoint(beat: 4, gainDb: 0),
+        ]
+        let audioLane = TakeLane(name: "Take 1", clip: Clip(
+            name: "A", startBeat: 0, lengthBeats: 4,
+            audioFileURL: URL(fileURLWithPath: "/tmp/c13a-take.wav"),
+            gainEnvelope: envelope))
+        let controllerLanes = [
+            MIDIControllerLane(type: .cc(controller: 87), points: [
+                MIDIControllerPoint(beat: 0, value: 10),
+                MIDIControllerPoint(beat: 1.5, value: 99),
+            ]),
+            MIDIControllerLane(type: .pitchBend, points: [
+                MIDIControllerPoint(beat: 0.25, value: 6_674),
+            ]),
+        ]
+        let midiLane = TakeLane(name: "Take 2", clip: Clip(
+            name: "M", startBeat: 0, lengthBeats: 4,
+            notes: [MIDINote(pitch: 60, startBeat: 0, lengthBeats: 1)],
+            controllerLanes: controllerLanes))
+        let group = TakeGroup(name: "Takes", lanes: [audioLane, midiLane], comp: [
+            CompSegment(laneID: midiLane.id, startBeat: 0, endBeat: 4),
+        ])
+
+        // Encode → decode → rebuild, exactly the .dawproj path (an ABSOLUTE
+        // media ref, the recovery-bundle shape, keeps the URL byte-stable).
+        let document = TakeGroupDocument(
+            from: group, mediaRefs: [audioLane.clip.id: "/tmp/c13a-take.wav"])
+        let decoded = try JSONDecoder().decode(
+            TakeGroupDocument.self, from: try JSONEncoder().encode(document))
+        var warnings: [String] = []
+        let restored = decoded.takeGroup(
+            bundleURL: URL(fileURLWithPath: "/tmp"), warn: { warnings.append($0) })
+
+        #expect(warnings.isEmpty)
+        #expect(restored.lanes.count == 2)
+        // The A1 fix, both halves: the envelope AND the lanes survive.
+        #expect(restored.lanes[0].clip.gainEnvelope == envelope)
+        #expect(restored.lanes[0].clip.audioFileURL?.path == "/tmp/c13a-take.wav")
+        #expect(restored.lanes[1].clip.controllerLanes == controllerLanes)
+        #expect(restored.lanes[1].clip.notes?.count == 1)
+        // And the whole lane clips still match field-for-field.
+        #expect(restored.lanes[0].clip == audioLane.clip)
+        #expect(restored.lanes[1].clip == midiLane.clip)
+    }
 }

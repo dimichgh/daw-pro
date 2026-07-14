@@ -89,4 +89,45 @@ public struct MIDIMapGeometry: Sendable, Equatable {
         }
         return rects
     }
+
+    // MARK: - Controller trace (m16-b4 arrange mini-map)
+
+    /// The fraction of the clip's height the controller trace occupies, measured
+    /// UP from the bottom edge (design-m16b §9: "the bottom 20% of the clip block").
+    public static let controllerTraceBandFraction: CGFloat = 0.2
+
+    /// A faint STEPPED polyline (hold-until-next — the §3 stepwise semantics drawn
+    /// honestly, never interpolated slopes) tracing one controller `lane` across
+    /// the bottom 20% band of a clip block (design-m16b §9). Value maps to the
+    /// band raw-domain-relative — value 0 sits on the bottom edge, the type's
+    /// range maximum at the top of the band — using the SAME `x = beat *
+    /// pixelsPerBeat` scale and right-edge clamp as `noteRects`, so the trace
+    /// registers with the note pills above it. Empty for an empty lane (nothing to
+    /// draw — the caller skips the stroke, so a laneless clip is pixel-identical).
+    /// Pure geometry, `[CGPoint]` like `noteRects`, headless-tested.
+    public func controllerTrace(_ lane: MIDIControllerLane,
+                                clipLengthBeats: Double, height: CGFloat) -> [CGPoint] {
+        guard !lane.points.isEmpty else { return [] }
+        let contentWidth = Swift.max(0, CGFloat(clipLengthBeats) * pixelsPerBeat)
+        guard contentWidth > 0 else { return [] }
+        let upper = Double(lane.type.valueRange.upperBound)
+        let band = height * Self.controllerTraceBandFraction
+        func yFor(_ value: Int) -> CGFloat {
+            let frac = upper > 0 ? (Double(value) / upper).clamped(to: 0...1) : 0
+            return height - CGFloat(frac) * band          // value 0 → bottom edge
+        }
+        var out: [CGPoint] = []
+        out.reserveCapacity(lane.points.count * 2 + 1)
+        for point in lane.points {
+            let x = Swift.min(contentWidth, Swift.max(0, CGFloat(point.beat) * pixelsPerBeat))
+            let y = yFor(point.value)
+            if let last = out.last { out.append(CGPoint(x: x, y: last.y)) }   // hold to here
+            out.append(CGPoint(x: x, y: y))                                    // step to value
+        }
+        // Hold the final value out to the clip's right edge.
+        if let last = out.last, last.x < contentWidth {
+            out.append(CGPoint(x: contentWidth, y: last.y))
+        }
+        return out
+    }
 }

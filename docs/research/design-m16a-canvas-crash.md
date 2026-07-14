@@ -299,6 +299,7 @@ Riders (not blockers):
 - **R3 (optional, audio-dsp)**: 30-min lldb session with the C1 script + breakpoints on
   `-[AVAudioEngine disconnectNodeOutput:]`/`detachNode:` to name the exact disconnector inside reconcile —
   informative only; the guard is origin-agnostic.
+  **RESOLVED 2026-07-13 (m16-h)**: mechanism named and fixed — no disconnector exists; players born on a ≥2-deep post-start subtree are permanently start-ineligible on a running engine (`docs/research/design-m16h-reconfig.md` §3; fix = deferred rebuild start + announce-class strip birth).
 - **R4 (optional)**: Apple Feedback: (a) `AVAudioPlayerNode playAtTime:` NSException from a documented-legal
   call sequence; (b) Swift runtime: ObjC exception across a job leaks `ExecutorTrackingInfo` + thread name,
   wedging the MainActor. Attach `throwhunt.log` + .ips set.

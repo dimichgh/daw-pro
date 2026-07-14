@@ -1023,7 +1023,14 @@ public struct TakeGroupDocument: Codable, Sendable, Equatable {
                 fadeInBeats: cd.fadeInBeats ?? 0, fadeOutBeats: cd.fadeOutBeats ?? 0,
                 fadeInCurve: cd.fadeInCurve ?? .linear, fadeOutCurve: cd.fadeOutCurve ?? .linear,
                 stretchRatio: cd.stretchRatio ?? 1, pitchShiftSemitones: cd.pitchShiftSemitones ?? 0,
-                formantPreserve: cd.formantPreserve ?? false)
+                formantPreserve: cd.formantPreserve ?? false,
+                // m16-b3 (design-m16b §14 amendment A1 / C13a): thread the
+                // envelope AND the controller lanes — this reconstruction
+                // silently dropped `gainEnvelope` since m13-e, and b2's lanes
+                // inherited the same gap. The main `tracks` path (:196/:200)
+                // always threaded both; take lanes now match it.
+                gainEnvelope: cd.gainEnvelope ?? [],
+                controllerLanes: cd.controllerLanes ?? [])
             // TakeLane.init strips any stray takeGroupID (payloads never nest).
             return TakeLane(id: ld.id, name: ld.name, clip: clip)
         }

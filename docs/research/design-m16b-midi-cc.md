@@ -302,6 +302,26 @@ The shared pure helper (`windowedControllerLanes` + the lane-state-at-beat scan)
 > **(A4) Clip-local `deleteTimeRange`/`insertTimeRange` (piano-roll bar edits) leave lanes untouched** — in-place
 > note mutation, no Clip reconstruction, no silent-drop risk; §11's table covers only the session-wide arrange verbs
 > by design. Reviewed and accepted.
+>
+> **b3 amendments (2026-07-13, live-thru + capture landing):**
+> **(A5) "Thru sounds while stopped" is EVENT-GATED — a held voice renders continuously only under a published
+> schedule.** `renderQuantum`'s idle-node early return (`InstrumentSourceNode.swift` step 7: `schedule == nil &&
+> liveCount == 0` → zero-fill, instrument not rendered) means a stopped node sounds live events only in the quantum
+> they drain; a HELD note/pedal-sustained voice reads silent between events (probe-verified on staging, port 17671 —
+> pre-existing M3-vii scope, NOT a b3 regression; C11's ≤ 1-quantum DELIVERY holds in both modes and is unit-pinned).
+> Consequence for C14: the e2e's audible pedal-hold proof runs under `transport.play` (schedule published, instrument
+> renders every quantum); the stopped half asserts the event-gated rise only. Candidate future fix (audit/M17 class):
+> render the instrument while any voice is active on an idle node, or keep an armed-track idle schedule published.
+> **(A6) The §7 final-value law, streaming realization:** a suppressed (sub-spacing) run's newest value COMMITS at
+> its own timestamp once it has HELD ≥ the spacing (the next value change arrives that much later) or at `finish` —
+> so a value audible for ≥ 5 ms is never dropped, at the price that a stored point may sit closer than the spacing
+> to its predecessor in exactly that case. Worst-case sustained density stays bounded ≤ 2 points per spacing window
+> (≈ 400 Hz/lane). The cap's "second-stage widening" = halve interior density (first/last kept) + double the lane's
+> spacing on reaching the store's 16384 cap.
+> **(A7) A CC-only take (controller data, ZERO notes) still discards** with the existing teaching error ("empty take
+> discarded — no MIDI notes received") — `midiLands` stays note-based in b3; lanes land only when the take lands.
+> Revisit only on real agent/user pain (the CC-only-clip model shape already supports landing them if the policy
+> flips).
 
 ### Phase b2 — model + schedule playback
 **Route: swift-app-engineer** (DAWCore model + store ops + §11 helper + wire/MCP/catalog) **then audio-dsp-engineer** (MIDISchedule kinds/sort/build/chase, PlaybackGraph base fix, instruments, reset). Files: `Sources/DAWCore/Model.swift`, `ProjectStore.swift` (+ a `ProjectStore+ControllerLanes.swift` if it runs long), `Sources/DAWEngine/MIDISchedule.swift`, `PlaybackGraph.swift` (:2114-2124, :2410-2444), `Instruments/PolySynthInstrument.swift`, `Instruments/SamplerInstrument.swift`, `AudioUnits/HostedAUInstrument.swift`, `Sources/DAWControl/Commands.swift`, `mcp-server/src/`, tests in `Tests/DAWCoreTests` + `Tests/DAWEngineTests` + `Tests/DAWControlTests` + npm.

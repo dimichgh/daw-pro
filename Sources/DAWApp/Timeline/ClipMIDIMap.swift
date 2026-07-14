@@ -20,6 +20,12 @@ struct ClipMIDIMap: View {
     /// Pill opacity — full-presence in an arrange clip, faded by the caller for a
     /// dim take-lane strip (the take row wraps this in `.opacity(0.5)`).
     var opacity: Double = 0.8
+    /// The clip's MIDI controller lanes (m16-b4). Default `[]` — a laneless clip
+    /// draws its note pills PIXEL-IDENTICALLY to before (the Canvas guards the
+    /// trace on `isEmpty`, so no code path runs when there are no lanes). Only the
+    /// FIRST lane (canonical order) traces, a faint stepped polyline in the bottom
+    /// 20% band at 0.35× the pill opacity (design-m16b §9).
+    var controllerLanes: [MIDIControllerLane] = []
 
     private var geometry: MIDIMapGeometry { MIDIMapGeometry(pixelsPerBeat: pixelsPerBeat) }
 
@@ -31,13 +37,21 @@ struct ClipMIDIMap: View {
         let lengthBeats = lengthBeats
         let tint = tint
         let opacity = opacity
+        let controllerLanes = controllerLanes
         return Canvas { @Sendable context, size in
-            guard !notes.isEmpty else { return }
-            let rects = geometry.noteRects(notes, clipLengthBeats: lengthBeats, height: size.height)
             let shading = GraphicsContext.Shading.color(tint.opacity(opacity))
-            for rect in rects {
+            for rect in geometry.noteRects(notes, clipLengthBeats: lengthBeats, height: size.height) {
                 context.fill(Path(roundedRect: rect, cornerRadius: 1.5), with: shading)
             }
+            // Controller trace: the first lane only, a faint stepped line under the
+            // pills. Guarded on isEmpty so a laneless clip runs no new draw code.
+            guard let lane = controllerLanes.first else { return }
+            let points = geometry.controllerTrace(lane, clipLengthBeats: lengthBeats, height: size.height)
+            guard points.count > 1 else { return }
+            var path = Path()
+            path.move(to: points[0])
+            for point in points.dropFirst() { path.addLine(to: point) }
+            context.stroke(path, with: .color(tint.opacity(opacity * 0.35)), lineWidth: 1)
         }
         .allowsHitTesting(false)
     }

@@ -125,11 +125,19 @@ public struct MIDIRecordingResult: Sendable, Equatable {
     public var lengthBeats: Double
     /// True when the capture ring overflowed mid-take (events were lost).
     public var droppedEvents: Bool
+    /// Captured controller streams (m16-b3): CC / pitch bend / channel
+    /// pressure as clip-relative lanes (same beat domain as `notes`), already
+    /// thinned at ingest per the design-m16b §7 capture law. ADDITIVE with a
+    /// `[]` default so fake engines and pre-CC constructions stay valid
+    /// unchanged (C12).
+    public var controllerLanes: [MIDIControllerLane]
 
-    public init(notes: [MIDINote], lengthBeats: Double, droppedEvents: Bool = false) {
+    public init(notes: [MIDINote], lengthBeats: Double, droppedEvents: Bool = false,
+                controllerLanes: [MIDIControllerLane] = []) {
         self.notes = notes
         self.lengthBeats = lengthBeats
         self.droppedEvents = droppedEvents
+        self.controllerLanes = controllerLanes
     }
 }
 

@@ -6,18 +6,25 @@ import Foundation
 /// (CoreMIDI downconverts MIDI 2.0 devices for free).
 enum MIDIUMPParser {
     /// What one accepted UMP word says — pre-timestamp, pre-source (the packet
-    /// walker adds those when it builds the `LiveMIDIEvent`).
+    /// walker adds those when it builds the `LiveMIDIEvent`). Field naming is
+    /// historical; the CONTENTS follow the §4.1 one-data-rule (design-m16b):
+    /// `pitch` ≡ MIDI data1, `velocity` ≡ MIDI data2 for EVERY kind — notes
+    /// (key, velocity), CC (controller, value), bend (LSB, MSB in wire order;
+    /// the consumer reassembles `(MSB << 7) | LSB`), channel pressure
+    /// (value, 0 — a TWO-byte message).
     struct LiveNote: Equatable {
-        var kind: UInt8       // ScheduledMIDIEvent.noteOn / .noteOff
-        var pitch: UInt8      // 0...127
-        var velocity: UInt8   // on: 1...127; off: 0
+        var kind: UInt8       // ScheduledMIDIEvent.noteOn/.noteOff/.controlChange/.pitchBend/.channelPressure
+        var pitch: UInt8      // MIDI data1 (0...127)
+        var velocity: UInt8   // MIDI data2 (0...127); 0 where the message has none
         var channel: UInt8    // 0...15
     }
 
-    /// Parses ONE 32-bit UMP word. v0 scope: message type 2 (MIDI 1.0 channel
-    /// voice) note-on / note-off only; **note-on velocity 0 maps to note-off**
-    /// per the MIDI 1.0 rule. Everything else (CC, pitch bend, aftertouch,
-    /// program change, non-MT-2 words) returns nil and is dropped.
+    /// Parses ONE 32-bit UMP word. Scope: message type 2 (MIDI 1.0 channel
+    /// voice) note-on / note-off (**note-on velocity 0 maps to note-off** per
+    /// the MIDI 1.0 rule) plus, since m16-b3, CC (0xB → kind 2), channel
+    /// pressure (0xD → kind 4) and pitch bend (0xE → kind 3) under the §4.1
+    /// one-data-rule above. Everything else (poly aftertouch, program change,
+    /// non-MT-2 words) returns nil and is dropped.
     ///
     /// RT-safe by construction: pure integer math, called from the CoreMIDI
     /// receive thread.
@@ -25,14 +32,23 @@ enum MIDIUMPParser {
         guard (word >> 28) & 0xF == 0x2 else { return nil }  // MT 2 only
         let status = UInt8((word >> 16) & 0xFF)
         let channel = status & 0x0F
-        let pitch = UInt8((word >> 8) & 0x7F)
-        let velocity = UInt8(word & 0x7F)
+        let data1 = UInt8((word >> 8) & 0x7F)
+        let data2 = UInt8(word & 0x7F)
         switch status >> 4 {
-        case 0x9 where velocity > 0:
-            return LiveNote(kind: ScheduledMIDIEvent.noteOn, pitch: pitch,
-                            velocity: velocity, channel: channel)
+        case 0x9 where data2 > 0:
+            return LiveNote(kind: ScheduledMIDIEvent.noteOn, pitch: data1,
+                            velocity: data2, channel: channel)
         case 0x9, 0x8:  // note-on vel 0 ≡ note-off; 0x8 is note-off proper
-            return LiveNote(kind: ScheduledMIDIEvent.noteOff, pitch: pitch,
+            return LiveNote(kind: ScheduledMIDIEvent.noteOff, pitch: data1,
+                            velocity: 0, channel: channel)
+        case 0xB:  // control change: data1 = controller#, data2 = value
+            return LiveNote(kind: ScheduledMIDIEvent.controlChange, pitch: data1,
+                            velocity: data2, channel: channel)
+        case 0xE:  // pitch bend: data1 = LSB, data2 = MSB (wire order)
+            return LiveNote(kind: ScheduledMIDIEvent.pitchBend, pitch: data1,
+                            velocity: data2, channel: channel)
+        case 0xD:  // channel pressure: TWO-byte message, data1 = value
+            return LiveNote(kind: ScheduledMIDIEvent.channelPressure, pitch: data1,
                             velocity: 0, channel: channel)
         default:
             return nil

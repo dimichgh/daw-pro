@@ -87,10 +87,11 @@ struct CanvasContractPinTests {
     @Test("every Canvas renderer in Sources/DAWApp opens @Sendable")
     func allCanvasClosuresAreSendable() {
         let sites = Self.scan()
-        // Guard the scan itself: the sweep landed 17 sites; if the count collapses the
-        // regex or the path walk broke and the pin would pass vacuously.
-        #expect(sites.count >= 17,
-                "expected at least 17 Canvas renderer sites, found \(sites.count) — scan likely broke")
+        // Guard the scan itself: the sweep landed 17 sites, plus the m16-b4
+        // controller-lane canvas → 18; if the count collapses the regex or the path
+        // walk broke and the pin would pass vacuously.
+        #expect(sites.count >= 18,
+                "expected at least 18 Canvas renderer sites, found \(sites.count) — scan likely broke")
         let offenders = sites.filter { !$0.sendable }
         let detail = offenders.map { "  \($0.file):\($0.line)  \($0.text)" }.joined(separator: "\n")
         #expect(offenders.isEmpty,

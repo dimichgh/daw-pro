@@ -85,6 +85,9 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// the clip-body honest-scope precedent).
     case pianoRollGrid
     case pianoRollVelocity
+    /// The Pro controller strip under the velocity lane (m16-b4) — bend, mod wheel,
+    /// sustain, and other CCs as a stepped value line.
+    case pianoRollControllers
     /// The insert-/delete-bar control cluster in the header (beta m10-h) — one card
     /// for the whole time-range affordance.
     case pianoRollBarOps
@@ -330,6 +333,9 @@ public enum ExplainCatalog {
         .pianoRollVelocity: ExplainEntry(
             title: "Velocity Lane",
             body: "Sets how hard each note is struck, which mostly shapes how loud and punchy it sounds. Drag a bar up for an accent or down for a softer touch, so the part feels more human."),
+        .pianoRollControllers: ExplainEntry(
+            title: "Controller Strip",
+            body: "Draws performance moves that ride under the notes — the mod wheel, sustain pedal, pitch bend, and other controls. Pick a lane, then drag to draw a stepped line; each point holds until the next one."),
         .pianoRollBarOps: ExplainEntry(
             title: "Insert / Delete Bar",
             body: "Adds or removes a whole bar at the marked spot. Insert opens an empty bar and slides the rest of the part later; delete takes that bar out and pulls everything after it back to close the gap."),

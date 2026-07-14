@@ -13,17 +13,29 @@
 // executor-tracking TLS record, and the app either crashes at the next
 // SE-0423 dynamic-isolation check or wedges (wire connects, every command
 // times out). Post-fix (Leg 0 play-guard + Leg 1 ObjC exception barrier):
-// every iteration completes, the wire keeps answering, and the snapshot
-// carries a `clip-unplayable`-family engine notice — proof the guard fired
-// rather than the path having gone silent.
+// every iteration completes and the wire keeps answering.
+//
+// EXPECTATION REPLACEMENT (2026-07-13, m16-h —
+// docs/research/design-m16h-reconfig.md §5.5): this gate originally
+// REQUIRED a `clip-unplayable` notice per run ("proof the guard fired").
+// That requirement asserted the DEFECT's signature: the raise this recipe
+// provoked on iterations ≥2 was the deep post-start reconfig defect (every
+// strip born on the running just-rebuilt engine was a dead player host),
+// not the missing-media shape. m16-h removed the raise class by
+// construction (deferred rebuild start + announce-class strip birth), and
+// the dying clip now PLAYS its already-open unlinked fd audibly — so
+// `clip-unplayable` is PERMITTED but NOT REQUIRED. The gate's real job —
+// wedge/crash detection under the poisoner recipe — is unchanged: all
+// iterations must complete, the wire must keep answering, and the
+// operator's .ips ledger must be byte-identical around the run.
 //
 // Usage against a staging instance (fresh 176xx port; see staging laws):
 //   env DAW_CONTROL_PORT=17663 nohup .build/debug/DAWApp &
 //   PORT=17663 ITERS=10 node scripts/gates/m16a-poison-recipe.mjs
 //
-// Exit codes: 0 = all iterations clean AND clip-unplayable observed;
+// Exit codes: 0 = all iterations clean (wire answered throughout);
 // 2 = app dead (connect failed); 3 = wedge (commands stopped answering);
-// 4 = honesty failure (ran clean but the guard notice never appeared).
+// 4 = iteration shortfall (an iteration failed without a wedge/crash).
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -104,9 +116,11 @@ async function iteration(ws, iter) {
   const notices = snap.engineNotices || [];
   const codes = notices.map((n) => n.code);
   if (codes.includes("clip-unplayable")) sawUnplayable++;
+  // Post-m16-h a notice-free iteration is the NORM (the dying clip plays
+  // its unlinked fd) — informational only, never a failure.
   const familyHit = codes.filter((c) => NOTICE_FAMILY.includes(c));
   if (familyHit.length === 0) {
-    log(`iter ${iter}: WARNING — no missing-media notice in snapshot (codes: ${codes.join(",") || "none"})`);
+    log(`iter ${iter}: no guard-family notice (codes: ${codes.join(",") || "none"}) — expected post-m16-h`);
   }
   return codes;
 }
@@ -146,12 +160,10 @@ for (let iter = 1; iter <= ITERS; iter++) {
   await sleep(500);
 }
 
-log(`done: ${clean}/${ITERS} iterations clean; clip-unplayable seen in ${sawUnplayable} snapshots`);
-if (clean === ITERS && sawUnplayable > 0) {
+log(`done: ${clean}/${ITERS} iterations clean; clip-unplayable seen in ${sawUnplayable} snapshots (permitted, not required — m16-h)`);
+if (clean === ITERS) {
   log("C1 PASS");
   process.exit(0);
 }
-log(clean === ITERS
-  ? "C1 HONESTY FAILURE: ran clean but the clip-unplayable guard notice never appeared"
-  : "C1 FAIL");
+log("C1 FAIL");
 process.exit(4);
