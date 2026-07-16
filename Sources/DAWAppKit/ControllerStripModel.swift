@@ -115,6 +115,35 @@ public final class ControllerStripModel {
         }
     }
 
+    // MARK: - External-mutation reseed seam (m18-i)
+
+    /// True when an incoming clip VALUE no longer matches what this strip
+    /// represents — the `PianoRollModel.needsReseed` twin for wire/arrange-side
+    /// geometry mutations landing while the editor is open on the same clip
+    /// identity (m18-i). Compares the stored lanes + clip length, incoming
+    /// lanes canonicalized first (`self.lanes` is stored canonical), so equal
+    /// content in any input shape reads EQUAL. The IDEMPOTENCE GUARD falls
+    /// out: the strip's own commit already reseeded via `load` on the store's
+    /// RETURNED clip (`commitControllerLane`), so the same value echoing back
+    /// compares equal and never re-reseeds — a double reseed would drop a
+    /// staged-but-uncommitted lane and reset the drag state for nothing.
+    public func needsReseed(lanes: [MIDIControllerLane], clipLengthBeats: Double) -> Bool {
+        if self.clipLengthBeats != max(0, clipLengthBeats) { return true }
+        return Clip.canonicalControllerLanes(lanes) != self.lanes
+    }
+
+    /// Re-reads the strip from an EXTERNALLY mutated clip — call only when
+    /// `needsReseed` says so. Exactly `load`: the chosen lane survives when
+    /// its type still exists (the strip's selection-preservation contract),
+    /// and the drag index clears, so a mid-flight point drag dies as a no-op
+    /// over the new content (CANCEL-THEN-RESEED, m18-i; an in-flight pencil
+    /// stroke simply continues onto the new draft — drawing lands on what is
+    /// really there). The m18-e ghost boundary needs no special handling:
+    /// `playableCount` splits on the reseeded `clipLengthBeats` next draw.
+    public func reseed(lanes: [MIDIControllerLane], clipLengthBeats: Double) {
+        load(lanes: lanes, clipLengthBeats: clipLengthBeats)
+    }
+
     // MARK: - Lane selection
 
     /// Shows an EXISTING lane (chip tap) or STAGES a lane type not yet on the clip
@@ -243,6 +272,25 @@ public final class ControllerStripModel {
     public func centerGuidelineY(type: MIDIControllerType) -> CGFloat? {
         guard case .pitchBend = type else { return nil }
         return y(forValue: type.neutralDefault, type: type)
+    }
+
+    /// Number of leading points that actually PLAY at `clipLengthBeats` — the
+    /// engine's schedule pass emits only points with `beat < clipLengthBeats`
+    /// (`MIDISchedule` strict `<`: a point exactly AT the clip end is latent),
+    /// so this is THE ONE boundary definition the m18-e ghost treatment splits
+    /// on (DESIGN-LANGUAGE "Controller strips"). Requires CANONICAL (ascending)
+    /// input — the playable points are then a prefix and the return value is the
+    /// split index: everything from it on renders ghosted (store-legal latent
+    /// data that a clip extension would re-light, a trim re-window would drop).
+    public nonisolated static func playableCount(
+        _ points: [MIDIControllerPoint], clipLengthBeats: Double
+    ) -> Int {
+        var count = 0
+        for p in points {
+            guard p.beat < clipLengthBeats else { break }
+            count += 1
+        }
+        return count
     }
 
     /// Handles are hidden once the visible lane is denser than

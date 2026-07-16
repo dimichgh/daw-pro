@@ -203,7 +203,7 @@ struct ProjectStoreMIDITests {
             url: URL(fileURLWithPath: "/tmp/Loop.wav"), toTrack: audioTrack.id
         )
         let wrong = projectError { _ = try store.setClipNotes(clipID: audioClip.id, notes: []) }
-        guard case .notAMIDIClip(let cid)? = wrong, cid == audioClip.id else {
+        guard case .notAMIDIClip(let cid, _)? = wrong, cid == audioClip.id else {
             Issue.record("expected notAMIDIClip, got \(String(describing: wrong))"); return
         }
         #expect(wrong?.errorDescription

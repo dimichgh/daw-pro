@@ -48,7 +48,7 @@ Use the specialized agents in `.claude/agents/`. Route by domain and complexity 
 | Work | Agent | Model |
 |---|---|---|
 | Architecture, RT audio, DSP algorithms | `daw-architect`, `audio-dsp-engineer` | fable |
-| App features, SwiftUI, custom controls/design | `swift-app-engineer`, `ui-design-engineer` | opus |
+| App features, SwiftUI, custom controls/design | `swift-app-engineer`, `ui-design-engineer` | fable |
 | MCP tools, AI-service clients, control protocol | `mcp-integration-engineer` | sonnet |
 | Research, competitive analysis | `research-analyst` | sonnet |
 | Tests, verification, regressions | `qa-test-engineer` | sonnet |

@@ -247,4 +247,30 @@ struct PianoRollModelTests {
         #expect(m.contentWidth == 14 * PianoRollModel.defaultPixelsPerBeat)
         #expect(m.contentHeight == 128 * PianoRollModel.defaultRowHeight)
     }
+
+    // 17. m18-f wide-window rule (DESIGN-LANGUAGE "Wide windows"): a band draws
+    // at max(content, viewport) — extended to the panel's right edge at wide
+    // windows, never narrower than its content.
+    @Test("drawnWidth extends content to a wider viewport")
+    func drawnWidthExtends() {
+        // 8-beat clip = 256 pt of content inside a 3400 pt ultra-wide viewport.
+        #expect(PianoRollModel.drawnWidth(content: 256, viewport: 3400) == 3400)
+        // Exactly-fitting viewport is a no-op.
+        #expect(PianoRollModel.drawnWidth(content: 256, viewport: 256) == 256)
+    }
+
+    // 18. Content always wins over a narrower viewport (the pre-m18-f behavior
+    // is unchanged when the clip outruns the window — the band stays scrollable),
+    // including content the model already extended for out-of-clip notes.
+    @Test("drawnWidth never shrinks below content")
+    func drawnWidthKeepsContent() {
+        #expect(PianoRollModel.drawnWidth(content: 2048, viewport: 1330) == 2048)
+        let m = makeModel(notes: [MIDINote(pitch: 60, startBeat: 10, lengthBeats: 4)], length: 8)
+        // Note-extended content (14 beats) beats a viewport narrower than it.
+        let content = m.contentWidth
+        #expect(PianoRollModel.drawnWidth(content: content, viewport: content - 1) == content)
+        // A degenerate viewport (panel narrower than the gutter reports <= 0)
+        // floors at 0 and passes content through untouched.
+        #expect(PianoRollModel.drawnWidth(content: content, viewport: -10) == content)
+    }
 }

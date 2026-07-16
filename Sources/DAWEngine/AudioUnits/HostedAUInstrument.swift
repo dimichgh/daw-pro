@@ -28,8 +28,20 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
 
     /// MAIN-ACTOR-ONLY: state capture (`fullStateForDocument`), teardown
     /// (`deallocateRenderResources`/`reset`), and rate renegotiation. Never
-    /// dereferenced by `render()`/`reset()`.
+    /// dereferenced by `render()`/`reset()`. ONE exception (m18-d): when
+    /// `serializedBankTeardown` is set, the registry's release path runs
+    /// teardown on `AUHostRegistry.dlsBankQueue` instead.
     let auAudioUnit: AUAudioUnit
+
+    /// m18-d: true for DLS-family AUs (AUSampler/DLSMusicDevice), whose
+    /// dispose mutates AudioToolbox's process-global bank state and must be
+    /// mutually exclusive with every `kAUSamplerProperty_LoadInstrument`
+    /// write. `deinit` hands the final `auAudioUnit` reference to
+    /// `AUHostRegistry.dlsBankQueue`, so `AUAudioUnitV2Bridge dealloc` →
+    /// `AudioComponentInstanceDispose` lands on the gate no matter which
+    /// owner (registry release, registry deinit, graph, offline renderer)
+    /// drops the last reference.
+    let serializedBankTeardown: Bool
 
     /// MAIN-ACTOR-ONLY (set once by the registry right after wrapping, read
     /// only inside `prepare`'s renegotiation block): re-applies per-instance
@@ -63,12 +75,14 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
     /// production — the registry never passes it.
     @MainActor
     init(au: AUAudioUnit, sampleRate: Double,
+         serializedBankTeardown: Bool = false,
          scheduleMIDIOverride: AUScheduleMIDIEventBlock? = nil) throws {
         // Called AFTER allocateRenderResources — renderBlock is only valid then.
         guard let schedule = au.scheduleMIDIEventBlock else {
             throw HostingError.notAMusicDevice
         }
         auAudioUnit = au
+        self.serializedBankTeardown = serializedBankTeardown
         renderBlock = au.renderBlock
         scheduleMIDI = scheduleMIDIOverride ?? schedule
         preparedSampleRate = sampleRate
@@ -82,6 +96,16 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
         free(shadowABL.unsafeMutablePointer)
         midiBytes.deallocate()
         renderErrorSlot.deallocate()
+        // m18-d deinit hand-off: escape the AU reference to the DLS bank
+        // gate so its FINAL release — and therefore
+        // `AudioComponentInstanceDispose`, which closes bank files inside
+        // AudioToolbox's unlocked global DLS state — is serialized against
+        // every in-flight bank load, regardless of which owner dropped us.
+        if serializedBankTeardown {
+            struct AUBox: @unchecked Sendable { let au: AUAudioUnit }
+            let box = AUBox(au: auAudioUnit)
+            AUHostRegistry.dlsBankQueue.async { _ = box }
+        }
     }
 
     /// Last non-noErr status the AU returned from a render, edge-triggered:

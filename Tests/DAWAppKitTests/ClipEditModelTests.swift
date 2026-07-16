@@ -103,6 +103,22 @@ struct ClipEditModelTests {
         #expect(g.beat(forX: -20) == 0)
     }
 
+    @Test("beat<->x holds at non-default zoom scales — drags derive beats from x through this (m17-b)")
+    func beatXAtZoomScales() {
+        // The arrange gestures (move/trim/split/fade) all derive beats from x via
+        // ClipEditGeometry; the zoomable pixelsPerBeat input must keep the
+        // mapping exact at every scale, including the S/M/L lane heights.
+        for (ppb, lane) in [(CGFloat(4), CGFloat(24)), (32, 34), (200, 50)] {
+            let g = ClipEditGeometry(pixelsPerBeat: ppb, laneHeight: lane)
+            for beat in [0.0, 0.5, 3.25, 17.0] {
+                #expect(abs(g.beat(forX: g.x(forBeat: beat)) - beat) < 1e-9,
+                        "round-trip failed at \(ppb) ppb")
+            }
+            // A 6-pt pointer travel means MORE beats zoomed out, fewer zoomed in.
+            #expect(abs(g.beat(forX: 6) - Double(6 / ppb)) < 1e-9)
+        }
+    }
+
     // MARK: - Hit classification
 
     @Test("classifyZone routes body, trim edges, and no-fade top corners")

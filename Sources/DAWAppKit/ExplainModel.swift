@@ -94,12 +94,21 @@ public enum ExplainID: String, CaseIterable, Sendable {
 
     // MARK: Arrange (timeline + sidebar)
     case arrangeSnap
+    /// The arrange-toolbar zoom cluster (m17-b): the −/%/+ horizontal zoom chip
+    /// AND the S/M/L track-height chip — one card summarizes the whole cluster
+    /// (its ⌘ shortcuts and the pinch gesture included — the honest-scope rule
+    /// for gesture chrome).
+    case arrangeZoom
     case arrangeAddTrack
     /// A sidebar track row's identity (its name + kind icon).
     case trackRowIdentity
     /// A timeline clip's body (a Canvas/gesture block; one card summarizes its
     /// move/trim/fade/split affordances — the honest-scope rule for Canvas chrome).
     case clipBlock
+    /// The lanes pointer surface (m17-c): the draggable playhead, the empty-lane
+    /// click-to-seek, and the hover ghost line. One card for the whole gesture
+    /// layer (the clip-body honest-scope precedent). NOT an AI surface — no violet.
+    case arrangePlayhead
     /// The arrange ruler's loop surface (beta m10-g) — a Canvas/gesture band; one
     /// card summarizes its sketch/resize/move/toggle/seek affordances (the
     /// clip-body honest-scope precedent). Distinct from `.transportLoop` (the chip):
@@ -179,6 +188,15 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// NOT an AI surface — no violet.
     case sidechain
 
+    // MARK: Effect editor (m17-a)
+    /// The built-in insert EFFECT EDITOR card (m17-a) — the panel of sliders a
+    /// built-in effect opens from its InsertRow (and auto-opens on a UI add).
+    /// ONE card for the whole surface: the rows are spec-generated, so
+    /// per-param entries would fake curation (the Canvas honest-scope rule).
+    /// Pro-only by construction (the inserts section is Pro-gated). NOT an AI
+    /// surface — no violet.
+    case effectEditor
+
     // MARK: AI panels (violet affordances — Rule 3)
     case aiCopilot
     case aiSketchpad
@@ -196,6 +214,9 @@ public enum ExplainID: String, CaseIterable, Sendable {
     case clipFixRegion
     case clipFixStrength
     case clipFixGo
+    /// The unified generation-progress card (m17-h) — the canonical violet
+    /// status surface every AI song job reports to, whatever started it.
+    case generationCard
 
     // MARK: Settings
     case settingsGear
@@ -240,7 +261,7 @@ public enum ExplainCatalog {
             body: "Jumps the playhead back to the very beginning of the song. Use it to replay from the top after a take, or to line up before you record."),
         .transportPlay: ExplainEntry(
             title: "Play / Pause",
-            body: "Starts and stops playback from wherever the playhead sits. Press it to hear your song; press again to pause right where you are."),
+            body: "Starts and stops playback from wherever the playhead sits. Press it — or tap the space bar — to hear your song; press again to pause right where you are."),
         .transportRecord: ExplainEntry(
             title: "Record",
             body: "Captures new sound or notes onto any armed track. Arm a track first, set the playhead, then press this to lay down a take. With LOOP on it jumps to the loop start and each pass stacks a fresh take to pick from."),
@@ -344,6 +365,9 @@ public enum ExplainCatalog {
         .arrangeSnap: ExplainEntry(
             title: "Grid Snap",
             body: "Lines up clip edits — moving, trimming, and splitting — to a musical grid so parts stay in time. Set it to Bar for big blocks, or a finer value for detailed edits."),
+        .arrangeZoom: ExplainEntry(
+            title: "Zoom",
+            body: "Zooms the timeline in for fine edits or out to see the whole song — the view holds its place around the playhead so nothing jumps. You can also pinch the timeline, and S, M, L set how tall each track row is."),
         .arrangeAddTrack: ExplainEntry(
             title: "Add Track",
             body: "Creates a new empty track to hold a recording, an instrument, or a generated part. Add one whenever you want to layer another sound on top of what you already have."),
@@ -353,6 +377,9 @@ public enum ExplainCatalog {
         .clipBlock: ExplainEntry(
             title: "Clip",
             body: "A block of sound or notes on the timeline. Drag it to move it in time; in Pro you can also drag its edges to trim, its top corners to fade, and double-click to split it in two."),
+        .arrangePlayhead: ExplainEntry(
+            title: "Playhead & Timeline",
+            body: "Click any empty lane space to move the playhead there, or grab the glowing line and drag it to scrub through the song. A faint guide line previews the beat you would land on. Double-click a clip to split it at that spot."),
         .loopRuler: ExplainEntry(
             title: "Loop Region",
             body: "The strip along the top of the timeline where you mark a section to repeat. Drag across it to set the loop, click inside to turn looping on or off, or click an empty spot to jump the playhead there."),
@@ -419,6 +446,11 @@ public enum ExplainCatalog {
             title: "Sidechain Key",
             body: "Makes this compressor or gate react to ANOTHER track instead of its own sound — pick a kick to duck a pad on every hit, the classic pump. Only compressors and gates can be keyed. Key from an audio track; to key an instrument, route it to a bus first."),
 
+        // MARK: Effect editor (m17-a)
+        .effectEditor: ExplainEntry(
+            title: "Effect Controls",
+            body: "The controls for one insert effect — each slider shapes part of its sound, and you hear every change live. Double-click a slider to reset it, and use the switch at the top to bypass the effect while you compare before and after."),
+
         // MARK: AI panels (violet affordances — Rule 3)
         .aiCopilot: ExplainEntry(
             title: "AI Copilot",
@@ -459,6 +491,9 @@ public enum ExplainCatalog {
         .clipFixGo: ExplainEntry(
             title: "Fix This Region",
             body: "Sends the chosen region to the AI and brings the repair back as a new take lane over just that part. Your original stays untouched, so you can compare the two and keep the better one."),
+        .generationCard: ExplainEntry(
+            title: "AI Generation",
+            body: "Shows every AI song job in one place — the stage it is in, how far along it is, and how long it has been working. If a job fails, the card says so and shows the exact reason."),
 
         // MARK: Settings
         .settingsGear: ExplainEntry(

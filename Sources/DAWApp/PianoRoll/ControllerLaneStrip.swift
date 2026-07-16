@@ -17,6 +17,13 @@ struct ControllerLaneStrip: View {
     var accent: Color
     /// Grid snap for pencil ticks (shares the piano roll's resolution).
     var snap: SnapResolution
+    /// Drawn canvas width — the model's content width, extended to the editor
+    /// viewport at wide windows (m18-f, DESIGN-LANGUAGE "Wide windows"). The
+    /// parent computes it via the shared `PianoRollModel.drawnWidth` rule so all
+    /// three editor bands extend identically; a plain value input keeps the
+    /// strip previewable. The canvas already draws the extension honestly —
+    /// shade + boundary hairline + ghost hold-line run to `size.width` (m18-e).
+    var drawnWidth: CGFloat
     /// Commits the visible lane through `ProjectStore.setControllerLane` (the wire
     /// verb's store call) and reseeds the model from the returned clip.
     var onCommit: () -> Void
@@ -231,15 +238,23 @@ struct ControllerLaneStrip: View {
     }
 
     /// SF Mono live value of the visible lane at its last point (the numeric-
-    /// readout rule — DESIGN-LANGUAGE "SF Mono for numeric readouts").
+    /// readout rule — DESIGN-LANGUAGE "SF Mono for numeric readouts"). The dim
+    /// lane label rides along (m17-f F3): the readout is trailing-pinned, so at a
+    /// wide window a BARE number floats over a thousand points from the lane it
+    /// describes and reads as stray debris — labeled, it reads as a readout.
     @ViewBuilder
     private func valueReadout(type: MIDIControllerType) -> some View {
         let value = model.draft.max(by: { $0.beat < $1.beat })?.value
         if let value {
-            Text("\(value)")
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundStyle(accent)
-                .glow(accent, radius: 4, intensity: 0.45)
+            HStack(spacing: 4) {
+                Text(ControllerStripModel.label(for: type))
+                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    .foregroundStyle(DAWTheme.textDim)
+                Text("\(value)")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(accent)
+                    .glow(accent, radius: 4, intensity: 0.45)
+            }
         }
     }
 
@@ -250,7 +265,7 @@ struct ControllerLaneStrip: View {
             sidebarLabel
             ScrollView(.horizontal, showsIndicators: false) {
                 ControllerLaneCanvas(model: model, accent: accent)
-                    .frame(width: model.contentWidth, height: Self.canvasHeight)
+                    .frame(width: max(drawnWidth, model.contentWidth), height: Self.canvasHeight)
                     .contentShape(Rectangle())
                     .hoverCursor(resolve: laneCursor)
                     .gesture(laneDrag)
@@ -335,6 +350,11 @@ private struct ControllerLaneCanvas: View {
         var showHandles: Bool
         var centerFraction: Double?     // bend center, as a fraction from the bottom
         var clipLengthBeats: Double
+        /// Split index for the m18-e ghost treatment: `points[..<playableCount]`
+        /// play (full glow), `points[playableCount...]` are beyond-clip latent
+        /// data (ghost — dim core, no glow). One boundary definition, the
+        /// model's engine-honest `playableCount`.
+        var playableCount: Int
         var accent: Color
         var hasLane: Bool
     }
@@ -357,6 +377,8 @@ private struct ControllerLaneCanvas: View {
                 return nil
             }),
             clipLengthBeats: model.clipLengthBeats,
+            playableCount: ControllerStripModel.playableCount(
+                points, clipLengthBeats: model.clipLengthBeats),
             accent: accent,
             hasLane: type != nil)
         return Canvas { @Sendable context, size in
@@ -378,12 +400,20 @@ private struct ControllerLaneCanvas: View {
         context.fill(
             Path(CGRect(x: 0, y: size.height - 0.5, width: size.width, height: 0.5)),
             with: .color(DAWTheme.hairline))
-        // Out-of-clip shade past the clip length.
+        // Out-of-clip shade past the clip length (the note-grid shade, same
+        // 0.28 black) + a 1 pt neutral boundary hairline at the clip end so the
+        // latent region reads as a deliberate boundary, not a rendering seam
+        // (m18-e — DESIGN-LANGUAGE "Controller strips"; gridEmphasis is the
+        // grid's own bar-line chrome, no accent and no glow: a boundary is
+        // chrome, not state).
         let clipX = CGFloat(s.clipLengthBeats) * s.pixelsPerBeat
         if clipX < size.width {
             context.fill(
                 Path(CGRect(x: clipX, y: 0, width: size.width - clipX, height: size.height)),
                 with: .color(Color.black.opacity(0.28)))
+            context.fill(
+                Path(CGRect(x: clipX - 0.5, y: 0, width: 1, height: size.height)),
+                with: .color(DAWTheme.gridEmphasis))
         }
     }
 
@@ -398,45 +428,98 @@ private struct ControllerLaneCanvas: View {
                        style: StrokeStyle(lineWidth: 0.75, dash: [3, 3]))
     }
 
+    /// The stepped value line, split at the clip boundary (m18-e ghost
+    /// treatment — DESIGN-LANGUAGE "Controller strips"): the in-clip portion
+    /// takes the full neon treatment (bloom + bright core), the beyond-clip
+    /// portion — latent data the engine never plays — draws as a single dim
+    /// core with NO glow (glow is earned; inert data earns none, the
+    /// disabled-automation-lane idiom). Hold segments that cross the boundary
+    /// split exactly at the clip-end x; a vertical step AT the boundary is
+    /// ghost (the model's strict-`<` playable rule).
     private nonisolated static func drawSteppedLine(_ context: inout GraphicsContext, size: CGSize, s: Snapshot) {
         guard s.hasLane, !s.points.isEmpty else { return }
-        var path = Path()
-        var started = false
-        var lastY: CGFloat = 0
+        let clipX = CGFloat(s.clipLengthBeats) * s.pixelsPerBeat
+        var lit = Path()
+        var ghost = Path()
+        var litEnd: CGPoint?
+        var ghostEnd: CGPoint?
+        // Appends one polyline segment to a path, continuing the subpath when
+        // it abuts the previous segment (a step line is one continuous trace
+        // per side of the boundary).
+        func add(_ a: CGPoint, _ b: CGPoint, lit litSide: Bool) {
+            if litSide {
+                if litEnd != a { lit.move(to: a) }
+                lit.addLine(to: b)
+                litEnd = b
+            } else {
+                if ghostEnd != a { ghost.move(to: a) }
+                ghost.addLine(to: b)
+                ghostEnd = b
+            }
+        }
+        // Routes a segment to the lit or ghost path, splitting a hold that
+        // crosses the clip boundary at exactly x = clipX.
+        func segment(_ a: CGPoint, _ b: CGPoint) {
+            if a.x >= clipX && b.x >= clipX {
+                add(a, b, lit: false)
+            } else if b.x <= clipX {
+                add(a, b, lit: true)
+            } else {
+                let mid = CGPoint(x: clipX, y: a.y)
+                add(a, mid, lit: true)
+                add(mid, b, lit: false)
+            }
+        }
+        var pen: CGPoint?
         for point in s.points {
             let x = CGFloat(point.beat) * s.pixelsPerBeat
             let y = yFor(value: point.value, size: size, s: s)
-            if !started {
-                path.move(to: CGPoint(x: x, y: y))
-                started = true
-            } else {
-                path.addLine(to: CGPoint(x: x, y: lastY))   // hold
-                path.addLine(to: CGPoint(x: x, y: y))        // step
+            if let last = pen {
+                segment(last, CGPoint(x: x, y: last.y))       // hold
+                segment(CGPoint(x: x, y: last.y), CGPoint(x: x, y: y))   // step
             }
-            lastY = y
+            pen = CGPoint(x: x, y: y)
         }
-        // Hold the final value out to the clip's right edge.
-        let rightEdge = Swift.max(CGFloat(s.clipLengthBeats) * s.pixelsPerBeat, size.width)
-        path.addLine(to: CGPoint(x: rightEdge, y: lastY))
-        // Neon glow recipe (value-only, m16-a): a faint wide bloom under the bright
-        // core, matching the velocity-lane accent stems.
-        context.stroke(path, with: .color(s.accent.opacity(0.16)), lineWidth: 4)
-        context.stroke(path, with: .color(s.accent.opacity(0.9)), lineWidth: 1.5)
+        // Hold the final value out to the canvas right edge (ghosted past the
+        // clip end — nothing sounds there).
+        if let last = pen {
+            let rightEdge = Swift.max(clipX, size.width)
+            if rightEdge > last.x {
+                segment(last, CGPoint(x: rightEdge, y: last.y))
+            }
+        }
+        // Neon glow recipe (value-only, m16-a): a faint wide bloom under the
+        // bright core, matching the velocity-lane accent stems — in-clip only.
+        if !lit.isEmpty {
+            context.stroke(lit, with: .color(s.accent.opacity(0.16)), lineWidth: 4)
+            context.stroke(lit, with: .color(s.accent.opacity(0.9)), lineWidth: 1.5)
+        }
+        if !ghost.isEmpty {
+            context.stroke(ghost, with: .color(s.accent.opacity(0.35)), lineWidth: 1)
+        }
     }
 
     private nonisolated static func drawHandles(_ context: inout GraphicsContext, size: CGSize, s: Snapshot) {
         guard s.hasLane, s.showHandles else { return }
-        for point in s.points {
+        for (index, point) in s.points.enumerated() {
             let x = CGFloat(point.beat) * s.pixelsPerBeat
             let y = yFor(value: point.value, size: size, s: s)
-            // Glow recipe (value-only, m16-a): a faint wide bloom + a mid ring under
-            // the bright core, so each handle reads as a soft neon dot.
-            context.fill(Path(ellipseIn: CGRect(x: x - 5.5, y: y - 5.5, width: 11, height: 11)),
-                         with: .color(s.accent.opacity(0.16)))
-            context.fill(Path(ellipseIn: CGRect(x: x - 3.5, y: y - 3.5, width: 7, height: 7)),
-                         with: .color(s.accent.opacity(0.32)))
-            context.fill(Path(ellipseIn: CGRect(x: x - 2.5, y: y - 2.5, width: 5, height: 5)),
-                         with: .color(s.accent))
+            if index < s.playableCount {
+                // Glow recipe (value-only, m16-a): a faint wide bloom + a mid ring
+                // under the bright core, so each handle reads as a soft neon dot.
+                context.fill(Path(ellipseIn: CGRect(x: x - 5.5, y: y - 5.5, width: 11, height: 11)),
+                             with: .color(s.accent.opacity(0.16)))
+                context.fill(Path(ellipseIn: CGRect(x: x - 3.5, y: y - 3.5, width: 7, height: 7)),
+                             with: .color(s.accent.opacity(0.32)))
+                context.fill(Path(ellipseIn: CGRect(x: x - 2.5, y: y - 2.5, width: 5, height: 5)),
+                             with: .color(s.accent))
+            } else {
+                // Beyond-clip ghost handle (m18-e): the flat dim core only — no
+                // bloom, no ring, no glow (latent data; still a full edit target,
+                // hit-test/drag/delete are boundary-blind on purpose).
+                context.fill(Path(ellipseIn: CGRect(x: x - 2.5, y: y - 2.5, width: 5, height: 5)),
+                             with: .color(s.accent.opacity(0.45)))
+            }
         }
     }
 }

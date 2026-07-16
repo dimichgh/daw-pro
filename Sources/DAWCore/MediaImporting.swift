@@ -37,7 +37,11 @@ public enum ProjectError: Error, LocalizedError {
     // Sound-bank instrument identity (m10-n): audioUnit and soundBank are
     // mutually exclusive selections in one setInstrument call.
     case ambiguousInstrumentSelection
-    case notAMIDIClip(UUID)
+    // `verb` names the command that actually rejected the call (defaults to
+    // `clip.setNotes`, the original/most common caller) so the message reads
+    // correctly for every notAMIDIClip site instead of always blaming
+    // setNotes — m16-g copy edit (design-m16b §14 A2 deferred this).
+    case notAMIDIClip(UUID, verb: String = "clip.setNotes")
     case mediaServiceUnavailable
     case importFailed(String)
     case invalidLoopRange(String)
@@ -202,9 +206,10 @@ public enum ProjectError: Error, LocalizedError {
         case .ambiguousInstrumentSelection:
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "provide either audioUnit or soundBank, not both"
-        case .notAMIDIClip(let id):
-            // Exact wording is contract (control protocol + MCP surface it verbatim).
-            return "clip \(id.uuidString) is an audio clip — clip.setNotes applies only to MIDI clips (created via clip.addMIDI)"
+        case .notAMIDIClip(let id, let verb):
+            // Exact wording is contract (control protocol + MCP surface it verbatim);
+            // `verb` lets each call site name itself (m16-g).
+            return "clip \(id.uuidString) is an audio clip — \(verb) applies only to MIDI clips (created via clip.addMIDI)"
         case .mediaServiceUnavailable:
             return "No media service is available to read audio files. Wire up ProjectStore.media before importing."
         case .importFailed(let reason):

@@ -139,7 +139,7 @@ struct TransportBar: View {
             ) {
                 store.transport.isPlaying ? store.stop() : store.play()
             }
-            .help(store.transport.isPlaying ? "Pause" : "Play")
+            .help(store.transport.isPlaying ? "Pause (space)" : "Play (space)")
             .explainable(.transportPlay)
 
             TransportButton(

@@ -77,10 +77,17 @@ public final class SketchpadModel {
         sidecarStatus = status
     }
 
-    /// True when a generation can be submitted: the sidecar is healthy AND the
-    /// prompt isn't blank. The banner explains any other case.
+    /// True when a generation can be submitted: the prompt isn't blank AND the
+    /// sidecar is healthy — or merely installed/booting (m17-h auto-start: the
+    /// observing generator boots the sidecar on first generate and submits
+    /// once it's healthy, so a stopped-but-installed sidecar no longer blocks
+    /// the button; the unified progress card narrates the boot). Not-installed
+    /// and error states stay blocked — auto-start can't fix those; the banner
+    /// explains them.
     public var canGenerate: Bool {
-        sidecarStatus?.state == .healthy && !trimmedPrompt.isEmpty
+        guard let state = sidecarStatus?.state else { return false }
+        let sidecarUsable = state == .healthy || state == .installedNotRunning || state == .starting
+        return sidecarUsable && !trimmedPrompt.isEmpty
     }
 
     /// An actionable banner when generation isn't currently possible, or nil
@@ -97,9 +104,11 @@ public final class SketchpadModel {
         case .installedNotRunning:
             // status.message is wire-speak ("call ai.sidecarStart") — right for
             // agents reading command errors, wrong register for this user-facing
-            // banner. The Start button below IS the fix, so the copy points there.
+            // banner. Since m17-h, Generate auto-starts the generator; the Start
+            // button remains as the explicit path, so the copy names both.
             return SketchpadBanner(
-                message: "The AI generator is installed but not running — press Start to launch it.",
+                message: "The AI generator is not running — Generate will start it for you, "
+                    + "or press Start to launch it now.",
                 canStartSidecar: true, tone: .warning)
         case .starting:
             // M10-b: a first-class in-progress banner — `.progress` tone (the
@@ -198,10 +207,15 @@ public final class SketchpadModel {
 
     /// Polls every still-active candidate (queued/running) once and applies the
     /// resulting transition. The view drives this on a timer; the model just
-    /// transitions. A poll that THROWS is treated as transient — the candidate
-    /// is marked `isStale` and KEPT (polling continues next tick), never killed
-    /// (docs: "a transient poll error must not kill the candidate"). A returned
-    /// status whose state is `.failed` is the one path to `.failed`.
+    /// transitions. A poll that throws a TERMINAL error — the worker reported
+    /// the job failed (`jobFailed`, its message verbatim) or the job is gone
+    /// upstream (`jobNotFound`) — flips the candidate to `.failed` (m17-h: the
+    /// real `ACEStepClient` surfaces upstream failure by THROWING, and before
+    /// this mapping a genuinely failed job sat in "reconnecting" forever — the
+    /// exact "user does not know if it failed" complaint). Any OTHER throw is
+    /// transient — the candidate is marked `isStale` and KEPT (polling
+    /// continues next tick), never killed (docs: "a transient poll error must
+    /// not kill the candidate").
     public func refresh() async {
         guard !isRefreshing else { return }
         isRefreshing = true
@@ -223,7 +237,14 @@ public final class SketchpadModel {
             } catch {
                 guard let idx = candidates.firstIndex(where: { $0.id == id }) else { continue }
                 guard candidates[idx].state.isActive else { continue }
-                candidates[idx].isStale = true    // transient — keep the candidate, keep polling
+                if let reason = GenerationPresenceModel.terminalFailureReason(error) {
+                    // The worker failed the job (reason verbatim) or the job is
+                    // gone upstream — terminal, never "reconnecting" forever.
+                    candidates[idx].isStale = false
+                    candidates[idx].state = .failed(message: reason)
+                } else {
+                    candidates[idx].isStale = true    // transient — keep the candidate, keep polling
+                }
             }
         }
     }
@@ -296,7 +317,12 @@ public final class SketchpadModel {
         case .queued:
             return .queued
         case .running:
-            return .running(progress: status.progress, statusText: status.statusText ?? status.stage)
+            // The clean pipeline stage beats the raw worker log line (m17-h —
+            // see `GenerationPresenceModel.preferredStageText`).
+            return .running(
+                progress: status.progress,
+                statusText: GenerationPresenceModel.preferredStageText(
+                    stage: status.stage, statusText: status.statusText))
         case .succeeded:
             // Succeeded but the audio isn't fetched yet reads as still working,
             // so import never sees an empty path.
@@ -314,6 +340,73 @@ public final class SketchpadModel {
             return description
         }
         return "\(error)"
+    }
+
+    // MARK: - Row resolution (m18-g: one story per job)
+
+    /// What the candidate ROW displays for a candidate, after deferring to the
+    /// generation-presence registry — the SAME lifecycle facts the canonical
+    /// card renders for the same job (m18-g; filed as the m17-h deviation:
+    /// during a sidecar model load the card said LOADING THE MODEL… while the
+    /// row still showed its own QUEUED + amber RECONNECTING — two different
+    /// stories about one job). The view resolves each candidate through this
+    /// before rendering; the model's OWN tracking is untouched (polling, import
+    /// eligibility, and `hasActiveCandidates` still read the raw candidate).
+    ///
+    /// Rules (total over every registry phase):
+    /// - A TERMINAL candidate (succeeded/failed/imported) is returned
+    ///   unchanged: the row owns riches the registry doesn't carry (the
+    ///   preview/import audio path, the imported track name), and both sides
+    ///   are advanced by the same upstream poll stream anyway.
+    /// - No registry twin for the candidate's `jobID` (registry rows clear
+    ///   after their linger; seeded demo rows have no twin; pre-submit boot
+    ///   entries carry a nil jobID and never match) → the candidate's own
+    ///   tracking stands.
+    /// - `startingSidecar`/`sidecarReady` map to a working presentation whose
+    ///   status text IS the card's own stage label ("LOADING THE MODEL…") —
+    ///   same words, one story — and never stale: the boot narration is the
+    ///   honest story (the registry's own overlay clears stale the same way).
+    /// - `queued`/`running` adopt the registry's phase AND its stale flag, so
+    ///   RECONNECTING is one story too. Stage text passes through VERBATIM —
+    ///   never gated on string equality (the upstream stage is rich text).
+    /// - Registry-`succeeded` while the candidate's own poll hasn't landed the
+    ///   audio path yet bridges as a full-bar "DONE" working row (no buttons)
+    ///   for the sub-second gap — never DONE on the card with QUEUED on the row.
+    /// - Registry-`failed` fails the row with the reason VERBATIM: the registry
+    ///   escalates sidecar death mid-job to failed (plus the engine notice),
+    ///   which the row's own transient-stale rule would have shown as
+    ///   RECONNECTING forever.
+    public nonisolated static func resolvedCandidate(
+        _ candidate: SketchpadCandidate,
+        registry: [GenerationPresenceJob]
+    ) -> SketchpadCandidate {
+        guard candidate.state.isActive, !candidate.jobID.isEmpty,
+              let presence = registry.first(where: { $0.jobID == candidate.jobID })
+        else { return candidate }
+
+        var resolved = candidate
+        switch presence.phase {
+        case .startingSidecar, .sidecarReady:
+            resolved.state = .running(
+                progress: nil,
+                statusText: GenerationPresenceModel.stageLabel(for: presence.phase))
+            resolved.isStale = false
+        case .queued:
+            resolved.state = .queued
+            resolved.isStale = presence.isStale
+        case .running(let progress, let stageText):
+            resolved.state = .running(progress: progress, statusText: stageText)
+            resolved.isStale = presence.isStale
+        case .succeeded:
+            resolved.state = .running(
+                progress: 1,
+                statusText: GenerationPresenceModel.stageLabel(for: presence.phase))
+            resolved.isStale = false
+        case .failed(let reason):
+            resolved.state = .failed(message: reason)
+            resolved.isStale = false
+        }
+        return resolved
     }
 }
 

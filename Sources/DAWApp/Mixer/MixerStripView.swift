@@ -26,7 +26,9 @@ struct MixerChannelStrip: View {
 
     private var isBus: Bool { track.kind == .bus }
     /// True when this track hosts an Audio Unit instrument — the only instrument
-    /// kind with a plugin window (built-ins have first-class in-app panels).
+    /// kind with a plugin window (built-in instruments are edited in the
+    /// instrument picker, which IS their editor — LAW L7; built-in insert
+    /// EFFECTS open the in-window effect editor card, m17-a).
     private var hostsAUInstrument: Bool {
         track.kind == .instrument && (track.instrument ?? .default).kind == .audioUnit
     }
@@ -47,9 +49,17 @@ struct MixerChannelStrip: View {
                     store: store,
                     trackID: track.id,
                     effects: track.effects,
+                    onAddBuiltIn: { kind in
+                        // The UI add funnel (m17-a): store add + AUTO-OPEN of the
+                        // effect editor card (wire fx.add never auto-opens).
+                        model.addBuiltInInsert(trackID: track.id, kind: kind)
+                    },
                     onAddAudioUnit: { model.openEffectPicker(trackID: track.id) },
                     onOpenWindow: { effectID in
                         model.openPluginWindow(trackID: track.id, effectID: effectID)
+                    },
+                    onOpenEditor: { effectID in
+                        model.toggleEffectEditor(trackID: track.id, effectID: effectID)
                     }
                 )
                 .explainable(.mixerInserts)
@@ -117,14 +127,24 @@ struct MixerChannelStrip: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             // The instrument chip (m10-n-3): the current sound + the picker opener,
             // for instrument tracks only. Full variant (the strip has room).
-            if track.kind == .instrument {
-                InstrumentChip(
-                    descriptor: track.instrument,
-                    status: store.audioUnitStatus(forTrack: track.id),
-                    compact: false,
-                    onOpen: { model.openInstrumentPicker(trackID: track.id) }
-                )
+            // ALIGNMENT SLOT (m17-f F2): every strip reserves this row's height —
+            // audio/bus strips render it empty — so PAN, the fader top, and (in
+            // Pro) the INSERTS header line up ACROSS the rack instead of shifting
+            // up ~26 pt on every non-instrument strip (a rack whose knobs sit at
+            // per-kind heights reads as misalignment, the classic console rule).
+            Group {
+                if track.kind == .instrument {
+                    InstrumentChip(
+                        descriptor: track.instrument,
+                        status: store.audioUnitStatus(forTrack: track.id),
+                        compact: false,
+                        onOpen: { model.openInstrumentPicker(trackID: track.id) }
+                    )
+                } else {
+                    Color.clear
+                }
             }
+            .frame(height: 25)
         }
     }
 
@@ -303,17 +323,25 @@ struct MixerChannelStrip: View {
 /// (m13-d, design §6): a section label, the "+" add-menu, and one `InsertRow`
 /// per effect — generalized over its target by `trackID: UUID?` (nil = the
 /// MASTER chain). Every action drives the matching `ProjectStore` method —
-/// `addEffect`/`removeEffect`/`setEffectBypassed` for a track/bus, the
-/// `addMasterEffect`/`removeMasterEffect`/`setMasterEffectBypassed` twins for
-/// master — exactly the methods the `fx.*` wire verbs call (UI == wire).
-/// `addableEffectKinds` is already the built-in set = exactly what the master
-/// chain accepts (built-ins only, v1), so the menu needs no per-target filter;
-/// the master target opens no plugin window (built-ins have in-app editors).
+/// `removeEffect`/`setEffectBypassed` for a track/bus, the master twins for
+/// master, and built-in adds through the host's `onAddBuiltIn` funnel
+/// (`AppModel.addBuiltInInsert` → the same `addEffect`/`addMasterEffect` the
+/// `fx.add` wire verb calls, plus the editor auto-open) — exactly the methods
+/// the `fx.*` wire verbs call (UI == wire). `addableEffectKinds` is already
+/// the built-in set = exactly what the master chain accepts (built-ins only,
+/// v1), so the menu needs no per-target filter; the master target opens no
+/// plugin window — built-in inserts open the in-window EFFECT EDITOR card
+/// instead (m17-a, `onOpenEditor`), on tracks, buses, AND the master chain.
 struct MixerInsertsSection: View {
     var store: ProjectStore
     /// nil = the project master chain; non-nil = a track/bus by id.
     var trackID: UUID?
     var effects: [EffectDescriptor]
+    /// Adds a built-in insert (m17-a): the host routes this through
+    /// `AppModel.addBuiltInInsert`, which performs the store add AND auto-opens
+    /// the new insert's effect editor card (the Logic add-then-open habit).
+    /// The wire's `fx.add` never comes through here — agents must not pop UI.
+    var onAddBuiltIn: (EffectDescriptor.Kind) -> Void
     /// Opens the AU-effect picker modal (m13-g, audit F6) — supplied by a track/bus
     /// host only, so the add-menu grows an "Audio Units…" item there. nil on the
     /// MASTER chain (built-ins only in v1, `masterChainBuiltInOnly`): hiding the
@@ -322,6 +350,9 @@ struct MixerInsertsSection: View {
     /// Opens an AU insert's plugin window (M3 vi-b) — supplied by a track/bus
     /// host only; nil on master (built-ins only).
     var onOpenWindow: ((UUID) -> Void)?
+    /// Toggles the effect editor card on a BUILT-IN insert (m17-a) — routed to
+    /// `AppModel.toggleEffectEditor` by every host (tracks, buses, master).
+    var onOpenEditor: (UUID) -> Void
 
     var body: some View {
         VStack(spacing: 4) {
@@ -344,10 +375,17 @@ struct MixerInsertsSection: View {
                         onToggleBypass: { toggleBypass(effect) },
                         onRemove: { remove(effect) },
                         // AU inserts get one open-window button (M3 vi-b); built-in
-                        // effects (nil) have first-class in-app editors instead, and
-                        // the master chain never hosts AUs so it stays nil there.
+                        // effects get the in-window effect editor card instead
+                        // (m17-a, `onOpenEditor` below), and the master chain never
+                        // hosts AUs so the window button stays nil there.
                         onOpenWindow: (trackID != nil && effect.kind == .audioUnit)
                             ? { onOpenWindow?(effect.id) }
+                            : nil,
+                        // Built-in kinds only: click the row (or its slider glyph)
+                        // to toggle the generic param editor — AU rows keep their
+                        // plugin-window affordance and never open the card (v1).
+                        onOpenEditor: effect.kind != .audioUnit
+                            ? { onOpenEditor(effect.id) }
                             : nil
                     )
                 }
@@ -359,7 +397,8 @@ struct MixerInsertsSection: View {
         Menu {
             ForEach(addableEffectKinds, id: \.self) { kind in
                 Button(MixerFormat.effectDisplayName(EffectDescriptor(kind: kind))) {
-                    add(kind)
+                    // m17-a: the host's add funnel — store add + editor auto-open.
+                    onAddBuiltIn(kind)
                 }
             }
             // Audio Units item (m13-g, audit F6): opens the searchable AU-effect
@@ -388,14 +427,6 @@ struct MixerInsertsSection: View {
         .help("Add an insert effect")
     }
 
-    private func add(_ kind: EffectDescriptor.Kind) {
-        if let trackID {
-            _ = try? store.addEffect(toTrack: trackID, kind: kind)
-        } else {
-            _ = try? store.addMasterEffect(kind: kind)
-        }
-    }
-
     private func toggleBypass(_ effect: EffectDescriptor) {
         if let trackID {
             try? store.setEffectBypassed(trackID: trackID, effectID: effect.id,
@@ -421,6 +452,7 @@ struct MixerInsertsSection: View {
 /// section (the density-honesty rule), leaving the fader a longer throw.
 struct MixerMasterStrip: View {
     @Environment(ProjectStore.self) private var store
+    @Environment(AppModel.self) private var model
     /// The mixer console's shared density store (`MixerView.panelID`) — read so
     /// the master strip reveals its inserts only in Pro, exactly like the
     /// channel strips.
@@ -449,7 +481,16 @@ struct MixerMasterStrip: View {
                     store: store,
                     trackID: nil,
                     effects: store.masterEffects,
-                    onOpenWindow: nil
+                    onAddBuiltIn: { kind in
+                        // m17-a: master adds auto-open the editor too — the card is
+                        // the master chain's ONLY in-app param surface (built-ins
+                        // only, no plugin windows).
+                        model.addBuiltInInsert(trackID: nil, kind: kind)
+                    },
+                    onOpenWindow: nil,
+                    onOpenEditor: { effectID in
+                        model.toggleEffectEditor(trackID: nil, effectID: effectID)
+                    }
                 )
                 .explainable(.mixerMasterInserts)
                 Divider().overlay(DAWTheme.playback.opacity(0.25))

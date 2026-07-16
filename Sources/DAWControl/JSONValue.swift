@@ -45,8 +45,19 @@ public enum JSONValue: Codable, Sendable, Equatable {
     }
 
     /// Re-encode any Encodable as a JSONValue (used for snapshot payloads).
+    ///
+    /// `dateEncodingStrategy = .iso8601` (m16-e, audit F8a): the default JSONEncoder
+    /// strategy (`.deferredToDate`) writes `Date` as raw seconds since the Cocoa
+    /// reference date (2001-01-01) — an agent-hostile number with no epoch context
+    /// (measured live: `project.recoveryStatus.savedAt` read `805645080`), and
+    /// inconsistent with every ON-DISK encoder in this codebase (`AutosaveManager`,
+    /// `ProjectBundle`, `DiagnosticsReporter` all already set `.iso8601`). Any
+    /// `Date` field reaching the wire through this helper now rides the same
+    /// human/agent-readable format as the manifest it mirrors.
     public init(encoding value: some Encodable) throws {
-        let data = try JSONEncoder().encode(value)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(value)
         self = try JSONDecoder().decode(JSONValue.self, from: data)
     }
 

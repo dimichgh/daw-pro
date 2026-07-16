@@ -80,13 +80,17 @@ struct FeedbackBundleCommandTests {
         #expect(engine.performance == .idle)
     }
 
-    @Test("unknown extras are ignored; includeProject defaults to false (house style)")
+    @Test("unknown extras are rejected with a teaching error (m16-e, audit F5 — house style widened)")
     func paramTolerance() async throws {
         let (router, _) = makeRouter()
         let sloppy = await router.handle(ControlRequest(
             id: "1", command: "app.feedbackBundle",
             params: ["bogus": .number(7), "reset": .bool(true)]))
-        #expect(sloppy.ok)
-        #expect(sloppy.result?["includesProject"]?.boolValue == false)
+        #expect(!sloppy.ok)
+        let error = sloppy.error ?? ""
+        #expect(error.contains("app.feedbackBundle"))
+        #expect(error.contains("'bogus'"))
+        #expect(error.contains("'reset'"))
+        #expect(error.contains("'includeProject'"))
     }
 }

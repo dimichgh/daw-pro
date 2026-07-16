@@ -26,9 +26,18 @@ struct ClipFixPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            composer
-            Divider().overlay(DAWTheme.hairline)
-            jobsSection
+            // Everything below the pinned header rides ONE vertical ScrollView so
+            // the panel COMPRESSES to the workspace row's height (m17-f F4, the
+            // SketchpadView fix): a rigid composer overflowed the whole window
+            // layout when the bottom editor was open at a short window. The
+            // header stays pinned (identity + close always reachable).
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 12) {
+                    composer
+                    Divider().overlay(DAWTheme.hairline)
+                    jobsSection
+                }
+            }
         }
         .padding(14)
         .frame(width: 340)
@@ -274,22 +283,20 @@ struct ClipFixPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.vertical, 6)
             } else {
-                ScrollView {
-                    VStack(spacing: 8) {
-                        // Newest on top — the fix you just asked for.
-                        ForEach(model.cards.reversed()) { card in
-                            ClipFixJobCard(
-                                card: card,
-                                onImport: { Task { await model.importFix(jobID: card.jobID) } },
-                                onDismiss: { model.dismiss(jobID: card.jobID) }
-                            )
-                        }
+                // A plain VStack — the panel's ONE outer ScrollView (m17-f F4)
+                // owns all vertical scrolling now, so the old 260 pt inner
+                // scroll cap would just nest a second same-axis scroller.
+                VStack(spacing: 8) {
+                    // Newest on top — the fix you just asked for.
+                    ForEach(model.cards.reversed()) { card in
+                        ClipFixJobCard(
+                            card: card,
+                            onImport: { Task { await model.importFix(jobID: card.jobID) } },
+                            onDismiss: { model.dismiss(jobID: card.jobID) }
+                        )
                     }
                 }
-                .frame(maxHeight: 260)
             }
-            Spacer(minLength: 0)
         }
-        .frame(maxHeight: .infinity, alignment: .top)
     }
 }

@@ -282,6 +282,22 @@ enum ACEStepFixtures {
         return envelope(data: [item])
     }
 
+    /// The LIVE mid-render shape captured verbatim at the m17-h gate
+    /// (2026-07-16): `status` still 0 but `stage` carries rich pipeline TEXT
+    /// (never the literal "running" the route source suggested) while
+    /// `progress` advances — the pre-m17-h mapping misread this as "queued"
+    /// for the job's entire render.
+    static func queryResultRunningLiveShape(taskID: String, progress: Double,
+                                            stage: String, logLine: String) -> Data {
+        let inner: [[String: Any]] = [[
+            "file": "", "wave": "", "status": 0, "create_time": 1_720_000_000, "env": "development",
+            "prompt": "", "lyrics": "", "metas": [String: Any](),
+            "progress": progress, "stage": stage, "error": NSNull(),
+        ]]
+        let item = queryResultItem(taskID: taskID, progressText: logLine, resultItems: inner, status: 0)
+        return envelope(data: [item])
+    }
+
     static func queryResultSucceeded(taskID: String, remoteFile: String) -> Data {
         let inner: [[String: Any]] = [[
             "file": remoteFile, "wave": "", "status": 1, "create_time": 1_720_000_005,
@@ -439,6 +455,44 @@ struct ACEStepClientTests {
         let secondSucceededStatus = try await client.generationStatus(jobID: "job-progress")
         #expect(secondSucceededStatus.audioPath == audioPath)
         #expect(server.callCount(forKey: "GET /v1/audio") == 1)
+    }
+
+    @Test("the LIVE mid-render shape (rich stage text + advancing progress, status 0) reads as RUNNING")
+    func liveRichStageShapeIsRunning() async throws {
+        // m17-h regression pin: real sidecar polls captured live carried
+        // `stage: "Generating music (batch size: 2)..."` / `"Phase 1:
+        // Generating CoT metadata (once for all items)..."` with status 0 —
+        // the old literal `stage == "running"` check misread every real job
+        // as queued for its whole render (the user's "does not really show
+        // progress" complaint).
+        let server = StubACEStepServer()
+        try server.start()
+        defer { server.stop() }
+        let downloadDir = try makeTempDownloadDir()
+        defer { try? FileManager.default.removeItem(at: downloadDir) }
+
+        server.enqueue(
+            ACEStepFixtures.queryResultRunningLiveShape(
+                taskID: "job-live", progress: 0.55,
+                stage: "Generating music (batch size: 2)...",
+                logLine: "MLX DiT diffusion:  25%|##5       | 2/8 [00:08<00:23,  3.88s/steps]"),
+            forKey: "POST /query_result")
+        server.enqueue(
+            ACEStepFixtures.queryResultRunningLiveShape(
+                taskID: "job-live", progress: 0.1,
+                stage: "Phase 1: Generating CoT metadata (once for all items)...",
+                logLine: "generate_with_stop_condition: formatted_prompt=..."),
+            forKey: "POST /query_result")
+
+        let client = makeClient(port: server.port, downloadDirectory: downloadDir)
+        let midRender = try await client.generationStatus(jobID: "job-live")
+        #expect(midRender.state == .running)
+        #expect(midRender.progress == 0.55)
+        #expect(midRender.stage == "Generating music (batch size: 2)...")
+
+        let earlyPhase = try await client.generationStatus(jobID: "job-live")
+        #expect(earlyPhase.state == .running)   // progress moved → running, whatever the stage text
+        #expect(earlyPhase.progress == 0.1)
     }
 
     @Test("succeeded metas: absent bpm/keyscale stay nil; a list of genres is joined; blank prompt is nil")

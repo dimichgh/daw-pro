@@ -39,6 +39,8 @@ struct DAWProApp: App {
             }
             FileCommands(store: model.store, model: model)
             EditCommands(store: model.store)
+            // Arrange zoom (m17-b): ⌘+/⌘−/⌘0 + the Track Height ladder.
+            ViewCommands(model: model)
         }
     }
 }
@@ -60,11 +62,28 @@ final class AppModel {
     let controlServer: ControlServer
     let transportBroadcaster: TransportBroadcaster
 
+    /// m18-b: the main-actor wedge detector. A background timer pings the main
+    /// actor once a second; a pong overdue past the threshold = wedged. The
+    /// control server's QUEUE tier reads `snapshot()` before every MainActor
+    /// hop so agents get honest answers (not silent hangs) while the UI is
+    /// wedged; breadcrumbs land in ~/Library/Logs/DAWPro/main-actor-wedge.log.
+    /// Detection only — no auto-kill, no restart, and the engine/render side
+    /// runs right through a wedge untouched.
+    let livenessMonitor: MainActorLivenessMonitor
+
     /// The local ACE-Step song generator + its sidecar manager, SHARED with the
     /// control router (so the Sketchpad panel and the `ai.*` wire path talk to
     /// the same job state) and used directly by the Sketchpad model.
     let songGenerator: ACEStepClient
     let sidecarManager: SidecarManager
+
+    /// The unified generation-progress registry (m17-h): EVERY generation job
+    /// — Sketchpad, wire `ai.generateSong` / MCP `generate_song`, stems /
+    /// repaint / import paths — reports here through the origin-tagged
+    /// `GenerationObservingGenerator` wrappers, and the canonical violet
+    /// progress card renders it. Owned here so `debug.generationCard` can
+    /// stage/read it and `debug.captureUI` renders the same instance.
+    let generationPresence: GenerationPresenceModel
 
     /// The AI Sketchpad panel's headless model (M6 iii-b). Owned here so the
     /// `debug.sketchpad*` capture commands can drive it and `debug.captureUI`
@@ -123,6 +142,20 @@ final class AppModel {
     /// inserts add-menu's "Audio Units…" item and `debug.effectPicker`; the picker
     /// renders as a centered overlay. Never a MASTER target (built-ins only, v1).
     var effectPickerTrackID: UUID?
+
+    /// The built-in insert EFFECT EDITOR's headless model (m17-a): spec-driven
+    /// param rows + the wire-identical apply path (`setEffectParam` /
+    /// `setMasterEffectParam` — exactly what `fx.setParam` calls). Owned here
+    /// (like `effectPicker`) so `debug.effectEditor` can drive it and
+    /// `debug.captureUI` renders the same instance the live card shows.
+    let effectEditor: EffectEditorModel
+
+    /// The open effect editor's insert (nil = closed; `trackID` nil = the MASTER
+    /// chain). ONE editor open app-wide — opening another insert's editor
+    /// replaces this. Set by clicking a built-in `InsertRow`, by the UI insert
+    /// add-menu (auto-open, Logic precedent), and by `debug.effectEditor`; the
+    /// wire's `fx.add` NEVER sets it (agents must not pop UI).
+    var effectEditorTarget: EffectEditorTarget?
 
     /// The Quantize & Groove panel's headless model (m11-a): the grid/strength/
     /// swing/ends state, the groove picker (built-in swings + saved templates), and
@@ -226,6 +259,163 @@ final class AppModel {
     /// Bumped on every `debug.arrangeScroll` call so ContentView's `.onChange`
     /// fires even when the target repeats (SwiftUI dedups equal values).
     var arrangeScrollNonce = 0
+
+    // MARK: Arrange zoom (m17-b)
+
+    /// The lanes' horizontal scroll offset MIRROR — what the pinned ruler
+    /// offsets by. Normally the `.lanes` preference feeds it; a zoom writes its
+    /// analytic target here FIRST so the ruler moves in the same update, and the
+    /// preference then re-confirms from real layout.
+    var arrangeHScroll: CGFloat = 0
+    /// The last offset the `.lanes` preference ACTUALLY reported (m17-b) — never
+    /// written analytically, so `debug.arrangeZoom` echoes ground truth: if a
+    /// programmatic zoom scroll failed to land, this diverges from the mirror
+    /// and the gate catches it (no circular pass).
+    var arrangeHScrollReported: CGFloat = 0
+    /// The lanes viewport width, reported by ContentView's geometry — sizes the
+    /// zoom anchor's viewport-center fallback and the zoomed-out padding.
+    var arrangeViewportWidth: CGFloat = 0
+    /// A programmatic horizontal scroll request (the anchor-preserving offset a
+    /// zoom computed) + its nonce; consumed by the lanes' `ArrangeHScrollBridge`
+    /// in the same transaction as the scale change.
+    var arrangeZoomScrollTarget: CGFloat?
+    var arrangeZoomScrollNonce = 0
+    /// The pinch in flight (nil at rest): captured on the first magnify tick so
+    /// per-tick zoom math measures off a FIXED anchor beat/screen-x.
+    private var arrangePinch: ArrangeZoom.PinchState?
+
+    // MARK: Arrange pointer affordances (m17-c)
+
+    /// The staged pointer event `debug.arrangePointer` injects (nil in normal
+    /// use) — ContentView threads it into the lanes, which run it through the
+    /// SAME handlers a real hover/click uses (the `stagedMarkerRenameID`
+    /// mirror precedent; hover isn't injectable without Accessibility).
+    var arrangePointerStage: ArrangePointerStage?
+    /// The pointer layer's live state, reported UP by the lanes (real hovers
+    /// and staged events alike) so the seam echoes ground truth — never its
+    /// own input (the `arrangeHScrollReported` honesty rule).
+    var arrangePointerZone: String = ArrangePointerZone.outside.rawValue
+    var arrangeGhostBeat: Double?
+    /// The split refusal currently surfaced on a clip block (verbatim store
+    /// message, amber bubble). Auto-clears a few seconds after presentation.
+    var arrangeSplitRefusal: ArrangeSplitRefusal?
+    private var arrangeRefusalSeq = 0
+
+    /// Surfaces a refused clip edit VERBATIM (m17-c): the store's
+    /// LocalizedError message — the SAME string the wire returns for the same
+    /// call — as a transient amber bubble on the refused clip. Auto-clears
+    /// after 6 s unless a newer refusal replaced it (seq guard).
+    func presentArrangeSplitRefusal(_ error: any Error, clipID: UUID?) {
+        arrangeRefusalSeq += 1
+        let seq = arrangeRefusalSeq
+        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        arrangeSplitRefusal = ArrangeSplitRefusal(clipID: clipID, message: message, seq: seq)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard let self, self.arrangeSplitRefusal?.seq == seq else { return }
+            self.arrangeSplitRefusal = nil
+        }
+    }
+
+    // MARK: Space-bar transport toggle (m17-d)
+
+    /// The app-wide key-down LOCAL monitor behind the space-bar transport
+    /// toggle (m17-d, user #6) — the TimelineLanesView ⌥-tracking precedent,
+    /// app-scoped. A monitor rather than a SwiftUI `.keyboardShortcut`/menu
+    /// key equivalent because key equivalents are checked BEFORE text
+    /// insertion — a space equivalent would steal the space bar from every
+    /// rename field (the exact failure the focus guard exists to prevent).
+    /// The monitor sees the event WITH the live first responder, asks the
+    /// headless `TransportKeyRouting.decide` predicate, and either swallows
+    /// the space (toggle) or hands it back untouched (pass through).
+    /// Installed once in `init`, lives for the app's lifetime.
+    @ObservationIgnored private var spaceKeyMonitor: Any?
+
+    /// The ONE content window (the WindowGroup window hosting ContentView),
+    /// captured when `applyWindowFloor()` runs on its appearance. The space
+    /// toggle is MAIN-WINDOW-ONLY (the documented safe default): events aimed
+    /// at floating plugin windows or any other panel classify as `.secondary`
+    /// and pass through. Weak — a closed window never dangles.
+    @ObservationIgnored private weak var contentWindow: NSWindow?
+
+    /// Installs the space-bar monitor (m17-d). The handler body lives in
+    /// `handleKeyDownEvent` so the `debug.keySpace` seam runs the SAME code
+    /// path with a synthesized event (real key injection needs Accessibility
+    /// the staging binary lacks — measured law).
+    private func installSpaceKeyMonitor() {
+        spaceKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return self.handleKeyDownEvent(event)
+        }
+    }
+
+    /// The one key-down body — the live monitor and `debug.keySpace {press:true}`
+    /// both run exactly this. Maps the event's facts (key code, chord modifiers,
+    /// repeat, the TARGET window's first responder, window identity) into the
+    /// headless predicate's value types and obeys the verdict. Returns nil to
+    /// swallow the event (the toggle consumed it — nothing downstream beeps or
+    /// types) or the event untouched to pass it through.
+    func handleKeyDownEvent(_ event: NSEvent) -> NSEvent? {
+        let decision = TransportKeyRouting.decide(
+            keyCode: event.keyCode,
+            modifiers: Self.transportKeyModifiers(event.modifierFlags),
+            isRepeat: event.isARepeat,
+            responder: Self.transportKeyResponder(event.window?.firstResponder),
+            window: transportKeyWindow(event.window))
+        guard decision == .toggleTransport else { return event }
+        toggleTransportFromSpaceKey()
+        return nil
+    }
+
+    /// The granted toggle: the play/pause button's EXACT funnel
+    /// (`isPlaying ? store.stop() : store.play()`, TransportBar) routed through
+    /// the headless `toggleIntent` so the ternary is unit-pinned. Recording
+    /// sets `isPlaying` true (`ProjectStore.record()`), so a mid-record space
+    /// lands on the SAME `store.stop()` the record button's stop branch calls.
+    func toggleTransportFromSpaceKey() {
+        switch TransportKeyRouting.toggleIntent(isPlaying: store.transport.isPlaying) {
+        case .play: store.play()
+        case .stop: store.stop()
+        }
+    }
+
+    /// Maps the event's device-independent chord modifiers into the headless
+    /// option set. Only command/option/control/shift block the toggle — caps
+    /// lock, fn, and numeric-pad flags deliberately don't (caps lock being on
+    /// must not kill the space bar).
+    private static func transportKeyModifiers(_ flags: NSEvent.ModifierFlags) -> TransportKeyModifiers {
+        let device = flags.intersection(.deviceIndependentFlagsMask)
+        var mods: TransportKeyModifiers = []
+        if device.contains(.command) { mods.insert(.command) }
+        if device.contains(.option) { mods.insert(.option) }
+        if device.contains(.control) { mods.insert(.control) }
+        if device.contains(.shift) { mods.insert(.shift) }
+        return mods
+    }
+
+    /// Classifies the first responder for the focus guard: any text-input
+    /// surface means the space belongs to the text. `NSText` covers the shared
+    /// field editor (an `NSTextView`) behind every AppKit-backed `TextField` —
+    /// track/marker/take renames, the Copilot rail input, Settings fields.
+    /// The `NSTextInputClient` catch-all covers SwiftUI-native text hosts that
+    /// aren't `NSText` subclasses (belt-and-suspenders). MEASURED live (m17-d
+    /// gate): at rest this app's first responder is the NSWindow itself
+    /// (`AppKitWindow`), which conforms to neither → `.none`; a focused rename
+    /// TextField puts `_SystemTextFieldFieldEditor` (an `NSTextView`) first →
+    /// `.textEditing` via the `NSText` branch.
+    private static func transportKeyResponder(_ responder: NSResponder?) -> TransportKeyResponder {
+        guard let responder else { return .none }
+        if responder is NSText { return .textEditing }
+        if responder is any NSTextInputClient { return .textEditing }
+        return .none
+    }
+
+    /// Main-window-only guard: only events aimed at THE content window toggle.
+    /// nil window (an unresolvable synthesized window number) is `.secondary`.
+    private func transportKeyWindow(_ window: NSWindow?) -> TransportKeyWindow {
+        guard let window, window === contentWindow else { return .secondary }
+        return .main
+    }
 
     /// Active workspace (Arrange or Mix). Driven by the header toggle and by the
     /// `ui.showMixer` control command (for headless UI verification).
@@ -453,11 +643,68 @@ final class AppModel {
         self.songGenerator = songGenerator
         self.sidecarManager = sidecarManager
 
-        // The Sketchpad model: generate over the shared client, import through
-        // the store's one-undo generation-import pipeline (the created track's
-        // name is read back for the imported badge).
+        // The unified generation-progress registry (m17-h): its own polls read
+        // the RAW client (never a decorator — no self-observation loop) and the
+        // sidecar manager's own status; a sidecar death mid-job posts an
+        // engine notice through the SAME handler funnel the engine uses (the
+        // `debug.postEngineNotice` path), so the transport chip lights up —
+        // failed card + notice, never silent.
+        let generationPresence = GenerationPresenceModel(
+            status: { [songGenerator] jobID in
+                try await songGenerator.generationStatus(jobID: jobID)
+            },
+            sidecarStatus: { [sidecarManager] in await sidecarManager.status() },
+            notify: { [weak engine] message in
+                engine?.engineNoticeHandler?(
+                    EngineNoticeEvent(code: "ai-generation-interrupted", message: message))
+            })
+        self.generationPresence = generationPresence
+
+        // Auto-start (m17-h): boots the sidecar and waits for healthy — the
+        // manager's `start()` blocks through its own ~30 s health window, then
+        // this keeps polling through the multi-minute model load (the presence
+        // card narrates the phases meanwhile). Bounded so a broken install can
+        // never wedge a submit forever.
+        let ensureSidecar: GenerationObservingGenerator.EnsureSidecar = { [sidecarManager] in
+            if let started = try? await sidecarManager.start(), started.state == .healthy {
+                return true
+            }
+            let deadline = Date().addingTimeInterval(15 * 60)
+            while Date() < deadline {
+                let probe = await sidecarManager.status()
+                switch probe.state {
+                case .healthy: return true
+                case .notInstalled, .error: return false
+                case .starting, .installedNotRunning: break
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            return false
+        }
+
+        // ONE real client, THREE origin-tagged observers (m17-h) — job state
+        // and audio caching stay unified in `songGenerator`; only the presence
+        // tag differs. The Sketchpad's awaits the auto-start boot (its generate
+        // is a panel action, free to take the boot inline); the wire's and the
+        // import seam's kick the boot fire-and-forget and rethrow — a control
+        // command must not block for a multi-minute model load, and the
+        // router's error translation already reports "starting…" honestly.
+        let sketchpadGenerator = GenerationObservingGenerator(
+            wrapping: songGenerator, origin: .sketchpad, presence: generationPresence,
+            ensureSidecar: ensureSidecar, awaitsBoot: true)
+        let wireGenerator = GenerationObservingGenerator(
+            wrapping: songGenerator, origin: .wire, presence: generationPresence,
+            ensureSidecar: ensureSidecar, awaitsBoot: false)
+        let importGenerator = GenerationObservingGenerator(
+            wrapping: songGenerator, origin: .import, presence: generationPresence,
+            ensureSidecar: ensureSidecar, awaitsBoot: false)
+
+        // The Sketchpad model: generate over the shared client (through its
+        // origin-tagged observer), import through the store's one-undo
+        // generation-import pipeline (the created track's name is read back
+        // for the imported badge).
         let sketchpad = SketchpadModel(
-            generator: songGenerator,
+            generator: sketchpadGenerator,
             importer: { [weak store] jobID in
                 guard let store else { throw DebugError("project store unavailable") }
                 let (trackID, _, _) = try await store.importGeneration(jobID: jobID)
@@ -515,6 +762,40 @@ final class AppModel {
         // `applyEffectChoice` → `store.addEffect(kind:.audioUnit)`.
         self.effectPicker = EffectPickerModel(
             audioUnits: { [weak store] in store?.availableAudioUnitEffects() ?? [] })
+
+        // The built-in insert effect editor model (m17-a): reads the LIVE
+        // descriptor (so a wire `fx.setParam` moves the open card's sliders and
+        // a removed effect honestly blanks it) and applies every edit through
+        // the SAME store methods the wire's `fx.setParam` calls — trackID nil =
+        // the MASTER chain (the `MixerInsertsSection` convention). The store's
+        // per-(effect, name) coalescing makes a slider drag ONE undo step.
+        self.effectEditor = EffectEditorModel(
+            descriptor: { [weak store] trackID, effectID in
+                guard let store else { return nil }
+                if let trackID {
+                    return store.tracks.first { $0.id == trackID }?
+                        .effects.first { $0.id == effectID }
+                }
+                return store.masterEffects.first { $0.id == effectID }
+            },
+            apply: { [weak store] trackID, effectID, name, value in
+                guard let store else { throw DebugError("project store unavailable") }
+                if let trackID {
+                    _ = try store.setEffectParam(
+                        trackID: trackID, effectID: effectID, name: name, value: value)
+                } else {
+                    _ = try store.setMasterEffectParam(effectID: effectID, name: name, value: value)
+                }
+            },
+            setBypassed: { [weak store] trackID, effectID, bypassed in
+                guard let store else { throw DebugError("project store unavailable") }
+                if let trackID {
+                    try store.setEffectBypassed(
+                        trackID: trackID, effectID: effectID, bypassed: bypassed)
+                } else {
+                    try store.setMasterEffectBypassed(effectID: effectID, bypassed: bypassed)
+                }
+            })
 
         // The Quantize & Groove model (m11-a): the built-in MPC swings are computed
         // once; the saved-template list, Apply, and Extract all route through the
@@ -603,14 +884,26 @@ final class AppModel {
         let port = portResolution.port
         let router = CommandRouter(
             store: store, sidecarManager: sidecarManager,
-            songGenerator: songGenerator, keyStore: keyStore,
+            // The wire's origin-tagged observer (m17-h): every `ai.*` job an
+            // agent submits lands on the unified progress card tagged "wire";
+            // the import seam gets its own "import"-tagged wrapper. Both wrap
+            // the SAME `songGenerator`, so job state stays unified.
+            songGenerator: wireGenerator, keyStore: keyStore,
             // Hand the resolved endpoint to the router so `app.connectionInfo` can
             // report it (the server owns the router, so it can't ask back). Value
             // in, no cycle.
             connectionInfo: ControlConnectionInfo(
                 port: port, source: portResolution.source.rawValue,
-                defaultPort: ControlPortConfig.defaultPort))
-        let server = ControlServer(router: router, port: port)
+                defaultPort: ControlPortConfig.defaultPort),
+            importGenerator: importGenerator)
+        // m18-b: the wedge monitor must exist before the server so the queue
+        // tier can consult it on every frame. Strong capture is cycle-free
+        // (server → closure → monitor; the monitor references nothing back).
+        let livenessMonitor = MainActorLivenessMonitor()
+        self.livenessMonitor = livenessMonitor
+        let server = ControlServer(
+            router: router, port: port,
+            livenessSnapshot: { livenessMonitor.snapshot() })
         self.router = router
         // Two-phase, no-retain-cycle wiring (the appCommandHandler precedent):
         // the engine strongly captures `router` via the dispatch closure; the
@@ -648,11 +941,19 @@ final class AppModel {
                 Data("control server failed to start on port \(port): \(error)\n".utf8)
             )
         }
+        // m18-b: start pinging the main actor. Deliberately OUTSIDE the
+        // server's do/catch — the wedge breadcrumb log is worth having even
+        // when the control plane failed to bind.
+        livenessMonitor.start()
         // The onboarding signal adapter observes the store and fires the tour's
         // completion signals (ob-b) — for UI AND wire-driven actions alike.
         onboardingAdapter = OnboardingSignalAdapter(store: store, model: onboarding)
         onboardingAdapter.start()
         installDebugCommands()
+        // Space-bar transport toggle (m17-d): the app-wide key monitor. Last —
+        // it reads store state only through the toggle funnel, no init order
+        // dependency, but keeping bootstrap side effects at the tail is house style.
+        installSpaceKeyMonitor()
     }
 
     /// Offers the tour on first launch: begins it when eligible (fresh / reset).
@@ -752,10 +1053,20 @@ final class AppModel {
                 return self.setWindowFrame(params)
             case "debug.arrangeScroll":
                 return self.setArrangeScroll(params)
+            case "debug.arrangeZoom":
+                return try self.arrangeZoomDebug(params)
+            case "debug.arrangePointer":
+                return try self.arrangePointerDebug(params)
+            case "debug.keySpace":
+                return try self.keySpaceDebug(params)
+            case "debug.mainActorWedge":
+                return try self.mainActorWedgeDebug(params)
             case "debug.mixerAddAU":
                 return self.mixerAddAUDebug(params)
             case "debug.effectPicker":
                 return self.effectPickerDebug(params)
+            case "debug.effectEditor":
+                return try self.effectEditorDebug(params)
             case "debug.explainMode":
                 return try self.setExplainMode(params)
             case "debug.vibeSeed":
@@ -816,6 +1127,8 @@ final class AppModel {
                 return self.lyricsWorkshopSeed(params)
             case "debug.lyricsWorkshopState":
                 return self.lyricsWorkshopStateResponse()
+            case "debug.generationCard":
+                return try self.generationCardDebug(params)
             case "debug.sketchpadReset":
                 self.sketchpad.setCandidatesForCapture([])
                 self.sketchpad.prompt = ""
@@ -897,8 +1210,13 @@ final class AppModel {
     /// where the transport / title row / TRACKS header would leave the frame. Called
     /// once the window exists (ContentView's onAppear); a no-op headless.
     func applyWindowFloor() {
-        mainCaptureWindow?.contentMinSize = CGSize(width: WindowFloor.minWidth,
-                                                   height: WindowFloor.minHeight)
+        let window = mainCaptureWindow
+        // Capture THE content window for the space-bar toggle's main-window-only
+        // guard (m17-d) — at first appearance the WindowGroup window is the only
+        // one, so this can never latch a plugin panel.
+        contentWindow = window
+        window?.contentMinSize = CGSize(width: WindowFloor.minWidth,
+                                        height: WindowFloor.minHeight)
     }
 
     /// `debug.windowFrame {width?, height?}` — stages the main window's CONTENT size
@@ -991,6 +1309,288 @@ final class AppModel {
             "trackId": arrangeScrollTarget.map { JSONValue.string($0.uuidString) } ?? .null,
             "bottom": .bool(arrangeScrollToBottom),
         ])
+    }
+
+    // MARK: - Arrange zoom (m17-b)
+
+    /// The live arrange horizontal zoom (pixels per beat) — one source of truth
+    /// in the persisted layout store.
+    var arrangePPB: CGFloat { panelLayout.arrangePPB }
+
+    /// The current track-row-height step (S/M/L), classified from the continuous
+    /// `panelLayout.rowHeight` (the m10-d splitter can sit between steps).
+    var arrangeRowStep: ArrangeZoom.RowStep {
+        ArrangeZoom.rowStep(closestTo: panelLayout.rowHeight)
+    }
+
+    /// Sets the arrange zoom, keeping one screen point visually stationary (the
+    /// no-jump rule): the PLAYHEAD's screen x when it's inside the viewport,
+    /// else the viewport center — or an explicit `anchorScreenX` (pointer /
+    /// debug seam). Writes the scale to the layout store and hands the
+    /// compensating scroll offset to the lanes bridge + the pinned ruler in the
+    /// SAME update, so both columns move together.
+    func setArrangeZoom(toPPB raw: CGFloat, anchorScreenX explicit: CGFloat? = nil) {
+        let old = panelLayout.arrangePPB
+        let new = ArrangeZoom.clamp(raw)
+        guard abs(new - old) > 0.0001 else { return }
+        let anchor = explicit ?? ArrangeZoom.anchorScreenX(
+            playheadContentX: CGFloat(store.transport.positionBeats) * old,
+            offset: arrangeHScroll,
+            viewportWidth: arrangeViewportWidth)
+        let newOffset = ArrangeZoom.offsetPreservingAnchor(
+            oldPPB: old, newPPB: new, oldOffset: arrangeHScroll, anchorScreenX: anchor)
+        panelLayout.setArrangePPB(new)
+        applyArrangeHScroll(newOffset)
+    }
+
+    /// One ladder step in (⌘+ / toolbar "+").
+    func zoomArrangeIn() { setArrangeZoom(toPPB: ArrangeZoom.zoomedIn(arrangePPB)) }
+    /// One ladder step out (⌘− / toolbar "−").
+    func zoomArrangeOut() { setArrangeZoom(toPPB: ArrangeZoom.zoomedOut(arrangePPB)) }
+    /// Back to the historical 16 pt/beat (⌘0).
+    func zoomArrangeReset() { setArrangeZoom(toPPB: ArrangeZoom.defaultPixelsPerBeat) }
+
+    /// Sets the stepped track-row height (S/M/L) through the SAME
+    /// `panelLayout.rowHeight` slot the m10-d splitter drags — the sidebar rows
+    /// and the lanes read that one value, so both columns stay row-aligned.
+    func setArrangeRowStep(_ step: ArrangeZoom.RowStep) {
+        panelLayout.setRowHeight(step.rowHeight)
+    }
+
+    /// A live pinch tick from the lanes (m17-b): the first tick captures the
+    /// anchor (`PinchState` — fixed beat + screen x under the pointer), each
+    /// tick rescales off the gesture-START state so magnification stays
+    /// cumulative and the anchor never feeds its own motion back.
+    func arrangePinchChanged(anchorContentX: CGFloat, magnification: CGFloat) {
+        if arrangePinch == nil {
+            arrangePinch = ArrangeZoom.PinchState(
+                startPPB: arrangePPB, startOffset: arrangeHScroll,
+                anchorContentX: anchorContentX)
+        }
+        guard let pinch = arrangePinch else { return }
+        let zoomed = pinch.zoomed(magnification: magnification)
+        guard abs(zoomed.ppb - arrangePPB) > 0.0001 else { return }
+        panelLayout.setArrangePPB(zoomed.ppb)
+        applyArrangeHScroll(zoomed.offset)
+    }
+
+    func arrangePinchEnded() { arrangePinch = nil }
+
+    /// Routes a computed offset to BOTH sync surfaces in one update: the pinned
+    /// ruler mirror (`arrangeHScroll` — the preference will re-confirm it from
+    /// the real layout) and the lanes' AppKit bridge (nonce-bumped so repeats
+    /// still apply).
+    private func applyArrangeHScroll(_ offset: CGFloat) {
+        arrangeHScroll = offset
+        arrangeZoomScrollTarget = offset
+        arrangeZoomScrollNonce += 1
+    }
+
+    /// `debug.arrangeZoom {ppb?, step?, rowStep?, reset?, anchorX?}` — the m17-b
+    /// zoom seam for captures/E2E (the `debug.arrangeScroll` precedent:
+    /// app-level, debug tier ONLY, off `allCommands`/MCP — zoom is UI state, so
+    /// ZERO new wire surface). `ppb` sets the scale through the SAME
+    /// anchor-preserving path the menu/toolbar use; `step` ("in"|"out") walks
+    /// the ladder; `anchorX` pins an explicit screen x (else playhead/center);
+    /// `rowStep` ("small"|"medium"|"large") sets the row-height ladder;
+    /// `reset:true` restores both defaults. A BARE call is READ-ONLY (the
+    /// m11-a law) and echoes {ppb, rowStep, rowHeight, hOffset, viewportWidth,
+    /// playheadBeat, playheadScreenX} so a gate can assert anchor stability
+    /// from the REAL reported offset.
+    private func arrangeZoomDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        let anchorX = params["anchorX"]?.doubleValue.map { CGFloat($0) }
+        let mutating = params["ppb"] != nil || params["step"] != nil
+            || params["rowStep"] != nil || params["reset"]?.boolValue == true
+        if mutating { workspaceMode = .arrange }
+        if params["reset"]?.boolValue == true {
+            setArrangeZoom(toPPB: ArrangeZoom.defaultPixelsPerBeat, anchorScreenX: anchorX)
+            setArrangeRowStep(.medium)
+        }
+        if let raw = params["ppb"]?.doubleValue {
+            setArrangeZoom(toPPB: CGFloat(raw), anchorScreenX: anchorX)
+        }
+        if let step = params["step"]?.stringValue {
+            switch step {
+            case "in": setArrangeZoom(toPPB: ArrangeZoom.zoomedIn(arrangePPB), anchorScreenX: anchorX)
+            case "out": setArrangeZoom(toPPB: ArrangeZoom.zoomedOut(arrangePPB), anchorScreenX: anchorX)
+            default: throw DebugError("unknown step \"\(step)\" — expected \"in\" or \"out\"")
+            }
+        }
+        if let raw = params["rowStep"]?.stringValue {
+            guard let step = ArrangeZoom.RowStep(rawValue: raw) else {
+                throw DebugError("unknown rowStep \"\(raw)\" — expected \"small\", \"medium\", or \"large\"")
+            }
+            setArrangeRowStep(step)
+        }
+        let ppb = arrangePPB
+        let playheadBeat = store.transport.positionBeats
+        return .object([
+            "ppb": .number(Double(ppb)),
+            "rowStep": .string(arrangeRowStep.rawValue),
+            "rowHeight": .number(Double(panelLayout.rowHeight)),
+            // GROUND TRUTH: the preference-REPORTED offset (real layout), never
+            // the analytic mirror — a failed programmatic scroll shows up here.
+            "hOffset": .number(Double(arrangeHScrollReported)),
+            "hOffsetMirror": .number(Double(arrangeHScroll)),
+            "viewportWidth": .number(Double(arrangeViewportWidth)),
+            "playheadBeat": .number(playheadBeat),
+            "playheadScreenX": .number(Double(CGFloat(playheadBeat) * ppb - arrangeHScrollReported)),
+        ])
+    }
+
+    /// `debug.arrangePointer {act?, x?, y?}` — the m17-c pointer seam for
+    /// captures/E2E (the `debug.arrangeZoom` precedent: app-level, debug tier
+    /// ONLY, off `allCommands`/MCP — pointer affordances ride the EXISTING
+    /// `transport.seek`/`clip.split` verbs, so ZERO new wire surface).
+    /// `act` is "hover" | "click" | "doubleClick" | "clear"; `x`/`y` are
+    /// CONTENT-space points (x = beats · ppb — zoom-exact without knowing the
+    /// scroll offset), required for all but "clear". The staged event runs
+    /// through the SAME view handlers a real pointer uses; the echo reflects
+    /// the state the view last REPORTED, so after a mutating call settle one
+    /// main-actor turn (~250 ms, the m17-b law) and re-read with a bare call.
+    /// A BARE call is READ-ONLY (the m11-a law) and echoes
+    /// {zone, ghostBeat, playheadBeat, ppb, refusal, refusalClipId}.
+    private func arrangePointerDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if let act = params["act"]?.stringValue {
+            guard let action = ArrangePointerStage.Action(rawValue: act) else {
+                throw DebugError(
+                    "unknown act \"\(act)\" — expected \"hover\", \"click\", \"doubleClick\", or \"clear\"")
+            }
+            workspaceMode = .arrange
+            var x: CGFloat = 0, y: CGFloat = 0
+            if action != .clear {
+                guard let xv = params["x"]?.doubleValue, let yv = params["y"]?.doubleValue else {
+                    throw DebugError(
+                        "act \"\(act)\" needs content-space x and y (points; x = beats · ppb)")
+                }
+                x = CGFloat(xv)
+                y = CGFloat(yv)
+            }
+            arrangePointerStage = ArrangePointerStage(
+                action: action, x: x, y: y,
+                nonce: (arrangePointerStage?.nonce ?? 0) + 1)
+        }
+        return .object([
+            "zone": .string(arrangePointerZone),
+            "ghostBeat": arrangeGhostBeat.map { .number($0) } ?? .null,
+            "playheadBeat": .number(store.transport.positionBeats),
+            "ppb": .number(Double(arrangePPB)),
+            "refusal": arrangeSplitRefusal.map { .string($0.message) } ?? .null,
+            "refusalClipId": arrangeSplitRefusal?.clipID.map { .string($0.uuidString) } ?? .null,
+        ])
+    }
+
+    /// `debug.keySpace {press?, post?, command?, option?, control?, shift?, repeat?}`
+    /// — the space-bar transport toggle's staging seam (m17-d). App-level, debug
+    /// tier ONLY (off `allCommands`/MCP — ZERO wire growth; play/stop already
+    /// exist as `transport.play`/`transport.stop`, the space bar is just a UI
+    /// driver for the same funnels). Real key injection needs an Accessibility
+    /// grant the staging binary lacks (measured law), so the seam synthesizes an
+    /// `NSEvent` and exercises the REAL code path:
+    ///   - `{}` — pure state read (the `debug.effectEditor` convention): monitor
+    ///     installed, window role, the content window's first-responder class +
+    ///     classification, the focused field's text when one is editing, and the
+    ///     transport state.
+    ///   - `{press:true}` — synthesizes the space key-down (modifier/repeat/
+    ///     `noWindow` overrides for matrix probing; `noWindow:true` targets an
+    ///     unresolvable window number → the `.secondary` branch) and runs the
+    ///     SAME `handleKeyDownEvent` body the live monitor runs. Echoes the
+    ///     decision + resulting transport.
+    ///   - `{press:true, post:true}` — posts the event through the REAL queue
+    ///     instead (`NSApp.postEvent`): the live monitor fires, and a passed-
+    ///     through space genuinely reaches the responder chain (a focused rename
+    ///     field gains the character). Asynchronous — settle, then read `{}`.
+    private func keySpaceDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        guard params["press"]?.boolValue == true else { return keySpaceStateResponse() }
+        var flags: NSEvent.ModifierFlags = []
+        if params["command"]?.boolValue == true { flags.insert(.command) }
+        if params["option"]?.boolValue == true { flags.insert(.option) }
+        if params["control"]?.boolValue == true { flags.insert(.control) }
+        if params["shift"]?.boolValue == true { flags.insert(.shift) }
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: flags,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: params["noWindow"]?.boolValue == true
+                ? 0 : (contentWindow?.windowNumber ?? 0),
+            context: nil,
+            characters: " ", charactersIgnoringModifiers: " ",
+            isARepeat: params["repeat"]?.boolValue ?? false,
+            keyCode: TransportKeyRouting.spaceKeyCode) else {
+            throw DebugError("failed to synthesize the space key event")
+        }
+        if params["post"]?.boolValue == true {
+            NSApplication.shared.postEvent(event, atStart: false)
+            return keySpaceStateResponse(extra: ["posted": .bool(true)])
+        }
+        let passedThrough = handleKeyDownEvent(event)
+        let decision: TransportKeyDecision = passedThrough == nil ? .toggleTransport : .passThrough
+        return keySpaceStateResponse(extra: [
+            "decision": .string(decision.rawValue),
+            "swallowed": .bool(passedThrough == nil),
+        ])
+    }
+
+    /// `debug.mainActorWedge {seconds?}` — the m18-b staging seam for the
+    /// main-actor liveness watchdog. App-level, debug tier ONLY (the
+    /// `debug.arrangeZoom` precedent: off `allCommands`/MCP, ZERO wire growth
+    /// — wedge visibility rides the EXISTING `engine.watchdogStatus` verb).
+    ///   - `{}` — READ-ONLY (the m11-a bare-read law): the monitor snapshot
+    ///     {responsive, wedgedForSeconds, pingsSent, pongsReceived,
+    ///     lastWedgeDurationSeconds, wedgeThresholdSeconds}.
+    ///   - `{seconds: N}` — deliberately BLOCKS the main actor for N seconds
+    ///     (clamped 0.5–30) via `Thread.sleep`, staged `asyncAfter` 0.1 s out
+    ///     so THIS response leaves the socket before the wedge begins. While
+    ///     wedged, verify from a SECOND connection: `engine.watchdogStatus`
+    ///     answers off-main with `mainActor.responsive: false`; every other
+    ///     command gets the teaching error instead of a silent hang.
+    /// Detection-only surface — nothing here kills or restarts anything.
+    private func mainActorWedgeDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if let secondsParam = params["seconds"] {
+            guard let raw = secondsParam.doubleValue else {
+                throw DebugError("'seconds' must be a number (0.5–30)")
+            }
+            let clamped = min(max(raw, 0.5), 30)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                Thread.sleep(forTimeInterval: clamped)
+            }
+            return .object([
+                "staged": .bool(true),
+                "seconds": .number(clamped),
+                "startsInSeconds": .number(0.1),
+            ])
+        }
+        let snap = livenessMonitor.snapshot()
+        return .object([
+            "responsive": .bool(snap.responsive),
+            "wedgedForSeconds": snap.wedgedForSeconds.map { .number($0) } ?? .null,
+            "pingsSent": .number(Double(snap.pingsSent)),
+            "pongsReceived": .number(Double(snap.pongsReceived)),
+            "lastWedgeDurationSeconds": snap.lastWedgeDurationSeconds.map { .number($0) } ?? .null,
+            "wedgeThresholdSeconds": .number(snap.wedgeThresholdSeconds),
+        ])
+    }
+
+    /// The `debug.keySpace` state echo: ground truth read fresh from the live
+    /// window + store (never the seam's own input — the `arrangeHScrollReported`
+    /// honesty rule). `fieldText` appears only while an `NSText` first responder
+    /// is editing, so the focus gate can prove a passed-through space actually
+    /// landed in the field.
+    private func keySpaceStateResponse(extra: [String: JSONValue] = [:]) -> JSONValue {
+        let responder = contentWindow?.firstResponder
+        var fields: [String: JSONValue] = [
+            "monitorInstalled": .bool(spaceKeyMonitor != nil),
+            "windowRole": .string(transportKeyWindow(contentWindow).rawValue),
+            "firstResponder": .string(Self.transportKeyResponder(responder).rawValue),
+            "responderClass": responder.map { .string(String(describing: type(of: $0))) } ?? .null,
+            "isPlaying": .bool(store.transport.isPlaying),
+            "isRecording": .bool(store.transport.isRecording),
+            "positionBeats": .number(store.transport.positionBeats),
+        ]
+        if let text = (responder as? NSText)?.string {
+            fields["fieldText"] = .string(text)
+        }
+        for (key, value) in extra { fields[key] = value }
+        return .object(fields)
     }
 
     /// `debug.mixerAddAU {trackId, index?, subType?}` — drives the EXACT store call
@@ -1559,6 +2159,98 @@ final class AppModel {
         return sketchpadStateResponse()
     }
 
+    // MARK: - Generation-presence card (m17-h)
+
+    /// `debug.generationCard {seed?, clear?}` — stages/reads the unified
+    /// generation-progress card for captures/E2E (app tier, debug tier ONLY —
+    /// off `allCommands`/MCP, the `debug.arrangeZoom`/`debug.effectEditor`
+    /// precedent: the card is status chrome; agents drive the `ai.*` protocol,
+    /// not the chrome). A bare call is READ-ONLY and echoes the registry (the
+    /// m11-a law) — gate scripts poll it to assert the card tracks sidecar
+    /// truth. `clear:true` drops every row FIRST (so `{clear:true, seed:{…}}`
+    /// resets then stages). `seed` appends ONE staged row:
+    /// `{phase (required: startingSidecar|sidecarReady|queued|running|
+    /// succeeded|failed), origin? ("sketchpad"|"wire"|"import", default
+    /// "wire"), label?, jobId? (OMIT to keep the live poll off the staged row —
+    /// the `debug.sketchpadDemo` empty-jobID rule), progress? (0…1), stage?,
+    /// detail? (the boot phase hint), reason? (the failed row's verbatim
+    /// text), elapsedSeconds? (backdates startedAt so the elapsed readout
+    /// shows it), stale?}`. Returns the resulting registry.
+    private func generationCardDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["clear"]?.boolValue == true {
+            generationPresence.clearForCapture()
+        }
+        if let seed = params["seed"]?.objectValue {
+            guard let phaseRaw = seed["phase"]?.stringValue else {
+                throw DebugError("debug.generationCard seed requires a phase")
+            }
+            let phase: GenerationPresencePhase
+            switch phaseRaw {
+            case "startingSidecar":
+                phase = .startingSidecar(detail: seed["detail"]?.stringValue)
+            case "sidecarReady":
+                phase = .sidecarReady
+            case "queued":
+                phase = .queued
+            case "running":
+                phase = .running(progress: seed["progress"]?.doubleValue,
+                                 stageText: seed["stage"]?.stringValue)
+            case "succeeded":
+                phase = .succeeded
+            case "failed":
+                phase = .failed(reason: seed["reason"]?.stringValue ?? "Generation failed (staged)")
+            default:
+                throw DebugError("unknown phase \"\(phaseRaw)\" — expected startingSidecar|"
+                    + "sidecarReady|queued|running|succeeded|failed")
+            }
+            let originRaw = seed["origin"]?.stringValue ?? GenerationJobOrigin.wire.rawValue
+            guard let origin = GenerationJobOrigin(rawValue: originRaw) else {
+                throw DebugError("unknown origin \"\(originRaw)\" — expected sketchpad|wire|import")
+            }
+            let elapsed = seed["elapsedSeconds"]?.doubleValue ?? 0
+            var job = GenerationPresenceJob(
+                jobID: seed["jobId"]?.stringValue,
+                origin: origin,
+                label: seed["label"]?.stringValue ?? "staged generation",
+                phase: phase,
+                startedAt: Date().addingTimeInterval(-elapsed),
+                isStale: seed["stale"]?.boolValue ?? false)
+            if !phase.isActive { job.finishedAt = Date() }
+            generationPresence.seedJobForCapture(job)
+        }
+        return generationCardState()
+    }
+
+    /// The registry echo `debug.generationCard` returns — also what the gate
+    /// scripts diff against sidecar truth.
+    private func generationCardState() -> JSONValue {
+        .object([
+            "visible": .bool(generationPresence.isVisible),
+            "jobs": .array(generationPresence.jobs.map { job in
+                var fields: [String: JSONValue] = [
+                    "id": .string(job.id.uuidString),
+                    "origin": .string(job.origin.rawValue),
+                    "label": .string(job.label),
+                    "phase": .string(job.phase.rawTag),
+                    "stageLabel": .string(GenerationPresenceModel.stageLabel(for: job.phase)),
+                    "elapsed": .string(generationPresence.elapsedText(for: job)),
+                    "stale": .bool(job.isStale),
+                ]
+                if let jobID = job.jobID { fields["jobId"] = .string(jobID) }
+                if case .running(let progress?, _) = job.phase {
+                    fields["progress"] = .number(progress)
+                }
+                if case .running(_, let stage?) = job.phase {
+                    fields["stage"] = .string(stage)
+                }
+                if case .failed(let reason) = job.phase {
+                    fields["reason"] = .string(reason)
+                }
+                return .object(fields)
+            }),
+        ])
+    }
+
     // MARK: - Clip fix (M6 v-b-2)
 
     /// Opens/closes the FIX-WITH-AI panel (the clip-selection affordance).
@@ -1777,6 +2469,174 @@ final class AppModel {
             "trackId": effectPickerTrackID.map { JSONValue.string($0.uuidString) } ?? .null,
             "count": .number(Double(effectPicker.filteredAudioUnits.count)),
             "search": .string(effectPicker.searchText),
+        ])
+    }
+
+    // MARK: - Built-in insert effect editor (m17-a)
+
+    /// Opens the effect editor card on one BUILT-IN insert (`trackID` nil = the
+    /// MASTER chain — built-ins only, so the card is the master chain's ONLY
+    /// in-app param surface). ONE editor app-wide: opening another insert's
+    /// editor replaces the current one. A hosted AU never opens the generic
+    /// card (v1 — AUs keep their plugin window, M3 vi-b).
+    func openEffectEditor(trackID: UUID?, effectID: UUID) {
+        let descriptor: EffectDescriptor?
+        if let trackID {
+            descriptor = store.tracks.first { $0.id == trackID }?
+                .effects.first { $0.id == effectID }
+        } else {
+            descriptor = store.masterEffects.first { $0.id == effectID }
+        }
+        guard let descriptor, descriptor.kind != .audioUnit else { return }
+        let label = trackID
+            .flatMap { id in store.tracks.first { $0.id == id }?.name }
+            .map { "on \($0)" } ?? "on Master"
+        effectEditor.prepare(trackID: trackID, effectID: effectID, targetLabel: label)
+        effectEditorTarget = EffectEditorTarget(trackID: trackID, effectID: effectID)
+    }
+
+    /// The `InsertRow` click: toggles the editor on that insert (clicking the
+    /// open row closes it; clicking another replaces — one editor app-wide).
+    func toggleEffectEditor(trackID: UUID?, effectID: UUID) {
+        if effectEditorTarget == EffectEditorTarget(trackID: trackID, effectID: effectID) {
+            closeEffectEditor()
+        } else {
+            openEffectEditor(trackID: trackID, effectID: effectID)
+        }
+    }
+
+    /// Closes the effect editor (scrim click, ✕, or replacing modal flows).
+    func closeEffectEditor() {
+        effectEditorTarget = nil
+        effectEditor.clear()
+    }
+
+    /// The UI insert add funnel (m17-a): adds a built-in effect through the
+    /// SAME store methods the wire's `fx.add` calls, then AUTO-OPENS its editor
+    /// card (the Logic add-then-open habit, scoped to an in-window card). Only
+    /// the strip's "+" menu and `debug.effectEditor {add}` come through here —
+    /// the wire's `fx.add` does NOT (an agent must never pop UI).
+    func addBuiltInInsert(trackID: UUID?, kind: EffectDescriptor.Kind) {
+        let added: EffectDescriptor?
+        if let trackID {
+            added = try? store.addEffect(toTrack: trackID, kind: kind)
+        } else {
+            added = try? store.addMasterEffect(kind: kind)
+        }
+        guard let added else { return }
+        openEffectEditor(trackID: trackID, effectID: added.id)
+    }
+
+    /// `debug.effectEditor {trackId?, effectId?, open?, add?, param?, value?,
+    /// close?}` — stages the built-in effect editor for captures/E2E (app-level,
+    /// debug tier — off `allCommands`/MCP, the `debug.effectPicker` precedent).
+    /// `trackId` takes a track UUID or `"master"` (the fx.* sentinel; omitted =
+    /// the first chain carrying a built-in insert). `open:true` opens the card
+    /// (switching to the Mix workspace + Pro density so a capture frames it);
+    /// `add:"eq"` drives the EXACT UI add funnel (`addBuiltInInsert` — store add
+    /// + auto-open, what the strip's "+" menu runs); `param`+`value` drive the
+    /// OPEN card's apply path (`EffectEditorModel.set` → the same store call a
+    /// slider tick makes — the G2 UI-vs-wire seam); `close:true` dismisses. A
+    /// bare call is READ-ONLY (echoes state, never re-opens — the m11-a law).
+    private func effectEditorDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["close"]?.boolValue == true {
+            closeEffectEditor()
+            return effectEditorStateResponse()
+        }
+
+        // Resolve the target chain: "master" → nil trackID; a UUID must exist.
+        var chainTrackID: UUID?
+        var chainGiven = false
+        if let raw = params["trackId"]?.stringValue {
+            chainGiven = true
+            if raw == "master" {
+                chainTrackID = nil
+            } else if let id = UUID(uuidString: raw),
+                      store.tracks.contains(where: { $0.id == id }) {
+                chainTrackID = id
+            } else {
+                throw DebugError("trackId is not 'master' or a known track UUID: \(raw)")
+            }
+        }
+
+        if let rawKind = params["add"]?.stringValue {
+            guard let kind = EffectDescriptor.Kind(rawValue: rawKind), kind != .audioUnit else {
+                throw DebugError("add must name a built-in effect kind, got: \(rawKind)")
+            }
+            if !chainGiven {
+                chainTrackID = store.tracks.first { $0.kind != .bus }?.id
+            }
+            workspaceMode = .mix
+            panelDensity.setDensity(.pro, forPanel: MixerView.panelID)
+            // THE UI funnel — store add + auto-open, verbatim what the "+" menu runs.
+            addBuiltInInsert(trackID: chainTrackID, kind: kind)
+            return effectEditorStateResponse()
+        }
+
+        if params["open"]?.boolValue == true {
+            if !chainGiven {
+                // Default: the first chain (tracks first, then master) with a built-in.
+                if let t = store.tracks.first(where: { t in
+                    t.effects.contains { $0.kind != .audioUnit }
+                }) {
+                    chainTrackID = t.id
+                } else if store.masterEffects.contains(where: { $0.kind != .audioUnit }) {
+                    chainTrackID = nil
+                } else {
+                    throw DebugError("no built-in insert exists to open an editor on")
+                }
+            }
+            let effects = chainTrackID
+                .map { id in store.tracks.first { $0.id == id }?.effects ?? [] }
+                ?? store.masterEffects
+            let effectID: UUID
+            if let raw = params["effectId"]?.stringValue {
+                guard let id = UUID(uuidString: raw),
+                      effects.contains(where: { $0.id == id && $0.kind != .audioUnit }) else {
+                    throw DebugError("effectId is not a built-in insert on the target chain: \(raw)")
+                }
+                effectID = id
+            } else if let first = effects.first(where: { $0.kind != .audioUnit }) {
+                effectID = first.id
+            } else {
+                throw DebugError("no built-in insert on the target chain")
+            }
+            workspaceMode = .mix
+            panelDensity.setDensity(.pro, forPanel: MixerView.panelID)
+            openEffectEditor(trackID: chainTrackID, effectID: effectID)
+        }
+
+        // param + value drive the OPEN card's apply path — the exact model call
+        // a slider tick makes (clamp → injected apply → setEffectParam twin).
+        if let name = params["param"]?.stringValue {
+            guard effectEditorTarget != nil else {
+                throw DebugError("no effect editor is open — pass open:true first")
+            }
+            guard let value = params["value"]?.doubleValue else {
+                throw DebugError("param requires a numeric value")
+            }
+            effectEditor.set(name: name, value: value)
+            if let error = effectEditor.lastErrorMessage {
+                throw DebugError(error)
+            }
+        }
+        return effectEditorStateResponse()
+    }
+
+    private func effectEditorStateResponse() -> JSONValue {
+        let values: [String: JSONValue] = Dictionary(
+            uniqueKeysWithValues: effectEditor.specs.map {
+                ($0.name, JSONValue.number(effectEditor.value(for: $0)))
+            })
+        return .object([
+            "visible": .bool(effectEditorTarget != nil && effectEditor.descriptor != nil),
+            "trackId": effectEditorTarget.map {
+                $0.trackID.map { JSONValue.string($0.uuidString) } ?? .string("master")
+            } ?? .null,
+            "effectId": effectEditorTarget.map { JSONValue.string($0.effectID.uuidString) } ?? .null,
+            "kind": effectEditor.kind.map { JSONValue.string($0.rawValue) } ?? .null,
+            "bypassed": .bool(effectEditor.isBypassed),
+            "values": .object(values),
         ])
     }
 
@@ -2451,11 +3311,23 @@ final class AppModel {
 
     /// `debug.sketchpadState` — read-only snapshot of the panel (candidates +
     /// visibility + sidecar), so a capture flow can poll for the state it wants.
+    /// Each candidate additionally carries `row` (m18-g, additive): the RESOLVED
+    /// presentation the row actually displays after deferring to the
+    /// generation-presence registry (`SketchpadModel.resolvedCandidate`) — a
+    /// gate can diff `row.statusText` against the card's `stageLabel` to prove
+    /// both surfaces tell one story about the same job.
     private func sketchpadStateResponse() -> JSONValue {
         .object([
             "visible": .bool(showSketchpad),
             "sidecar": .string(sketchpad.sidecarStatus?.state.rawValue ?? "unknown"),
-            "candidates": .array(sketchpad.candidates.map(Self.candidateSummary)),
+            "candidates": .array(sketchpad.candidates.map { candidate in
+                guard case .object(var fields) = Self.candidateSummary(candidate) else {
+                    return Self.candidateSummary(candidate)   // unreachable — summary is an object
+                }
+                fields["row"] = Self.candidateSummary(SketchpadModel.resolvedCandidate(
+                    candidate, registry: generationPresence.jobs))
+                return .object(fields)
+            }),
         ])
     }
 

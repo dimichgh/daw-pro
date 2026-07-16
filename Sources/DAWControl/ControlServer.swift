@@ -6,7 +6,8 @@ import Network
 ///
 /// @unchecked Sendable justification: `listener` and `connections` are only
 /// touched on the private serial `queue`; the router is @MainActor and is only
-/// called via a MainActor task hop.
+/// called via a MainActor task hop; `livenessSnapshot` is an immutable
+/// `@Sendable` closure fixed at init.
 public final class ControlServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dawpro.control-server")
     private var listener: NWListener?
@@ -14,9 +15,20 @@ public final class ControlServer: @unchecked Sendable {
     private let router: CommandRouter
     public let port: UInt16
 
-    public init(router: CommandRouter, port: UInt16 = 17600) {
+    /// m18-b: main-actor liveness read for the QUEUE tier. Routing hops to the
+    /// MainActor (`dispatch`), so during a main-actor wedge the socket keeps
+    /// reading frames while every command silently hangs — the one failure the
+    /// normal path can never report. When this provider says "wedged",
+    /// `dispatch` answers ON THE QUEUE, before the hop (see `wedgeIntercept`).
+    /// nil (headless tests, older callers) = no interception, byte-identical
+    /// pre-m18-b behavior.
+    private let livenessSnapshot: (@Sendable () -> MainActorLivenessSnapshot?)?
+
+    public init(router: CommandRouter, port: UInt16 = 17600,
+                livenessSnapshot: (@Sendable () -> MainActorLivenessSnapshot?)? = nil) {
         self.router = router
         self.port = port
+        self.livenessSnapshot = livenessSnapshot
     }
 
     public func start() throws {
@@ -85,6 +97,16 @@ public final class ControlServer: @unchecked Sendable {
     }
 
     private func dispatch(_ data: Data, on connection: NWConnection) {
+        // m18-b wedge honesty: consult the liveness snapshot HERE, on the
+        // server queue, before the MainActor hop below. A wedged main actor
+        // would swallow the Task forever; the queue tier answers instead so an
+        // agent never faces a silent hang. Runs on `queue` (receiveMessage
+        // callback), so `send` below is queue-legal.
+        if let snapshot = livenessSnapshot?(),
+           let response = Self.wedgeIntercept(data, snapshot: snapshot) {
+            send(response, on: connection)
+            return
+        }
         Task { @MainActor [router] in
             let response: ControlResponse
             do {
@@ -95,6 +117,52 @@ public final class ControlServer: @unchecked Sendable {
             }
             self.send(response, on: connection)
         }
+    }
+
+    // MARK: - Main-actor wedge interception (m18-b, queue tier)
+
+    /// Decides the queue-tier answer for one inbound frame while the main
+    /// actor may be wedged. Returns nil when responsive (take the normal
+    /// MainActor route). Static + internal so the decision is testable with a
+    /// fake snapshot — no sockets, no wall time.
+    ///
+    /// The wedged rules (ZERO new wire commands — the surface rides existing
+    /// verbs):
+    /// · `engine.watchdogStatus` answers from the snapshot with the additive
+    ///   `mainActor` field ONLY: the engine watchdog fields are PRODUCED on
+    ///   the main actor (`store.watchdogStatus()`), unreadable during a wedge
+    ///   — rather than dress a stale cache as live data they are honestly
+    ///   OMITTED; `mainActor: {responsive: false, wedgedForSeconds}` carries
+    ///   the whole story. (The healthy path adds `mainActor: {responsive:
+    ///   true}` next to the full engine fields — see Commands.swift.)
+    /// · Every other command fails fast with the teaching error (wire errors
+    ///   are strings) instead of hanging until recovery.
+    /// · Malformed JSON gets the usual malformed error, still answered here.
+    static func wedgeIntercept(_ data: Data,
+                               snapshot: MainActorLivenessSnapshot) -> ControlResponse? {
+        guard !snapshot.responsive, let wedgedFor = snapshot.wedgedForSeconds else { return nil }
+        guard let request = try? JSONDecoder().decode(ControlRequest.self, from: data) else {
+            return .failure("?", "malformed request JSON (answered off-main during a main-actor wedge)")
+        }
+        if request.command == "engine.watchdogStatus" {
+            return .success(request.id, .object([
+                "mainActor": .object([
+                    "responsive": .bool(false),
+                    "wedgedForSeconds": .number(wedgedFor),
+                ])
+            ]))
+        }
+        return .failure(request.id, wedgeTeachingError(wedgedForSeconds: wedgedFor))
+    }
+
+    /// The teaching error every non-watchdog command receives during a wedge:
+    /// what happened, for how long, where liveness IS readable, and when
+    /// normal service resumes. An agent must never guess at a silent hang.
+    static func wedgeTeachingError(wedgedForSeconds: Double) -> String {
+        "main actor has been unresponsive for "
+            + String(format: "%.1f", wedgedForSeconds)
+            + " s — the app UI is wedged; engine.watchdogStatus reports liveness; "
+            + "other commands cannot run until it recovers."
     }
 
     private func send(_ response: ControlResponse, on connection: NWConnection) {

@@ -255,7 +255,7 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // count is a bijection" check (commands.length + exception-table-B size).
   // Hardcoded here (per the brief) as a fast, focused real-transport check —
   // if this drifts, audit-tools.test.ts is the source of truth for why.
-  assert.equal(result.tools.length, 128);
+  assert.equal(result.tools.length, 129);
 });
 
 // ---------------------------------------------------------------------------

@@ -23,8 +23,14 @@ import Foundation
 ///   `{"file": <sidecar-local path>, "status", "create_time", "env",
 ///   "prompt", "lyrics", "metas": {...}}` (no `stage`/`progress`/`error`
 ///   keys). For a queued/running/failed job it is instead `{"file": "",
-///   "status", "create_time", "env", "progress": Double, "stage": String
-///   ("queued"|"running"|"failed"), "error": String?}`.
+///   "status", "create_time", "env", "progress": Double, "stage": String,
+///   "error": String?}`. NOTE on `stage` (measured live at the m17-h gate,
+///   2026-07-16): the route source reads like a "queued"|"running"|"failed"
+///   enum, but a REAL mid-render job carries rich pipeline text there
+///   ("Phase 1: Generating CoT metadata (once for all items)...",
+///   "Generating music (batch size: 2)...") with `progress` advancing 0→1 —
+///   the queued/running mapping below is coded against that measured
+///   behavior, not the apparent enum.
 /// - `GET /v1/audio?path=<sidecar-local path>` — streams the finished audio
 ///   file's bytes; 403 if the path is outside the sidecar's allowed temp
 ///   directory, 404 if missing.
@@ -152,7 +158,20 @@ public actor ACEStepClient: SongGenerating {
         switch statusInt {
         case 1: state = .succeeded
         case 2: state = .failed
-        default: state = (stage == "running") ? .running : .queued
+        default:
+            // MEASURED LIVE (m17-h gate, 2026-07-16): mid-render the sidecar's
+            // `stage` is NOT the "queued"/"running" enum the route source
+            // suggested — it carries rich pipeline text ("Phase 1: Generating
+            // CoT metadata (once for all items)...", "Generating music (batch
+            // size: 2)...") while `progress` advances 0→1. The old literal
+            // `stage == "running"` check left every real job reading "queued"
+            // for its whole render — the exact "does not really show progress"
+            // complaint. A status-0 job is RUNNING when the stage is any
+            // non-queued text OR progress has moved; only a literal "queued"
+            // stage (or no movement at all) still means waiting.
+            let progress = asDouble(first["progress"]) ?? 0
+            let stageSaysWaiting = (stage ?? "queued").isEmpty || stage == "queued"
+            state = (!stageSaysWaiting || progress > 0) ? .running : .queued
         }
 
         let statusText = item["progress_text"] as? String

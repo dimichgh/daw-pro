@@ -3979,7 +3979,8 @@ public final class ProjectStore {
     /// callers to `clip.removeControllerLane` for an explicit delete.
     ///
     /// MIDI clips only — controller data feeds the instrument, so an audio clip
-    /// throws `notAMIDIClip` (the `setClipNotes`/time-range family). Caps
+    /// throws `notAMIDIClip` naming `clip.setControllerLane` (m16-g controller-
+    /// specific copy — design-m16b §14 A2 deferred this). Caps
     /// (design-m16b §7): a lane may hold at most `maxControllerPointsPerLane`
     /// points (over-cap throws, naming the count) and a clip at most
     /// `maxControllerLanesPerClip` lanes (adding a new type past the cap throws).
@@ -3996,7 +3997,7 @@ public final class ProjectStore {
         try requireNotCompMember(trackIndex: t, clipIndex: c)
         let clip = tracks[t].clips[c]
         guard clip.isMIDI else {
-            throw ProjectError.notAMIDIClip(clipID)
+            throw ProjectError.notAMIDIClip(clipID, verb: "clip.setControllerLane")
         }
         guard points.count <= Self.maxControllerPointsPerLane else {
             throw ProjectError.invalidClipEdit(
@@ -4027,7 +4028,8 @@ public final class ProjectStore {
     }
 
     /// Removes the clip's controller lane of `type` (m16-b). MIDI clips only
-    /// (`notAMIDIClip` otherwise). If the clip has no lane of that type, throws
+    /// (`notAMIDIClip` naming `clip.removeControllerLane` otherwise — m16-g
+    /// controller-specific copy). If the clip has no lane of that type, throws
     /// `invalidClipEdit` LISTING the clip's existing lanes (the m13-c listing
     /// idiom) so an agent can correct the type. One undo step. Returns the
     /// updated clip.
@@ -4039,7 +4041,7 @@ public final class ProjectStore {
         try requireNotCompMember(trackIndex: t, clipIndex: c)
         let clip = tracks[t].clips[c]
         guard clip.isMIDI else {
-            throw ProjectError.notAMIDIClip(clipID)
+            throw ProjectError.notAMIDIClip(clipID, verb: "clip.removeControllerLane")
         }
         guard clip.controllerLanes.contains(where: { $0.type == type }) else {
             let existing = clip.controllerLanes.map(\.type.wireKey)
@@ -5034,6 +5036,47 @@ public final class ProjectStore {
             }
         }
         return removed
+    }
+
+    /// One entry in `untitledRecoveryBundles()` — a per-slug untitled-recovery
+    /// bundle's wire-facing facts.
+    public struct UntitledRecoveryBundleInfo: Sendable, Equatable {
+        /// Absolute filesystem path, directly usable as `project.open`'s `path`.
+        public var path: String
+        /// File modification time (the bundle is overwritten in place per slug,
+        /// so mtime is exactly "when this snapshot last changed" — the same
+        /// signal `pruneUntitledRecoveryBundles` sorts by).
+        public var savedAt: Date
+        /// True for the ONE entry (if any) that is THIS store's own slug —
+        /// its next dirty new/open flush overwrites this exact file, so it is
+        /// live safety-net content, not a past session's abandoned work.
+        public var isCurrentSession: Bool
+    }
+
+    /// Wire-discoverable listing of the per-slug untitled-recovery bundles
+    /// (m16-e, audit F3) — `project.recoveryBundles`. These are ordinary
+    /// `.dawproj` bundles (`project.open {path}` already opens one directly);
+    /// this is a listing seam so an agent can find them at all, since nothing
+    /// on the wire otherwise names the Autosave directory. Newest-first (the
+    /// `pruneUntitledRecoveryBundles` ordering). Never throws — an unreadable
+    /// or missing Autosave directory reads an empty list.
+    public func untitledRecoveryBundles() -> [UntitledRecoveryBundleInfo] {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: autosaveRecoveryDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return [] }
+        let ownBundleName = recoveryBundleURL.lastPathComponent
+        return entries
+            .filter { $0.lastPathComponent.hasPrefix("Untitled-") && $0.pathExtension == "dawproj" }
+            .map { url -> UntitledRecoveryBundleInfo in
+                let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                    .contentModificationDate) ?? .distantPast
+                return UntitledRecoveryBundleInfo(
+                    path: url.path, savedAt: mtime,
+                    isCurrentSession: url.lastPathComponent == ownBundleName)
+            }
+            .sorted { $0.savedAt > $1.savedAt }
     }
 
     /// Default autosave/recovery directory:

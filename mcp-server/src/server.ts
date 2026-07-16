@@ -71,33 +71,68 @@ export const server = new McpServer({
   version: "0.1.0",
 });
 
+/**
+ * Registers a MUTATING tool with a STRICT input schema (m16-e, audit F5's
+ * MCP-side half). `server.registerTool` builds a permissive `z.object(shape)`
+ * from a raw `ZodRawShape` — zod's default "strip" parse mode silently
+ * DISCARDS any key not in the shape, before the handler (and therefore the
+ * DAW's own wire-level `rejectUnknownKeys`) ever sees it. Verified directly
+ * against this file's own `track_add` schema: `{name:"kind"}` was designed to
+ * still create an audio track since 'kind' is optional, but
+ * `{name:"x", type:"instrument"}` (the audit's measured typo) parses
+ * successfully with `type` silently dropped and `kind` defaulting to
+ * `"audio"` — the wire never even learns a `type` key was sent. A `.strict()`
+ * schema turns that into a validation error AT THE MCP BOUNDARY instead,
+ * closing the loop for the primary audience (an MCP-connected agent), not
+ * just raw wire clients. Every MUTATING tool below registers through this
+ * instead of `server.registerTool` directly; read-only tools (list/status/
+ * describe/snapshot) are unaffected — an extra key on a pure read is not the
+ * hazard class this closes (nothing it could silently misconfigure).
+ */
+function registerTool(
+  name: string,
+  config: {
+    title: string;
+    description: string;
+    inputSchema?: Record<string, z.ZodTypeAny>;
+  },
+  handler: (...args: any[]) => Promise<ToolResult>
+): void {
+  const strictConfig = config.inputSchema
+    ? { ...config, inputSchema: z.object(config.inputSchema).strict() }
+    : config;
+  server.registerTool(name, strictConfig as any, handler as any);
+}
+
 // ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "transport_play",
   {
     title: "Start playback",
     description:
       "Start playback of the DAW session from the current transport position. " +
       "Has no effect (still ok) if already playing.",
+    inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("transport.play"))
 );
 
-server.registerTool(
+registerTool(
   "transport_stop",
   {
     title: "Stop playback",
     description:
       "Stop playback. The playhead stays at its current position (use " +
       "transport_seek to move it). Has no effect (still ok) if already stopped.",
+    inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("transport.stop"))
 );
 
-server.registerTool(
+registerTool(
   "transport_seek",
   {
     title: "Move the playhead",
@@ -137,7 +172,7 @@ server.registerTool(
 // Markers (m11-c) — named song-section anchors on the timeline
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "marker_add",
   {
     title: "Add a session marker",
@@ -162,7 +197,7 @@ server.registerTool(
   async ({ name, beat }) => toToolResult(() => bridge.send("marker.add", { name, beat }))
 );
 
-server.registerTool(
+registerTool(
   "marker_remove",
   {
     title: "Remove a session marker",
@@ -178,7 +213,7 @@ server.registerTool(
   async ({ markerId }) => toToolResult(() => bridge.send("marker.remove", { markerId }))
 );
 
-server.registerTool(
+registerTool(
   "marker_rename",
   {
     title: "Rename a session marker",
@@ -195,7 +230,7 @@ server.registerTool(
   async ({ markerId, name }) => toToolResult(() => bridge.send("marker.rename", { markerId, name }))
 );
 
-server.registerTool(
+registerTool(
   "marker_move",
   {
     title: "Move a session marker",
@@ -230,7 +265,7 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("marker.list", {}))
 );
 
-server.registerTool(
+registerTool(
   "transport_set_tempo",
   {
     title: "Set the project tempo",
@@ -268,7 +303,7 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("tempo.map", {}))
 );
 
-server.registerTool(
+registerTool(
   "tempo_set_map",
   {
     title: "Set the tempo & meter maps",
@@ -337,7 +372,7 @@ server.registerTool(
     )
 );
 
-server.registerTool(
+registerTool(
   "transport_record",
   {
     title: "Start recording",
@@ -366,16 +401,23 @@ server.registerTool(
       "full pass through the loop lands as its own take lane on ONE take " +
       "group — comp with the existing take_* tools (the newest lane is " +
       "comped by default). Stopping mid-cycle still lands an honest partial " +
-      "lane for whatever was captured; there is no separate flag for this, " +
-      "it's entirely decided by whether the loop is on, so disable the loop " +
-      "first if you want one plain linear take instead. This is rejected if " +
-      "a punch window is ALSO enabled (see transport_set_punch), or if the " +
-      "loop is shorter than 1 second per cycle.",
+      "lane for whatever was captured — the take group keeps that partial " +
+      "lane, and default comp selection plays it (the NEWEST lane, even " +
+      "when it's a mid-cycle partial) exactly as it would any complete " +
+      "lane; this is industry-consistent (matches Logic's take selection) " +
+      "and intentional, not a bug — call take_select to comp an earlier, " +
+      "complete lane instead. There is no separate flag for partial-take " +
+      "behavior; it's entirely decided by whether the loop is on, so " +
+      "disable the loop first if you want one plain linear take instead. " +
+      "This is rejected if a punch window is ALSO enabled (see " +
+      "transport_set_punch), or if the loop is shorter than 1 second per " +
+      "cycle.",
+    inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("transport.record"))
 );
 
-server.registerTool(
+registerTool(
   "transport_set_loop",
   {
     title: "Enable or disable loop playback",
@@ -416,7 +458,7 @@ server.registerTool(
     toToolResult(() => bridge.send("transport.setLoop", { enabled, startBeat, endBeat }))
 );
 
-server.registerTool(
+registerTool(
   "transport_set_punch",
   {
     title: "Enable or disable punch recording",
@@ -459,7 +501,7 @@ server.registerTool(
     toToolResult(() => bridge.send("transport.setPunch", { enabled, inBeat, outBeat }))
 );
 
-server.registerTool(
+registerTool(
   "transport_set_metronome",
   {
     title: "Enable or disable the metronome click",
@@ -494,7 +536,7 @@ server.registerTool(
 // Tracks
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "track_add",
   {
     title: "Add a track",
@@ -516,7 +558,7 @@ server.registerTool(
   async ({ name, kind }) => toToolResult(() => bridge.send("track.add", { name, kind }))
 );
 
-server.registerTool(
+registerTool(
   "track_remove",
   {
     title: "Remove a track",
@@ -531,7 +573,7 @@ server.registerTool(
   async ({ trackId }) => toToolResult(() => bridge.send("track.remove", { trackId }))
 );
 
-server.registerTool(
+registerTool(
   "track_rename",
   {
     title: "Rename a track",
@@ -546,7 +588,7 @@ server.registerTool(
   async ({ trackId, name }) => toToolResult(() => bridge.send("track.rename", { trackId, name }))
 );
 
-server.registerTool(
+registerTool(
   "track_set_volume",
   {
     title: "Set track volume",
@@ -566,7 +608,7 @@ server.registerTool(
   async ({ trackId, volume }) => toToolResult(() => bridge.send("track.setVolume", { trackId, volume }))
 );
 
-server.registerTool(
+registerTool(
   "track_set_pan",
   {
     title: "Set track pan",
@@ -581,7 +623,7 @@ server.registerTool(
   async ({ trackId, pan }) => toToolResult(() => bridge.send("track.setPan", { trackId, pan }))
 );
 
-server.registerTool(
+registerTool(
   "track_set_mute",
   {
     title: "Mute or unmute a track",
@@ -594,7 +636,7 @@ server.registerTool(
   async ({ trackId, muted }) => toToolResult(() => bridge.send("track.setMute", { trackId, muted }))
 );
 
-server.registerTool(
+registerTool(
   "track_set_solo",
   {
     title: "Solo or unsolo a track",
@@ -609,7 +651,7 @@ server.registerTool(
   async ({ trackId, soloed }) => toToolResult(() => bridge.send("track.setSolo", { trackId, soloed }))
 );
 
-server.registerTool(
+registerTool(
   "track_set_arm",
   {
     title: "Arm or disarm a track for recording",
@@ -844,7 +886,7 @@ const soundBankSchema = z
       "untouched."
   );
 
-server.registerTool(
+registerTool(
   "track_set_instrument",
   {
     title: "Select or edit an instrument track's instrument",
@@ -1009,7 +1051,7 @@ server.registerTool(
 // Bus routing & sends
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "track_set_output",
   {
     title: "Route a track's output to a bus (or back to master)",
@@ -1041,7 +1083,7 @@ server.registerTool(
     toToolResult(() => bridge.send("track.setOutput", { trackId, busId: busId ?? null }))
 );
 
-server.registerTool(
+registerTool(
   "track_add_send",
   {
     title: "Add an effect send from a track to a bus",
@@ -1089,7 +1131,7 @@ server.registerTool(
     toToolResult(() => bridge.send("track.addSend", { trackId, busId, level }))
 );
 
-server.registerTool(
+registerTool(
   "track_set_send",
   {
     title: "Change an existing send's level",
@@ -1120,7 +1162,7 @@ server.registerTool(
     toToolResult(() => bridge.send("track.setSend", { trackId, sendId, level }))
 );
 
-server.registerTool(
+registerTool(
   "track_remove_send",
   {
     title: "Remove a send",
@@ -1250,7 +1292,7 @@ server.registerTool(
   async ({ source }) => toToolResult(() => bridge.send("instrument.listSoundBankPrograms", { source }))
 );
 
-server.registerTool(
+registerTool(
   "instrument_import_sound_bank",
   {
     title: "Import a SoundFont2/DLS file into the sound bank library",
@@ -1353,7 +1395,7 @@ const fxAudioUnitSchema = z
       "to fx_list_audio_units."
   );
 
-server.registerTool(
+registerTool(
   "fx_add",
   {
     title: "Add an effect to a track or bus's insert chain",
@@ -1441,7 +1483,7 @@ server.registerTool(
 // Plugin UI windows (M3 vi-b)
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "plugin_open_ui",
   {
     title: "Open an Audio Unit plugin's window",
@@ -1493,7 +1535,7 @@ server.registerTool(
     toToolResult(() => bridge.send("plugin.openUI", { trackId, effectId, x, y }))
 );
 
-server.registerTool(
+registerTool(
   "plugin_close_ui",
   {
     title: "Close an Audio Unit plugin's window",
@@ -1533,7 +1575,7 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("plugin.listOpenUIs"))
 );
 
-server.registerTool(
+registerTool(
   "fx_remove",
   {
     title: "Remove an effect from a track or bus's insert chain",
@@ -1554,7 +1596,7 @@ server.registerTool(
   async ({ trackId, effectId }) => toToolResult(() => bridge.send("fx.remove", { trackId, effectId }))
 );
 
-server.registerTool(
+registerTool(
   "fx_reorder",
   {
     title: "Move an effect within a track or bus's insert chain",
@@ -1587,7 +1629,7 @@ server.registerTool(
     toToolResult(() => bridge.send("fx.reorder", { trackId, effectId, index }))
 );
 
-server.registerTool(
+registerTool(
   "fx_set_bypass",
   {
     title: "Bypass or re-enable an effect",
@@ -1612,7 +1654,7 @@ server.registerTool(
     toToolResult(() => bridge.send("fx.setBypass", { trackId, effectId, bypassed }))
 );
 
-server.registerTool(
+registerTool(
   "fx_set_param",
   {
     title: "Set an effect parameter",
@@ -1649,7 +1691,7 @@ server.registerTool(
     toToolResult(() => bridge.send("fx.setParam", { trackId, effectId, name, value }))
 );
 
-server.registerTool(
+registerTool(
   "fx_set_sidechain",
   {
     title: "Key a compressor or gate from another track (sidechain)",
@@ -1741,7 +1783,7 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("input.listDevices"))
 );
 
-server.registerTool(
+registerTool(
   "input_set_device",
   {
     title: "Pin the recording input device",
@@ -1811,7 +1853,7 @@ const noteSchema = z.object({
     ),
 });
 
-server.registerTool(
+registerTool(
   "clip_add_audio",
   {
     title: "Import an audio file as a clip",
@@ -1845,7 +1887,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.addAudio", { trackId, path, atBeat }))
 );
 
-server.registerTool(
+registerTool(
   "clip_add_midi",
   {
     title: "Create a MIDI clip with notes",
@@ -1898,7 +1940,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.addMIDI", { trackId, name, atBeat, lengthBeats, notes }))
 );
 
-server.registerTool(
+registerTool(
   "clip_set_notes",
   {
     title: "Replace a MIDI clip's notes",
@@ -1925,7 +1967,7 @@ server.registerTool(
   async ({ clipId, notes }) => toToolResult(() => bridge.send("clip.setNotes", { clipId, notes }))
 );
 
-server.registerTool(
+registerTool(
   "clip_remove",
   {
     title: "Remove a clip",
@@ -1949,7 +1991,7 @@ const fadeCurveSchema = z
       "outs. Defaults to `linear` when omitted."
   );
 
-server.registerTool(
+registerTool(
   "clip_split",
   {
     title: "Split a clip in two at a beat",
@@ -1982,7 +2024,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.split", { trackId, clipId, atBeat }))
 );
 
-server.registerTool(
+registerTool(
   "clip_trim",
   {
     title: "Trim a clip's start/end (ripple its visible window)",
@@ -2015,7 +2057,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.trim", { trackId, clipId, newStartBeat, newLengthBeats }))
 );
 
-server.registerTool(
+registerTool(
   "clip_move",
   {
     title: "Move a clip to a new timeline position",
@@ -2044,7 +2086,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.move", { trackId, clipId, toStartBeat }))
 );
 
-server.registerTool(
+registerTool(
   "clip_duplicate",
   {
     title: "Duplicate a clip",
@@ -2062,7 +2104,11 @@ server.registerTool(
       "(their edge is trimmed, or they're removed if fully covered) so two clips " +
       "never sound at once with no crossfade; use clip_crossfade instead to " +
       "deliberately blend two audio clips. A comp/take-group member source is " +
-      "rejected — call take_flatten first, then duplicate the flattened clip. One " +
+      "rejected — call take_flatten first, then duplicate the flattened clip. " +
+      "NOTE IDS: the new clip gets a brand-new clip id, but for a MIDI clip its " +
+      "individual notes keep their SOURCE note ids verbatim (not re-minted), so " +
+      "the source clip and the duplicate end up with two different clips whose " +
+      "notes share the same per-note ids. One " +
       "undo step. Returns the new clip's fields (unwrapped, the track_add/" +
       "clip_add_midi convention), plus additive `trimmed` and `removed` arrays " +
       "listing the ids of any stationary clips the overlap policy edited (empty on " +
@@ -2092,7 +2138,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.duplicate", { clipId, toStartBeat, toTrackId }))
 );
 
-server.registerTool(
+registerTool(
   "clip_set_gain",
   {
     title: "Set a clip's per-clip gain",
@@ -2115,7 +2161,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.setGain", { trackId, clipId, gainDb }))
 );
 
-server.registerTool(
+registerTool(
   "clip_set_gain_envelope",
   {
     title: "Draw a clip's gain envelope",
@@ -2164,7 +2210,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.setGainEnvelope", { trackId, clipId, points: points ?? [] }))
 );
 
-server.registerTool(
+registerTool(
   "clip_set_fades",
   {
     title: "Set a clip's fade-in/fade-out",
@@ -2201,7 +2247,7 @@ server.registerTool(
     )
 );
 
-server.registerTool(
+registerTool(
   "clip_crossfade",
   {
     title: "Crossfade two adjacent/overlapping audio clips",
@@ -2242,7 +2288,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.crossfade", { trackId, clipId, otherClipId, lengthBeats }))
 );
 
-server.registerTool(
+registerTool(
   "clip_set_stretch",
   {
     title: "Set a clip's time-stretch / pitch-shift",
@@ -2299,7 +2345,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.setStretch", { trackId, clipId, ratio, semitones, formantPreserve }))
 );
 
-server.registerTool(
+registerTool(
   "clip_stretch_to_length",
   {
     title: "Stretch a clip to a new timeline length (handle drag)",
@@ -2332,7 +2378,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.stretchToLength", { trackId, clipId, lengthBeats }))
 );
 
-server.registerTool(
+registerTool(
   "clip_quantize",
   {
     title: "Quantize a MIDI clip's timing to the grid",
@@ -2403,7 +2449,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.quantize", { clipId, gridBeats, strength, swing, quantizeEnds, groove }))
 );
 
-server.registerTool(
+registerTool(
   "clip_humanize",
   {
     title: "Add human feel to a MIDI clip (seeded timing + velocity jitter)",
@@ -2494,7 +2540,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.detectTransients", { clipId, sensitivity }))
 );
 
-server.registerTool(
+registerTool(
   "clip_quantize_audio",
   {
     title: "Quantize an audio clip's timing to the grid (slice + nudge)",
@@ -2583,7 +2629,7 @@ server.registerTool(
     )
 );
 
-server.registerTool(
+registerTool(
   "clip_delete_time_range",
   {
     title: "Delete a time range from a MIDI clip (excise + close the gap)",
@@ -2627,7 +2673,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.deleteTimeRange", { clipId, startBeat, lengthBeats }))
 );
 
-server.registerTool(
+registerTool(
   "clip_insert_time_range",
   {
     title: "Insert silence into a MIDI clip (open a gap, shift later notes right)",
@@ -2693,7 +2739,7 @@ const controllerPointSchema = z.object({
     ),
 });
 
-server.registerTool(
+registerTool(
   "clip_set_controller_lane",
   {
     title: "Write a MIDI clip's controller lane (mod wheel, sustain, pitch bend, ...)",
@@ -2762,7 +2808,7 @@ server.registerTool(
     toToolResult(() => bridge.send("clip.setControllerLane", { clipId, type, controller, points }))
 );
 
-server.registerTool(
+registerTool(
   "clip_remove_controller_lane",
   {
     title: "Remove a MIDI clip's controller lane",
@@ -2807,7 +2853,7 @@ server.registerTool(
 // automation, and the loop/punch regions.
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "arrange_insert_bars",
   {
     title: "Insert empty bars across the whole project",
@@ -2845,7 +2891,7 @@ server.registerTool(
   async ({ atBar, count }) => toToolResult(() => bridge.send("arrange.insertBars", { atBar, count }))
 );
 
-server.registerTool(
+registerTool(
   "arrange_delete_bars",
   {
     title: "Delete bars across the whole project",
@@ -2914,7 +2960,7 @@ const compSegmentSchema = z.object({
     .describe("Segment end, in ABSOLUTE timeline beats. Must be greater than startBeat."),
 });
 
-server.registerTool(
+registerTool(
   "take_group",
   {
     title: "Group overlapping clips into a take group",
@@ -2951,7 +2997,7 @@ server.registerTool(
     toToolResult(() => bridge.send("take.group", { trackId, clipIds, name }))
 );
 
-server.registerTool(
+registerTool(
   "take_set_comp",
   {
     title: "Replace a take group's comp (which lane plays where)",
@@ -2989,7 +3035,7 @@ server.registerTool(
     toToolResult(() => bridge.send("take.setComp", { trackId, groupId, segments }))
 );
 
-server.registerTool(
+registerTool(
   "take_select",
   {
     title: "Swap a take group's comp to one whole lane (quick take pick)",
@@ -3017,7 +3063,7 @@ server.registerTool(
     toToolResult(() => bridge.send("take.select", { trackId, groupId, laneId }))
 );
 
-server.registerTool(
+registerTool(
   "take_remove_lane",
   {
     title: "Delete an unused take from a group",
@@ -3040,7 +3086,7 @@ server.registerTool(
     toToolResult(() => bridge.send("take.removeLane", { trackId, groupId, laneId }))
 );
 
-server.registerTool(
+registerTool(
   "take_flatten",
   {
     title: "Dissolve a take group into ordinary clips",
@@ -3066,7 +3112,7 @@ server.registerTool(
   async ({ trackId, groupId }) => toToolResult(() => bridge.send("take.flatten", { trackId, groupId }))
 );
 
-server.registerTool(
+registerTool(
   "take_move",
   {
     title: "Move a whole take group to a new timeline position",
@@ -3092,7 +3138,7 @@ server.registerTool(
     toToolResult(() => bridge.send("take.move", { trackId, groupId, toStartBeat }))
 );
 
-server.registerTool(
+registerTool(
   "take_set_crossfade",
   {
     title: "Set a take group's comp-join crossfade width",
@@ -3120,7 +3166,7 @@ server.registerTool(
     toToolResult(() => bridge.send("take.setCrossfade", { trackId, groupId, seconds }))
 );
 
-server.registerTool(
+registerTool(
   "take_auto_align",
   {
     title: "Auto-align a take's onsets to the group's reference lane",
@@ -3191,7 +3237,7 @@ server.registerTool(
 // name without extracting anything.
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "groove_extract",
   {
     title: "Extract a groove template from a clip's feel",
@@ -3250,7 +3296,7 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("groove.list", {}))
 );
 
-server.registerTool(
+registerTool(
   "groove_remove",
   {
     title: "Delete a saved groove template",
@@ -3270,7 +3316,7 @@ server.registerTool(
 // Mixer
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "mixer_set_master_volume",
   {
     title: "Set master volume",
@@ -3313,7 +3359,7 @@ const mixerPresetSchema = z
       "with no tone change — a clean level lift."
   );
 
-server.registerTool(
+registerTool(
   "mixer_apply_preset",
   {
     title: "Apply a curated mixer preset to a track or bus",
@@ -3445,7 +3491,7 @@ server.registerTool(
 // Beta feedback (M9 beta)
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "app_feedback_bundle",
   {
     title: "Write a local diagnostics bundle for a bug report",
@@ -3536,7 +3582,7 @@ const songSkeletonSectionSchema = z
   })
   .describe("One arrangement section: a named span measured in bars.");
 
-server.registerTool(
+registerTool(
   "macro_song_skeleton",
   {
     title: "Scaffold a whole song: tempo, tracks, sections, and loop in one step",
@@ -3656,7 +3702,7 @@ const automationPointSchema = z.object({
     ),
 });
 
-server.registerTool(
+registerTool(
   "automation_add_lane",
   {
     title: "Add an automation lane to a track",
@@ -3698,7 +3744,7 @@ server.registerTool(
   async ({ trackId, target }) => toToolResult(() => bridge.send("automation.addLane", { trackId, target }))
 );
 
-server.registerTool(
+registerTool(
   "automation_remove_lane",
   {
     title: "Remove an automation lane",
@@ -3724,7 +3770,7 @@ server.registerTool(
     toToolResult(() => bridge.send("automation.removeLane", { trackId, laneId }))
 );
 
-server.registerTool(
+registerTool(
   "automation_set_points",
   {
     title: "Draw an automation lane's breakpoints",
@@ -3776,7 +3822,7 @@ server.registerTool(
     toToolResult(() => bridge.send("automation.setPoints", { trackId, laneId, points }))
 );
 
-server.registerTool(
+registerTool(
   "automation_set_lane_enabled",
   {
     title: "Enable or disable an automation lane",
@@ -3817,7 +3863,7 @@ server.registerTool(
 // Render
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "render_mixdown",
   {
     title: "Render (bounce) the session to a WAV file",
@@ -3867,7 +3913,7 @@ server.registerTool(
     toToolResult(() => bridge.send("render.mixdown", { path, fromBeat, durationSeconds }))
 );
 
-server.registerTool(
+registerTool(
   "render_measure_loudness",
   {
     title: "Measure the session's loudness without writing anything to disk",
@@ -3914,7 +3960,7 @@ server.registerTool(
     toToolResult(() => bridge.send("render.measureLoudness", { fromBeat, durationSeconds }))
 );
 
-server.registerTool(
+registerTool(
   "render_bounce",
   {
     title: "Bounce the session to a loudness-measured, optionally normalized WAV",
@@ -4007,7 +4053,7 @@ server.registerTool(
     )
 );
 
-server.registerTool(
+registerTool(
   "render_stems",
   {
     title: "Export the session as individual stem WAV files",
@@ -4095,7 +4141,7 @@ server.registerTool(
     )
 );
 
-server.registerTool(
+registerTool(
   "track_bounce_in_place",
   {
     title: "Bounce a track to a new audio track (commit it to audio)",
@@ -4182,7 +4228,7 @@ server.registerTool(
 // Project files
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "project_save",
   {
     title: "Save the session as a .dawproj bundle",
@@ -4194,7 +4240,10 @@ server.registerTool(
       "project has never been saved, omitting `path` errors with guidance " +
       "to supply one. Re-saving is incremental — media already copied into " +
       "the bundle is not re-copied. Returns `{path, mediaFilesCopied, " +
-      "warnings}`. Cannot save while recording.",
+      "warnings, discardedRecovery?}` — `discardedRecovery` (m16-e) appears " +
+      "ONLY when this save just cleared a pending crash-recovery offer " +
+      "(see project_recovery_status): saving supersedes it, since the work " +
+      "is now safely on disk. Cannot save while recording.",
     inputSchema: {
       path: z
         .string()
@@ -4210,7 +4259,7 @@ server.registerTool(
   async ({ path }) => toToolResult(() => bridge.send("project.save", { path }))
 );
 
-server.registerTool(
+registerTool(
   "project_open",
   {
     title: "Open a .dawproj bundle",
@@ -4219,10 +4268,13 @@ server.registerTool(
       "Unless `discardChanges` is true, unsaved changes in the current " +
       "session are automatically saved first — to its existing file, or to " +
       "a recovery bundle if the current session was never saved (untitled) " +
-      "— before the new project is opened. Returns `{warnings, snapshot}`: " +
-      "`warnings` lists any media files the project references but that " +
-      "are missing on disk; `snapshot` is the full new session state (same " +
-      "shape as project_snapshot). Refuses while recording. Refuses to " +
+      "— before the new project is opened. Returns `{warnings, snapshot, " +
+      "discardedRecovery?}`: `warnings` lists any media files the project " +
+      "references but that are missing on disk; `snapshot` is the full new " +
+      "session state (same shape as project_snapshot); `discardedRecovery` " +
+      "(m16-e) appears ONLY when opening this project just cleared a " +
+      "pending crash-recovery offer (see project_recovery_status) — opening " +
+      "another project supersedes it. Refuses while recording. Refuses to " +
       "open a project saved by a newer version of the app, with a readable " +
       "error explaining why.",
     inputSchema: {
@@ -4244,7 +4296,7 @@ server.registerTool(
     toToolResult(() => bridge.send("project.open", { path, discardChanges }))
 );
 
-server.registerTool(
+registerTool(
   "project_new",
   {
     title: "Start a new empty session",
@@ -4253,8 +4305,12 @@ server.registerTool(
       "Unless `discardChanges` is true, unsaved changes in the current " +
       "session are automatically saved first — to its existing file, or to " +
       "a recovery bundle if it was never saved. Returns the new (empty) " +
-      "session snapshot (same shape as project_snapshot). Refuses while " +
-      "recording.",
+      "session snapshot (same shape as project_snapshot), plus an additive " +
+      "`discardedRecovery` field (m16-e) that appears ONLY when this call " +
+      "just cleared a pending crash-recovery offer (see " +
+      "project_recovery_status) — a fresh session supersedes it, and this " +
+      "is the offer's own facts echoed back so nothing is lost silently. " +
+      "Refuses while recording.",
     inputSchema: {
       discardChanges: z
         .boolean()
@@ -4280,17 +4336,41 @@ server.registerTool(
       "at the next launch a surviving lock plus a snapshot means the last session crashed with " +
       "unsaved work. Returns `{available, savedAt?, sourcePath?, editCount?}`: `available` is " +
       "true only when both a crash was detected AND a restorable snapshot is present. `savedAt` " +
-      "is when the snapshot was last written; `sourcePath` is the .dawproj file the crashed " +
+      "is when the snapshot was last written, as an ISO-8601 string (e.g. " +
+      "\"2026-07-15T09:41:00Z\"); `sourcePath` is the .dawproj file the crashed " +
       "session was editing (absent for a never-saved/untitled session); `editCount` is how many " +
       "edits the snapshot captured. When `available` is false there is nothing to restore. Safe " +
       "to call anytime; never modifies the session. Follow up with project_recover to accept or " +
-      "discard the offer.",
+      "discard the offer. This describes the ONE rolling crash-recovery snapshot only — see " +
+      "project_recovery_bundles for the separate per-session untitled-recovery bundles.",
     inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("project.recoveryStatus", {}))
 );
 
 server.registerTool(
+  "project_recovery_bundles",
+  {
+    title: "List recoverable per-session untitled-project snapshots",
+    description:
+      "List the per-session 'untitled recovery' bundles the app writes whenever a DIRTY, " +
+      "never-saved (untitled) session is abandoned via project_new / project_open (m16-e, audit " +
+      "F3) — distinct from the single rolling crash-recovery snapshot project_recovery_status " +
+      "describes. Each entry is an ordinary .dawproj bundle already directly openable with " +
+      "project_open — this tool exists ONLY because nothing else on the wire names where these " +
+      "live, so without it they are invisible even though they are on disk. Returns `{bundles: " +
+      "[{path, savedAt, isCurrentSession}]}`, newest first: `path` is the absolute .dawproj " +
+      "bundle path (pass straight to project_open); `savedAt` is an ISO-8601 timestamp (the " +
+      "bundle's file modification time); `isCurrentSession` flags the ONE entry (if any) that is " +
+      "THIS running app's own in-progress safety copy, not a past session's abandoned work — " +
+      "recovering that one is unnecessary (it is the current session). Never errors; reads an " +
+      "empty list if nothing has been abandoned yet.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("project.recoveryBundles", {}))
+);
+
+registerTool(
   "project_recover",
   {
     title: "Restore or discard unsaved work from a crashed session",
@@ -4320,7 +4400,7 @@ server.registerTool(
 // Edit
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "edit_undo",
   {
     title: "Undo the last edit",
@@ -4335,11 +4415,12 @@ server.registerTool(
       "\"nothing to undo\" when the undo history is empty, and refuses while " +
       "recording. Check `project_snapshot`'s `undoLabel` field beforehand " +
       "(null = nothing to undo) to preview what edit_undo would revert.",
+    inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("edit.undo"))
 );
 
-server.registerTool(
+registerTool(
   "edit_redo",
   {
     title: "Redo the last undone edit",
@@ -4353,6 +4434,7 @@ server.registerTool(
       "beforehand (null = nothing to redo) to preview what edit_redo would " +
       "reapply. The redo history is cleared as soon as a new edit is made " +
       "after an undo, so redoing is only possible immediately after undoing.",
+    inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("edit.redo"))
 );
@@ -4543,7 +4625,7 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("ai.sidecarStatus"))
 );
 
-server.registerTool(
+registerTool(
   "ai_sidecar_start",
   {
     title: "Start the local ACE-Step song-generation sidecar",
@@ -4560,11 +4642,12 @@ server.registerTool(
       "ai_sidecar_start. Returns the same `{state, message, version?, " +
       "ditModel?, lmModel?, pid?}` shape as ai_sidecar_status. Remember: " +
       "Once healthy, use generate_song to start writing a track.",
+    inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("ai.sidecarStart"))
 );
 
-server.registerTool(
+registerTool(
   "ai_sidecar_stop",
   {
     title: "Stop the local ACE-Step song-generation sidecar",
@@ -4576,6 +4659,7 @@ server.registerTool(
       "error) if it wasn't running. Returns the same `{state, message, " +
       "version?, ditModel?, lmModel?, pid?}` shape as ai_sidecar_status " +
       "(state settles to `installedNotRunning`).",
+    inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("ai.sidecarStop"))
 );
@@ -4604,7 +4688,7 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("ai.providerStatus"))
 );
 
-server.registerTool(
+registerTool(
   "ai_write_lyrics",
   {
     title: "Write or refine lyrics in the app (project-aware)",
@@ -4684,7 +4768,7 @@ server.registerTool(
 // ERROR from generation_status, not a silent `"failed"` state, so treat any
 // non-ok generation_status call after a valid jobId as exactly that.
 
-server.registerTool(
+registerTool(
   "generate_song",
   {
     title: "Generate a full song locally (ACE-Step)",
@@ -4809,7 +4893,7 @@ server.registerTool(
   async ({ jobId }) => toToolResult(() => bridge.send("ai.generationStatus", { jobId }))
 );
 
-server.registerTool(
+registerTool(
   "import_generation",
   {
     title: "Import a finished generation into the project",
@@ -4890,7 +4974,7 @@ server.registerTool(
 // reports an actionable error). Pass `model` explicitly only to request a
 // different DiT model.
 
-server.registerTool(
+registerTool(
   "extract_stems",
   {
     title: "Separate an existing audio file into named stems (ACE-Step)",
@@ -4943,7 +5027,7 @@ server.registerTool(
   async (params) => toToolResult(() => bridge.send("ai.extractStems", params))
 );
 
-server.registerTool(
+registerTool(
   "lego_generate",
   {
     title: "Generate new tracks that fit existing audio (ACE-Step Lego)",
@@ -5012,7 +5096,7 @@ server.registerTool(
   async (params) => toToolResult(() => bridge.send("ai.legoGenerate", params))
 );
 
-server.registerTool(
+registerTool(
   "import_generated_stems",
   {
     title: "Import a finished stems/Lego job as N tracks",
@@ -5080,7 +5164,7 @@ server.registerTool(
 // call ai_repaint_audio again with the same sourcePath/start/end and omit
 // `seed` (a fresh random seed each call).
 
-server.registerTool(
+registerTool(
   "ai_repaint_audio",
   {
     title: "Repaint a window of existing audio in place (ACE-Step)",
@@ -5211,7 +5295,7 @@ server.registerTool(
 // in-memory only: they DIE with the app process (and on a project switch) — an
 // import for an unknown/expired job tells you to submit again.
 
-server.registerTool(
+registerTool(
   "ai_fix_clip_region",
   {
     title: "Fix a region of a clip with AI (submit)",
@@ -5316,7 +5400,7 @@ server.registerTool(
   async (params) => toToolResult(() => bridge.send("ai.fixClipRegion", params))
 );
 
-server.registerTool(
+registerTool(
   "ai_import_clip_fix",
   {
     title: "Import a finished clip fix (land the take)",
@@ -5360,7 +5444,7 @@ server.registerTool(
 // -> copilot -> in-process dispatch. The copilot's own tool catalog
 // deliberately excludes ai_copilot_*, so it can never call itself.
 
-server.registerTool(
+registerTool(
   "ai_copilot_send",
   {
     title: "Send a message to the in-app AI copilot",
@@ -5434,7 +5518,7 @@ server.registerTool(
   async ({ turnId }) => toToolResult(() => bridge.send("ai.copilotState", { turnId }))
 );
 
-server.registerTool(
+registerTool(
   "ai_copilot_reset",
   {
     title: "Reset the in-app AI copilot",
@@ -5442,6 +5526,7 @@ server.registerTool(
       "Cancel any in-flight copilot turn and clear its transcript/history back " +
       "to idle. No params. Use this to start a fresh conversation, or to " +
       "recover from a stuck/looping turn.",
+    inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("ai.copilotReset"))
 );

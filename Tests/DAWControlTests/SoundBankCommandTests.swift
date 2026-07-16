@@ -397,8 +397,9 @@ struct SoundBankCommandTests {
         // clip.setGainEnvelope took it 119 → 120. m15-d's clip.duplicate +
         // arrange.insertBars + arrange.deleteBars took it 120 → 123. m16-b2's
         // clip.setControllerLane + clip.removeControllerLane took it 123 → 125.
-        // The three instrument commands must stay.
-        #expect(CommandRouter.allCommands.count == 125)
+        // m16-e's project.recoveryBundles (the per-slug autosave listing seam,
+        // audit F3) took it 125 → 126. The three instrument commands must stay.
+        #expect(CommandRouter.allCommands.count == 126)
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBanks"))
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBankPrograms"))
         #expect(CommandRouter.allCommands.contains("instrument.importSoundBank"))

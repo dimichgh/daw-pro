@@ -266,6 +266,93 @@ struct ControllerStripModelTests {
         #expect(m.selectedType == nil)
         #expect(m.draft.isEmpty)
     }
+
+    // MARK: - m18-e beyond-clip boundary (playableCount)
+
+    // 15. playableCount mirrors the engine's schedule rule EXACTLY (MIDISchedule
+    //    strict `<`): points strictly inside [0, clipLen) play, a point exactly
+    //    AT the clip end is latent — the ghost treatment's one split index.
+    @Test("m18-e playableCount is strict-< at the clip end (engine-honest)")
+    func playableCountStrictBoundary() {
+        let pts = [
+            MIDIControllerPoint(beat: 1, value: 10),
+            MIDIControllerPoint(beat: 3.9, value: 20),
+            MIDIControllerPoint(beat: 4, value: 30),    // exactly at the end → latent
+            MIDIControllerPoint(beat: 6, value: 40),
+        ]
+        #expect(ControllerStripModel.playableCount(pts, clipLengthBeats: 4) == 2)
+    }
+
+    // 16. Degenerate inputs: empty points, all-in, all-beyond, zero-length clip.
+    @Test("m18-e playableCount edges: empty / all-in / all-beyond / zero-length")
+    func playableCountEdges() {
+        let pts = [
+            MIDIControllerPoint(beat: 0, value: 1),
+            MIDIControllerPoint(beat: 2, value: 2),
+        ]
+        #expect(ControllerStripModel.playableCount([], clipLengthBeats: 4) == 0)
+        #expect(ControllerStripModel.playableCount(pts, clipLengthBeats: 4) == 2)
+        #expect(ControllerStripModel.playableCount(pts, clipLengthBeats: 0) == 0)
+        let beyond = [
+            MIDIControllerPoint(beat: 8, value: 1),
+            MIDIControllerPoint(beat: 9, value: 2),
+        ]
+        #expect(ControllerStripModel.playableCount(beyond, clipLengthBeats: 4) == 0)
+    }
+
+    // 17. The split index agrees with the canonical order the view draws (the
+    //    Snapshot feeds canonicalPoints into playableCount): a raw out-of-order
+    //    draft canonicalizes to ascending, and the count is a clean prefix.
+    @Test("m18-e playableCount over canonicalized points is a clean prefix")
+    func playableCountCanonicalPrefix() {
+        let raw = [
+            MIDIControllerPoint(beat: 6, value: 90),
+            MIDIControllerPoint(beat: 1, value: 10),
+            MIDIControllerPoint(beat: 5, value: 70),
+            MIDIControllerPoint(beat: 3, value: 50),
+        ]
+        let canon = MIDIControllerLane.canonicalPoints(raw, type: .cc(controller: 1))
+        let count = ControllerStripModel.playableCount(canon, clipLengthBeats: 4)
+        #expect(count == 2)
+        for p in canon[..<count] { #expect(p.beat < 4) }
+        for p in canon[count...] { #expect(p.beat >= 4) }
+    }
+
+    // 18. Beyond-clip points stay first-class EDIT targets (the m18-e rule:
+    //    ghost rendering, boundary-blind editing): hit-test finds them, a drag
+    //    across the boundary is legal in both directions, delete works, and
+    //    contentWidth still sizes to the furthest latent point.
+    @Test("m18-e beyond-clip points hit-test, drag across the boundary, delete")
+    func beyondClipPointsStayEditable() {
+        let m = makeModel(lanes: [
+            MIDIControllerLane(type: .cc(controller: 1), points: [
+                MIDIControllerPoint(beat: 2, value: 64),
+                MIDIControllerPoint(beat: 12, value: 100),   // beyond the 8-beat clip
+            ]),
+        ], length: 8)
+        // The canvas extends to the latent point, not the clip end.
+        #expect(m.contentWidth == CGFloat(12) * m.pixelsPerBeat)
+        // Hit-test lands on the ghost handle at its drawn position.
+        let ghostAt = CGPoint(x: m.x(forBeat: 12), y: m.y(forValue: 100, type: .cc(controller: 1)))
+        #expect(m.hitTest(ghostAt) == 1)
+        // Drag it back inside the clip → it re-lights (playableCount grows).
+        #expect(m.beginDrag(at: ghostAt))
+        m.dragPoint(toBeat: 6, value: 100)
+        m.endDrag()
+        let canonIn = MIDIControllerLane.canonicalPoints(m.draft, type: .cc(controller: 1))
+        #expect(ControllerStripModel.playableCount(canonIn, clipLengthBeats: 8) == 2)
+        // Drag an in-clip point OUT past the end → it goes latent (no clamp).
+        let litAt = CGPoint(x: m.x(forBeat: 2), y: m.y(forValue: 64, type: .cc(controller: 1)))
+        #expect(m.beginDrag(at: litAt))
+        m.dragPoint(toBeat: 10, value: 64)
+        m.endDrag()
+        let canonOut = MIDIControllerLane.canonicalPoints(m.draft, type: .cc(controller: 1))
+        #expect(ControllerStripModel.playableCount(canonOut, clipLengthBeats: 8) == 1)
+        // Option-delete a latent point works like any other.
+        let outAt = CGPoint(x: m.x(forBeat: 10), y: m.y(forValue: 64, type: .cc(controller: 1)))
+        #expect(m.removePoint(at: outAt))
+        #expect(m.draft.count == 1)
+    }
 }
 
 /// C17 — UI == wire equivalence (the m11-a idiom): a strip gesture commit produces

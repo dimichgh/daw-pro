@@ -147,7 +147,7 @@ struct HumanizeTests {
         let audioErr = projectError {
             _ = try store.humanizeClipNotes(clipID: audio.id, timingBeats: 0.02, velocityRange: 8, seed: nil)
         }
-        guard case .notAMIDIClip(let id)? = audioErr, id == audio.id else {
+        guard case .notAMIDIClip(let id, _)? = audioErr, id == audio.id else {
             Issue.record("expected notAMIDIClip, got \(String(describing: audioErr))"); return
         }
         #expect(store.tracks[0].clips[0].audioFileURL != nil)      // nothing changed

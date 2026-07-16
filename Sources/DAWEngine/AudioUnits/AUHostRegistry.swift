@@ -16,13 +16,17 @@ public enum HostedAUEndpoint: Hashable, Sendable {
 /// Owns hosted Audio Unit instrument lifecycle for a set of tracks: discovery,
 /// async instantiation, format/state/resource setup, and save-time state
 /// capture. All AU property access happens here, on the main actor — with ONE
-/// documented exception (m10-n §5.3): the `.soundBank` bank load runs on a
-/// DETACHED task against an AU that is exclusively owned by its prepare
+/// documented exception (m10-n §5.3): the `.soundBank` bank load runs OFF the
+/// main actor against an AU that is exclusively owned by its prepare
 /// (allocated, never yet published to any graph), because
 /// `kAUSamplerProperty_LoadInstrument` is calling-thread-synchronous and a
 /// GB-scale SF2 would stall the main actor. The render-safe product is a
 /// `HostedAUInstrument` whose render path touches only its two captured
 /// blocks.
+///
+/// m18-d: that off-actor load is SERIALIZED on `dlsBankQueue` — see the
+/// queue's doc for the two crash signatures that made per-instance
+/// exclusivity insufficient.
 ///
 /// Every AU call runs inside a timeout-raced Task so a stalled (v3 XPC)
 /// component can never block the main actor: on timeout the track fails
@@ -57,6 +61,35 @@ public final class AUHostRegistry {
     /// (or written to) the track's `audioUnit` config.
     static let auSamplerComponent = AudioUnitComponentID(
         type: "aumu", subType: "samp", manufacturer: "appl")
+
+    /// m18-d — THE DLS BANK GATE. AudioToolbox's DLS/SF2 machinery behind
+    /// AUSampler keeps process-GLOBAL state (shared bank cache, open bank
+    /// files): `kAUSamplerProperty_LoadInstrument` and
+    /// `AudioComponentInstanceDispose` both mutate it WITHOUT internal
+    /// locking. Measured on macOS 26.4 (swiftpm-testing-helper .ips corpus +
+    /// the m18-d stress amplifier, 3/3 crashes pre-fix):
+    ///   - load vs dispose → EXC_BAD_ACCESS inside CoreAudio under
+    ///     `AudioUnitSetProperty` while another thread closes the bank file
+    ///     under `AudioComponentInstanceDispose` (07-16-100906.ips);
+    ///   - load vs load (two instances!) → CoreAudio internal assertion
+    ///     (`CAVerboseAbort`) / C++ rethrow, EXC_BREAKPOINT
+    ///     (07-16-112926.ips).
+    /// Per-instance exclusivity (§5.3a) therefore does NOT protect the load.
+    /// EVERY LoadInstrument write and EVERY sampler-family teardown/dispose
+    /// in this process must run on this one utility serial queue. The render
+    /// thread never touches it; the main actor only ever blocks on it via the
+    /// rare renegotiation re-load (see `reloadSoundBankAfterRenegotiation`).
+    nonisolated static let dlsBankQueue = DispatchQueue(
+        label: "com.dawpro.engine.dls-bank-gate", qos: .userInitiated)
+
+    /// True for the Apple components that route into the shared DLS engine —
+    /// AUSampler ("samp", every `.soundBank` track) and DLSMusicDevice
+    /// ("dls "), which a user can host directly via `.audioUnit`. Their
+    /// teardown must go through `dlsBankQueue`.
+    nonisolated static func isDLSFamily(_ component: AudioUnitComponentID) -> Bool {
+        component.manufacturer == "appl"
+            && (component.subType == "samp" || component.subType == "dls ")
+    }
 
     /// Resolves the `"gm"` sentinel / bank paths for the pre-instantiation
     /// existence check (default directories — resolution never touches them).
@@ -167,7 +200,13 @@ public final class AUHostRegistry {
     }
 
     /// Tears one track's instrument down: deallocate render resources, reset
-    /// (main-actor-only — never from the render thread), drop all bookkeeping.
+    /// (never from the render thread), drop all bookkeeping. DLS-family
+    /// instruments tear down ON `dlsBankQueue` (m18-d): `deallocateRender-
+    /// Resources` releases the loaded bank (measured, T6) and the closure's
+    /// captured reference then dies on the queue, so the whole
+    /// uninitialize→dispose window is mutually exclusive with any in-flight
+    /// bank load. Bookkeeping removal and window invalidation stay
+    /// synchronous on the main actor — callers observe the same state.
     public func releaseInstrument(forTrack id: UUID) {
         attempted[id] = nil
         status[id] = nil
@@ -175,8 +214,15 @@ public final class AUHostRegistry {
         // Invalidate any plugin window BEFORE the AU's render resources go — the
         // window (and any observing vendor view) detaches against a live AU.
         onRelease?(.instrument(trackID: id))
-        instrument.auAudioUnit.deallocateRenderResources()
-        instrument.auAudioUnit.reset()
+        if instrument.serializedBankTeardown {
+            Self.dlsBankQueue.async {
+                instrument.auAudioUnit.deallocateRenderResources()
+                instrument.auAudioUnit.reset()
+            }  // `instrument` dies here → dispose serialized (deinit hand-off)
+        } else {
+            instrument.auAudioUnit.deallocateRenderResources()
+            instrument.auAudioUnit.reset()
+        }
     }
 
     /// True when the track's descriptor demands a (re)prepare: config changed,
@@ -508,7 +554,9 @@ public final class AUHostRegistry {
                     throw error
                 }
             }
-            return try HostedAUInstrument(au: au, sampleRate: sampleRate)
+            return try HostedAUInstrument(
+                au: au, sampleRate: sampleRate,
+                serializedBankTeardown: Self.isDLSFamily(key.component))
         }
 
         switch outcome {
@@ -539,13 +587,15 @@ public final class AUHostRegistry {
     ///
     /// Threading: `kAUSamplerProperty_LoadInstrument` on an INITIALIZED AU
     /// loads synchronously on the calling thread (TN2283), and a GB-scale
-    /// SF2 can block for seconds — so the call runs on a DETACHED task
-    /// (LAW L2), never on the main actor. v2 CoreAudio property calls are
-    /// safe from any single thread; the `@unchecked Sendable` box is the
-    /// sanctioned pre-publish-exclusive crossing (the
+    /// SF2 can block for seconds — so the call runs on `dlsBankQueue`
+    /// (LAW L2: never on the main actor; m18-d: never CONCURRENT with any
+    /// other load or sampler dispose — per-instance exclusivity §5.3a is not
+    /// enough, the DLS engine's state is process-global). The `@unchecked
+    /// Sendable` box is the sanctioned pre-publish-exclusive crossing (the
     /// `HostedAUInstrument: @unchecked Sendable` precedent). A timed-out
-    /// prepare abandons the detached task harmlessly: it finishes against an
-    /// AU that was never published and dies by ARC.
+    /// prepare abandons the await harmlessly: the queued load still runs,
+    /// serialized, and the never-published AU dies by ARC — its dispose
+    /// lands back on this same queue via the deinit hand-off.
     private static func loadSoundBank(into au: AUAudioUnit, config: SoundBankConfig,
                                       resolvedURL: URL) async throws {
         guard let bridge = au as? AUAudioUnitV2Bridge else {
@@ -560,10 +610,13 @@ public final class AUHostRegistry {
         let lsb = UInt8(clamping: config.bankLSB)
         let program = UInt8(clamping: config.program)
 
-        let status: OSStatus = await Task.detached(priority: .userInitiated) {
-            Self.setLoadInstrumentProperty(unit: box.unit, path: path,
-                                           bankMSB: msb, bankLSB: lsb, program: program)
-        }.value
+        let status: OSStatus = await withCheckedContinuation { continuation in
+            dlsBankQueue.async {
+                continuation.resume(returning: Self.setLoadInstrumentProperty(
+                    unit: box.unit, path: path,
+                    bankMSB: msb, bankLSB: lsb, program: program))
+            }
+        }
 
         guard status == noErr else {
             throw EngineError.renderFailed(
@@ -572,13 +625,15 @@ public final class AUHostRegistry {
     }
 
     /// The raw `kAUSamplerProperty_LoadInstrument` write, shared by the
-    /// detached prepare-time load and the R7 post-renegotiation re-load.
-    /// `nonisolated`: pure C-API call, runs on whatever thread owns the AU
-    /// at that moment (detached task pre-publish; main actor for R7).
+    /// prepare-time load and the R7 post-renegotiation re-load. m18-d: MUST
+    /// run on `dlsBankQueue` (enforced below) — a concurrent LoadInstrument
+    /// anywhere in the process corrupts the shared DLS engine (measured:
+    /// 07-16-112926.ips, two threads in `AudioUnitSetProperty`).
     private nonisolated static func setLoadInstrumentProperty(
         unit: AudioUnit, path: String,
         bankMSB: UInt8, bankLSB: UInt8, program: UInt8
     ) -> OSStatus {
+        dispatchPrecondition(condition: .onQueue(dlsBankQueue))  // the m18-d invariant
         let url = URL(fileURLWithPath: path) as CFURL
         return withExtendedLifetime(url) {  // R6: the CFURL must outlive the call
             var data = AUSamplerInstrumentData(
@@ -600,18 +655,29 @@ public final class AUHostRegistry {
     /// synchronous, bounded, logged renegotiation path: a transient
     /// wrong-timbre window (async reload) would violate LAW L5's honesty —
     /// for the rare registry-rate ≠ graph-rate recovery path, a bounded
-    /// stall is the lesser evil (the NORMAL prepare path stays detached,
+    /// stall is the lesser evil (the NORMAL prepare path stays off-actor,
     /// LAW L2). Failure logs and leaves the default preset — the same
     /// degrade-with-stderr contract as a failed renegotiation itself.
+    ///
+    /// m18-d: the write itself hops onto `dlsBankQueue` SYNCHRONOUSLY —
+    /// mutual exclusion with in-flight loads/disposes, still a bounded stall
+    /// (worst case: one queued GB-scale load ahead of it, plus a queued
+    /// dispose's internal bounce-to-main, which Apple times out — never a
+    /// permanent deadlock).
     private nonisolated static func reloadSoundBankAfterRenegotiation(
         au: AUAudioUnit, config: SoundBankConfig, resolvedURL: URL
     ) {
         guard let bridge = au as? AUAudioUnitV2Bridge else { return }
-        let status = setLoadInstrumentProperty(
-            unit: bridge.audioUnit, path: resolvedURL.path,
-            bankMSB: UInt8(clamping: config.bankMSB),
-            bankLSB: UInt8(clamping: config.bankLSB),
-            program: UInt8(clamping: config.program))
+        struct UnitBox: @unchecked Sendable { let unit: AudioUnit }
+        let box = UnitBox(unit: bridge.audioUnit)
+        let path = resolvedURL.path
+        let msb = UInt8(clamping: config.bankMSB)
+        let lsb = UInt8(clamping: config.bankLSB)
+        let program = UInt8(clamping: config.program)
+        let status = dlsBankQueue.sync {
+            setLoadInstrumentProperty(unit: box.unit, path: path,
+                                      bankMSB: msb, bankLSB: lsb, program: program)
+        }
         if status != noErr {
             FileHandle.standardError.write(Data(
                 "AUHostRegistry: sound bank re-load after rate renegotiation failed (OSStatus \(status)) — instrument may render the factory default preset\n".utf8))

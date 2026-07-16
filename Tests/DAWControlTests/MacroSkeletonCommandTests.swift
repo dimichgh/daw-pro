@@ -23,14 +23,31 @@ struct MacroSkeletonCommandTests {
         #expect(CommandRouter.allCommands.contains("macro.songSkeleton"))
     }
 
-    @Test("missing genre is a field-named validation error")
+    @Test("missing genre is a field-named validation error listing every valid genre (m16-e, audit F8c)")
     func missingGenre() async {
         let (router, _) = makeRouter()
         let response = await router.handle(ControlRequest(
             id: "1", command: "macro.songSkeleton", params: [:]
         ))
         #expect(!response.ok)
-        #expect(response.error == "missing or invalid required param 'genre'")
+        let error = response.error ?? ""
+        #expect(error.contains("missing or invalid required param 'genre'"))
+        for name in SongSkeletonCatalog.names {
+            #expect(error.contains(name), "error omits '\(name)': \(error)")
+        }
+    }
+
+    @Test("unknown top-level key is rejected with a teaching error (m16-e)")
+    func unknownKeyRejected() async {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "macro.songSkeleton",
+            params: ["genre": .string("pop"), "gener": .string("pop")]
+        ))
+        #expect(!response.ok)
+        let error = response.error ?? ""
+        #expect(error.contains("'gener'"))
+        #expect(error.contains("macro.songSkeleton"))
     }
 
     @Test("unknown genre error lists every valid genre name")

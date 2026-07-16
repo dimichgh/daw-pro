@@ -65,6 +65,12 @@ struct PianoRollView: View {
     /// horizontal scroll (never on a transport tick), so it stays off the playback
     /// redraw path.
     @State private var gridScrollX: CGFloat = 0
+    /// The editor panel's full width, read once from a background GeometryReader
+    /// (the `gridScrollReader` idiom). Feeds the m18-f wide-window rule: every
+    /// horizontal band draws at `max(content, viewport)` so the grid reaches the
+    /// panel's right edge instead of leaving dead glass. Changes only on a window
+    /// or splitter resize — never on a transport tick or playback frame.
+    @State private var panelWidth: CGFloat = 0
     @FocusState private var isFocused: Bool
 
     private static let keyboardWidth: CGFloat = 54
@@ -113,11 +119,37 @@ struct PianoRollView: View {
     /// Violet whenever the clip is AI-touched, else playback cyan.
     private var noteColor: Color { clip.isAIGenerated ? DAWTheme.ai : DAWTheme.playback }
 
+    // MARK: - Wide-window band widths (m18-f — DESIGN-LANGUAGE "Wide windows")
+
+    /// The horizontal viewport every band scrolls in: the panel minus the shared
+    /// 54 pt gutter (keyboard sidebar / VEL label / CTRL label — all
+    /// `keyboardWidth`-wide by design, so one number serves all three bands).
+    private var bandViewportWidth: CGFloat { max(0, panelWidth - Self.keyboardWidth) }
+
+    /// Drawn width of the note grid AND the velocity lane (they share the grid's
+    /// beat→x space, so they must stay width-identical): content, extended to the
+    /// viewport at wide windows. The extension is shaded latent space — the
+    /// out-of-clip shade keeps the playable window honest.
+    private var gridDrawnWidth: CGFloat {
+        PianoRollModel.drawnWidth(content: model.contentWidth, viewport: bandViewportWidth)
+    }
+
+    /// Drawn width of the controller canvas — its own model's content width
+    /// (CC points can outrun notes and vice versa), same viewport extension.
+    private var controllerDrawnWidth: CGFloat {
+        PianoRollModel.drawnWidth(content: controllerModel.contentWidth, viewport: bandViewportWidth)
+    }
+
     private enum ActiveDrag: Equatable {
         case none
         case click(UUID?)     // shift-click or empty — resolved on drag end
         case move
         case resize(UUID)
+        /// An external mutation reseeded the models mid-gesture (m18-i): the
+        /// rest of the drag is swallowed — no apply, no commit, and no restart
+        /// (`onChanged` only begins a gesture from `.none`) — so a half-dragged
+        /// ghost never lands on the new content. Cleared on gesture end.
+        case cancelled
     }
 
     var body: some View {
@@ -136,6 +168,7 @@ struct PianoRollView: View {
             }
         }
         .glassPanel()
+        .background { panelWidthReader }
         .focusable()
         .focused($isFocused)
         .onKeyPress(.delete) {
@@ -145,6 +178,40 @@ struct PianoRollView: View {
             return .handled
         }
         .onAppear { isFocused = true }
+        // m18-i: the external-mutation seam. `.id(clip.id)` recreates this view
+        // (and its seeded @State models) only on a clip IDENTITY switch; a
+        // wire/arrange-side geometry op (`clip.trim`/`move`/`split`, arrange
+        // bar ops, undo/redo of any) mutates the clip VALUE under the same
+        // identity — without this, every band keeps drawing the pre-op
+        // snapshot until a reselect. The MODELS decide staleness themselves
+        // (`needsReseed`, canonical-content compare — headless-tested), so the
+        // editor's own commits echoing back through the store read as equal
+        // and never double-reseed (which would clobber scroll/selection/the
+        // strip's chosen lane).
+        .onChange(of: clip) { _, newValue in
+            reseedFromExternalMutation(newValue)
+        }
+    }
+
+    /// Reseeds the edit models from an externally mutated clip value (m18-i).
+    /// CANCEL-THEN-RESEED for an in-flight grid gesture: the drag parks in
+    /// `.cancelled` (remaining ticks swallowed — no apply, no commit, no
+    /// restart) and the models clear their own drag baselines (`reseed` doc
+    /// comments), so stale gesture state never edits the new content.
+    private func reseedFromExternalMutation(_ clip: Clip) {
+        let notes = clip.notes ?? []
+        let gridStale = model.needsReseed(notes: notes, clipLengthBeats: clip.lengthBeats)
+        let stripStale = controllerModel.needsReseed(
+            lanes: clip.controllerLanes, clipLengthBeats: clip.lengthBeats)
+        guard gridStale || stripStale else { return }
+        if activeDrag != .none {
+            activeDrag = .cancelled
+            didMove = false
+        }
+        if gridStale { model.reseed(notes: notes, clipLengthBeats: clip.lengthBeats) }
+        if stripStale {
+            controllerModel.reseed(lanes: clip.controllerLanes, clipLengthBeats: clip.lengthBeats)
+        }
     }
 
     private func commit() { onCommit(model.buildSubmission()) }
@@ -398,7 +465,11 @@ struct PianoRollView: View {
                     // here by extraction rather than trusting Canvas diffing).
                     PianoRollGrid(model: model, beatsPerBar: beatsPerBar,
                                   snap: effectiveSnap, noteColor: noteColor)
-                        .frame(width: model.contentWidth, height: model.contentHeight)
+                        // Extended to the viewport at wide windows (m18-f): the
+                        // Canvas draws the extension correctly by construction —
+                        // key rows + gridlines run the full width and the
+                        // out-of-clip shade covers everything past the clip end.
+                        .frame(width: gridDrawnWidth, height: model.contentHeight)
                         // Playhead above the grid, below floating chrome; full grid
                         // height so it reads at any vertical scroll position.
                         .overlay(alignment: .topLeading) { gridPlayhead }
@@ -449,6 +520,19 @@ struct PianoRollView: View {
                 .offset(x: x)
                 .allowsHitTesting(false)
         }
+    }
+
+    /// Reads the editor panel's full width for the m18-f band extension. A
+    /// background (never hit-tested), updated only when the width actually
+    /// changes — a window/splitter resize, never a playback tick.
+    private var panelWidthReader: some View {
+        GeometryReader { geo in
+            Color.clear
+                .onChange(of: geo.size.width, initial: true) { _, newValue in
+                    panelWidth = newValue
+                }
+        }
+        .allowsHitTesting(false)
     }
 
     /// Reads the grid content's leading x in the scroll viewport space → the live
@@ -521,7 +605,7 @@ struct PianoRollView: View {
                     switch activeDrag {
                     case .move: DragCursor.set(.grabbing)
                     case .resize: DragCursor.set(.resizeLeftRight)
-                    case .click, .none: break
+                    case .click, .none, .cancelled: break
                     }
                 }
                 applyGesture(value)
@@ -557,7 +641,7 @@ struct PianoRollView: View {
         case .resize(let id):
             model.resizeNote(id: id, toEndBeat: model.beat(forX: value.location.x), resolution: effectiveSnap)
             if abs(value.translation.width) > 3 { didMove = true }
-        case .click, .none:
+        case .click, .none, .cancelled:
             break
         }
     }
@@ -575,6 +659,8 @@ struct PianoRollView: View {
             }
         case .none:
             break
+        case .cancelled:
+            break   // external reseed swallowed this gesture (m18-i) — no commit
         }
         activeDrag = .none
         didMove = false
@@ -591,7 +677,9 @@ struct PianoRollView: View {
                 .frame(width: Self.keyboardWidth, height: VelocityLane.height, alignment: .center)
             ScrollView(.horizontal, showsIndicators: false) {
                 VelocityLane(model: model, noteColor: noteColor, onCommit: commit)
-                    .frame(width: model.contentWidth)
+                    // Width-identical with the note grid (same beat→x space),
+                    // so the m18-f viewport extension rides along.
+                    .frame(width: gridDrawnWidth)
                     // The playhead continues through the velocity lane so the eye
                     // tracks it across both editors (m10-e). Same content x + scale
                     // as the grid, so it lines up.
@@ -627,6 +715,7 @@ struct PianoRollView: View {
             model: controllerModel,
             accent: noteColor,
             snap: effectiveSnap,
+            drawnWidth: controllerDrawnWidth,
             onCommit: commitControllerLane
         )
     }

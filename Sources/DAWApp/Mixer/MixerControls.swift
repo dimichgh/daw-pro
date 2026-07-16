@@ -257,7 +257,10 @@ struct MixerStateButton: View {
 
 /// One insert-chain row: effect name + a bypass dot. The dot glows signal-green
 /// while the effect is passing audio and dims when bypassed. Tap the dot to
-/// toggle bypass; the row's context menu removes it.
+/// toggle bypass; the row's context menu removes it. A BUILT-IN effect's row
+/// body (and its slider glyph, and the context menu's "Edit Controls") toggles
+/// the in-window effect editor card (m17-a) — an AU row opens its plugin
+/// window instead (M3 vi-b).
 struct InsertRow: View {
     /// The store + owning-track id let a keyable insert (compressor/gate) host
     /// the sidechain KEY picker, which drives `ProjectStore.setSidechain` — the
@@ -274,6 +277,12 @@ struct InsertRow: View {
     /// Non-nil ONLY for Audio Unit inserts (M3 vi-b): opens the plugin window.
     /// Always nil on the master chain (built-ins only, v1).
     var onOpenWindow: (() -> Void)?
+    /// Non-nil ONLY for BUILT-IN inserts (m17-a): toggles the in-window effect
+    /// editor card on this insert. The row body is the click target (the
+    /// bypass dot / KEY picker / context menu keep their own hits); a small
+    /// slider glyph makes the affordance discoverable (the AU row's
+    /// window-button twin). Supplied on tracks, buses, AND the master chain.
+    var onOpenEditor: (() -> Void)?
 
     /// Built-in compressor/gate inserts take a sidechain key (m12-g). Hosted AUs
     /// and every other kind do NOT (the store rejects them with a teaching
@@ -305,7 +314,16 @@ struct InsertRow: View {
                     PluginWindowButton(action: onOpenWindow)
                         .help("Open the effect plugin window")
                 }
+                if let onOpenEditor {
+                    EffectEditorButton(action: onOpenEditor)
+                        .help("Edit the effect's controls")
+                }
             }
+            // The row body toggles the built-in effect editor card (m17-a).
+            // A plain tap gesture: the bypass dot / glyph buttons and the KEY
+            // picker's menu sit ABOVE it and keep their own single-purpose hits.
+            .contentShape(Rectangle())
+            .onTapGesture { onOpenEditor?() }
             if isKeyable, let trackID {
                 SidechainKeyControl(store: store, trackID: trackID, effect: effect)
                     .explainable(.sidechain)
@@ -319,6 +337,10 @@ struct InsertRow: View {
             Button(effect.isBypassed ? "Enable" : "Bypass", action: onToggleBypass)
             if let onOpenWindow {
                 Button("Open Plugin Window", action: onOpenWindow)
+            }
+            if let onOpenEditor {
+                // The click target's discoverability twin (the "Rename Track" rule).
+                Button("Edit Controls…", action: onOpenEditor)
             }
             Button("Remove Insert", role: .destructive, action: onRemove)
         }
@@ -442,6 +464,27 @@ struct PluginWindowButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "macwindow")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(hovering ? DAWTheme.playback : DAWTheme.textDim)
+                .frame(width: 16, height: 16)
+                .background(DAWTheme.panelRaised)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// The small slider glyph that toggles a BUILT-IN insert's effect editor card
+/// (m17-a) — the `PluginWindowButton` twin for the kinds that have no plugin
+/// window. Neutral at rest, cyan on hover (never violet — that is AI meaning).
+struct EffectEditorButton: View {
+    var action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "slider.horizontal.3")
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(hovering ? DAWTheme.playback : DAWTheme.textDim)
                 .frame(width: 16, height: 16)

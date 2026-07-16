@@ -233,10 +233,14 @@ struct TrackRow: View {
     }
 
     private var row: some View {
-        // Tight top-level spacing (5 pt) so a fully-loaded row still fits inside
-        // the sidebar's narrow end (250 pt) WITHOUT the name giving up its readable
-        // share; the Spacer restores generous separation at wider widths.
-        HStack(spacing: 5) {
+        // Tight top-level spacing (4 pt, m17-f F1 — was 5) so a fully-loaded row
+        // still fits inside the sidebar's narrow end (250 pt) WITHOUT the name
+        // giving up its readable share; the Spacer restores generous separation at
+        // wider widths. The instrument chip (m10-n-3) joined this row after the
+        // m10-i budget was measured, so the chrome (spacing + M/S/R + disclosure
+        // widths) re-tightened here to hand the name back its ≳60 pt share at the
+        // DEFAULT sidebar — "Synth 10" must read untruncated out of the box.
+        HStack(spacing: 4) {
             identityCluster
 
             // The instrument chip (m10-n-3): the current sound + the picker opener,
@@ -444,7 +448,7 @@ struct TrackRow: View {
             Image(systemName: "chart.xyaxis.line")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(active || isExpanded ? DAWTheme.playback : DAWTheme.textDim)
-                .frame(width: 20, height: 18)
+                .frame(width: 18, height: 18)   // 18 pt (m17-f F1) — see ToggleChip
                 .background((active || isExpanded) ? DAWTheme.playback.opacity(0.18) : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .overlay(
@@ -470,7 +474,7 @@ struct TrackRow: View {
                 Image(systemName: "square.stack.3d.up")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(DAWTheme.signal)
-                    .frame(width: 20, height: 18)
+                    .frame(width: 18, height: 18)   // 18 pt (m17-f F1) — see ToggleChip
                     .background(DAWTheme.signal.opacity(isTakesExpanded ? 0.22 : 0.14))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
                     .overlay(
@@ -721,7 +725,10 @@ struct ToggleChip: View {
             Text(label)
                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                 .foregroundStyle(isOn ? onColor : DAWTheme.textDim)
-                .frame(width: 20, height: 18)
+                // 18 pt wide (m17-f F1 — was 20): one mono letter needs ~8 pt, and
+                // the 3 chips ride the crowded track-header row where every point
+                // feeds the name's readable share.
+                .frame(width: 18, height: 18)
                 .background(isOn ? onColor.opacity(0.18) : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .overlay(

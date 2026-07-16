@@ -29,8 +29,10 @@ struct ContentView: View {
     /// Live horizontal scroll offset of the arrange lanes (m13-g). The scrolling
     /// `.lanes` instance reports it; the pinned `.ruler` block mirrors it so the
     /// ruler stays horizontally synced with the content while pinned above the
-    /// vertical scroll. View-local — pure scroll bookkeeping.
-    @State private var arrangeHScroll: CGFloat = 0
+    /// vertical scroll. Hoisted onto AppModel (m17-b) so the zoom entry points
+    /// (menu / toolbar / pinch / debug seam) can compute the anchor-preserving
+    /// offset off the same live value.
+    private var arrangeHScroll: CGFloat { model.arrangeHScroll }
 
     /// Gap between the pinned ruler block and the scrolling track area (m13-g) —
     /// reads as a distinct pinned ruler bar over the track panels.
@@ -276,6 +278,17 @@ struct ContentView: View {
     /// each routes selection through the SAME store method the wire uses.
     @ViewBuilder
     private var pickerOverlays: some View {
+        // ⌘= alias for Zoom In (m17-b): macOS convention answers BOTH ⌘+ (the
+        // View-menu item — physically ⌘⇧=) and bare ⌘=. A menu item carries ONE
+        // key equivalent, so the alias is a hidden in-window shortcut — folded
+        // into this always-present overlay builder so the root body chain gains
+        // no new modifier link (the chain sits at the type-checker's limit).
+        Button("") { model.zoomArrangeIn() }
+            .keyboardShortcut("=", modifiers: .command)
+            .buttonStyle(.plain)
+            .frame(width: 0, height: 0)
+            .opacity(0)
+            .accessibilityHidden(true)
         if model.instrumentPickerTrackID != nil {
             InstrumentPickerOverlay(
                 model: model.instrumentPicker,
@@ -295,6 +308,36 @@ struct ContentView: View {
                 onChoose: { config in withAnimation(.easeOut(duration: 0.15)) { model.applyEffectChoice(config) } },
                 onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeEffectPicker() } }
             )
+        }
+        // Built-in insert effect editor (m17-a): the FIFTH centered dark-glass
+        // modal (Settings / Instrument Picker / Quantize / Undo History) — opened
+        // by clicking a built-in InsertRow or auto-opened by the UI insert add
+        // (never by the wire's fx.add). Every slider routes through the SAME
+        // `store.setEffectParam`/`setMasterEffectParam` the wire's `fx.setParam`
+        // calls. The descriptor gate drops the card honestly if the insert is
+        // removed (e.g. a wire `fx.remove`) while it is open.
+        if model.effectEditorTarget != nil, model.effectEditor.descriptor != nil {
+            EffectEditorOverlay(
+                model: model.effectEditor,
+                onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeEffectEditor() } }
+            )
+        }
+        // Unified generation-progress card (m17-h): the canonical violet status
+        // surface — EVERY generation job (Sketchpad, wire/MCP, import paths)
+        // reports here. An IN-WINDOW card floated bottom-trailing above the
+        // transport bar's right status cluster (the engine-notices slot), never
+        // a popover, so `debug.captureUI` snapshots it. Present in BOTH
+        // workspaces (a wire job can land any time); folded into this
+        // always-present overlay builder so the root body chain gains no new
+        // modifier link (the ⌘= alias rule — the chain sits at the
+        // type-checker's limit). Status chrome sits UNDER the centered modals
+        // above by declaration order — a modal legitimately covers it.
+        if model.generationPresence.isVisible {
+            GenerationPresenceCard(presence: model.generationPresence)
+                .padding(.trailing, 24)
+                .padding(.bottom, 84)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .transition(.opacity)
         }
     }
 
@@ -318,7 +361,18 @@ struct ContentView: View {
                 let sidebarW = model.panelLayout.sidebarWidth
                 let bodyViewport = max(0, trackGeo.size.height
                                        - TimelineLanesView.rulerHeight - Self.arrangeBlockGap)
-                VStack(spacing: Self.arrangeBlockGap) {
+                // The lanes viewport WIDTH (m17-b): total minus the sidebar, the
+                // 6 pt splitter, and the two 10 pt HStack gaps — identical in the
+                // pinned ruler row and the scrolling row, so one value serves the
+                // zoom anchor math and the zoomed-out padding heuristic.
+                let lanesViewportW = max(0, trackGeo.size.width - sidebarW - 6 - 20)
+                // `alignment: .leading` (m17-b, measured): the pinned block and the
+                // shared vertical scroll MUST share a leading edge — the ruler's
+                // beat→x math assumes the columns start at the same x. Under the
+                // default center alignment this macOS laid the scroll subtree out
+                // 6 pt right of the pinned row (a half-scroller phantom width),
+                // statically skewing every lanes gridline off its ruler tick.
+                VStack(alignment: .leading, spacing: Self.arrangeBlockGap) {
                     // PINNED RULER BLOCK — both columns, fixed at rulerHeight.
                     HStack(spacing: 10) {
                         TracksHeaderBar()
@@ -361,6 +415,11 @@ struct ContentView: View {
                             }
                         }
                     }
+                }
+                // Report the live lanes viewport width to the zoom model (m17-b) —
+                // onChange (not inline) so the model mutation never runs mid-render.
+                .onChange(of: lanesViewportW, initial: true) { _, w in
+                    model.arrangeViewportWidth = w
                 }
             }
 
@@ -452,6 +511,15 @@ struct ContentView: View {
             // Global track-row height (beta m10-d) — the SAME store value the sidebar
             // rows use, so lanes and headers stay pixel-aligned.
             rowHeight: model.panelLayout.rowHeight,
+            // Arrange zoom (m17-b): the SAME store value drives the pinned ruler
+            // and the lanes, so both columns rescale in one update.
+            pixelsPerBeat: model.panelLayout.arrangePPB,
+            availableWidth: model.arrangeViewportWidth,
+            // Pinch zoom, anchored at the pointer — the model owns the math.
+            onPinchZoomChanged: { x, m in
+                model.arrangePinchChanged(anchorContentX: x, magnification: m)
+            },
+            onPinchZoomEnded: { model.arrangePinchEnded() },
             // The shared-scroll viewport height (m10-j): the lanes fill it when short.
             availableHeight: viewport,
             onMoveClip: { trackID, clip, toStart in
@@ -462,7 +530,13 @@ struct ContentView: View {
                                         newStartBeat: newStart, newLengthBeats: newLength)
             },
             onSplitClip: { trackID, clip, atBeat in
-                _ = try? store.splitClip(trackId: trackID, clipId: clip.id, atBeat: atBeat)
+                // m17-c: refusals (comp member, outside-span) surface VERBATIM
+                // as an amber bubble on the clip — the same message the wire's
+                // `clip.split` returns (the double-click and the verb share
+                // `ProjectStore.splitClip`, so the copy is identical by
+                // construction).
+                do { _ = try store.splitClip(trackId: trackID, clipId: clip.id, atBeat: atBeat) }
+                catch { model.presentArrangeSplitRefusal(error, clipID: clip.id) }
             },
             onSetClipFades: { trackID, clip, fadeIn, fadeOut, inCurve, outCurve in
                 _ = try? store.setClipFades(trackId: trackID, clipId: clip.id,
@@ -520,6 +594,15 @@ struct ContentView: View {
             onRenameMarker: { markerID, name in _ = try? store.renameMarker(id: markerID, name: name) },
             onRemoveMarker: { markerID in try? store.removeMarker(id: markerID) },
             stageRenameMarkerID: model.stagedMarkerRenameID,
+            // Pointer affordances (m17-c): the debug-staged pointer event flows
+            // down; the live zone/ghost state flows back up so the seam echoes
+            // ground truth; a split refusal flows down to the refused block.
+            stagePointer: model.arrangePointerStage,
+            onPointerState: { zone, ghost in
+                model.arrangePointerZone = zone.rawValue
+                model.arrangeGhostBeat = ghost
+            },
+            splitRefusal: model.arrangeSplitRefusal,
             // Audio import via drag-drop (beta m10-k).
             onImportAudio: { urls, targetTrackID, atBeatRaw in
                 model.importAudioFiles(urls: urls, targetTrackID: targetTrackID,
@@ -533,7 +616,17 @@ struct ContentView: View {
             // Ruler-block pinning (m13-g): the render mode + horizontal-sync wiring.
             content: content,
             hScrollOffset: arrangeHScroll,
-            onHScrollChange: { arrangeHScroll = $0 }
+            onHScrollChange: {
+                // The preference is ground truth: it drives the ruler mirror AND
+                // the `reported` copy the debug seam echoes (m17-b — a zoom's
+                // analytic write touches only the mirror, so `reported` can't lie).
+                model.arrangeHScroll = $0
+                model.arrangeHScrollReported = $0
+            },
+            // Zoom's anchor-preserving scroll request (m17-b) — applied by the
+            // lanes' AppKit bridge in the same update as the scale change.
+            hScrollApplyTarget: model.arrangeZoomScrollTarget,
+            hScrollApplyNonce: model.arrangeZoomScrollNonce
         )
     }
 
@@ -589,6 +682,10 @@ struct ContentView: View {
                 clipFixToggle
                     .explainable(.aiFix)
             }
+            // Arrange zoom cluster (m17-b) — seated beside the SNAP chip; shown in
+            // BOTH densities (zoom is view navigation, not Pro edit chrome).
+            zoomCluster
+                .explainable(.arrangeZoom)
             if arrangeIsPro {
                 snapPicker
                     .explainable(.arrangeSnap)
@@ -688,6 +785,83 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help("Fix a region of this audio clip with AI — lands as a violet take lane")
+    }
+
+    /// Arrange zoom cluster (m17-b): a −/readout/+ chip for the horizontal
+    /// pixels-per-beat scale plus an S/M/L chip for the stepped track-row height.
+    /// Neutral chrome (zoom is navigation, not an active state — Rule 3): SF Mono
+    /// for the percent readout, cyan ONLY on the earned active row step (the
+    /// SimpleProToggle active-half idiom). Every action routes through the SAME
+    /// AppModel zoom entry points the ⌘ menu and `debug.arrangeZoom` use, so the
+    /// playhead-anchored no-jump rule applies from every driver.
+    private var zoomCluster: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 0) {
+                zoomStepButton("minus.magnifyingglass", help: "Zoom out (⌘−)") {
+                    model.zoomArrangeOut()
+                }
+                Text(ArrangeZoom.percentLabel(pixelsPerBeat: model.panelLayout.arrangePPB))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(DAWTheme.textDim)
+                    .frame(width: 40)
+                    .help("Timeline zoom — ⌘0 resets to 100%")
+                zoomStepButton("plus.magnifyingglass", help: "Zoom in (⌘+)") {
+                    model.zoomArrangeIn()
+                }
+            }
+            .padding(.vertical, 3)
+            .background(DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(DAWTheme.hairline, lineWidth: 1)
+            )
+
+            HStack(spacing: 1) {
+                ForEach(ArrangeZoom.RowStep.allCases, id: \.self) { step in
+                    rowStepButton(step)
+                }
+            }
+            .padding(2)
+            .background(DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(DAWTheme.hairline, lineWidth: 1)
+            )
+            .help("Track height — small, medium, or large rows")
+        }
+    }
+
+    private func zoomStepButton(_ systemImage: String, help: String,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(DAWTheme.textDim)
+                .padding(.horizontal, 7)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private func rowStepButton(_ step: ArrangeZoom.RowStep) -> some View {
+        let active = model.arrangeRowStep == step
+        return Button {
+            model.setArrangeRowStep(step)
+        } label: {
+            Text(step.label)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .tracking(0.6)
+                .foregroundStyle(active ? DAWTheme.playback : DAWTheme.textDim)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(active ? DAWTheme.playback.opacity(0.18) : .clear)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     /// Themed grid-snap menu: Off / Bar / Beat / 1/2 / 1/4. Bar follows the meter.

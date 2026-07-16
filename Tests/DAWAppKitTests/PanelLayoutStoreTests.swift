@@ -104,6 +104,26 @@ struct PanelLayoutStoreTests {
         #expect(store.rowHeight == 40)
     }
 
+    @Test("arrange zoom (m17-b) defaults to 16 pt/beat, clamps to 4–200, and persists")
+    func arrangePPB() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        #expect(store.arrangePPB == 16)                       // the historical fixed scale
+        store.setArrangePPB(9999)
+        #expect(store.arrangePPB == 200)
+        store.setArrangePPB(0)
+        #expect(store.arrangePPB == 4)
+        store.setArrangePPB(32)
+        #expect(store.arrangePPB == 32)
+        #expect(backing.storage[PanelLayoutStore.arrangePPBKey] == 32)   // write-through
+        // Sticky across a "relaunch": a fresh store over the same backing.
+        #expect(PanelLayoutStore(backing: backing).arrangePPB == 32)
+        // Reset restores + persists the default (like every dimension).
+        store.reset()
+        #expect(store.arrangePPB == 16)
+        #expect(backing.storage[PanelLayoutStore.arrangePPBKey] == 16)
+    }
+
     @Test("a stored OUT-OF-RANGE value is re-clamped on load")
     func loadReClamps() {
         // Simulate a corrupt / stale defaults value beyond the range.

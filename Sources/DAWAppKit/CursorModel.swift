@@ -56,6 +56,7 @@ public enum CursorAffordance: String, CaseIterable, Sendable {
     case clipBody          // arrange clip block
     case noteBody          // piano-roll note
     case automationPoint   // automation breakpoint
+    case playhead          // arrange playhead grab strip (m17-c) — drag scrub-seeks
     // Place / paint.
     case automationField   // empty automation lane (click adds a point)
     case takeLanePaint     // take lane comp paint / select
@@ -67,7 +68,7 @@ public enum CursorAffordance: String, CaseIterable, Sendable {
             return .resizeUpDown
         case .horizontalFader, .trimEdge, .fadeGrip:
             return .resizeLeftRight
-        case .clipBody, .noteBody, .automationPoint:
+        case .clipBody, .noteBody, .automationPoint, .playhead:
             return .grab
         case .automationField, .takeLanePaint:
             return .crosshair
@@ -79,7 +80,7 @@ public enum CursorAffordance: String, CaseIterable, Sendable {
     /// cursor for the whole drag (a resize stays a resize, a fader stays a fader).
     public var dragCursor: CursorKind {
         switch self {
-        case .clipBody, .noteBody, .automationPoint:
+        case .clipBody, .noteBody, .automationPoint, .playhead:
             return .grabbing
         default:
             return restCursor

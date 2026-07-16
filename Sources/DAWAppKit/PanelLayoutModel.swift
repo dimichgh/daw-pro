@@ -42,6 +42,10 @@ public final class PanelLayoutStore {
     public static let sidebarWidthKey = "sidebarWidth"
     public static let editorFractionKey = "editorFraction"
     public static let rowHeightKey = "rowHeight"
+    /// Arrange horizontal zoom (m17-b) — pixels per beat. Rides the same
+    /// app-sticky preference mechanism as the other dimensions (never project
+    /// data, never undoable, never in the wire snapshot).
+    public static let arrangePPBKey = "arrangePPB"
 
     // MARK: - Defaults (today's hardcoded values — the pre-m10-d look)
 
@@ -51,6 +55,8 @@ public final class PanelLayoutStore {
     public static let defaultEditorFraction: CGFloat = 0.45
     /// Global track-row / timeline-lane height — was `TimelineLanesView.laneHeight`.
     public static let defaultRowHeight: CGFloat = 34
+    /// Arrange pixels-per-beat (m17-b) — the historical fixed 16 pt/beat scale.
+    public static let defaultArrangePPB: CGFloat = ArrangeZoom.defaultPixelsPerBeat
 
     // MARK: - Clamp ranges
     //
@@ -77,12 +83,17 @@ public final class PanelLayoutStore {
     /// range was innocent — the earlier tall-editor overflow came from the fraction,
     /// not the row height).
     public static let rowHeightRange: ClosedRange<CGFloat> = 24...64
+    /// Arrange zoom bounds (m17-b) — one source of truth in `ArrangeZoom`.
+    public static let arrangePPBRange: ClosedRange<CGFloat> = ArrangeZoom.pixelsPerBeatRange
 
     // MARK: - Live values (observed)
 
     public private(set) var sidebarWidth: CGFloat
     public private(set) var editorFraction: CGFloat
     public private(set) var rowHeight: CGFloat
+    /// Arrange pixels-per-beat (m17-b) — read by every beat↔x mapping surface in
+    /// the arrange workspace (ruler block, lanes, playhead, clip gestures…).
+    public private(set) var arrangePPB: CGFloat
 
     @ObservationIgnored private let backing: PanelLayoutBacking
 
@@ -98,6 +109,8 @@ public final class PanelLayoutStore {
                                           default: Self.defaultEditorFraction, range: Self.editorFractionRange)
         self.rowHeight = Self.loaded(backing, Self.rowHeightKey,
                                      default: Self.defaultRowHeight, range: Self.rowHeightRange)
+        self.arrangePPB = Self.loaded(backing, Self.arrangePPBKey,
+                                      default: Self.defaultArrangePPB, range: Self.arrangePPBRange)
     }
 
     private static func loaded(_ backing: PanelLayoutBacking, _ key: String,
@@ -122,11 +135,20 @@ public final class PanelLayoutStore {
         backing.storeValue(Double(rowHeight), forKey: Self.rowHeightKey)
     }
 
+    /// Sets the arrange horizontal zoom (m17-b). Clamped like every dimension;
+    /// callers that need the no-jump anchor rule go through the AppModel zoom
+    /// entry points, which recompute the scroll offset BEFORE writing here.
+    public func setArrangePPB(_ value: CGFloat) {
+        arrangePPB = value.clamped(to: Self.arrangePPBRange)
+        backing.storeValue(Double(arrangePPB), forKey: Self.arrangePPBKey)
+    }
+
     /// Restores every dimension to its default (and persists the reset).
     public func reset() {
         setSidebarWidth(Self.defaultSidebarWidth)
         setEditorFraction(Self.defaultEditorFraction)
         setRowHeight(Self.defaultRowHeight)
+        setArrangePPB(Self.defaultArrangePPB)
     }
 }
 

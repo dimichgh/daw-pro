@@ -26,10 +26,22 @@ struct SketchpadView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            if let banner = model.banner { bannerView(banner) }
-            composer
-            Divider().overlay(DAWTheme.hairline)
-            candidatesSection
+            // Everything below the pinned header rides ONE vertical ScrollView so
+            // the panel COMPRESSES to whatever height the workspace row has
+            // (m17-f F4): with the bottom editor open at a short window the row
+            // can be far shorter than the composer's natural height, and a rigid
+            // panel drove the whole window layout past its bounds (header +
+            // transport pushed off-window, unrendered voids). The header stays
+            // pinned so the panel's identity + close are always reachable; with
+            // room to spare nothing scrolls and the layout reads as before.
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let banner = model.banner { bannerView(banner) }
+                    composer
+                    Divider().overlay(DAWTheme.hairline)
+                    candidatesSection
+                }
+            }
         }
         .padding(14)
         .frame(width: 340)
@@ -306,25 +318,30 @@ struct SketchpadView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.vertical, 6)
             } else {
-                ScrollView {
-                    VStack(spacing: 8) {
-                        // Newest on top — the take you just asked for.
-                        ForEach(model.candidates.reversed()) { candidate in
-                            SketchpadCandidateRow(
-                                candidate: candidate,
-                                isPlaying: preview.playingID == candidate.id,
-                                onPlayToggle: { path in preview.toggle(id: candidate.id, path: path) },
-                                onImport: { Task { await model.importCandidate(candidate.id) } },
-                                onDismiss: { preview.stopIf(candidate.id); model.dismissCandidate(candidate.id) }
-                            )
-                        }
+                // A plain VStack — the panel's ONE outer ScrollView (m17-f F4)
+                // owns all vertical scrolling now, so the old 320 pt inner
+                // scroll cap would just nest a second same-axis scroller.
+                VStack(spacing: 8) {
+                    // Newest on top — the take you just asked for. Each row is
+                    // resolved against the generation-presence registry first
+                    // (m18-g): the row defers to the SAME lifecycle facts the
+                    // canonical card renders for this job — during a sidecar
+                    // model load it reads LOADING THE MODEL… like the card,
+                    // never its own stale QUEUED + RECONNECTING story. Actions
+                    // still target the model's RAW candidate by id.
+                    ForEach(model.candidates.reversed()) { candidate in
+                        SketchpadCandidateRow(
+                            candidate: SketchpadModel.resolvedCandidate(
+                                candidate, registry: app.generationPresence.jobs),
+                            isPlaying: preview.playingID == candidate.id,
+                            onPlayToggle: { path in preview.toggle(id: candidate.id, path: path) },
+                            onImport: { Task { await model.importCandidate(candidate.id) } },
+                            onDismiss: { preview.stopIf(candidate.id); model.dismissCandidate(candidate.id) }
+                        )
                     }
                 }
-                .frame(maxHeight: 320)
             }
-            Spacer(minLength: 0)
         }
-        .frame(maxHeight: .infinity, alignment: .top)
     }
 }
 

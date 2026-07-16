@@ -21,13 +21,16 @@ enum ArrangeContent: Equatable {
     case lanes
 }
 
-/// Reports the `.lanes` horizontal scroll offset up to the pinned `.ruler` so the
-/// two stay in sync (m13-g). The lane content's `minX` in the scroll coordinate
-/// space, negated, is the scroll distance.
-struct ArrangeHOffsetKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
+// The `.lanes` → `.ruler` horizontal sync (m13-g) is a one-way mirror: the lane
+// content's `minX` in the scroll coordinate space, negated, is the scroll
+// distance, reported up through `onHScrollChange`. It was born as an
+// `ArrangeHOffsetKey` PreferenceKey; m17-b (arrange zoom — the first feature
+// that actually scrolls this axis) MEASURED that on current macOS the native
+// ScrollView never re-delivers `.preference()` changes emitted from its content
+// (only the initial default reached any listener, content-side included), while
+// a content GeometryReader keeps re-evaluating with fresh geometry — so the
+// mirror now reports via `.onChange` inside that GeometryReader (view-update
+// machinery), same contract, working delivery. See `lanesBody`.
 
 /// Arrange timeline: one horizontal lane per track (same order as the sidebar),
 /// clips as rounded interactive blocks positioned by beats, a beat/bar grid, and
@@ -35,7 +38,10 @@ struct ArrangeHOffsetKey: PreferenceKey {
 /// audio clips draw a peak waveform (M5 i-d); a MIDI clip tap still opens the
 /// piano roll (docs/DESIGN-LANGUAGE.md "Glass Cockpit"). A track whose automation
 /// disclosure is open grows a breakpoint-editor row under its clip lane,
-/// beat-aligned with the grid. No zoom yet.
+/// beat-aligned with the grid. The horizontal scale is the zoomable
+/// `pixelsPerBeat` input (m17-b, 4…200, default 16) — EVERY beat↔x mapping in
+/// this view derives from it, so the ruler block, lanes, gestures, and overlays
+/// scale together; grid/label density adapts via `ArrangeZoom`.
 struct TimelineLanesView: View {
     var tracks: [Track]
     var positionBeats: Double
@@ -73,6 +79,24 @@ struct TimelineLanesView: View {
     /// `takeGroupHeaderHeight`) keep their own constants, so those sections compose
     /// on top of a taller/shorter clip lane without themselves resizing.
     var rowHeight: CGFloat = Self.laneHeight
+    /// Arrange horizontal zoom (m17-b): pixels per beat, threaded from
+    /// `PanelLayoutStore.arrangePPB` so the pinned `.ruler` block and the
+    /// scrolling `.lanes` body scale in the SAME update (both instances read the
+    /// one store value — the rowHeight discipline, horizontal axis). Every
+    /// beat↔x mapping below derives from THIS value; nothing else may hardcode a
+    /// scale. Defaults to the historical 16 for previews / headless callers.
+    var pixelsPerBeat: CGFloat = Self.defaultPixelsPerBeat
+    /// The lanes viewport WIDTH (m17-b), threaded from ContentView's geometry —
+    /// used only by the empty-bars padding heuristic so the timeline surface
+    /// still fills the viewport when zoomed far out on a short session. 0
+    /// (previews / headless) falls back to the content-driven width.
+    var availableWidth: CGFloat = 0
+    /// Live pinch-zoom ticks (m17-b, MagnifyGesture on the lanes area): reports
+    /// the pointer's CONTENT-space x at gesture start + the cumulative
+    /// magnification; the AppModel owns the anchor math (`ArrangeZoom.PinchState`)
+    /// and writes the scale + compensated scroll offset back down.
+    var onPinchZoomChanged: ((_ anchorContentX: CGFloat, _ magnification: CGFloat) -> Void)? = nil
+    var onPinchZoomEnded: (() -> Void)? = nil
     /// The shared-scroll viewport height (m10-j), threaded from ContentView's
     /// GeometryReader. The timeline fills it when the content is SHORT (so the glass
     /// panel doesn't shrink to its content and the column stays flush with the
@@ -165,6 +189,22 @@ struct TimelineLanesView: View {
     /// menu drive `renamingMarkerID` directly).
     var stageRenameMarkerID: UUID? = nil
 
+    // MARK: Pointer affordances (m17-c)
+
+    /// Staged pointer event from `debug.arrangePointer` (nil in normal use).
+    /// The view runs it through the SAME hover / click-seek / double-click-split
+    /// handlers a real pointer uses — hover isn't injectable on the unbundled
+    /// staging binary (the m17-b Accessibility measurement), so the seam stages
+    /// and this view mirrors (the `stageRenameMarkerID` precedent).
+    var stagePointer: ArrangePointerStage? = nil
+    /// Reports the pointer layer's live state (zone + snapped ghost beat) up to
+    /// the AppModel so `debug.arrangePointer` echoes ground truth. Real hovers
+    /// and staged events feed the same callback.
+    var onPointerState: ((_ zone: ArrangePointerZone, _ ghostBeat: Double?) -> Void)? = nil
+    /// A clip-split refusal to surface (m17-c): the store's message VERBATIM as
+    /// a transient amber bubble on the refused clip's block.
+    var splitRefusal: ArrangeSplitRefusal? = nil
+
     // MARK: Audio import drag-drop (beta m10-k)
 
     /// Imports dropped audio file URLs (wired to `AppModel.importAudioFiles`, which
@@ -203,6 +243,18 @@ struct TimelineLanesView: View {
     /// `.lanes` only: reports the live horizontal scroll offset so the pinned ruler
     /// mirrors it (the m10-j shared-scroll discipline, on the horizontal axis).
     var onHScrollChange: ((CGFloat) -> Void)? = nil
+    /// `.lanes` only (m17-b): a programmatic horizontal scroll request — the
+    /// anchor-preserving offset a zoom computed. Applied via `ScrollViewReader`
+    /// against a layout-real 1 pt marker at that content x (`scrollTo` with a
+    /// `.leading` anchor lands the viewport edge exactly on it — the
+    /// `debug.arrangeScroll` vertical precedent; SwiftUI's native scroller has no
+    /// pixel-precise offset API on the macOS 14 floor). `hScrollApplyNonce`
+    /// bumps per request so a repeat of the same offset still applies.
+    var hScrollApplyTarget: CGFloat? = nil
+    var hScrollApplyNonce: Int = 0
+
+    /// The scroll-anchor marker's identity for `scrollTo` (m17-b).
+    private static let zoomScrollMarkerID = "arrangeZoomScrollMarker"
 
     /// Stationary content coordinate space — clip drags measure against this so a
     /// block moving under the cursor never feeds its own translation back.
@@ -216,16 +268,20 @@ struct TimelineLanesView: View {
     private var rulerInset: CGFloat { content == .lanes ? 0 : Self.rulerHeight }
 
     /// Shared clip hit/geometry model at the timeline scale. Reads the live
-    /// `rowHeight` so trim/fade/gain hit-testing tracks the adjustable lane height.
+    /// `rowHeight` so trim/fade/gain hit-testing tracks the adjustable lane height,
+    /// and the live `pixelsPerBeat` so every clip gesture derives beats from x at
+    /// the current zoom (m17-b).
     private var clipGeometry: ClipEditGeometry {
-        ClipEditGeometry(pixelsPerBeat: Self.pixelsPerBeat, laneHeight: rowHeight)
+        ClipEditGeometry(pixelsPerBeat: pixelsPerBeat, laneHeight: rowHeight)
     }
 
-    // Fixed scale + row metrics tuned to line up with the sidebar track rows
-    // (TrackListView: 42 pt header, 6 pt gaps). The clip-lane height is the DEFAULT
-    // for the adjustable `rowHeight` input (beta m10-d) — the sidebar rows read the
-    // same store value, so both columns scale in lockstep.
-    static let pixelsPerBeat: CGFloat = 16
+    // Row metrics tuned to line up with the sidebar track rows (TrackListView:
+    // 42 pt header, 6 pt gaps). The clip-lane height is the DEFAULT for the
+    // adjustable `rowHeight` input (beta m10-d) — the sidebar rows read the same
+    // store value, so both columns scale in lockstep.
+    /// The historical fixed scale — the default for the zoomable `pixelsPerBeat`
+    /// input below (m17-b) and the ⌘0 reset target (`ArrangeZoom` owns the math).
+    static let defaultPixelsPerBeat: CGFloat = ArrangeZoom.defaultPixelsPerBeat
     /// Ruler height (m11-c grew it 42 → 56 for the marker lane; m12-d grows it
     /// 56 → 80 to seat the TEMPO LANE below the marker lane — each ruler surface
     /// gets its own strip, so no hit zone is overloaded). Top→bottom the 80 pt
@@ -291,7 +347,7 @@ struct TimelineLanesView: View {
     }
 
     private var takeGeometry: TakeLaneGeometry {
-        TakeLaneGeometry(pixelsPerBeat: Self.pixelsPerBeat, rowHeight: Self.takeLaneRowHeight)
+        TakeLaneGeometry(pixelsPerBeat: pixelsPerBeat, rowHeight: Self.takeLaneRowHeight)
     }
 
     /// The automation lane a track is editing (explicit selection or its first).
@@ -308,10 +364,26 @@ struct TimelineLanesView: View {
         // divisor for "how many empty bars to show" — this is not a snap path.
         let basePerBar = meterMap.beatsPerBar(atBeat: 0)
         let bars = Int((lastClipEnd / Double(basePerBar)).rounded(.up)) + 2
-        return max(bars * basePerBar, 32)   // always show a few empty bars
+        // Zoom padding (m17-b), in whole empty bars:
+        //  (a) zoomed far out, a short session would otherwise shrink to a thin
+        //      strip — pad to fill the viewport width;
+        //  (b) an anchor-preserving zoom-in needs the WINDOW at its scroll
+        //      target to exist — pad to `target + viewport`, else the scroller
+        //      clamps the jump to the old content edge and the anchor drifts.
+        // Both the `.ruler` and `.lanes` instances receive the SAME
+        // `availableWidth` + `hScrollApplyTarget` (one call site builds both),
+        // so their content widths stay identical (alignment law).
+        var minBeats = 32
+        if availableWidth > 0, pixelsPerBeat > 0 {
+            let neededWidth = availableWidth + max(0, hScrollApplyTarget ?? 0)
+            let neededBeats = Int((neededWidth / pixelsPerBeat).rounded(.up))
+            let neededBars = Int((Double(neededBeats) / Double(basePerBar)).rounded(.up))
+            minBeats = max(minBeats, neededBars * basePerBar)
+        }
+        return max(bars * basePerBar, minBeats)
     }
 
-    private var contentWidth: CGFloat { CGFloat(totalBeats) * Self.pixelsPerBeat }
+    private var contentWidth: CGFloat { CGFloat(totalBeats) * pixelsPerBeat }
 
     /// Extra height a track contributes below its clip lane: its takes section
     /// (directly under the clips) then its automation row (the same order the
@@ -378,6 +450,15 @@ struct TimelineLanesView: View {
     /// set once a press crosses the click slop. Drives the live band preview.
     @State private var loopDrag: LoopDragState?
 
+    /// A zoom scroll request not yet confirmed against laid-out geometry (m17-b):
+    /// set when `hScrollApplyNonce` bumps, cleared when the width preference
+    /// confirms the rescaled layout and the final `scrollTo` is issued.
+    @State private var zoomScrollPending = false
+    /// The last laid-out `.lanes` content width (reported by the content
+    /// GeometryReader's `.onChange`, same delivery as the h-offset mirror) —
+    /// the signal that a pending zoom scroll can land exactly.
+    @State private var laidOutContentWidth: CGFloat = 0
+
     /// The marker-flag drag in flight (m11-c): nil at rest / during a click, set
     /// once a press on a flag crosses the click slop. Drives the live flag preview
     /// and the coalesced move-scrub.
@@ -393,6 +474,15 @@ struct TimelineLanesView: View {
     /// when nothing is hovering a valid audio drop.
     @State private var dropHover: AudioDropHover?
 
+    /// The snapped beat the lanes hover ghost line previews (m17-c) — nil unless
+    /// the pointer is over EMPTY timeline space (never over a clip, the extras
+    /// editors, or the playhead grab strip).
+    @State private var ghostBeat: Double?
+    /// True once a playhead grab drag crossed the scrub slop: holds the closed
+    /// hand for the whole drag and makes a movement-free press a no-op (grabbing
+    /// the playhead without moving must not jump it to a snapped beat).
+    @State private var playheadScrubbing = false
+
     var body: some View {
         Group {
             switch content {
@@ -406,6 +496,11 @@ struct TimelineLanesView: View {
         // staged value present before the view mounts still opens the field.
         .onChange(of: stageRenameMarkerID) { _, id in renamingMarkerID = id }
         .onAppear { if let id = stageRenameMarkerID { renamingMarkerID = id } }
+        // Pointer staging (m17-c): run a debug-staged pointer event through the
+        // SAME handlers a real hover/click uses. Only the lane-bearing instance
+        // reacts — the pinned `.ruler` block has no pointer layer.
+        .onChange(of: stagePointer) { _, stage in applyPointerStage(stage) }
+        .onAppear { applyPointerStage(stagePointer) }
     }
 
     /// The `.lanes` viewport-filling height: fill the shared-scroll viewport when
@@ -422,13 +517,16 @@ struct TimelineLanesView: View {
         ScrollView(.horizontal, showsIndicators: true) {
             ZStack(alignment: .topLeading) {
                 grid
+                pointerHoverSurface
                 loopBand
                 clipBlocks
                 crossfadeSeams
                 takeLanes
                 automationLanes
                 dropAffordance
+                ghostLine
                 playhead
+                playheadGrabStrips
                 loopRuler
                 markerLane
                 tempoLaneView
@@ -446,32 +544,123 @@ struct TimelineLanesView: View {
     @ViewBuilder
     private var lanesBody: some View {
         let laneHeight = laneStackHeight
-        ScrollView(.horizontal, showsIndicators: true) {
-            ZStack(alignment: .topLeading) {
-                grid
-                clipBlocks
-                crossfadeSeams
-                takeLanes
-                automationLanes
-                dropAffordance
-                playhead
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: true) {
+                ZStack(alignment: .topLeading) {
+                    grid
+                    pointerHoverSurface
+                    clipBlocks
+                    crossfadeSeams
+                    takeLanes
+                    automationLanes
+                    dropAffordance
+                    ghostLine
+                    playhead
+                    playheadGrabStrips
+                    zoomScrollMarker
+                }
+                .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
+                .coordinateSpace(name: Self.contentSpace)
+                // Pinch zoom (m17-b): two-finger magnification over the lanes area,
+                // anchored at the pointer. Simultaneous so clip drags / taps are
+                // untouched (a pinch is a distinct two-finger gesture).
+                .simultaneousGesture(pinchZoomGesture)
+                // Report the live horizontal scroll offset (content minX in the scroll
+                // space, negated) so the pinned ruler mirrors it — the m10-j shared-
+                // scroll discipline on the horizontal axis (no second vertical scroll,
+                // so the columns can't desync; only the ruler tracks this offset).
+                // Report the live scroll offset + laid-out width via `.onChange`
+                // INSIDE the GeometryReader (m17-b, measured): on this macOS the
+                // native ScrollView never re-delivers `.preference()` changes
+                // emitted from its content (only the initial default arrived at
+                // any listener, content-side included), while the GeometryReader
+                // itself demonstrably re-evaluates with fresh geometry on every
+                // scroll/resize — so the reporting rides view-update machinery,
+                // not preference machinery (the header note above the view
+                // records the measurement; the old PreferenceKeys are gone).
+                .background(GeometryReader { geo in
+                    let minX = geo.frame(in: .named(Self.hScrollSpace)).minX
+                    let width = geo.size.width
+                    Color.clear
+                        .onChange(of: minX, initial: true) { _, v in
+                            onHScrollChange?(-v)
+                        }
+                        .onChange(of: width, initial: true) { _, v in
+                            laidOutContentWidth = v
+                        }
+                })
+                .onDrop(of: [.fileURL], delegate: laneDropDelegate)
             }
-            .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
-            .coordinateSpace(name: Self.contentSpace)
-            // Report the live horizontal scroll offset (content minX in the scroll
-            // space, negated) so the pinned ruler mirrors it — the m10-j shared-
-            // scroll discipline on the horizontal axis (no second vertical scroll,
-            // so the columns can't desync; only the ruler tracks this offset).
-            .background(GeometryReader { geo in
-                Color.clear.preference(
-                    key: ArrangeHOffsetKey.self,
-                    value: -geo.frame(in: .named(Self.hScrollSpace)).minX)
-            })
-            .onDrop(of: [.fileURL], delegate: laneDropDelegate)
+            .coordinateSpace(name: Self.hScrollSpace)
+            // A zoom's anchor-preserving scroll (m17-b): jump the viewport's
+            // leading edge onto the layout-real marker. `scrollTo` consults LIVE
+            // layout, so the request lands in two stages: a best-effort jump now
+            // (exact whenever the rescaled content is already laid out), and the
+            // confirming jump once `laidOutContentWidth` reports the new width
+            // (without it, a zoom-in clamps against the OLD, shorter content
+            // and lands short). Never animated — a zoom must not glide.
+            .onChange(of: hScrollApplyNonce) { _, _ in
+                guard hScrollApplyTarget != nil else { return }
+                zoomScrollPending = true
+                proxy.scrollTo(Self.zoomScrollMarkerID, anchor: .leading)
+                confirmZoomScroll(proxy)
+            }
+            .onChange(of: laidOutContentWidth) { _, _ in
+                confirmZoomScroll(proxy)
+            }
         }
-        .coordinateSpace(name: Self.hScrollSpace)
-        .onPreferenceChange(ArrangeHOffsetKey.self) { onHScrollChange?($0) }
         .frame(height: laneHeight, alignment: .topLeading)
+    }
+
+    /// Issues the CONFIRMING zoom scroll once the rescaled content's laid-out
+    /// width matches the width this view computed — from then on `scrollTo`
+    /// resolves the marker against fresh geometry, so the landing is exact.
+    ///
+    /// The confirm lands TWICE (m17-b, measured): once right here — inside the
+    /// layout-driven `onChange` — so the very next frame presents at the target
+    /// (no one-frame blip), and once more on a fresh main-actor turn. A
+    /// `scrollTo` issued from within a layout callback moves the real layout
+    /// (geometry reports the target and holds it) but does NOT durably update
+    /// the ScrollView's internal position state — any later forced re-render
+    /// (window snapshot, resize) re-resolved from the stale internal value and
+    /// visibly jumped the viewport. The deferred re-issue runs outside the
+    /// layout transaction and makes the landing stick.
+    private func confirmZoomScroll(_ proxy: ScrollViewProxy) {
+        guard zoomScrollPending, hScrollApplyTarget != nil,
+              abs(laidOutContentWidth - contentWidth) < 0.5 else { return }
+        zoomScrollPending = false
+        proxy.scrollTo(Self.zoomScrollMarkerID, anchor: .leading)
+        Task { @MainActor in
+            proxy.scrollTo(Self.zoomScrollMarkerID, anchor: .leading)
+        }
+    }
+
+    /// The zoom scroll anchor (m17-b): a 1 pt, layout-real, hit-test-inert marker
+    /// whose LEADING edge sits exactly at the requested offset — `scrollTo(...,
+    /// anchor: .leading)` then lands the viewport edge on it precisely. Built
+    /// with real frames (never `.offset`) so `scrollTo` reads a true layout
+    /// position.
+    private var zoomScrollMarker: some View {
+        HStack(spacing: 0) {
+            Color.clear
+                .frame(width: max(0, hScrollApplyTarget ?? 0), height: 1)
+            Color.clear
+                .frame(width: 1, height: 1)
+                .id(Self.zoomScrollMarkerID)
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// The pinch-zoom gesture (m17-b): reports the pointer's content-space x at
+    /// gesture start + the cumulative magnification; the AppModel anchors the
+    /// zoom there (`ArrangeZoom.PinchState`) so the beat under the pointer holds
+    /// its screen position through the pinch.
+    private var pinchZoomGesture: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                onPinchZoomChanged?(value.startLocation.x, value.magnification)
+            }
+            .onEnded { _ in onPinchZoomEnded?() }
     }
 
     // MARK: - Ruler body (m13-g: pinned block, horizontally offset to track lanes)
@@ -526,15 +715,24 @@ struct TimelineLanesView: View {
         let rulerHeight = Self.rulerHeight
         // Lane-top offsets (one per track, in order) precomputed off the closure.
         let laneTops: [CGFloat] = tracks.indices.map { laneTop($0) }
+        // Grid/label density adapts to the zoom (m17-b, `ArrangeZoom`): per-beat
+        // hairlines drop out below the legibility spacing, and bar NUMBERS thin to
+        // every 2nd/4th/8th… bar zoomed out (the base meter sizes the stride — a
+        // display heuristic like `totalBeats`, not a snap path). Same drawing
+        // logic, density-gated — never forked.
+        let showBeatLines = ArrangeZoom.showsBeatLines(pixelsPerBeat: pixelsPerBeat)
+        let labelStride = ArrangeZoom.barLabelStride(
+            pixelsPerBeat: pixelsPerBeat, beatsPerBar: meterMap.beatsPerBar(atBeat: 0))
         // Per-beat classification — the SAME meter math as the legacy in-closure loop,
         // run once here so `meterMap` never crosses into the renderer.
         let beatCells: [GridBeatCell] = (0...totalBeats).map { beat in
             let position = meterMap.barBeat(atBeat: Double(beat))
             let isBar = position.beatInBar < 0.001
+            let labeled = isBar && position.bar % labelStride == 0
             return GridBeatCell(
-                x: CGFloat(beat) * Self.pixelsPerBeat,
+                x: CGFloat(beat) * pixelsPerBeat,
                 isBar: isBar,
-                barLabel: isBar ? "\(position.bar + 1)" : nil)
+                barLabel: labeled ? "\(position.bar + 1)" : nil)
         }
         return Canvas { @Sendable context, size in
             // Lane backgrounds — not drawn in the pinned ruler block (m13-g).
@@ -557,7 +755,8 @@ struct TimelineLanesView: View {
                 let line = CGRect(x: cell.x, y: 0, width: 1, height: size.height)
                 if cell.isBar {
                     barLines.addRect(line)
-                } else {
+                } else if showBeatLines {
+                    // Zoomed out (m17-b) the per-beat hairlines drop; bars stay.
                     beatLines.addRect(line)
                 }
             }
@@ -596,7 +795,7 @@ struct TimelineLanesView: View {
     private var clipBlocks: some View {
         ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
             ForEach(track.clips) { clip in
-                let width = max(3, CGFloat(clip.lengthBeats) * Self.pixelsPerBeat)
+                let width = max(3, CGFloat(clip.lengthBeats) * pixelsPerBeat)
                 let takeGroup = TakeLaneSelection.group(forMember: clip, in: track)
                 ClipBlock(
                     clip: clip,
@@ -642,9 +841,12 @@ struct TimelineLanesView: View {
                         if let other = crossfadeNeighbor(for: clip, in: track) {
                             onCrossfadeClips(track.id, clip.id, other, length)
                         }
+                    },
+                    refusalMessage: splitRefusal.flatMap {
+                        $0.clipID == clip.id ? $0.message : nil
                     }
                 )
-                .offset(x: CGFloat(clip.startBeat) * Self.pixelsPerBeat, y: laneTop(index))
+                .offset(x: CGFloat(clip.startBeat) * pixelsPerBeat, y: laneTop(index))
                 // One card summarizes the clip's edit affordances — the honest scope
                 // for Canvas/gesture chrome (fade grips, trim edges, ⌥-stretch are
                 // gesture-internal, not tag-able views). Per-instance frames anchor it
@@ -666,7 +868,7 @@ struct TimelineLanesView: View {
             ForEach(crossfadeSeamMarks(in: track)) { seam in
                 CrossfadeSeamBadge()
                     .frame(width: 15, height: 15)
-                    .position(x: CGFloat(seam.centerBeat) * Self.pixelsPerBeat,
+                    .position(x: CGFloat(seam.centerBeat) * pixelsPerBeat,
                               y: laneTop(index) + 9)
                     .explainable(.crossfade)
             }
@@ -760,7 +962,7 @@ struct TimelineLanesView: View {
                 lane: lane,
                 param: param,
                 geometry: AutomationGeometry(
-                    pixelsPerBeat: Self.pixelsPerBeat,
+                    pixelsPerBeat: pixelsPerBeat,
                     laneHeight: Self.automationLaneHeight,
                     range: param.range),
                 contentWidth: contentWidth,
@@ -808,7 +1010,7 @@ struct TimelineLanesView: View {
     /// audio lane — the plan's routing rule, shared so the preview never drifts from
     /// what the drop will actually do). `rawBeat` is fed to the callback unsnapped.
     private func resolveDropHover(at point: CGPoint, fileCount: Int) -> AudioDropHover {
-        let rawBeat = max(0, Double(point.x / Self.pixelsPerBeat))
+        let rawBeat = max(0, Double(point.x / pixelsPerBeat))
         let snapped = effectiveSnap.snap(beat: rawBeat, meterMap: meterMap)
         let index = trackIndex(atContentY: point.y)
         let kind = index.map { tracks[$0].kind }
@@ -843,7 +1045,7 @@ struct TimelineLanesView: View {
                 .fill(DAWTheme.playback)
                 .frame(width: 2, height: contentHeight)
                 .glow(DAWTheme.playback, radius: 5, intensity: 0.7)
-                .offset(x: CGFloat(hover.snappedBeat) * Self.pixelsPerBeat)
+                .offset(x: CGFloat(hover.snappedBeat) * pixelsPerBeat)
                 .allowsHitTesting(false)
         }
     }
@@ -855,8 +1057,209 @@ struct TimelineLanesView: View {
             .fill(DAWTheme.playback)
             .frame(width: 1.5, height: contentHeight)
             .glow(DAWTheme.playback, radius: 5, intensity: 0.7)
-            .offset(x: CGFloat(positionBeats) * Self.pixelsPerBeat)
+            .offset(x: CGFloat(positionBeats) * pixelsPerBeat)
             .allowsHitTesting(false)
+    }
+
+    // MARK: - Pointer affordances (m17-c: grab-scrub, ghost line, click-seek)
+
+    /// The playhead's content-space x at the live zoom.
+    private var playheadX: CGFloat { CGFloat(positionBeats) * pixelsPerBeat }
+
+    /// The lane-band geometry the headless classifier consumes — built from the
+    /// SAME laneTop/rowHeight/extraHeight math the layout uses, so the zone
+    /// decisions can never drift from what is actually drawn.
+    private var pointerLanes: [ArrangePointerLane] {
+        tracks.indices.map { i in
+            let top = laneTop(i)
+            return ArrangePointerLane(
+                clipTop: top,
+                clipBottom: top + rowHeight,
+                bottom: top + rowHeight + extraHeight(tracks[i]),
+                clipSpans: tracks[i].clips.map {
+                    ArrangeClipSpan(startBeat: $0.startBeat, lengthBeats: $0.lengthBeats)
+                })
+        }
+    }
+
+    private func pointerZone(at p: CGPoint) -> ArrangePointerZone {
+        ArrangePointer.zone(
+            x: p.x, y: p.y,
+            playheadX: playheadX,
+            pixelsPerBeat: pixelsPerBeat,
+            topInset: rulerInset,
+            contentBottom: laneStackHeight,
+            lanes: pointerLanes,
+            laneSpacing: Self.laneSpacing)
+    }
+
+    /// The beat a pointer x seeks/previews: snapped on the arrange grid, or raw
+    /// while ⌥ is held (the house fine-drag modifier — documented m17-c choice).
+    private func pointerBeat(forX x: CGFloat) -> Double {
+        ArrangePointer.beat(
+            forX: x, pixelsPerBeat: pixelsPerBeat, snap: effectiveSnap,
+            meterMap: meterMap,
+            snapBypassed: NSEvent.modifierFlags.contains(.option))
+    }
+
+    /// A clear, full-lane-area surface UNDER the clip blocks / take lanes /
+    /// automation editors: clicks that reach it are by construction on EMPTY
+    /// timeline space (everything interactive hit-tests above it), extending the
+    /// ruler-never-dead rule to the lanes. Its continuous hover drives the ghost
+    /// line — hover is NOT occlusion-gated on this macOS (the marker-lane
+    /// precedent), so the handler classifies the zone itself and only ghosts
+    /// over genuinely empty space.
+    private var pointerHoverSurface: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: contentWidth, height: max(0, laneStackHeight - rulerInset))
+            .contentShape(Rectangle())
+            .onContinuousHover(coordinateSpace: .named(Self.contentSpace)) { phase in
+                switch phase {
+                case .active(let p): handlePointerHover(at: p)
+                case .ended: endPointerHover()
+                }
+            }
+            .onTapGesture(coordinateSpace: .named(Self.contentSpace)) { location in
+                handleEmptyClick(at: location)
+            }
+            .offset(y: rulerInset)
+            .explainable(.arrangePlayhead)
+    }
+
+    private func handlePointerHover(at p: CGPoint) {
+        let zone = pointerZone(at: p)
+        let ghost = zone == .empty ? pointerBeat(forX: p.x) : nil
+        if ghostBeat != ghost { ghostBeat = ghost }
+        onPointerState?(zone, ghost)
+    }
+
+    private func endPointerHover() {
+        if ghostBeat != nil { ghostBeat = nil }
+        onPointerState?(.outside, nil)
+    }
+
+    /// Click on empty lane space seeks (m17-c #3). The zone guard is
+    /// belt-and-suspenders — a click over a clip/editor never reaches this
+    /// surface — and keeps the STAGED path (which bypasses hit-testing) honest:
+    /// a staged click over a clip is refused the same way a real one is.
+    private func handleEmptyClick(at p: CGPoint) {
+        guard pointerZone(at: p) == .empty else { return }
+        onSeek(pointerBeat(forX: p.x))
+    }
+
+    /// The staged twin of `ClipBlock`'s double-click split (debug seam only —
+    /// a real double-click runs the block's own gesture): locates the topmost
+    /// clip under the point and routes through the SAME `ClipEdit.snappedSplit`
+    /// math and the SAME `onSplitClip` callback (→ `ProjectStore.splitClip`,
+    /// the `clip.split` wire method). Pro-only, exactly like the gesture.
+    private func handleStagedDoubleClick(at p: CGPoint) {
+        guard isPro else { return }
+        guard let laneIndex = tracks.indices.first(where: {
+            p.y >= laneTop($0) && p.y < laneTop($0) + rowHeight
+        }) else { return }
+        let track = tracks[laneIndex]
+        let beatRaw = Double(p.x / max(pixelsPerBeat, 0.0001))
+        let spans = track.clips.map {
+            ArrangeClipSpan(startBeat: $0.startBeat, lengthBeats: $0.lengthBeats)
+        }
+        guard let clipIndex = ArrangePointer.clipIndex(atBeat: beatRaw, in: spans) else { return }
+        let clip = track.clips[clipIndex]
+        if let beat = ClipEdit.snappedSplit(
+            timelineBeatRaw: beatRaw, clipStart: clip.startBeat,
+            clipLength: clip.lengthBeats, snap: effectiveSnap, meterMap: meterMap) {
+            onSplitClip(track.id, clip, beat)
+        }
+    }
+
+    /// Runs a debug-staged pointer event through the live handlers. `.ruler`
+    /// instances carry no pointer layer, so they ignore the stage (exactly one
+    /// instance reacts per staging).
+    private func applyPointerStage(_ stage: ArrangePointerStage?) {
+        guard let stage, content != .ruler else { return }
+        let p = CGPoint(x: stage.x, y: stage.y)
+        switch stage.action {
+        case .hover: handlePointerHover(at: p)
+        case .click:
+            handlePointerHover(at: p)
+            handleEmptyClick(at: p)
+        case .doubleClick:
+            handlePointerHover(at: p)
+            handleStagedDoubleClick(at: p)
+        case .clear: endPointerHover()
+        }
+    }
+
+    /// The hover ghost line (m17-c #2): a faint NEUTRAL hairline at the
+    /// pointer's snapped beat while hovering empty timeline space. Deliberately
+    /// un-playhead-like — 1 pt `textSecondary` at low opacity, NO glow, never
+    /// cyan — so it can never be confused with the glowing playhead (glow is
+    /// earned by transport state, not by a hover hint).
+    @ViewBuilder
+    private var ghostLine: some View {
+        if let ghostBeat {
+            Rectangle()
+                .fill(DAWTheme.textSecondary.opacity(0.35))
+                .frame(width: 1, height: max(0, laneStackHeight - rulerInset))
+                .offset(x: CGFloat(ghostBeat) * pixelsPerBeat, y: rulerInset)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// The playhead grab strips (m17-c #1): narrow clear segments over each
+    /// track's CLIP band plus the free space below the lanes, centered on the
+    /// playhead — hovering shows the open hand, dragging scrub-seeks. Segments
+    /// (not one full-height strip) so the take-lane / automation editors keep
+    /// their full pointer surface at the playhead x; the headless classifier
+    /// mirrors exactly this coverage.
+    @ViewBuilder
+    private var playheadGrabStrips: some View {
+        let tol = ArrangePointer.playheadGrabTolerance
+        let stripWidth = tol * 2 + 1.5   // tolerance each side of the 1.5 pt line
+        let stripX = playheadX - tol
+        ForEach(Array(tracks.enumerated()), id: \.element.id) { index, _ in
+            Rectangle()
+                .fill(Color.clear)
+                .frame(width: stripWidth, height: rowHeight)
+                .contentShape(Rectangle())
+                .hoverCursor(ArrangePointer.cursor(for: .playheadGrab) ?? .grab)
+                .gesture(playheadScrubGesture)
+                .offset(x: stripX, y: laneTop(index))
+        }
+        let tailTop = tracks.indices.last.map {
+            laneTop($0) + rowHeight + extraHeight(tracks[$0]) + Self.laneSpacing
+        } ?? rulerInset
+        if laneStackHeight > tailTop {
+            Rectangle()
+                .fill(Color.clear)
+                .frame(width: stripWidth, height: laneStackHeight - tailTop)
+                .contentShape(Rectangle())
+                .hoverCursor(ArrangePointer.cursor(for: .playheadGrab) ?? .grab)
+                .gesture(playheadScrubGesture)
+                .offset(x: stripX, y: tailTop)
+        }
+    }
+
+    /// Grab-and-scrub the playhead: the drag reads the stationary content space
+    /// (the strip relocates under the pointer as seeks land — the ClipBlock
+    /// "don't feed your own motion back" rule), seeks per tick on the SNAP grid
+    /// (⌥ = unsnapped fine scrub), and holds the closed hand for the whole
+    /// drag. A press that never crosses the slop is a click and does nothing —
+    /// grabbing the playhead must not jump it.
+    private var playheadScrubGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.contentSpace))
+            .onChanged { value in
+                if !playheadScrubbing {
+                    guard abs(value.translation.width) > ArrangePointer.scrubSlop else { return }
+                    playheadScrubbing = true
+                }
+                DragCursor.set(ArrangePointer.cursor(for: .playheadGrab, dragging: true) ?? .grabbing)
+                onSeek(pointerBeat(forX: value.location.x))
+            }
+            .onEnded { _ in
+                playheadScrubbing = false
+                DragCursor.clear()
+            }
     }
 
     // MARK: - Loop region band + ruler (beta m10-g)
@@ -869,7 +1272,7 @@ struct TimelineLanesView: View {
     }
 
     private var loopGeometry: LoopRulerGeometry {
-        LoopRulerGeometry(pixelsPerBeat: Self.pixelsPerBeat)
+        LoopRulerGeometry(pixelsPerBeat: pixelsPerBeat)
     }
 
     /// The region the band DRAWS: the live drag preview while a gesture is in
@@ -898,8 +1301,8 @@ struct TimelineLanesView: View {
     @ViewBuilder
     private var loopBand: some View {
         if let region = displayLoopRegion {
-            let startX = CGFloat(region.start) * Self.pixelsPerBeat
-            let w = max(3, CGFloat(region.end - region.start) * Self.pixelsPerBeat)
+            let startX = CGFloat(region.start) * pixelsPerBeat
+            let w = max(3, CGFloat(region.end - region.start) * pixelsPerBeat)
             let enabled = displayLoopEnabled
             let accent = DAWTheme.playback
             RoundedRectangle(cornerRadius: 2)
@@ -979,7 +1382,7 @@ struct TimelineLanesView: View {
                         snap: effectiveSnap, meterMap: meterMap)
                     DragCursor.set(.resizeLeftRight)
                 case .move:
-                    let delta = Double((curX - value.startLocation.x) / Self.pixelsPerBeat)
+                    let delta = Double((curX - value.startLocation.x) / pixelsPerBeat)
                     preview = LoopEdit.movedRegion(
                         region: state.origin, dragDeltaBeats: delta,
                         snap: effectiveSnap, meterMap: meterMap)
@@ -1041,7 +1444,7 @@ struct TimelineLanesView: View {
     // MARK: - Session marker lane (m11-c)
 
     private var markerGeometry: MarkerLaneGeometry {
-        MarkerLaneGeometry(pixelsPerBeat: Self.pixelsPerBeat)
+        MarkerLaneGeometry(pixelsPerBeat: pixelsPerBeat)
     }
 
     /// The beat a marker's flag DRAWS at: its live drag preview while a move is in
@@ -1099,7 +1502,7 @@ struct TimelineLanesView: View {
             model: tempoLane,
             tempoMap: tempoMap,
             meterMap: meterMap,
-            pixelsPerBeat: Self.pixelsPerBeat,
+            pixelsPerBeat: pixelsPerBeat,
             height: Self.tempoLaneHeight,
             contentWidth: contentWidth,
             snap: effectiveSnap,
@@ -1139,7 +1542,7 @@ struct TimelineLanesView: View {
                                                  previewBeat: marker.beat)
                 }
                 guard let drag = markerDrag, drag.markerID == marker.id else { return }
-                let delta = Double(translationWidth / Self.pixelsPerBeat)
+                let delta = Double(translationWidth / pixelsPerBeat)
                 let beat = MarkerLaneEdit.movedBeat(
                     originBeat: drag.originBeat, dragDeltaBeats: delta,
                     snap: effectiveSnap, meterMap: meterMap)
@@ -1381,6 +1784,13 @@ private struct ClipBlock: View {
     /// (wired to `ProjectStore.crossfadeClips`, one undo step).
     var onCrossfadeWithNext: (_ lengthBeats: Double) -> Void = { _ in }
 
+    // MARK: Edit refusal (m17-c)
+
+    /// A refused clip edit's message (the store's LocalizedError VERBATIM — the
+    /// same string the wire returns), shown as a transient amber bubble over
+    /// this block. nil in normal use; the parent clears it after a few seconds.
+    var refusalMessage: String? = nil
+
     /// A take lane reference for the member context menu.
     struct TakeMenuLane: Identifiable, Equatable { let id: UUID; let name: String }
 
@@ -1527,6 +1937,7 @@ private struct ClipBlock: View {
             .overlay(alignment: .leading) { spliceLine }
             .overlay(alignment: .bottom) { takeBadgeView }
             .overlay(alignment: .top) { readoutBubble }
+            .overlay(alignment: .top) { refusalBubble }
             .glow(borderColor, radius: 5, intensity: glowIntensity)
             .frame(width: width, height: height)
             .contentShape(Rectangle())
@@ -2014,6 +2425,36 @@ private struct ClipBlock: View {
                 .glow(DAWTheme.playback, radius: 3, intensity: 0.3)
                 .fixedSize()
                 .offset(y: -20)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// The edit-refusal bubble (m17-c): the store's refusal message VERBATIM in
+    /// an amber (warning — the edit didn't happen, nothing was destroyed) chip
+    /// above the block. Prose, so SF Pro (SF Mono is reserved for numeric
+    /// readouts); soft amber glow at the warning intensity; transient — the
+    /// parent auto-clears it.
+    @ViewBuilder
+    private var refusalBubble: some View {
+        if let refusalMessage {
+            Text(refusalMessage)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(DAWTheme.record)
+                .multilineTextAlignment(.leading)
+                // The overlay is proposed the CLIP's width, which can be a
+                // sliver — claim a readable wrap width instead so the verbatim
+                // message is never truncated (it must read exactly as the wire
+                // returns it).
+                .frame(width: 300, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(DAWTheme.panel)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4)
+                    .stroke(DAWTheme.record.opacity(0.6), lineWidth: 1))
+                .glow(DAWTheme.record, radius: 3, intensity: 0.3)
+                .offset(y: -30)
                 .allowsHitTesting(false)
         }
     }

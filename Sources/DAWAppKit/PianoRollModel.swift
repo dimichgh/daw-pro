@@ -108,6 +108,41 @@ public final class PianoRollModel {
         self.moveBaseline = [:]
     }
 
+    // MARK: - External-mutation reseed seam (m18-i)
+
+    /// True when an incoming clip VALUE no longer matches what this model
+    /// represents — the observation seam for wire/arrange-side geometry
+    /// mutations (`clip.trim`/`move`/`split`, arrange bar ops, undo/redo of
+    /// any) landing while the editor is open on the SAME clip identity
+    /// (m18-i; `.id(clip.id)` only recreates the view on an identity switch).
+    /// Compares content + geometry, never identity: notes compare in the
+    /// store's canonical order (`MIDINote.canonicallyOrdered` — every draft
+    /// note already passed the clamping `MIDINote.init`, so the store's
+    /// re-clamp is a no-op) and the clip length through the same `max(0,·)`
+    /// the seed applies. The IDEMPOTENCE GUARD falls out: the editor's own
+    /// commit echoes back through `setClipNotes` re-ordered but content-equal,
+    /// reads EQUAL here, and triggers no reseed — a double reseed would
+    /// clobber selection and any in-flight gesture for nothing.
+    public func needsReseed(notes: [MIDINote], clipLengthBeats: Double) -> Bool {
+        if self.clipLengthBeats != max(0, clipLengthBeats) { return true }
+        return MIDINote.canonicallyOrdered(draft) != MIDINote.canonicallyOrdered(notes)
+    }
+
+    /// Re-reads the model from an EXTERNALLY mutated clip — call only when
+    /// `needsReseed` says so. Same re-read as `load`, except the selection
+    /// keeps the notes that SURVIVED the mutation (an agent trimming over the
+    /// wire must not strip a human's selection of untouched notes; dropped
+    /// ids fall away so the selection never dangles). In-flight interaction
+    /// resolves as CANCEL-THEN-RESEED (m18-i): the move baseline clears, so a
+    /// mid-flight move drag becomes a no-op over the new content — the view
+    /// additionally parks its gesture routing in a cancelled state so a
+    /// resize can't reapply either. Never a half-dragged ghost on new truth.
+    public func reseed(notes: [MIDINote], clipLengthBeats: Double) {
+        let survivors = selection.intersection(notes.map(\.id))
+        load(notes: notes, clipLengthBeats: clipLengthBeats)
+        selection = survivors
+    }
+
     // MARK: - Geometry
 
     public func x(forBeat beat: Double) -> CGFloat { CGFloat(beat) * pixelsPerBeat }
@@ -133,6 +168,20 @@ public final class PianoRollModel {
     public var contentWidth: CGFloat {
         let maxNoteEnd = draft.map(\.endBeat).max() ?? 0
         return CGFloat(max(clipLengthBeats, maxNoteEnd, 1)) * pixelsPerBeat
+    }
+
+    /// Width a horizontal editor band actually DRAWS at (m18-f — DESIGN-LANGUAGE
+    /// "Wide windows"): the band's content width, extended to fill the editor
+    /// viewport when the viewport is wider, so the grid always reaches the
+    /// panel's right edge instead of leaving dead glass at wide windows. ONE
+    /// definition shared by all three bands (note grid, velocity lane, and the
+    /// controller canvas via its own model's content width). Honesty is
+    /// preserved by the out-of-clip shade: the extension is shaded latent
+    /// space — the playable window still ends at the clip end — and a note
+    /// created there is the same legal-but-latent data the m18-e ghost rule
+    /// recorded (store-legal, engine-windowed by strict `<`).
+    public nonisolated static func drawnWidth(content: CGFloat, viewport: CGFloat) -> CGFloat {
+        max(content, max(0, viewport))
     }
 
     /// A note's rectangle in content coordinates. A minimum drawn width keeps a

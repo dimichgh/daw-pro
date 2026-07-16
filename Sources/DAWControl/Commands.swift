@@ -246,6 +246,7 @@ public final class CommandRouter {
         "project.open",
         "project.new",
         "project.recoveryStatus",
+        "project.recoveryBundles",
         "project.recover",
         "edit.undo",
         "edit.redo",
@@ -267,7 +268,8 @@ public final class CommandRouter {
         keyStore: APIKeyStoring = KeychainKeyStore(),
         keyEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         connectionInfo: ControlConnectionInfo = ControlConnectionInfo(),
-        lyricsWriter: (@MainActor () throws -> any LyricsGenerating)? = nil
+        lyricsWriter: (@MainActor () throws -> any LyricsGenerating)? = nil,
+        importGenerator: SongGenerating? = nil
     ) {
         self.store = store
         self.sidecarManager = sidecarManager
@@ -286,7 +288,13 @@ public final class CommandRouter {
         // (M6 iii-a) so `ai.importGeneration` reaches finished audio + metas by
         // jobId. One source of truth: tests injecting a fake generator get the
         // adapter for free; the app wires the real ACEStepClient once.
-        store.generationSource = SongGenerationImportSource(generator: songGenerator)
+        // `importGenerator` (m17-h, optional) lets the app hand the seam its
+        // OWN origin-tagged observing wrapper around that same client — so an
+        // import-path job lands on the unified progress card tagged "import"
+        // instead of "wire". nil (every test / headless construction) keeps
+        // the pre-m17-h behavior byte-identical.
+        store.generationSource = SongGenerationImportSource(
+            generator: importGenerator ?? songGenerator)
     }
 
     /// Async because `render.mixdown` awaits offline Audio Unit preparation;
@@ -309,10 +317,14 @@ public final class CommandRouter {
         let params = request.params ?? [:]
         switch request.command {
         case "transport.play":
+            // No params (m16-e, audit F5 survey: closes the zero-param gap).
+            try params.rejectUnknownKeys([], verb: "transport.play")
             store.play()
             return .success(request.id)
 
         case "transport.stop":
+            // No params (m16-e, audit F5 survey).
+            try params.rejectUnknownKeys([], verb: "transport.stop")
             store.stop()
             return .success(request.id)
 
@@ -323,6 +335,8 @@ public final class CommandRouter {
             // BOTH is rejected (ambiguous intent), so a caller states one clearly;
             // an unknown/ambiguous marker is a field-named error. `beats` stays
             // required whenever `marker` is absent.
+            try params.rejectUnknownKeys(
+                ["beats", "marker"], verb: "transport.seek")
             if let marker = params["marker"]?.stringValue {
                 if params["beats"] != nil {
                     throw ControlError("pass either 'beats' or 'marker', not both — they name the seek destination two different ways")
@@ -339,6 +353,8 @@ public final class CommandRouter {
         case "marker.add":
             // params: name (optional — empty/absent auto-names "Marker N"),
             // beat (required, >= 0). Returns the created marker {id,name,beat}.
+            try params.rejectUnknownKeys(
+                ["name", "beat"], verb: "marker.add")
             let beat = try params.require("beat", \.doubleValue)
             guard beat >= 0 else { throw ControlError("'beat' must be >= 0") }
             let name = params["name"]?.stringValue
@@ -348,6 +364,8 @@ public final class CommandRouter {
         case "marker.remove":
             // params: markerId (required). markerNotFound surfaces via the
             // LocalizedError mapping. Returns {removed: true}.
+            try params.rejectUnknownKeys(
+                ["markerId"], verb: "marker.remove")
             let markerID = try params.requireMarkerID()
             try store.removeMarker(id: markerID)
             return .success(request.id, .object(["removed": .bool(true)]))
@@ -356,6 +374,8 @@ public final class CommandRouter {
             // params: markerId (required), name (required, non-empty). A trimmed,
             // changed name commits one undo step; empty/unchanged is a no-op.
             // Returns the resulting marker.
+            try params.rejectUnknownKeys(
+                ["markerId", "name"], verb: "marker.rename")
             let markerID = try params.requireMarkerID()
             let name = try params.require("name", \.stringValue)
             guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -367,6 +387,8 @@ public final class CommandRouter {
         case "marker.move":
             // params: markerId (required), beat (required, >= 0). Coalesces a live
             // scrub into one undo step. Returns the moved marker.
+            try params.rejectUnknownKeys(
+                ["markerId", "beat"], verb: "marker.move")
             let markerID = try params.requireMarkerID()
             let beat = try params.require("beat", \.doubleValue)
             guard beat >= 0 else { throw ControlError("'beat' must be >= 0") }
@@ -383,6 +405,8 @@ public final class CommandRouter {
             // the store REJECTS with a teaching error pointing at tempo.setMap on
             // a project that carries a multi-segment tempo map (surfaces via the
             // LocalizedError mapping — .tempoMapMultiSegment).
+            try params.rejectUnknownKeys(
+                ["bpm"], verb: "transport.setTempo")
             let bpm = try params.require("bpm", \.doubleValue)
             try store.setTempo(bpm)
             return .success(request.id, .number(store.transport.tempoBPM))
@@ -401,6 +425,8 @@ public final class CommandRouter {
             // with field-named teaching errors. ONE undoable step (coalescing key
             // "tempo.map"); a single-segment map collapses to the scalar tempo.
             // transportBusy while recording surfaces via the LocalizedError map.
+            try params.rejectUnknownKeys(
+                ["segments", "meterChanges"], verb: "tempo.setMap")
             let tempoMap = try Self.parseTempoMap(params)
             let meterMap = try Self.parseMeterMap(params)
             try store.setTempoMap(tempoMap, meterMap: meterMap)
@@ -425,6 +451,7 @@ public final class CommandRouter {
             // (1 s/cycle). noArmedTracks/recordPermissionDenied/
             // recordPermissionPending/transportBusy/invalidPunchRange/
             // invalidLoopRange surface via the LocalizedError mapping.
+            try params.rejectUnknownKeys([], verb: "transport.record")
             try store.record()
             return .success(request.id, try JSONValue(encoding: store.transport))
 
@@ -438,6 +465,8 @@ public final class CommandRouter {
             // mid-take bounds edit would restart the engine's scheduled loop
             // and kill the capture writer's anchor. transportBusy/
             // invalidLoopRange surface via the LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["enabled", "startBeat", "endBeat"], verb: "transport.setLoop")
             let enabled = try params.require("enabled", \.boolValue)
             let startBeat = params["startBeat"]?.doubleValue
             let endBeat = params["endBeat"]?.doubleValue
@@ -449,6 +478,8 @@ public final class CommandRouter {
             // clamped), outBeat number (optional). Omitted beats keep the
             // current window. transportBusy while recording and
             // invalidPunchRange surface via the LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["enabled", "inBeat", "outBeat"], verb: "transport.setPunch")
             let punchEnabled = try params.require("enabled", \.boolValue)
             let inBeat = params["inBeat"]?.doubleValue
             let outBeat = params["outBeat"]?.doubleValue
@@ -461,12 +492,23 @@ public final class CommandRouter {
             // playing (the store restarts via seek so the click audibly
             // starts/stops — v0 costs a ~60 ms seam); refused while recording
             // (transportBusy surfaces via the LocalizedError mapping).
+            try params.rejectUnknownKeys(
+                ["enabled", "countInBars"], verb: "transport.setMetronome")
             let metronomeEnabled = try params.require("enabled", \.boolValue)
             let countInBars = params["countInBars"]?.doubleValue.map { Int($0) }
             try store.setMetronome(enabled: metronomeEnabled, countInBars: countInBars)
             return .success(request.id, try JSONValue(encoding: store.transport))
 
         case "track.add":
+            // F5 HARDENING (m16-e, audit F5): the audit's measured wrong-object-
+            // created trap — {type:"instrument"} silently ignored (the real key is
+            // `kind`) and the omitted `kind` default (audio) created the WRONG kind
+            // of track while returning ok:true. Unknown keys are REJECTED first, so
+            // a typo'd `type` can never masquerade as an accepted "default to audio".
+            try params.rejectUnknownKeys(
+                ["name", "kind"], verb: "track.add",
+                hint: "the track kind param is 'kind' (audio|instrument|bus), not "
+                    + "'type' — omitting 'kind' defaults to an audio track")
             let name = params["name"]?.stringValue
             let kindRaw = params["kind"]?.stringValue ?? TrackKind.audio.rawValue
             guard let kind = TrackKind(rawValue: kindRaw) else {
@@ -476,6 +518,8 @@ public final class CommandRouter {
             return .success(request.id, try JSONValue(encoding: track))
 
         case "track.remove":
+            try params.rejectUnknownKeys(
+                ["trackId"], verb: "track.remove")
             let id = try params.requireTrackID()
             // When the target is a bus, its deletion reroutes every source that
             // fed it (outputs → master, sends dropped). Count from the PRE-removal
@@ -500,30 +544,40 @@ public final class CommandRouter {
             return .success(request.id)
 
         case "track.rename":
+            try params.rejectUnknownKeys(
+                ["trackId", "name"], verb: "track.rename")
             let id = try params.requireTrackID()
             let name = try params.require("name", \.stringValue)
             guard store.renameTrack(id: id, name: name) else { throw ControlError.noTrack(id) }
             return .success(request.id)
 
         case "track.setVolume":
+            try params.rejectUnknownKeys(
+                ["trackId", "volume"], verb: "track.setVolume")
             let id = try params.requireTrackID()
             let volume = try params.require("volume", \.doubleValue)
             guard store.setTrackVolume(id: id, volume: volume) else { throw ControlError.noTrack(id) }
             return .success(request.id)
 
         case "track.setPan":
+            try params.rejectUnknownKeys(
+                ["trackId", "pan"], verb: "track.setPan")
             let id = try params.requireTrackID()
             let pan = try params.require("pan", \.doubleValue)
             guard store.setTrackPan(id: id, pan: pan) else { throw ControlError.noTrack(id) }
             return .success(request.id)
 
         case "track.setMute":
+            try params.rejectUnknownKeys(
+                ["trackId", "muted"], verb: "track.setMute")
             let id = try params.requireTrackID()
             let muted = try params.require("muted", \.boolValue)
             guard store.setTrackMute(id: id, muted: muted) else { throw ControlError.noTrack(id) }
             return .success(request.id)
 
         case "track.setSolo":
+            try params.rejectUnknownKeys(
+                ["trackId", "soloed"], verb: "track.setSolo")
             let id = try params.requireTrackID()
             let soloed = try params.require("soloed", \.boolValue)
             guard store.setTrackSolo(id: id, soloed: soloed) else { throw ControlError.noTrack(id) }
@@ -563,6 +617,8 @@ public final class CommandRouter {
             // params: trackId (required), busId (required UUID), level? (number,
             // clamps silently like setVolume). duplicateSend/notABus/busRoutingFixed/
             // trackNotFound surface via the LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["trackId", "busId", "level"], verb: "track.addSend")
             let addTrackID = try params.requireTrackID()
             let rawBus = try params.require("busId", \.stringValue)
             guard let addBusID = UUID(uuidString: rawBus) else {
@@ -577,6 +633,8 @@ public final class CommandRouter {
             // params: trackId (required), sendId (required UUID), level (required
             // number). sendNotFound/busRoutingFixed/trackNotFound surface via the
             // LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["trackId", "sendId", "level"], verb: "track.setSend")
             let setSendTrackID = try params.requireTrackID()
             let setSendID = try params.requireSendID()
             let sendLevel = try params.require("level", \.doubleValue)
@@ -586,6 +644,8 @@ public final class CommandRouter {
         case "track.removeSend":
             // params: trackId (required), sendId (required UUID). sendNotFound/
             // busRoutingFixed/trackNotFound surface via the LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["trackId", "sendId"], verb: "track.removeSend")
             let remSendTrackID = try params.requireTrackID()
             let remSendID = try params.requireSendID()
             try store.removeSend(trackID: remSendTrackID, sendID: remSendID)
@@ -604,6 +664,9 @@ public final class CommandRouter {
             // instrumentRequiresInstrumentTrack via the LocalizedError mapping;
             // unknown id → noTrack. Response is the resolved instrument object
             // {kind, polySynth:{...}, sampler:{zones:[{path,…}],…}}.
+            try params.rejectUnknownKeys(
+                ["trackId", "kind", "waveform", "sampler", "attack", "decay", "sustain",
+                    "release", "cutoffHz", "resonance", "gain", "audioUnit", "soundBank"], verb: "track.setInstrument")
             let instTrackID = try params.requireTrackID()
             let kind = try parseInstrumentKind(params["kind"])
             let waveform = try parseWaveform(params["waveform"])
@@ -666,6 +729,8 @@ public final class CommandRouter {
             // Codable — {track, clip, file, sourceTrackId, sourceMuted,
             // measurement} where measurement is the same un-normalized
             // LoudnessMeasurement a render.stems stem file carries.
+            try params.rejectUnknownKeys(
+                ["trackId", "fromBeat", "durationSeconds", "muteSource", "name"], verb: "track.bounceInPlace")
             let bounceTrackID = try params.requireTrackID()
             let bounceFromBeat = params["fromBeat"]?.doubleValue ?? 0
             guard bounceFromBeat >= 0 else {
@@ -728,6 +793,8 @@ public final class CommandRouter {
             // source; the project is untouched. Response {bank: <SoundBankInfo>}
             // (§6.4). Extension/existence/readability errors surface in the
             // MediaImporting "Audio import failed: …" tone.
+            try params.rejectUnknownKeys(
+                ["path"], verb: "instrument.importSoundBank")
             let importRawPath = try params.require("path", \.stringValue)
             guard importRawPath.hasPrefix("/") else {
                 throw ControlError("'path' must be an absolute path")
@@ -745,6 +812,8 @@ public final class CommandRouter {
             // Unknown kind lists valid kinds; chainFull/trackNotFound surface via
             // the LocalizedError mapping. On the MASTER chain only built-in kinds
             // are legal (kind "audioUnit" → masterChainBuiltInOnly via the store).
+            try params.rejectUnknownKeys(
+                ["trackId", "kind", "index", "params", "audioUnit"], verb: "fx.add")
             let fxAddTarget = try params.parseFXTarget()
             let fxKind = try parseEffectKind(params["kind"])
             let fxIndex = params["index"]?.doubleValue.map { Int($0) }
@@ -799,6 +868,8 @@ public final class CommandRouter {
             // params: trackId (required — a track UUID or "master", m13-d),
             // effectId (required UUID). effectNotFound/trackNotFound surface via
             // the LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["trackId", "effectId"], verb: "fx.remove")
             let fxRemEffectID = try params.requireEffectID()
             switch try params.parseFXTarget() {
             case .track(let fxRemTrackID):
@@ -814,6 +885,8 @@ public final class CommandRouter {
             // effectId (required UUID), index (required int, clamps into the
             // valid range). effectNotFound/trackNotFound surface via the
             // LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["trackId", "effectId", "index"], verb: "fx.reorder")
             let fxReoEffectID = try params.requireEffectID()
             let fxReoIndex = try params.require("index", \.doubleValue)
             switch try params.parseFXTarget() {
@@ -830,6 +903,8 @@ public final class CommandRouter {
             // params: trackId (required — a track UUID or "master", m13-d),
             // effectId (required UUID), bypassed (required bool). effectNotFound/
             // trackNotFound surface via the LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["trackId", "effectId", "bypassed"], verb: "fx.setBypass")
             let fxBypEffectID = try params.requireEffectID()
             let fxBypassed = try params.require("bypassed", \.boolValue)
             switch try params.parseFXTarget() {
@@ -849,6 +924,8 @@ public final class CommandRouter {
             // track.setVolume). An unknown name surfaces unknownEffectParam
             // (listing the valid names); effectNotFound/trackNotFound also
             // surface via the LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["trackId", "effectId", "name", "value"], verb: "fx.setParam")
             let fxParEffectID = try params.requireEffectID()
             let fxParName = try params.require("name", \.stringValue)
             let fxParValue = try params.require("value", \.doubleValue)
@@ -881,6 +958,8 @@ public final class CommandRouter {
             // The master chain cannot host a sidechain-keyed effect (m13-d,
             // design §4): reject `trackId:"master"` with the NAMED teaching
             // error rather than the generic UUID-parse error.
+            try params.rejectUnknownKeys(
+                ["trackId", "effectId", "sourceTrackId"], verb: "fx.setSidechain")
             guard case .track(let fxScTrackID) = try params.parseFXTarget() else {
                 throw ProjectError.sidechainMasterUnsupported
             }
@@ -965,12 +1044,16 @@ public final class CommandRouter {
             ]))
 
         case "track.setArm":
+            try params.rejectUnknownKeys(
+                ["trackId", "armed"], verb: "track.setArm")
             let id = try params.requireTrackID()
             let armed = try params.require("armed", \.boolValue)
             guard try store.setTrackArm(id: id, armed: armed) else { throw ControlError.noTrack(id) }
             return .success(request.id)
 
         case "mixer.setMasterVolume":
+            try params.rejectUnknownKeys(
+                ["volume"], verb: "mixer.setMasterVolume")
             let volume = try params.require("volume", \.doubleValue)
             store.setMasterVolume(volume)
             return .success(request.id, .object(["masterVolume": .number(store.masterVolume)]))
@@ -985,6 +1068,8 @@ public final class CommandRouter {
             // surfaces via the LocalizedError mapping. Returns the resulting
             // chain in the shared fx-mutation result shape ({trackId, effects})
             // so the agent sees the effects the preset laid down, in order.
+            try params.rejectUnknownKeys(
+                ["trackId", "preset"], verb: "mixer.applyPreset")
             let presetTrackID = try params.requireTrackID()
             let presetName = try params.require("preset", \.stringValue)
             _ = try store.applyMixerPreset(trackID: presetTrackID, presetName: presetName)
@@ -1041,7 +1126,22 @@ public final class CommandRouter {
             // recovered), consecutiveFailures, lastHeartbeat, engineRunning}.
             // Read-only, never throws, headless-safe: no engine reads the
             // zero/idle status.
-            return .success(request.id, try JSONValue(encoding: store.watchdogStatus()))
+            //
+            // ADDITIVE (m18-b, wire-lawful — the discardedRecovery precedent):
+            // `mainActor: {responsive: true}` rides every response produced
+            // HERE — self-evidently true, since this handler runs ON the main
+            // actor. During a main-actor WEDGE this handler can't run at all;
+            // the ControlServer's queue tier answers instead with `mainActor:
+            // {responsive: false, wedgedForSeconds}` and the engine fields
+            // omitted (they're produced on the main actor — see
+            // ControlServer.wedgeIntercept). Same verb, one discoverable
+            // surface, zero new commands.
+            var watchdogPayload = try JSONValue(encoding: store.watchdogStatus())
+            if case .object(var watchdogFields) = watchdogPayload {
+                watchdogFields["mainActor"] = .object(["responsive": .bool(true)])
+                watchdogPayload = .object(watchdogFields)
+            }
+            return .success(request.id, watchdogPayload)
 
         case "macro.songSkeleton":
             // params: genre (required — a SongSkeletonCatalog kebab name),
@@ -1054,7 +1154,20 @@ public final class CommandRouter {
             // bad tempo/sections → field-named errors. Both surface via the
             // LocalizedError mapping. Response carries the full scaffold with
             // real, actionable ids (see `songSkeletonResult`).
-            let genre = try params.require("genre", \.stringValue)
+            //
+            // F8 FIX (m16-e, audit F8c): the store's OWN unknown-genre error
+            // already lists every valid name — the gap the audit measured was the
+            // OMITTED-genre case, where `params.require` threw the generic
+            // "missing or invalid required param 'genre'" with no enumeration, so
+            // a caller who omitted `genre` learned the valid values only after a
+            // SECOND round trip (passing any string to trigger the store's own
+            // teaching error). Naming the valid genres here too closes that gap.
+            try params.rejectUnknownKeys(
+                ["genre", "tempoBPM", "sections"], verb: "macro.songSkeleton")
+            guard let genre = params["genre"]?.stringValue else {
+                let valid = SongSkeletonCatalog.names.joined(separator: ", ")
+                throw ControlError("missing or invalid required param 'genre' — valid: \(valid)")
+            }
             let skeletonTempo = params["tempoBPM"]?.doubleValue
             let skeletonSections = try parseSkeletonSections(params["sections"])
             let skeleton = try store.applySongSkeleton(
@@ -1080,6 +1193,8 @@ public final class CommandRouter {
             // naming where those lanes live. All surface via the
             // LocalizedError mapping. Response: {"lane": {id, target, points,
             // isEnabled}} either way.
+            try params.rejectUnknownKeys(
+                ["trackId", "target"], verb: "automation.addLane")
             let addLaneTarget = try parseAutomationTarget(params["target"])
             switch try params.parseFXTarget() {
             case .track(let addLaneTrackID):
@@ -1095,6 +1210,8 @@ public final class CommandRouter {
             // params: trackId (required — a track UUID or "master", m15-c),
             // laneId (required UUID). automationLaneNotFound/trackNotFound
             // surface via the LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["trackId", "laneId"], verb: "automation.removeLane")
             let removeLaneID = try params.requireLaneID()
             switch try params.parseFXTarget() {
             case .track(let removeLaneTrackID):
@@ -1117,6 +1234,8 @@ public final class CommandRouter {
             // points when the array is over cap. automationLaneNotFound/
             // trackNotFound surface via the LocalizedError mapping. Response:
             // {"lane": {id, target, points, isEnabled}}.
+            try params.rejectUnknownKeys(
+                ["trackId", "laneId", "points"], verb: "automation.setPoints")
             let setPointsLaneID = try params.requireLaneID()
             guard let rawPoints = params["points"] else {
                 throw ControlError("missing or invalid required param 'points'")
@@ -1139,6 +1258,8 @@ public final class CommandRouter {
             // lane between read (drawn curve) and manual (fader/knob) without
             // touching its points. automationLaneNotFound/trackNotFound
             // surface via the LocalizedError mapping. Response: {"lane": {...}}.
+            try params.rejectUnknownKeys(
+                ["trackId", "laneId", "enabled"], verb: "automation.setLaneEnabled")
             let setEnabledLaneID = try params.requireLaneID()
             let laneEnabled = try params.require("enabled", \.boolValue)
             let enabledLane: AutomationLane
@@ -1153,6 +1274,8 @@ public final class CommandRouter {
             return .success(request.id, .object(["lane": try JSONValue(encoding: enabledLane)]))
 
         case "clip.addAudio":
+            try params.rejectUnknownKeys(
+                ["trackId", "path", "atBeat"], verb: "clip.addAudio")
             let id = try params.requireTrackID()
             let rawPath = try params.require("path", \.stringValue)
             let path = (rawPath as NSString).expandingTildeInPath
@@ -1167,6 +1290,8 @@ public final class CommandRouter {
             // atBeat? (>= 0), lengthBeats? (> 0), notes? (array — see parseNotes;
             // omitted/[] = an empty clip). trackNotFound/
             // midiClipsRequireInstrumentTrack surface via the LocalizedError map.
+            try params.rejectUnknownKeys(
+                ["trackId", "name", "atBeat", "lengthBeats", "notes"], verb: "clip.addMIDI")
             let midiTrackID = try params.requireTrackID()
             let midiName = params["name"]?.stringValue
             let midiAtBeat = params["atBeat"]?.doubleValue
@@ -1187,6 +1312,8 @@ public final class CommandRouter {
         case "clip.setNotes":
             // params: clipId (required UUID), notes (required array, may be []).
             // clipNotFound/notAMIDIClip surface via the LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["clipId", "notes"], verb: "clip.setNotes")
             let setClipID = try params.requireClipID()
             guard let setNotesValue = params["notes"] else {
                 throw ControlError("missing or invalid required param 'notes'")
@@ -1198,6 +1325,8 @@ public final class CommandRouter {
         case "clip.remove":
             // params: clipId (required UUID). Removes an audio or MIDI clip.
             // clipNotFound surfaces via the LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["clipId"], verb: "clip.remove")
             let removeClipID = try params.requireClipID()
             let removedClip = try store.removeClip(id: removeClipID)
             return .success(request.id, try JSONValue(encoding: removedClip))
@@ -1211,6 +1340,8 @@ public final class CommandRouter {
             // coalescing. trackNotFound/clipNotFound surface via the
             // LocalizedError mapping. Response: {"first": {...clip...},
             // "second": {...clip...}}.
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId", "atBeat"], verb: "clip.split")
             let splitTrackID = try params.requireTrackID()
             let splitClipID = try params.requireClipID()
             let splitAtBeat = try params.require("atBeat", \.doubleValue)
@@ -1230,6 +1361,8 @@ public final class CommandRouter {
             // re-clamp. Coalesces under clip.trim:<clipId> so a drag of the
             // edge is one undo step. trackNotFound/clipNotFound surface via
             // the LocalizedError mapping. Response: the updated clip.
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId", "newStartBeat", "newLengthBeats"], verb: "clip.trim")
             let trimTrackID = try params.requireTrackID()
             let trimClipID = try params.requireClipID()
             let trimNewStartBeat = try params.require("newStartBeat", \.doubleValue)
@@ -1259,6 +1392,8 @@ public final class CommandRouter {
             // `trimmed:[clipId…]` and `removed:[clipId…]` arrays naming the
             // stationary clips the policy edited (empty when the move hit free
             // space).
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId", "toStartBeat"], verb: "clip.move")
             let moveTrackID = try params.requireTrackID()
             let moveClipID = try params.requireClipID()
             let moveToStartBeat = try params.require("toStartBeat", \.doubleValue)
@@ -1288,6 +1423,8 @@ public final class CommandRouter {
             // convention) PLUS additive `trimmed:[clipId…]` / `removed:[clipId…]`
             // arrays naming the residents the overlap policy edited (the clip.move
             // shape).
+            try params.rejectUnknownKeys(
+                ["clipId", "toStartBeat", "toTrackId"], verb: "clip.duplicate")
             let dupClipID = try params.requireClipID()
             let dupToStartBeat = params["toStartBeat"]?.doubleValue
             if let dupToStartBeat, dupToStartBeat < 0 {
@@ -1332,6 +1469,8 @@ public final class CommandRouter {
             // EXACTLY the final overlap; each clip's OTHER fade is preserved. ONE
             // undo step ("Crossfade Clips"). Audio only, comp members rejected.
             // Response: {left: clip, right: clip, overlapBeats: Number}.
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId", "otherClipId", "lengthBeats"], verb: "clip.crossfade")
             let xfTrackID = try params.requireTrackID()
             let xfClipID = try params.requireClipID()
             let xfOtherClipID = try params.requireUUID("otherClipId")
@@ -1351,6 +1490,8 @@ public final class CommandRouter {
             // under clip.gain:<clipId> so a knob scrub is one undo step.
             // trackNotFound/clipNotFound surface via the LocalizedError
             // mapping. Response: the updated clip.
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId", "gainDb"], verb: "clip.setGain")
             let gainTrackID = try params.requireTrackID()
             let gainClipID = try params.requireClipID()
             let gainDb = try params.require("gainDb", \.doubleValue)
@@ -1372,6 +1513,8 @@ public final class CommandRouter {
             // breakpoint drag is one undo step. trackNotFound/clipNotFound
             // surface via the LocalizedError mapping. Response: the updated clip
             // (its stored, canonicalized envelope echoes back in gainEnvelope).
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId", "points"], verb: "clip.setGainEnvelope")
             let envTrackID = try params.requireTrackID()
             let envClipID = try params.requireClipID()
             let envPoints = try parseGainEnvelope(params["points"])
@@ -1431,6 +1574,9 @@ public final class CommandRouter {
             // a fade-handle drag is one undo step. trackNotFound/clipNotFound
             // surface via the LocalizedError mapping. Response: the updated
             // clip.
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId", "fadeInBeats", "fadeOutBeats", "fadeInCurve",
+                    "fadeOutCurve"], verb: "clip.setFades")
             let fadesTrackID = try params.requireTrackID()
             let fadesClipID = try params.requireClipID()
             let fadeInBeats = try params.require("fadeInBeats", \.doubleValue)
@@ -1453,6 +1599,8 @@ public final class CommandRouter {
             // Coalesces under clip.stretch:<clipId>. trackNotFound/clipNotFound
             // surface via the LocalizedError mapping. Response: the updated clip
             // (the stretch fields ride Clip's Codable when non-default).
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId", "ratio", "semitones", "formantPreserve"], verb: "clip.setStretch")
             let stretchTrackID = try params.requireTrackID()
             let stretchClipID = try params.requireClipID()
             let stretchRatio = params["ratio"]?.doubleValue
@@ -1473,6 +1621,8 @@ public final class CommandRouter {
             // window survives). Fades re-clamp. Audio clips only (MIDI surfaces
             // invalidClipEdit). Coalesces under the SAME clip.stretch:<clipId>
             // key as clip.setStretch. Response: the updated clip.
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId", "lengthBeats"], verb: "clip.stretchToLength")
             let stretchLenTrackID = try params.requireTrackID()
             let stretchLenClipID = try params.requireClipID()
             let stretchToLength = try params.require("lengthBeats", \.doubleValue)
@@ -1493,6 +1643,8 @@ public final class CommandRouter {
             // only. clipNotFound/notAMIDIClip/invalidClipEdit (non-positive length
             // or startBeat outside [0, lengthBeats)) surface via the LocalizedError
             // mapping. Response: the updated clip.
+            try params.rejectUnknownKeys(
+                ["clipId", "startBeat", "lengthBeats"], verb: "clip.deleteTimeRange")
             let delRangeClipID = try params.requireClipID()
             let delRangeStart = try params.require("startBeat", \.doubleValue)
             let delRangeLength = try params.require("lengthBeats", \.doubleValue)
@@ -1510,6 +1662,8 @@ public final class CommandRouter {
             // notAMIDIClip/invalidClipEdit (non-positive length or atBeat outside
             // [0, lengthBeats]) surface via the LocalizedError mapping. Response:
             // the updated clip.
+            try params.rejectUnknownKeys(
+                ["clipId", "atBeat", "lengthBeats"], verb: "clip.insertTimeRange")
             let insRangeClipID = try params.requireClipID()
             let insRangeAt = try params.require("atBeat", \.doubleValue)
             let insRangeLength = try params.require("lengthBeats", \.doubleValue)
@@ -1535,6 +1689,8 @@ public final class CommandRouter {
             // resolved to QuantizeSettings.groove (parseQuantizeSettings →
             // resolveGrooveParam). When set it REPLACES the swing grid targets
             // (groove wins); an unknown ref is a field-named 'groove' error.
+            try params.rejectUnknownKeys(
+                ["clipId", "gridBeats", "strength", "swing", "quantizeEnds", "groove"], verb: "clip.quantize")
             let quantizeClipID = try params.requireClipID()
             let quantizeSettings = try parseQuantizeSettings(params)
             let quantizedClip = try store.quantizeClipNotes(
@@ -1554,6 +1710,8 @@ public final class CommandRouter {
             // notAMIDIClip verbatim; clipNotFound via the LocalizedError mapping.
             // Response: the updated clip fields PLUS `seedUsed` (the seed actually
             // used — replay it, or a nil `seed`, to reproduce/re-roll the take).
+            try params.rejectUnknownKeys(
+                ["clipId", "timingBeats", "velocityRange", "seed"], verb: "clip.humanize")
             let humanizeClipID = try params.requireClipID()
             let humanizeTiming = params["timingBeats"]?.doubleValue ?? 0.02
             guard (0...0.25).contains(humanizeTiming) else {
@@ -1628,6 +1786,9 @@ public final class CommandRouter {
             // (parseAudioQuantizeSettings → resolveGrooveParam); when set it
             // REPLACES the swing grid targets through the same QuantizeTarget the
             // MIDI path uses; an unknown ref is a field-named 'groove' error.
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId", "gridBeats", "strength", "swing", "sensitivity",
+                    "crossfadeMs", "groove"], verb: "clip.quantizeAudio")
             let aqTrackID = try params.requireTrackID()
             let aqClipID = try params.requireClipID()
             let aqSettings = try parseAudioQuantizeSettings(params)
@@ -1646,6 +1807,8 @@ public final class CommandRouter {
             // inserts 6-beat bars). Refused mid-record and across a take group
             // (invalidArrangeEdit → flatten first) via the LocalizedError mapping.
             // Response: {atBeat, insertedBeats, beatsPerBar}.
+            try params.rejectUnknownKeys(
+                ["atBar", "count"], verb: "arrange.insertBars")
             let insAtBar = Int(try params.require("atBar", \.doubleValue))
             let insCount = Int(try params.require("count", \.doubleValue))
             let insResult = try store.insertBars(atBar: insAtBar, count: insCount)
@@ -1668,6 +1831,8 @@ public final class CommandRouter {
             // mid-record and across a take group (invalidArrangeEdit) via the
             // LocalizedError mapping. Response: {fromBeat, deletedBeats,
             // removedClipIds, removedMarkerIds}.
+            try params.rejectUnknownKeys(
+                ["fromBar", "count"], verb: "arrange.deleteBars")
             let delFromBar = Int(try params.require("fromBar", \.doubleValue))
             let delCount = Int(try params.require("count", \.doubleValue))
             let delResult = try store.deleteBars(fromBar: delFromBar, count: delCount)
@@ -1687,6 +1852,8 @@ public final class CommandRouter {
             // newest lane across the full range (newest wins). cannotGroup/
             // clipNotFound/trackNotFound surface via the LocalizedError mapping.
             // Response: {"group": {...}}.
+            try params.rejectUnknownKeys(
+                ["trackId", "clipIds", "name"], verb: "take.group")
             let groupTrackID = try params.requireTrackID()
             let groupClipIDs = try parseClipIDs(params["clipIds"])
             let groupName = params["name"]?.stringValue
@@ -1707,6 +1874,8 @@ public final class CommandRouter {
             // the LocalizedError mapping. Response: {"group": {...}, "clips": [...]}
             // — the freshly rebuilt members (clips churn ids on every rebuild;
             // see spec §2 ASSUMPTION).
+            try params.rejectUnknownKeys(
+                ["trackId", "groupId", "segments"], verb: "take.setComp")
             let compTrackID = try params.requireTrackID()
             let compGroupID = try params.requireGroupID()
             let compSegments = try parseCompSegments(params["segments"])
@@ -1723,6 +1892,8 @@ public final class CommandRouter {
             // take swap). Shares take.setComp's take.comp:<groupId> coalescing
             // key. laneNotFound/takeGroupNotFound/trackNotFound surface via the
             // LocalizedError mapping. Response: {"group": {...}, "clips": [...]}.
+            try params.rejectUnknownKeys(
+                ["trackId", "groupId", "laneId"], verb: "take.select")
             let selectTrackID = try params.requireTrackID()
             let selectGroupID = try params.requireGroupID()
             let selectLaneID = try params.requireLaneID()
@@ -1740,6 +1911,8 @@ public final class CommandRouter {
             // lane in the group (invalidComp — flatten to dissolve instead).
             // laneNotFound/takeGroupNotFound/trackNotFound surface via the
             // LocalizedError mapping. Response: {"group": {...}}.
+            try params.rejectUnknownKeys(
+                ["trackId", "groupId", "laneId"], verb: "take.removeLane")
             let removeLaneTrackID = try params.requireTrackID()
             let removeLaneGroupID = try params.requireGroupID()
             let removeLaneLaneID = try params.requireLaneID()
@@ -1754,6 +1927,8 @@ public final class CommandRouter {
             // member protection); non-comped lane material is discarded (files
             // remain on disk). takeGroupNotFound/trackNotFound surface via the
             // LocalizedError mapping. Response: {"clips": [...freed clips...]}.
+            try params.rejectUnknownKeys(
+                ["trackId", "groupId"], verb: "take.flatten")
             let flattenTrackID = try params.requireTrackID()
             let flattenGroupID = try params.requireGroupID()
             let flattenedClips = try store.flattenTakeGroup(
@@ -1767,6 +1942,8 @@ public final class CommandRouter {
             // take.move:<groupId> so a drag is one undo step. takeGroupNotFound/
             // trackNotFound surface via the LocalizedError mapping. Response:
             // {"group": {...}, "clips": [...]}.
+            try params.rejectUnknownKeys(
+                ["trackId", "groupId", "toStartBeat"], verb: "take.move")
             let moveGroupTrackID = try params.requireTrackID()
             let moveGroupID = try params.requireGroupID()
             let moveToStartBeat = try params.require("toStartBeat", \.doubleValue)
@@ -1784,6 +1961,8 @@ public final class CommandRouter {
             // Coalesces under take.xf:<groupId>. takeGroupNotFound/trackNotFound
             // surface via the LocalizedError mapping. Response: {"group": {...},
             // "clips": [...]}.
+            try params.rejectUnknownKeys(
+                ["trackId", "groupId", "seconds"], verb: "take.setCrossfade")
             let xfTrackID = try params.requireTrackID()
             let xfGroupID = try params.requireGroupID()
             let xfSeconds = try params.require("seconds", \.doubleValue)
@@ -1818,6 +1997,8 @@ public final class CommandRouter {
             // via the LocalizedError mapping. Response: the report —
             // {offsetMs, offsetBeats, matchedOnsets, referenceOnsets,
             // candidateOnsets, confidence, applied}.
+            try params.rejectUnknownKeys(
+                ["trackId", "groupId", "laneId", "searchWindowMs", "apply"], verb: "take.autoAlign")
             let alignTrackID = try params.requireTrackID()
             let alignGroupID = try params.requireGroupID()
             let alignLaneID = try params.requireLaneID()
@@ -1843,6 +2024,8 @@ public final class CommandRouter {
             // clipNotFound / engineUnavailable (audio, headless) / invalidClipEdit
             // (non-positive grid/cycle) surface via the LocalizedError mapping.
             // Response: {"groove": {...}}.
+            try params.rejectUnknownKeys(
+                ["clipId", "name", "gridBeats", "cycleBeats"], verb: "groove.extract")
             let extractClipID = try params.requireClipID()
             let extractName = try params.require("name", \.stringValue)
             let extractGrid = params["gridBeats"]?.doubleValue ?? 0.25
@@ -1882,6 +2065,8 @@ public final class CommandRouter {
             // removable. An unknown id surfaces grooveNotFound verbatim. A groove
             // already applied to a past quantize keeps working (applied by value).
             // Response: {"removed": true}.
+            try params.rejectUnknownKeys(
+                ["grooveId"], verb: "groove.remove")
             let removeGrooveID = try params.requireGrooveID()
             try store.removeGrooveTemplate(id: removeGrooveID)
             return .success(request.id, .object(["removed": .bool(true)]))
@@ -1897,6 +2082,8 @@ public final class CommandRouter {
             // MIDI-only songs). No clips past fromBeat → nothingToRender,
             // surfaced verbatim. Response: {path, durationSeconds, sampleRate,
             // channels}.
+            try params.rejectUnknownKeys(
+                ["path", "fromBeat", "durationSeconds"], verb: "render.mixdown")
             let path = params["path"]?.stringValue
             let fromBeat = params["fromBeat"]?.doubleValue ?? 0
             guard fromBeat >= 0 else {
@@ -1925,6 +2112,8 @@ public final class CommandRouter {
             // mapping. Response: the model's own LoudnessMeasureResult Codable
             // — {measurement: {integratedLufs?, truePeakDbtp?,
             // maxMomentaryLufs?, maxShortTermLufs?}, durationSeconds, sampleRate}.
+            try params.rejectUnknownKeys(
+                ["fromBeat", "durationSeconds"], verb: "render.measureLoudness")
             let measureFromBeat = params["fromBeat"]?.doubleValue ?? 0
             guard measureFromBeat >= 0 else {
                 throw ControlError("'fromBeat' must be >= 0")
@@ -1955,6 +2144,9 @@ public final class CommandRouter {
             // {path, durationSeconds, sampleRate, channels, report: {input,
             // output, appliedGainDb, lufsTarget?, truePeakCeilingDbtp,
             // limitedByCeiling}}.
+            try params.rejectUnknownKeys(
+                ["path", "fromBeat", "durationSeconds", "lufsTarget",
+                    "truePeakCeilingDb"], verb: "render.bounce")
             let bouncePath = params["path"]?.stringValue
             let bounceFromBeat = params["fromBeat"]?.doubleValue ?? 0
             guard bounceFromBeat >= 0 else {
@@ -2002,6 +2194,9 @@ public final class CommandRouter {
             // sampleRate, durationSeconds, channels, stems: [{trackId, name,
             // kind: "track"|"bus", path, measurement}], mixdown?: {path,
             // measurement}}.
+            try params.rejectUnknownKeys(
+                ["trackIds", "directory", "fromBeat", "durationSeconds",
+                    "includeMixdown"], verb: "render.stems")
             let stemsTrackIDs = try parseOptionalTrackIDs(params["trackIds"])
             let stemsDirectory = params["directory"]?.stringValue
             let stemsFromBeat = params["fromBeat"]?.doubleValue ?? 0
@@ -2061,14 +2256,17 @@ public final class CommandRouter {
             // "starting" with a truthfully increasing startingForSeconds
             // instead of losing track of the boot. Response: SidecarStatus
             // (see ai.sidecarStatus for the phase/startingForSeconds fields).
+            try params.rejectUnknownKeys([], verb: "ai.sidecarStart")
             let startedStatus = try await sidecarManager.start()
             return .success(request.id, try JSONValue(encoding: startedStatus))
 
         case "ai.sidecarStop":
-            // No params. Graceful stop (SIGTERM via the pidfile, escalating
-            // to SIGKILL if it doesn't exit in time) of a running sidecar;
-            // a no-op success (not an error) if it wasn't running. Response:
-            // SidecarStatus (state settles to installedNotRunning/notInstalled).
+            // No params (m16-e, audit F5 survey). Graceful stop (SIGTERM via
+            // the pidfile, escalating to SIGKILL if it doesn't exit in time)
+            // of a running sidecar; a no-op success (not an error) if it
+            // wasn't running. Response: SidecarStatus (state settles to
+            // installedNotRunning/notInstalled).
+            try params.rejectUnknownKeys([], verb: "ai.sidecarStop")
             let stoppedStatus = try await sidecarManager.stop()
             return .success(request.id, try JSONValue(encoding: stoppedStatus))
 
@@ -2107,6 +2305,9 @@ public final class CommandRouter {
             // this fails with an actionable message naming the Settings panel
             // (⌘,) and ai.providerStatus — never a key value (keys never cross
             // this plane; see ai.providerStatus).
+            try params.rejectUnknownKeys(
+                ["prompt", "style", "structure", "context", "existingLyrics",
+                    "instruction"], verb: "ai.writeLyrics")
             let lyricsTheme = try params.require("prompt", \.stringValue)
             var writeRequest = LyricsWriteRequest(prompt: lyricsTheme)
             if let style = params["style"]?.stringValue { writeRequest.style = style }
@@ -2143,6 +2344,9 @@ public final class CommandRouter {
             // fresh submission. Throws the SidecarManager's own
             // state-specific actionable message (not a bare connection
             // error) when the sidecar isn't reachable.
+            try params.rejectUnknownKeys(
+                ["prompt", "lyrics", "durationSeconds", "seed", "bpm", "keyScale",
+                    "timeSignature", "vocalLanguage", "guidanceScale", "inferenceSteps"], verb: "ai.generateSong")
             let genPrompt = try params.require("prompt", \.stringValue)
             var genRequest = SongGenerationRequest(prompt: genPrompt)
             genRequest.lyrics = params["lyrics"]?.stringValue
@@ -2201,6 +2405,8 @@ public final class CommandRouter {
             // clipId, adoptedTempoBPM?} (adoptedTempoBPM omitted when tempo was
             // left unchanged). A still-running job / unknown (expired) jobId
             // surface as actionable errors pointing back at ai.generationStatus.
+            try params.rejectUnknownKeys(
+                ["jobId", "trackName", "atBeat", "setProjectTempo"], verb: "ai.importGeneration")
             let importJobID = try params.require("jobId", \.stringValue)
             let importTrackName = params["trackName"]?.stringValue
             let importAtBeat = params["atBeat"]?.doubleValue
@@ -2256,6 +2462,8 @@ public final class CommandRouter {
             // ai.generateSong (one status surface, not a parallel one); a
             // succeeded poll's `stems` array carries every named result.
             // Response: {jobId, state, trackNames}.
+            try params.rejectUnknownKeys(
+                ["sourceAudioPath", "trackNames", "model"], verb: "ai.extractStems")
             let extractSourceAudioPath = try params.require("sourceAudioPath", \.stringValue)
             let extractTrackNames = try parseTrackNames(params["trackNames"])
             let extractModel = params["model"]?.stringValue
@@ -2281,6 +2489,8 @@ public final class CommandRouter {
             // doc). Same one-upstream-job-per-track / composite-jobId /
             // shared-status-surface shape as ai.extractStems. Response:
             // {jobId, state, trackNames}.
+            try params.rejectUnknownKeys(
+                ["sourceAudioPath", "globalCaption", "tracks", "model"], verb: "ai.legoGenerate")
             let legoSourceAudioPath = try params.require("sourceAudioPath", \.stringValue)
             let legoGlobalCaption = try params.require("globalCaption", \.stringValue)
             let legoTracks = try parseLegoTracks(params["tracks"])
@@ -2312,6 +2522,8 @@ public final class CommandRouter {
             // jobId / any missing stem file surface as actionable errors —
             // reuses ai.importGeneration's exact rejection wording
             // (generationNotReady points back at ai.generationStatus).
+            try params.rejectUnknownKeys(
+                ["jobId", "atBeat", "setProjectTempo"], verb: "ai.importGeneratedStems")
             let importStemsJobID = try params.require("jobId", \.stringValue)
             let importStemsAtBeat = params["atBeat"]?.doubleValue
             let importStemsSetTempo = params["setProjectTempo"]?.boolValue
@@ -2365,6 +2577,9 @@ public final class CommandRouter {
             // {jobId, state, queuePosition?} — a SINGLE (not composite) job
             // id, polled via ai.generationStatus exactly like
             // ai.generateSong.
+            try params.rejectUnknownKeys(
+                ["sourcePath", "start", "end", "prompt", "lyrics", "mode", "strength",
+                    "wavCrossfadeSec", "seed", "model"], verb: "ai.repaintAudio")
             let repaintSourcePath = try parseRepaintSourcePath(params["sourcePath"])
             let repaintStart = try params.require("start", \.doubleValue)
             guard repaintStart >= 0 else {
@@ -2431,6 +2646,9 @@ public final class CommandRouter {
             // windowEndBeat, regionStartBeat, regionEndBeat, repaintStartSeconds,
             // repaintEndSeconds, bouncePath}. A pending fix does NOT survive an
             // app restart or a project switch.
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId", "startBeat", "endBeat", "prompt", "lyrics",
+                    "mode", "strength", "seed", "contextSeconds", "model"], verb: "ai.fixClipRegion")
             let fixTrackID = try params.requireTrackID()
             let fixClipID = try params.requireClipID()
             let fixStartBeat = try params.require("startBeat", \.doubleValue)
@@ -2481,6 +2699,8 @@ public final class CommandRouter {
             // still-running/unknown job surfaces an actionable error
             // (clipFixJobNotFound points back at ai.fixClipRegion; a target that
             // drifted beyond a pure move surfaces clipFixStale).
+            try params.rejectUnknownKeys(
+                ["jobId"], verb: "ai.importClipFix")
             let importFixJobID = try params.require("jobId", \.stringValue)
             do {
                 let result = try await store.importClipFix(jobID: importFixJobID)
@@ -2554,9 +2774,25 @@ public final class CommandRouter {
             // path optional: absolute or ~-prefixed .dawproj destination; omit
             // to save in place (an untitled session throws projectPathRequired).
             // transportBusy/saveFailed surface via the LocalizedError mapping.
+            //
+            // RECOVERY HONESTY (m16-e, audit F3): saveProject() unconditionally
+            // invalidates any pending crash-recovery offer (a titled save supersedes
+            // it — the work is now safely on disk where the user put it). Before
+            // this fix that consumption was SILENT; the response now carries
+            // `discardedRecovery` (the offer's own facts — see
+            // `discardedRecoveryField`) whenever this call is the one that cleared
+            // an offer that was still available beforehand. Absent when there was
+            // nothing to discard (the common case).
+            try params.rejectUnknownKeys(
+                ["path"], verb: "project.save")
             let savePath = params["path"]?.stringValue
+            let pendingBeforeSave = store.recoveryStatus()
             let result = try store.saveProject(to: savePath)
-            return .success(request.id, try JSONValue(encoding: result))
+            var saveResult = try JSONValue(encoding: result).objectValue ?? [:]
+            if let discarded = try discardedRecoveryField(before: pendingBeforeSave) {
+                saveResult["discardedRecovery"] = discarded
+            }
+            return .success(request.id, .object(saveResult))
 
         case "project.open":
             // path required. discardChanges (default false) abandons unsaved
@@ -2564,30 +2800,96 @@ public final class CommandRouter {
             // plus the full post-open snapshot. transportBusy/openFailed/
             // malformedProject/newerProjectVersion/unsavedChanges surface via the
             // LocalizedError mapping.
+            //
+            // RECOVERY HONESTY (m16-e, audit F3): same `discardedRecovery` honesty
+            // as project.save/project.new — opening another project supersedes a
+            // pending crash offer via the SAME `invalidateCrashRecovery()` call.
+            try params.rejectUnknownKeys(
+                ["path", "discardChanges"], verb: "project.open")
             let openPath = try params.require("path", \.stringValue)
             let discard = params["discardChanges"]?.boolValue ?? false
+            let pendingBeforeOpen = store.recoveryStatus()
             let warnings = try store.openProject(at: openPath, discardChanges: discard)
-            return .success(request.id, .object([
+            var openResult: [String: JSONValue] = [
                 "warnings": .array(warnings.map(JSONValue.string)),
                 "snapshot": try snapshotJSON(),
-            ]))
+            ]
+            if let discarded = try discardedRecoveryField(before: pendingBeforeOpen) {
+                openResult["discardedRecovery"] = discarded
+            }
+            return .success(request.id, .object(openResult))
 
         case "project.new":
             // discardChanges (default false) abandons unsaved edits instead of
             // flushing them first. transportBusy/unsavedChanges surface via the
             // LocalizedError mapping.
+            //
+            // RECOVERY HONESTY (m16-e, audit F3): this is the audit's LIVED case —
+            // the staging-normalization law every agent follows opens a session
+            // with `project.new`, which silently ran `AutosaveManager.invalidate()`
+            // and destroyed a real crash's recovery offer with no signal in the
+            // response. DESIGN DECISION (chosen over a refuse-once `discardRecovery:
+            // true` gate): an honesty FIELD, not a refusal — refusing every
+            // new/open/save whenever an unconsumed offer exists would put friction
+            // on the ordinary "I don't want to recover, start fresh" flow (the
+            // common case right after any crash-adjacent launch), and no existing
+            // caller breaks. The response instead carries `discardedRecovery:
+            // {savedAt, sourcePath?, editCount}` — the exact offer that was just
+            // superseded — whenever this call is the one that cleared it (checked
+            // by comparing `store.recoveryStatus()` before/after; absent when
+            // nothing was on offer). `project.recover` is UNCHANGED — its own
+            // `recovered`/`discarded` fields already say honestly that the offer
+            // was consumed on purpose, so it does not also carry this field.
+            try params.rejectUnknownKeys(
+                ["discardChanges"], verb: "project.new")
             let discardNew = params["discardChanges"]?.boolValue ?? false
+            let pendingBeforeNew = store.recoveryStatus()
             try store.newProject(discardChanges: discardNew)
-            return .success(request.id, try snapshotJSON())
+            var newResult = try snapshotJSON().objectValue ?? [:]
+            if let discarded = try discardedRecoveryField(before: pendingBeforeNew) {
+                newResult["discardedRecovery"] = discarded
+            }
+            return .success(request.id, .object(newResult))
 
         case "project.recoveryStatus":
             // No params. Crash-recovery offer (M9 crash-b): whether the LAST
             // session ended unexpectedly (a crash / SIGKILL left its lock) AND a
             // rolling autosave snapshot is on disk to restore. Response =
             // AutosaveRecoveryStatus verbatim: {available, savedAt?, sourcePath?,
-            // editCount?}. Readable anytime; headless-safe — a session that never
-            // ran crash detection, or no Autosave dir, reads {available:false}.
+            // editCount?} — `savedAt` is ISO-8601 (m16-e, audit F8a; was raw
+            // Apple-epoch seconds). Readable anytime; headless-safe — a session
+            // that never ran crash detection, or no Autosave dir, reads
+            // {available:false}.
             return .success(request.id, try JSONValue(encoding: store.recoveryStatus()))
+
+        case "project.recoveryBundles":
+            // No params. Wire-discoverable listing of the PER-SLUG untitled-
+            // recovery bundles (m16-e, audit F3) — distinct from the single
+            // rolling crash-recovery snapshot `project.recoveryStatus` describes.
+            // Every dirty UNTITLED session flushed via new/open (`flushForTransition`)
+            // writes one `Untitled-<slug8>.dawproj` under the Autosave directory;
+            // up to `pruneUntitledRecoveryBundles`'s grace window these accumulate
+            // invisibly on disk with no wire path to find them (the audit's own
+            // "softener" — the 41-track session's flush landed one of these, but no
+            // verb could list or open it). Each is a REGULAR `.dawproj` bundle —
+            // `project.open {path}` already opens one directly, so this is a listing
+            // seam only, not a new open primitive. Response: {"bundles":
+            // [{path, savedAt (ISO-8601 file modification time), isCurrentSession}]},
+            // newest-first (mirrors `pruneUntitledRecoveryBundles`'s own ordering).
+            // `isCurrentSession` flags THIS store's own slug (the file it would
+            // write on its next flush) so an agent doesn't try to recover its own
+            // live session's safety copy. Never throws — an unreadable/missing
+            // Autosave directory reads an empty list.
+            let recoveryBundleFormatter = ISO8601DateFormatter()
+            return .success(request.id, .object([
+                "bundles": .array(store.untitledRecoveryBundles().map { entry in
+                    .object([
+                        "path": .string(entry.path),
+                        "savedAt": .string(recoveryBundleFormatter.string(from: entry.savedAt)),
+                        "isCurrentSession": .bool(entry.isCurrentSession),
+                    ])
+                }),
+            ]))
 
         case "project.recover":
             // params: accept (required bool). accept:true loads the autosave INTO
@@ -2597,6 +2899,8 @@ public final class CommandRouter {
             // accept:false drops the snapshot + clears the offer → {discarded:true}.
             // No offer available + accept:true → noRecoveryAvailable via the
             // LocalizedError mapping.
+            try params.rejectUnknownKeys(
+                ["accept"], verb: "project.recover")
             let accept = try params.require("accept", \.boolValue)
             switch try store.recoverFromAutosave(accept: accept) {
             case .recovered(let warnings):
@@ -2623,6 +2927,8 @@ public final class CommandRouter {
             // crashReportCount, includesProject}. Never throws except a real
             // filesystem failure (DiagnosticsError.writeFailed via the
             // LocalizedError mapping); headless-safe (engine snapshots read idle).
+            try params.rejectUnknownKeys(
+                ["includeProject"], verb: "app.feedbackBundle")
             let includeProject = params["includeProject"]?.boolValue ?? false
             return .success(request.id,
                             try JSONValue(encoding: store.writeFeedbackBundle(includeProject: includeProject)))
@@ -2662,6 +2968,8 @@ public final class CommandRouter {
             // is clamped into CopilotLimits.validRange (1–32) — 0 → 1, 99 → 32 — so it
             // never errors; omit it to honor the app's configured value. Existing
             // callers that don't pass it behave exactly as before.
+            try params.rejectUnknownKeys(
+                ["message", "maxRounds"], verb: "ai.copilotSend")
             guard let copilotEngine else {
                 throw ControlError("copilot engine not wired — app startup incomplete")
             }
@@ -2695,7 +3003,8 @@ public final class CommandRouter {
 
         case "ai.copilotReset":
             // Cancels any in-flight turn and clears the transcript/history back
-            // to idle. No params.
+            // to idle. No params (m16-e, audit F5 survey).
+            try params.rejectUnknownKeys([], verb: "ai.copilotReset")
             guard let copilotEngine else {
                 throw ControlError("copilot engine not wired — app startup incomplete")
             }
@@ -2703,9 +3012,11 @@ public final class CommandRouter {
             return .success(request.id)
 
         case "edit.undo":
-            // Reverses the last edit. nothingToUndo/transportBusy surface via the
-            // LocalizedError mapping. Result carries the reversed label plus the
-            // full post-undo snapshot so agents re-orient in one round trip.
+            // No params (m16-e, audit F5 survey). Reverses the last edit.
+            // nothingToUndo/transportBusy surface via the LocalizedError
+            // mapping. Result carries the reversed label plus the full
+            // post-undo snapshot so agents re-orient in one round trip.
+            try params.rejectUnknownKeys([], verb: "edit.undo")
             let label = try store.undo()
             return .success(request.id, .object([
                 "undone": .string(label),
@@ -2713,7 +3024,9 @@ public final class CommandRouter {
             ]))
 
         case "edit.redo":
-            // Reapplies the last undone edit; mirror of edit.undo.
+            // No params (m16-e, audit F5 survey). Reapplies the last undone
+            // edit; mirror of edit.undo.
+            try params.rejectUnknownKeys([], verb: "edit.redo")
             let label = try store.redo()
             return .success(request.id, .object([
                 "redone": .string(label),
@@ -2753,6 +3066,8 @@ public final class CommandRouter {
             // listOpenUIs entry: {trackId, effectId?, title, component:{name,
             // manufacturerName, isV3}, body ("generic"|"custom"), alreadyOpen,
             // frame:{x,y,width,height}, warning?}.
+            try params.rejectUnknownKeys(
+                ["trackId", "effectId", "x", "y"], verb: "plugin.openUI")
             let target = try requirePluginTarget(params)
             guard let pluginUI else {
                 throw ControlError(
@@ -2771,6 +3086,8 @@ public final class CommandRouter {
             // instrument window). Headless (no app UI) errors like plugin.openUI.
             // Response: {closed: true|false} (false = honest no-op, the window
             // was not open).
+            try params.rejectUnknownKeys(
+                ["trackId", "effectId"], verb: "plugin.closeUI")
             let closeTarget = try pluginCloseTarget(params)
             guard let pluginUI else {
                 throw ControlError(
@@ -3790,24 +4107,69 @@ public final class CommandRouter {
     /// (optional, 50...75, default 50 — the wire name for `swingPercent`),
     /// `quantizeEnds` (optional bool, default false). Shared shape iii-f's audio
     /// quantize and iii-g's groove ref (resolved to `settings.groove`) extend.
+    ///
+    /// DUAL-ERROR FIX (m16-e, audit F8b): every field is validated and every
+    /// problem COLLECTED — not just the first `guard` hit — so a call broken in
+    /// two ways (the audit's measured case: no `gridBeats` + an unknown `groove`
+    /// name) reports BOTH in one round trip instead of costing the caller a
+    /// second one to discover the groove typo after fixing gridBeats. A single
+    /// problem still throws its own plain message (every existing single-error
+    /// test keeps matching); 2+ problems join into one numbered message via
+    /// `combinedFieldProblems`.
     private func parseQuantizeSettings(_ params: [String: JSONValue]) throws -> QuantizeSettings {
-        let gridBeats = try params.require("gridBeats", \.doubleValue)
-        guard gridBeats > 0 else {
-            throw ControlError("'gridBeats' must be greater than 0 (beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16)")
+        var problems: [String] = []
+
+        var gridBeats = 0.0
+        if let raw = params["gridBeats"]?.doubleValue {
+            if raw > 0 {
+                gridBeats = raw
+            } else {
+                problems.append("'gridBeats' must be greater than 0 (beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16)")
+            }
+        } else {
+            problems.append("missing or invalid required param 'gridBeats'")
         }
+
         let strength = params["strength"]?.doubleValue ?? 1
-        guard (0...1).contains(strength) else {
-            throw ControlError("'strength' must be between 0 and 1 (1 = snap fully, 0.5 = halfway, 0 = leave notes)")
+        if !(0...1).contains(strength) {
+            problems.append("'strength' must be between 0 and 1 (1 = snap fully, 0.5 = halfway, 0 = leave notes)")
         }
+
         let swing = params["swing"]?.doubleValue ?? 50
-        guard (50...75).contains(swing) else {
-            throw ControlError("'swing' must be between 50 and 75 (50 = straight, 75 = max MPC shuffle)")
+        if !(50...75).contains(swing) {
+            problems.append("'swing' must be between 50 and 75 (50 = straight, 75 = max MPC shuffle)")
         }
+
         let quantizeEnds = params["quantizeEnds"]?.boolValue ?? false
-        let groove = try resolveGrooveParam(params["groove"])
+        var groove: GrooveTemplate?
+        do {
+            groove = try resolveGrooveParam(params["groove"])
+        } catch let error as ControlError {
+            problems.append(error.message)
+        }
+
+        guard problems.isEmpty else {
+            throw combinedFieldProblems(problems, verb: "clip.quantize")
+        }
         return QuantizeSettings(gridBeats: gridBeats, strength: strength,
                                 swingPercent: swing, quantizeEnds: quantizeEnds,
                                 groove: groove)
+    }
+
+    /// Joins 2+ field-validation problems into ONE teaching error (m16-e, audit
+    /// F8b) instead of surfacing only the first — a compound mistake (e.g. a
+    /// missing required param AND an unknown enum value elsewhere in the same
+    /// call) otherwise costs the caller one round trip per problem. A single
+    /// problem is returned VERBATIM (unchanged from the pre-m16-e single-`guard`
+    /// wording) so every existing single-error test keeps matching exactly.
+    private func combinedFieldProblems(_ problems: [String], verb: String) -> ControlError {
+        guard problems.count > 1 else {
+            return ControlError(problems.first ?? "\(verb): invalid parameters")
+        }
+        let numbered = problems.enumerated()
+            .map { "(\($0.offset + 1)) \($0.element)" }
+            .joined(separator: "; ")
+        return ControlError("\(verb): \(problems.count) problems — \(numbered)")
     }
 
     /// Resolves the optional `groove` param (M5 iii-g) — a reserved built-in
@@ -3831,29 +4193,53 @@ public final class CommandRouter {
     /// (M5 iii-f), reusing the shared `gridBeats`/`strength`/`swing` validation
     /// shape and adding `sensitivity` (0...1, default 0.5) and `crossfadeMs`
     /// (0...50 ms, default 10 — the model clamps to 0...0.05 s). `groove?` is the
-    /// iii-g seam.
+    /// iii-g seam. Same dual-error collection as `parseQuantizeSettings` (m16-e,
+    /// audit F8b) — every field validates independently and every problem is
+    /// reported together via `combinedFieldProblems`.
     private func parseAudioQuantizeSettings(_ params: [String: JSONValue]) throws -> AudioQuantizeSettings {
-        let gridBeats = try params.require("gridBeats", \.doubleValue)
-        guard gridBeats > 0 else {
-            throw ControlError("'gridBeats' must be greater than 0 (beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16)")
+        var problems: [String] = []
+
+        var gridBeats = 0.0
+        if let raw = params["gridBeats"]?.doubleValue {
+            if raw > 0 {
+                gridBeats = raw
+            } else {
+                problems.append("'gridBeats' must be greater than 0 (beats: 1 = 1/4 note, 0.5 = 1/8, 0.25 = 1/16)")
+            }
+        } else {
+            problems.append("missing or invalid required param 'gridBeats'")
         }
+
         let strength = params["strength"]?.doubleValue ?? 1
-        guard (0...1).contains(strength) else {
-            throw ControlError("'strength' must be between 0 and 1 (1 = snap fully, 0.5 = halfway, 0 = leave slices)")
+        if !(0...1).contains(strength) {
+            problems.append("'strength' must be between 0 and 1 (1 = snap fully, 0.5 = halfway, 0 = leave slices)")
         }
+
         let swing = params["swing"]?.doubleValue ?? 50
-        guard (50...75).contains(swing) else {
-            throw ControlError("'swing' must be between 50 and 75 (50 = straight, 75 = max MPC shuffle)")
+        if !(50...75).contains(swing) {
+            problems.append("'swing' must be between 50 and 75 (50 = straight, 75 = max MPC shuffle)")
         }
+
         let sensitivity = params["sensitivity"]?.doubleValue ?? 0.5
-        guard (0...1).contains(sensitivity) else {
-            throw ControlError("'sensitivity' must be between 0 and 1 (0.5 = default; higher finds more onsets)")
+        if !(0...1).contains(sensitivity) {
+            problems.append("'sensitivity' must be between 0 and 1 (0.5 = default; higher finds more onsets)")
         }
+
         let crossfadeMs = params["crossfadeMs"]?.doubleValue ?? 10
-        guard (0...50).contains(crossfadeMs) else {
-            throw ControlError("'crossfadeMs' must be between 0 and 50 (default 10 — join crossfade width in milliseconds)")
+        if !(0...50).contains(crossfadeMs) {
+            problems.append("'crossfadeMs' must be between 0 and 50 (default 10 — join crossfade width in milliseconds)")
         }
-        let groove = try resolveGrooveParam(params["groove"])
+
+        var groove: GrooveTemplate?
+        do {
+            groove = try resolveGrooveParam(params["groove"])
+        } catch let error as ControlError {
+            problems.append(error.message)
+        }
+
+        guard problems.isEmpty else {
+            throw combinedFieldProblems(problems, verb: "clip.quantizeAudio")
+        }
         return AudioQuantizeSettings(
             gridBeats: gridBeats, strength: strength, swingPercent: swing,
             groove: groove, sensitivity: sensitivity,
@@ -4146,6 +4532,23 @@ public final class CommandRouter {
         return .object(root)
     }
 
+    /// The `discardedRecovery` honesty echo (m16-e, audit F3) for
+    /// project.new/open/save, each of which routes through
+    /// `ProjectStore.invalidateCrashRecovery()` as a SIDE EFFECT of an
+    /// unrelated transition. `before` is the offer status captured immediately
+    /// before the mutating store call; this compares it against the CURRENT
+    /// status and, only when an offer that was available is now gone, echoes
+    /// the offer's own facts back (minus the now-redundant `available: true`)
+    /// so the response says "you just lost this" instead of staying silent.
+    /// Returns nil when there was nothing to discard (the common case, and
+    /// also true when the call THREW before reaching this point).
+    private func discardedRecoveryField(before: AutosaveRecoveryStatus) throws -> JSONValue? {
+        guard before.available, !store.recoveryStatus().available else { return nil }
+        var obj = try JSONValue(encoding: before).objectValue ?? [:]
+        obj.removeValue(forKey: "available")
+        return .object(obj)
+    }
+
     /// The base instrument wire JSON plus, for kind audioUnit, the resolved
     /// "audioUnit" object {type, subType, manufacturer, name, manufacturerName,
     /// status}. `status` comes from the store's engine forwarder ("pending"
@@ -4271,14 +4674,22 @@ extension [String: JSONValue] {
     }
 
     /// Rejects any parameter key not in `allowed` with a teaching error naming
-    /// the offending key(s) and the valid ones (m15-d, audit F5 hardening). Used
-    /// ONLY by the "omit = destructive default" verbs — `track.setOutput`
-    /// (omitting `busId` un-routes to master) and `input.setDevice` (omitting
-    /// `uid` resets to the system-default input) — where a typo'd key would
-    /// otherwise be silently ignored AND the real key's absence would apply the
-    /// destructive default. Verbs whose optional params keep the CURRENT value on
-    /// omission (partial updates like `track.setInstrument`, `clip.setStretch`)
-    /// deliberately do NOT call this: an ignored typo there is a harmless no-op.
+    /// the offending key(s) and the valid ones (m15-d, audit F5 hardening).
+    ///
+    /// m15-d scoped this to only the two "omit = destructive default" verbs
+    /// (`track.setOutput`/`input.setDevice`), reasoning that an ignored typo on a
+    /// partial-update verb (omission keeps the CURRENT value) is a harmless no-op.
+    /// audit-m16 F5 disproved the generalization: `track.add {type:"instrument"}`
+    /// silently ignored the typo'd key (the real key is `kind`) and the omitted
+    /// `kind`'s default (audio) created the WRONG OBJECT KIND, not a no-op — a
+    /// class the old scoping missed entirely. m16-e widens this to essentially
+    /// every mutating verb: an unrecognized key is ALWAYS worth surfacing, whether
+    /// the param it collides with is destructive-default, wrong-object-created, or
+    /// truly a no-op — the agent typo'd something, and the cheapest possible
+    /// response is a same-round-trip teaching error instead of silent divergence
+    /// from what the agent asked for. This call does NOT change omit semantics:
+    /// a verb whose optional param legitimately keeps the current value on
+    /// OMISSION still does — this only rejects keys that aren't recognized at all.
     /// `allowed` is sorted for a deterministic, contract-stable message.
     func rejectUnknownKeys(_ allowed: Set<String>, verb: String, hint: String? = nil) throws {
         let unknown = keys.filter { !allowed.contains($0) }.sorted()

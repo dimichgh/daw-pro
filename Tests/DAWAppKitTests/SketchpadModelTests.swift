@@ -205,6 +205,47 @@ import AIServices
         }
     }
 
+    @Test func terminalPollThrowFlipsTheCandidateToFailedWithTheWorkerMessage() async {
+        // m17-h honesty fix: the REAL client surfaces an upstream failure by
+        // THROWING `ACEStepError.jobFailed` (never returning a `.failed`
+        // status), and before this mapping a genuinely failed job sat in
+        // "reconnecting" forever — the exact "user does not know if it failed"
+        // complaint. The worker's message must land verbatim.
+        let gen = FakeGenerator()
+        let model = healthyModel(gen)
+        model.prompt = "x"
+        await model.generate()
+        let job = model.candidates[0].jobID
+        await gen.script(job, [
+            .failure(ACEStepError.jobFailed(jobID: job, message: "CUDA out of memory on step 6")),
+        ])
+        await model.refresh()
+        if case .failed(let message) = model.candidates[0].state {
+            #expect(message == "CUDA out of memory on step 6")
+        } else {
+            Issue.record("expected failed, got \(model.candidates[0].state)")
+        }
+        #expect(!model.candidates[0].isStale, "terminal failure is not a transient blip")
+        #expect(!model.hasActiveCandidates)
+    }
+
+    @Test func jobNotFoundPollThrowIsTerminalToo() async {
+        // An expired/lost job (sidecar restarted, ~24h retention) must read as
+        // failed, not poll forever.
+        let gen = FakeGenerator()
+        let model = healthyModel(gen)
+        model.prompt = "x"
+        await model.generate()
+        let job = model.candidates[0].jobID
+        await gen.script(job, [.failure(ACEStepError.jobNotFound(job))])
+        await model.refresh()
+        if case .failed(let message) = model.candidates[0].state {
+            #expect(message.contains(job))
+        } else {
+            Issue.record("expected failed, got \(model.candidates[0].state)")
+        }
+    }
+
     @Test func refreshOnlyPollsActiveCandidates() async {
         // A succeeded (terminal) candidate must not be re-polled back into flux.
         let gen = FakeGenerator()
@@ -305,20 +346,36 @@ import AIServices
         #expect(model.canGenerate)
     }
 
-    @Test func notRunningSidecarOffersStart() {
+    @Test func notRunningSidecarOffersStartAndArmsAutoStartGenerate() {
         let model = SketchpadModel(generator: FakeGenerator(),
                                    importer: { _ in SketchpadImportResult(trackID: UUID(), trackName: "x") })
         model.prompt = "warm pads"
         model.updateSidecar(SidecarStatus(state: .installedNotRunning,
                                           message: "ACE-Step is installed but not running — call ai.sidecarStart."))
-        #expect(model.canGenerate == false)
+        // m17-h auto-start: an installed-but-stopped sidecar no longer blocks
+        // Generate — the observing generator boots it on submit and the
+        // progress card narrates the boot. The banner + Start button remain.
+        #expect(model.canGenerate == true)
         let banner = model.banner
         #expect(banner?.canStartSidecar == true)
         #expect(banner?.tone == .warning)
         // The banner translates to user-speak; the wire message (agent-facing
         // "call ai.sidecarStart") must never reach this surface.
-        #expect(banner?.message == "The AI generator is installed but not running — press Start to launch it.")
+        #expect(banner?.message == "The AI generator is not running — Generate will start it for you, "
+            + "or press Start to launch it now.")
         #expect(banner?.message.contains("ai.sidecarStart") == false)
+    }
+
+    @Test func notInstalledAndErrorStatesStillBlockGenerate() {
+        // Auto-start can't fix a missing install or a broken sidecar — the
+        // m17-h arming stops at exactly those states.
+        let model = SketchpadModel(generator: FakeGenerator(),
+                                   importer: { _ in SketchpadImportResult(trackID: UUID(), trackName: "x") })
+        model.prompt = "warm pads"
+        model.updateSidecar(SidecarStatus(state: .notInstalled, message: "run install.sh"))
+        #expect(model.canGenerate == false)
+        model.updateSidecar(SidecarStatus(state: .error, message: "bad /health payload"))
+        #expect(model.canGenerate == false)
     }
 
     @Test func notInstalledAndErrorBannersDoNotOfferStart() {
@@ -380,13 +437,16 @@ import AIServices
         #expect(banner?.message == "[dry-run] would spawn: /bin/bash run.sh")
     }
 
-    @Test func startingBannerNeverOffersAGenerateEitherAsCanGenerateStaysFalse() {
+    @Test func startingBannerKeepsGenerateArmedForTheAutoStartPath() {
+        // m17-h: a boot in flight no longer disarms Generate — the observing
+        // generator's submit waits through the boot (awaitsBoot) and the
+        // progress card narrates it. Pre-m17-h this pinned canGenerate false.
         let model = SketchpadModel(generator: FakeGenerator(),
                                    importer: { _ in SketchpadImportResult(trackID: UUID(), trackName: "x") })
         model.prompt = "warm pads"
         model.updateSidecar(SidecarStatus(
             state: .starting, message: "starting", phase: "loading models…", startingForSeconds: 5))
-        #expect(model.canGenerate == false)
+        #expect(model.canGenerate == true)
     }
 
     // MARK: - Duration stepper

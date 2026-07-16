@@ -66,7 +66,11 @@ struct InstrumentChip: View {
 
     var body: some View {
         Button(action: onOpen) {
-            HStack(spacing: compact ? 4 : 6) {
+            // Full-variant spacing/padding are tuned so the DEFAULT built-in name
+            // ("Poly Synth") renders untruncated inside the mixer strip's fixed
+            // 132 pt width (m17-f F5) — at 6/8 the label budget fell ~2 pt short
+            // and every strip in a fresh session read "Poly Sy…".
+            HStack(spacing: compact ? 4 : 5) {
                 Image(systemName: failureReason != nil ? "exclamationmark.triangle.fill" : glyph)
                     .font(.system(size: compact ? 9 : 10, weight: .semibold))
                     .foregroundStyle(iconColor)
@@ -92,7 +96,7 @@ struct InstrumentChip: View {
                     PendingDot()
                 }
             }
-            .padding(.horizontal, compact ? 6 : 8)
+            .padding(.horizontal, 6)
             .padding(.vertical, compact ? 3 : 5)
             .frame(maxWidth: compact ? nil : .infinity, alignment: .leading)
             .background(DAWTheme.panelRaised.opacity(compact ? 0.7 : 1))

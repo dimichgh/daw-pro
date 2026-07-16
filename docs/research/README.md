@@ -14,3 +14,7 @@ Standing questions (pick these up first):
 Answered:
 - ~~Suno official API~~ — none exists publicly (2026-07-05); pivoted to local ACE-Step-1.5 → `2026-07-05-ace-step-local-song-generation.md`.
 - ~~DiffSinger-class local singing synthesis~~ — superseded: ACE-Step-1.5 sings, locally.
+- ~~SFZ / DecentSampler `.dspreset` import feasibility (m18-h)~~ — DONE both halves: format research
+  (opcode census, `.dspreset` survey, licensing) → `2026-07-16-spike-sfz-dspreset-formats.md`;
+  mapping design + estimate → `2026-07-16-spike-sfz-dspreset-design.md` (**GO**, 10–11 days across
+  four proposed items: selection dimension, per-zone scalars/ADSR, SFZ importer, `.dspreset` importer).
