@@ -27,6 +27,10 @@ struct InstrumentPickerOverlay: View {
     var onChoose: (InstrumentChoice) -> Void
     /// NSOpenPanel → `model.importBank` (not headless, so it lives in the app view).
     var onImport: () -> Void
+    /// NSOpenPanel → `store.importSampleLibrary` (m19-c): imports an .sfz
+    /// (documented subset) or .dspreset sample-library file onto this
+    /// track's built-in Sampler. Sits beside the sound-bank import flow.
+    var onImportSampleLibrary: () -> Void
     var onClose: () -> Void
 
     /// The picker's stable panel ID for the shared density store.
@@ -152,15 +156,66 @@ struct InstrumentPickerOverlay: View {
         let items = model.builtIns
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                sectionLabel("BUILT-IN")
+                // The sample-library import lands on the built-in Sampler, so
+                // its affordance lives on THIS section (the sound-bank import
+                // button precedent below).
+                sectionLabel("BUILT-IN", trailing: AnyView(sampleLibraryImportButton))
                 ForEach(items) { item in
                     row(title: item.name, subtitle: item.detail, glyph: "waveform.path",
                         isCurrent: model.isCurrent(item.choice)) {
                         onChoose(item.choice)
                     }
                 }
+                if let notice = model.importNotice {
+                    inlineNotice(notice)
+                }
             }
         }
+    }
+
+    /// COPY LAW (m19-c): "imports .sfz (documented subset) and .dspreset
+    /// sample-library files" — never a product-compatibility claim.
+    private var sampleLibraryImportButton: some View {
+        Button(action: onImportSampleLibrary) {
+            HStack(spacing: 4) {
+                Image(systemName: "plus")
+                    .font(.system(size: 9, weight: .bold))
+                Text("Import Sample Library…")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundStyle(DAWTheme.textPrimary)   // neutral create-chrome (Rule 3)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Import an .sfz (documented subset) or .dspreset sample-library file onto this track's Sampler")
+    }
+
+    /// The neutral inline notice (m19-c): import-report facts — zone counts
+    /// and degradations — in informational chrome, deliberately NOT the red
+    /// `inlineError` style (a degraded import is a fact, not a failure).
+    private func inlineNotice(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "info.circle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(DAWTheme.textDim)
+            Text(text)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(DAWTheme.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button { model.clearImportNotice() } label: {
+                Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(DAWTheme.textDim)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(8)
+        .background(DAWTheme.panelRaised.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(DAWTheme.hairline, lineWidth: 1))
     }
 
     // MARK: - Sound Banks section

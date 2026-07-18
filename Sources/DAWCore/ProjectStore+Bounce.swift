@@ -114,7 +114,7 @@ extension ProjectStore {
             fromBeat: startBeat, durationSeconds: duration,
             forcedCompensationTargets: targets
         )
-        let measurement = Loudness.measure(audio)
+        let measurement = await Loudness.measureDetached(audio)
 
         // 3. Write into the project-stable media home (survives temp sweeps and
         //    undo/redo resurrection, and folds into the .dawproj media/ on save

@@ -738,7 +738,18 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
                 guard let url else { return nil }  // unresolvable media → drop the zone
                 return SamplerZone(
                     id: zd.id, audioFileURL: url, rootPitch: zd.rootPitch,
-                    minPitch: zd.minPitch, maxPitch: zd.maxPitch, gain: zd.gain)
+                    minPitch: zd.minPitch, maxPitch: zd.maxPitch, gain: zd.gain,
+                    minVelocity: zd.minVelocity, maxVelocity: zd.maxVelocity,
+                    group: zd.group, seqLength: zd.seqLength, seqPosition: zd.seqPosition,
+                    randMin: zd.randMin, randMax: zd.randMax,
+                    tuneCents: zd.tuneCents, pan: zd.pan, ampVelTrack: zd.ampVelTrack,
+                    oneShot: zd.oneShot, startFrame: zd.startFrame, endFrame: zd.endFrame,
+                    attack: zd.attack, decay: zd.decay, sustain: zd.sustain,
+                    release: zd.release,
+                    // m20-g: tolerant decode — an unknown loopMode rawValue
+                    // resolves to nil (no loop) rather than failing the open.
+                    loopMode: zd.loopMode.flatMap(SamplerLoopMode.init(rawValue:)),
+                    loopStart: zd.loopStart, loopEnd: zd.loopEnd)
             }
             return SamplerParams(zones: zones, oneShot: s.oneShot,
                                  attack: s.attack, release: s.release, gain: s.gain)
@@ -789,6 +800,12 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
 /// (self-contained bundle), an absolute path (recovery bundles only), or null
 /// (source missing at save). `id` is required (identity); pitch/gain fields are
 /// additive-optional with the model's defaults.
+///
+/// m19-a selection fields (minVelocity...randMax) and m19-b playback scalars
+/// (tuneCents...release) persist as additive-optional keys that are OMITTED
+/// when nil (the ClipDocument omit-when-default rule) — a pre-m19 zone's
+/// document shape stays byte-identical across a round trip, and pre-m19
+/// project files decode every new field as nil (= the legacy behavior).
 public struct SamplerZoneDocument: Codable, Sendable, Equatable {
     public var id: UUID
     public var media: String?
@@ -796,9 +813,37 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
     public var minPitch: Int
     public var maxPitch: Int
     public var gain: Double
+    // m19-a selection dimension — nil never encodes.
+    public var minVelocity: Int?
+    public var maxVelocity: Int?
+    public var group: Int?
+    public var seqLength: Int?
+    public var seqPosition: Int?
+    public var randMin: Double?
+    public var randMax: Double?
+    // m19-b playback scalars — nil never encodes.
+    public var tuneCents: Double?
+    public var pan: Double?
+    public var ampVelTrack: Double?
+    public var oneShot: Bool?
+    public var startFrame: Int?
+    public var endFrame: Int?
+    public var attack: Double?
+    public var decay: Double?
+    public var sustain: Double?
+    public var release: Double?
+    // m20-g loop fields — nil never encodes. loopMode is the enum's rawValue;
+    // the document layer stays string-typed like `media`.
+    public var loopMode: String?
+    public var loopStart: Int?
+    public var loopEnd: Int?
 
     private enum CodingKeys: String, CodingKey {
         case id, media, rootPitch, minPitch, maxPitch, gain
+        case minVelocity, maxVelocity, group, seqLength, seqPosition, randMin, randMax
+        case tuneCents, pan, ampVelTrack, oneShot, startFrame, endFrame
+        case attack, decay, sustain, release
+        case loopMode, loopStart, loopEnd
     }
 
     init(from z: SamplerZone, media: String?) {
@@ -808,6 +853,26 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         minPitch = z.minPitch
         maxPitch = z.maxPitch
         gain = z.gain
+        minVelocity = z.minVelocity
+        maxVelocity = z.maxVelocity
+        group = z.group
+        seqLength = z.seqLength
+        seqPosition = z.seqPosition
+        randMin = z.randMin
+        randMax = z.randMax
+        tuneCents = z.tuneCents
+        pan = z.pan
+        ampVelTrack = z.ampVelTrack
+        oneShot = z.oneShot
+        startFrame = z.startFrame
+        endFrame = z.endFrame
+        attack = z.attack
+        decay = z.decay
+        sustain = z.sustain
+        release = z.release
+        loopMode = z.loopMode?.rawValue
+        loopStart = z.loopStart
+        loopEnd = z.loopEnd
     }
 
     public init(from decoder: any Decoder) throws {
@@ -818,6 +883,26 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         minPitch = try c.decodeIfPresent(Int.self, forKey: .minPitch) ?? 0
         maxPitch = try c.decodeIfPresent(Int.self, forKey: .maxPitch) ?? 127
         gain = try c.decodeIfPresent(Double.self, forKey: .gain) ?? 1
+        minVelocity = try c.decodeIfPresent(Int.self, forKey: .minVelocity)
+        maxVelocity = try c.decodeIfPresent(Int.self, forKey: .maxVelocity)
+        group = try c.decodeIfPresent(Int.self, forKey: .group)
+        seqLength = try c.decodeIfPresent(Int.self, forKey: .seqLength)
+        seqPosition = try c.decodeIfPresent(Int.self, forKey: .seqPosition)
+        randMin = try c.decodeIfPresent(Double.self, forKey: .randMin)
+        randMax = try c.decodeIfPresent(Double.self, forKey: .randMax)
+        tuneCents = try c.decodeIfPresent(Double.self, forKey: .tuneCents)
+        pan = try c.decodeIfPresent(Double.self, forKey: .pan)
+        ampVelTrack = try c.decodeIfPresent(Double.self, forKey: .ampVelTrack)
+        oneShot = try c.decodeIfPresent(Bool.self, forKey: .oneShot)
+        startFrame = try c.decodeIfPresent(Int.self, forKey: .startFrame)
+        endFrame = try c.decodeIfPresent(Int.self, forKey: .endFrame)
+        attack = try c.decodeIfPresent(Double.self, forKey: .attack)
+        decay = try c.decodeIfPresent(Double.self, forKey: .decay)
+        sustain = try c.decodeIfPresent(Double.self, forKey: .sustain)
+        release = try c.decodeIfPresent(Double.self, forKey: .release)
+        loopMode = try c.decodeIfPresent(String.self, forKey: .loopMode)
+        loopStart = try c.decodeIfPresent(Int.self, forKey: .loopStart)
+        loopEnd = try c.decodeIfPresent(Int.self, forKey: .loopEnd)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -830,6 +915,26 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         try c.encode(minPitch, forKey: .minPitch)
         try c.encode(maxPitch, forKey: .maxPitch)
         try c.encode(gain, forKey: .gain)
+        try c.encodeIfPresent(minVelocity, forKey: .minVelocity)
+        try c.encodeIfPresent(maxVelocity, forKey: .maxVelocity)
+        try c.encodeIfPresent(group, forKey: .group)
+        try c.encodeIfPresent(seqLength, forKey: .seqLength)
+        try c.encodeIfPresent(seqPosition, forKey: .seqPosition)
+        try c.encodeIfPresent(randMin, forKey: .randMin)
+        try c.encodeIfPresent(randMax, forKey: .randMax)
+        try c.encodeIfPresent(tuneCents, forKey: .tuneCents)
+        try c.encodeIfPresent(pan, forKey: .pan)
+        try c.encodeIfPresent(ampVelTrack, forKey: .ampVelTrack)
+        try c.encodeIfPresent(oneShot, forKey: .oneShot)
+        try c.encodeIfPresent(startFrame, forKey: .startFrame)
+        try c.encodeIfPresent(endFrame, forKey: .endFrame)
+        try c.encodeIfPresent(attack, forKey: .attack)
+        try c.encodeIfPresent(decay, forKey: .decay)
+        try c.encodeIfPresent(sustain, forKey: .sustain)
+        try c.encodeIfPresent(release, forKey: .release)
+        try c.encodeIfPresent(loopMode, forKey: .loopMode)
+        try c.encodeIfPresent(loopStart, forKey: .loopStart)
+        try c.encodeIfPresent(loopEnd, forKey: .loopEnd)
     }
 }
 

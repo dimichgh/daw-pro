@@ -1,0 +1,8 @@
+# Everything install.sh creates/derives — never checked in (engine clone,
+# Python venv, symlinked/derived model weights, conversion outputs, logs,
+# and the voice store: voices are the USER'S OWN trained models and never
+# belong in git). Only install.sh/run.sh/server.py/README.md/.gitignore
+# are tracked.
+runtime/
+.install-state.json
+*.pid

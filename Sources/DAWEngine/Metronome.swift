@@ -94,10 +94,18 @@ final class Metronome {
     /// graph rate (same explicit-format rule as PlaybackGraph's track mixers:
     /// `format: nil` would force a second SRC and break sample accuracy).
     /// Click buffers are (re)built here when the rate changed. Idempotent.
-    func attach(to engine: AVAudioEngine) {
+    /// m20-c: production callers pass the graph's INJECTED rate so the click
+    /// edge and buffers share the same build-time rate as every other edge;
+    /// nil (headless test rigs only) keeps the legacy output-node query.
+    func attach(to engine: AVAudioEngine, graphRate: Double? = nil) {
         guard player.engine == nil else { return }
-        let graphRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-        let rate = graphRate > 0 ? graphRate : 48_000
+        let rate: Double
+        if let graphRate {
+            rate = graphRate
+        } else {
+            let queried = engine.outputNode.outputFormat(forBus: 0).sampleRate
+            rate = queried > 0 ? queried : 48_000
+        }
         guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2) else {
             return
         }

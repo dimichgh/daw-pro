@@ -415,6 +415,28 @@ the orchestrator to file):
   *(v2 candidates filed separately, not as boxes: loops + `smpl` chunk; `.dslibrary` unzip;
   streaming/background sample load.)*
 
+### 10.0 Implementation amendments (m19-a, landed 2026-07-16)
+
+Recorded per the deviations-return-to-the-doc rule; none change the §2.2 tiers or §4 semantics:
+
+- **A-imp-1 (wire readback, extends §3's ride-along):** `instrumentJSON` emits the seven selection keys per zone ONLY when non-nil — an agent that sets `minVelocity` reads it back; a legacy zone's wire shape stays byte-identical.
+- **A-imp-2 (MCP copy):** the old `zones` description ("zones are not layered — exactly one, if any, sounds per note") became untrue under groups; rewritten to teach group/first-match semantics. Description only.
+- **A-imp-3 (clamps, elided by §3):** velocities clamp 0...127 + swap-if-reversed (the pitch idiom); `group` clamps ≥ 0 (negatives reserved — `Int32.min` is the engine's lastFiredGroup sentinel); `seqLength` → max(1,·); `seqPosition` → 1...seqLength; rand values clamp 0...1 + swap-if-reversed; engine converts with `Int32(clamping:)` so extreme wire ints cannot trap.
+- **A-imp-4 (sort):** the §4.1 stable sort is explicit (enumerated-offset tiebreaker) rather than relying on stdlib stability.
+- **A-imp-5 (RNG mapping):** draw = top 24 bits of the xorshift64*-scrambled state → Float in [0,1); a zero seed substitutes a fixed odd constant (xorshift degenerate-state guard). Known, accepted: UInt32 RR counters phase-shift non-power-of-two cycles once per ~2³² range matches on wrap — practically unreachable.
+
+### 10.0b Implementation amendments (m19-b, landed 2026-07-16)
+
+Same rule; none change the §2.2 tiers or the §4.4–4.5 semantics:
+
+- **B-imp-1 (tuneCents clamp, elided by §3):** ±4,800 cents (±4 octaves) — wide enough for SFZ `transpose`×100 + `tune`.
+- **B-imp-2 (pan nil ≠ 0 — bit-compat carve-out to §4.5):** `pan == nil` resolves to `panL = panR = 1.0` EXACTLY (the legacy unity dual-mono gains, preserved through the ×1.0 IEEE identity); only a PRESENT pan engages the constant-power `cos/sin((p+1)π/4)` law, placing an explicit 0 at 0.7071 (−3 dB center). The legacy-suite hard gate forbids a −3 dB shift on nil zones; the MCP description teaches the distinction.
+- **B-imp-3 (start/end policy):** the model clamps start ≥ 0 and RAISES end to start+1 — never swaps (a swap would silently invert skip-vs-stop intent); the engine re-clamps both against the real file length defensively (raw Codable decode bypasses the model init and these bound pointer reads), noting degeneracy in `zoneLoadNotes`.
+- **B-imp-4 (one-shot inherit mechanics):** the voice copies the zone's tri-state (−1 inherit / 0 / 1) at trigger; noteOff resolves −1 against the LIVE global (mid-note global toggles behave exactly as pre-m19-b), 0/1 wins; one-shot voices never mark `sustained`, keeping the pedal-up sweep a structural no-op.
+- **B-imp-5 (envelope sentinels + clamps):** only attack/release carry the −1 inherit sentinel (trigger-time fallback to the LIVE global coefficients — the §4.4 semantic shift applies solely to them); decay/sustain resolve at init to constant defaults (0 / 1, no globals exist). Decay uses the PolySynth time-accurate law `(1 − sustain)/(decay·rate)` with the `max(1,·)` guard. Clamps: attack → `SamplerParams.attackRange` (0...1); decay 0...8 with NO floor (present-0 must stay legal — it equals the nil default); sustain 0...1; release → `SamplerParams.releaseRange` (0.001...8).
+- **B-imp-6 (start/end storage type):** `LoadedZone` stores start/end as `Int` (not the §4.1 sketch's Int32) to compare directly against the `Int` playhead index with zero per-frame conversions.
+- **B-imp-7 (persistence gap, discovered and fixed):** `SamplerZoneDocument` carried NONE of the m19-a/m19-b zone fields — a project save→reopen silently dropped all 17 (m19-a shipped with this data-loss hole). Extended additively with omit-when-nil encoding (the ClipDocument rule): legacy zone documents stay byte-identical, pre-m19 bundles decode all-nil. Covered by `SamplerZonePersistenceTests`; the §3 "no Codable break" claim now genuinely holds end-to-end through the document layer.
+
 ### 10.1 The researcher's 7 open questions, answered
 
 1. **Velocity on `SamplerZone` vs a parallel structure?** On the zone, as additive-optional

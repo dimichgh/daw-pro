@@ -1314,6 +1314,25 @@ public struct SamplerParams: Codable, Sendable, Equatable {
 
 /// One sampler key zone: an audio file mapped across a pitch span, played
 /// back resampled relative to its root pitch.
+///
+/// m19-a selection dimension (design 2026-07-16 §3): everything below `gain`
+/// is ADDITIVE-OPTIONAL — pre-m19 project files decode the new fields as nil,
+/// and nil is defined to reproduce the original pitch-only first-match
+/// behavior exactly (implicit group 0, full velocity span, no round-robin or
+/// random gate).
+///
+/// m19-b playback scalars (design §3/§4.4/§4.5): the fields from `tuneCents`
+/// down are the same additive-optional contract — nil reproduces the pre-m19
+/// playback law byte-for-byte (no retune, unity dual-mono, velocity/127 amp,
+/// global one-shot, full file span, global attack/release with no decay stage
+/// and full sustain).
+/// Loop behavior (m20-g). nil = no loop — the pre-m20-g playback law
+/// byte-for-byte. `.sustain` loops while the note (or CC64) holds and plays
+/// through past the loop end on release; `.continuous` loops through the
+/// release. A looping zone's voices are never one-shot (loopMode wins over
+/// `oneShot` — see SamplerInstrument).
+public enum SamplerLoopMode: String, Codable, Sendable { case sustain, continuous }
+
 public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
     public let id: UUID
     public var audioFileURL: URL
@@ -1322,11 +1341,87 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
     /// Inclusive pitch span this zone responds to (clamped; swapped if reversed).
     public var minPitch: Int
     public var maxPitch: Int
-    /// Per-zone gain, 0...1.
+    /// Per-zone gain, 0...2 (m19-b, amendment A5: relaxed from 0...1 so SFZ
+    /// `volume` up to +6 dB imports at level).
     public var gain: Double
+    /// Inclusive velocity span (m19-a): the zone responds only to note-ons
+    /// whose velocity falls inside it (clamped; swapped if reversed).
+    /// nil = 0 / 127 — all velocities, today's behavior.
+    public var minVelocity: Int?
+    public var maxVelocity: Int?
+    /// Layering identity (m19-a): zones in DIFFERENT groups layer (one voice
+    /// per group per note-on); within the SAME group the first eligible zone
+    /// wins. nil = implicit group 0, reserved for hand-built/legacy zones so
+    /// their relative order — and first-match behavior — is preserved exactly.
+    public var group: Int?
+    /// Round-robin (m19-a): with `seqLength` N > 1 the zone plays only on the
+    /// `seqPosition`-th of every N consecutive range matches (ARIA per-region
+    /// counters). nil/1 = no round-robin gate; `seqPosition` nil = 1.
+    public var seqLength: Int?
+    public var seqPosition: Int?
+    /// Random alternation (m19-a): one random draw in [0, 1) per note-on
+    /// selects zones whose [randMin, randMax) span contains it (randMax 1
+    /// closes the interval). nil = 0 / 1 — always eligible.
+    public var randMin: Double?
+    public var randMax: Double?
+    /// Pitch offset in cents, ±4800 (±4 octaves — the design elides the clamp;
+    /// documented here as the m19-b choice, wide enough for SFZ
+    /// `transpose`×100 + `tune`). nil = 0 = no retune.
+    public var tuneCents: Double?
+    /// Stereo placement, −1 (hard left) ... +1 (hard right), constant-power
+    /// −3 dB-center law. nil is NOT the same as an explicit 0: nil keeps the
+    /// legacy unity dual-mono gains (1.0/1.0) byte-for-byte, while a PRESENT 0
+    /// sits at the pan law's 0.7071 center — see
+    /// `SamplerInstrument.LoadedZone`.
+    public var pan: Double?
+    /// Velocity→amplitude depth, 0...1: 1 = today's velocity/127 law, 0 =
+    /// velocity ignored (full level at any velocity). nil = 1.
+    public var ampVelTrack: Double?
+    /// Per-zone one-shot override: true/false forces it for this zone's
+    /// voices; nil = inherit the live `SamplerParams.oneShot` global.
+    public var oneShot: Bool?
+    /// Playback span in SOURCE-FILE frames: `startFrame` ≥ 0 (nil = 0) is
+    /// where the playhead starts, `endFrame` (nil = file end) is where the
+    /// voice frees itself. Clamped so end > start (end raises to start + 1
+    /// rather than swapping — a swap would silently invert skip-vs-stop
+    /// intent); the engine further clamps both to the real file length.
+    public var startFrame: Int?
+    public var endFrame: Int?
+    /// Per-zone envelope (m19-b, design §4.4), seconds/level. `attack` nil =
+    /// the live `SamplerParams.attack` global (clamped to its 0...1 range);
+    /// `decay` nil = 0 = no decay stage (present-0 stays legal, so the clamp
+    /// is 0...8 with NO minimum floor); `sustain` nil = 1 (hold at peak);
+    /// `release` nil = the live `SamplerParams.release` global (clamped to
+    /// its 0.001...8 range).
+    public var attack: Double?
+    public var decay: Double?
+    public var sustain: Double?
+    public var release: Double?
+    /// Loop behavior (m20-g). nil = no loop — the pre-m20-g playback law
+    /// byte-for-byte. See `SamplerLoopMode`.
+    public var loopMode: SamplerLoopMode?
+    /// Loop span in SOURCE-FILE frames, same conventions as startFrame/endFrame:
+    /// loopStart inclusive (nil = 0), loopEnd EXCLUSIVE (nil = the zone's
+    /// resolved end). Ignored when loopMode is nil. Clamped so loopEnd >
+    /// loopStart (raised, not swapped — the endFrame idiom); the engine further
+    /// clamps both into the real playable span.
+    public var loopStart: Int?
+    public var loopEnd: Int?
 
     public static let pitchRange: ClosedRange<Int> = 0...127
-    public static let gainRange: ClosedRange<Double> = 0...1
+    /// m19-b (A5): 0...2 (+6 dB), relaxed from 0...1 — decode-safe for every
+    /// pre-m19-b project (a range relaxation never re-clamps old values).
+    public static let gainRange: ClosedRange<Double> = 0...2
+    public static let velocityRange: ClosedRange<Int> = 0...127
+    public static let randRange: ClosedRange<Double> = 0...1
+    public static let tuneCentsRange: ClosedRange<Double> = -4_800...4_800
+    public static let panRange: ClosedRange<Double> = -1...1
+    public static let ampVelTrackRange: ClosedRange<Double> = 0...1
+    /// Per-zone decay: 0...8 s. Deliberately NOT SamplerParams.releaseRange —
+    /// present-0 must stay legal because it equals the nil default (no decay
+    /// stage).
+    public static let decayRange: ClosedRange<Double> = 0...8
+    public static let sustainRange: ClosedRange<Double> = 0...1
 
     public init(
         id: UUID = UUID(),
@@ -1334,7 +1429,27 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
         rootPitch: Int = 60,
         minPitch: Int = 0,
         maxPitch: Int = 127,
-        gain: Double = 1
+        gain: Double = 1,
+        minVelocity: Int? = nil,
+        maxVelocity: Int? = nil,
+        group: Int? = nil,
+        seqLength: Int? = nil,
+        seqPosition: Int? = nil,
+        randMin: Double? = nil,
+        randMax: Double? = nil,
+        tuneCents: Double? = nil,
+        pan: Double? = nil,
+        ampVelTrack: Double? = nil,
+        oneShot: Bool? = nil,
+        startFrame: Int? = nil,
+        endFrame: Int? = nil,
+        attack: Double? = nil,
+        decay: Double? = nil,
+        sustain: Double? = nil,
+        release: Double? = nil,
+        loopMode: SamplerLoopMode? = nil,
+        loopStart: Int? = nil,
+        loopEnd: Int? = nil
     ) {
         self.id = id
         self.audioFileURL = audioFileURL
@@ -1344,9 +1459,62 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
         self.minPitch = min(lo, hi)
         self.maxPitch = max(lo, hi)
         self.gain = gain.clamped(to: Self.gainRange)
+        // Optionals stay nil when passed nil (the additive-Codable contract);
+        // present values clamp/swap with the same idiom as the pitch span.
+        let vlo = minVelocity.map { $0.clamped(to: Self.velocityRange) }
+        let vhi = maxVelocity.map { $0.clamped(to: Self.velocityRange) }
+        if let vlo, let vhi, vlo > vhi {
+            self.minVelocity = vhi
+            self.maxVelocity = vlo
+        } else {
+            self.minVelocity = vlo
+            self.maxVelocity = vhi
+        }
+        // Negative groups are reserved for engine sentinels — clamp to ≥ 0.
+        self.group = group.map { max(0, $0) }
+        let length = seqLength.map { max(1, $0) }
+        self.seqLength = length
+        self.seqPosition = seqPosition.map { min(max(1, $0), length ?? Int.max) }
+        let rlo = randMin.map { $0.clamped(to: Self.randRange) }
+        let rhi = randMax.map { $0.clamped(to: Self.randRange) }
+        if let rlo, let rhi, rlo > rhi {
+            self.randMin = rhi
+            self.randMax = rlo
+        } else {
+            self.randMin = rlo
+            self.randMax = rhi
+        }
+        // m19-b playback scalars: same idiom — optionals stay nil when nil,
+        // present values clamp to their documented ranges.
+        self.tuneCents = tuneCents.map { $0.clamped(to: Self.tuneCentsRange) }
+        self.pan = pan.map { $0.clamped(to: Self.panRange) }
+        self.ampVelTrack = ampVelTrack.map { $0.clamped(to: Self.ampVelTrackRange) }
+        self.oneShot = oneShot
+        // start ≥ 0; end > start (raised, not swapped — see the field doc).
+        let start = startFrame.map { max(0, $0) }
+        self.startFrame = start
+        self.endFrame = endFrame.map { max($0, (start ?? 0) + 1) }
+        self.attack = attack.map { $0.clamped(to: SamplerParams.attackRange) }
+        self.decay = decay.map { $0.clamped(to: Self.decayRange) }
+        self.sustain = sustain.map { $0.clamped(to: Self.sustainRange) }
+        self.release = release.map { $0.clamped(to: SamplerParams.releaseRange) }
+        // m20-g loops: loopStart ≥ 0; loopEnd > loopStart (raised, not swapped
+        // — the endFrame idiom); the engine further clamps to the real span.
+        self.loopMode = loopMode
+        let ls = loopStart.map { max(0, $0) }
+        self.loopStart = ls
+        self.loopEnd = loopEnd.map { max($0, (ls ?? 0) + 1) }   // raise, never swap
     }
 
     public func contains(pitch: Int) -> Bool { pitch >= minPitch && pitch <= maxPitch }
+
+    /// Pitch ∩ velocity span membership (m19-a), nil-tolerant: nil velocity
+    /// bounds read as the full 0/127 span.
+    public func contains(pitch: Int, velocity: Int) -> Bool {
+        contains(pitch: pitch)
+            && velocity >= (minVelocity ?? 0)
+            && velocity <= (maxVelocity ?? 127)
+    }
 }
 
 /// Parameters for the built-in subtractive poly synth. All values are clamped

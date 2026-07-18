@@ -85,6 +85,49 @@ final class PlaybackGraph {
             bakeFile = reader
             return reader
         }
+
+        // MARK: R1 enqueue ledger (m19-f)
+
+        /// True iff this player has received ≥ 1 `scheduleSegment`/
+        /// `scheduleBuffer` since its last stop (equivalently, since node
+        /// creation) — the EXACT "schedule-empty" predicate of m19-f R1
+        /// (design §2.1): the enqueue ledger itself, never a model-level
+        /// re-derivation of the six schedule guards. `startAllPlayers`,
+        /// `prepareAllPlayers`, and `stopAllPlayers` skip flag-false nodes:
+        /// a started-empty player renders silence, can never receive
+        /// soundable content mid-roll (clipPlans exclusion + the
+        /// drained-queue freeze, see `topUpLoopCycles`), and pays a ~6 ms
+        /// `play(at:)` handshake + ~1 ms `stop()` for nothing. Every path
+        /// that later gives the player a schedule routes through a full
+        /// re-anchored restart, where the flag is set fresh by the new
+        /// enqueues. NOTE: no in-tree consumer reads clip-player
+        /// `isPlaying` (grep-verified, design §5) — a skipped player is
+        /// externally indistinguishable from a started-empty one.
+        private(set) var hasPendingSchedule = false
+
+        /// FUNNEL-ONLY CONVENTION (m19-f R1): these two methods are the ONLY
+        /// legal enqueue surface for clip players. A direct
+        /// `player.scheduleSegment`/`player.scheduleBuffer` call bypasses
+        /// the ledger and births a silently never-started active player —
+        /// the grep-zero gate (design §2.4-2) pins zero such calls outside
+        /// this class (the metronome owns its own player, out of scope).
+        func enqueueSegment(startingFrame: AVAudioFramePosition,
+                            frameCount: AVAudioFrameCount, at when: AVAudioTime?) {
+            hasPendingSchedule = true
+            player.scheduleSegment(file, startingFrame: startingFrame,
+                                   frameCount: frameCount, at: when,
+                                   completionHandler: nil)
+        }
+
+        /// Buffer flavor of the funnel — see `enqueueSegment`.
+        func enqueueBuffer(_ buffer: AVAudioPCMBuffer, at when: AVAudioTime?) {
+            hasPendingSchedule = true
+            player.scheduleBuffer(buffer, at: when, options: [], completionHandler: nil)
+        }
+
+        /// Clears the ledger — call ONLY alongside a queue-clearing
+        /// `player.stop()` (the reschedule primitive's contract).
+        func noteStopped() { hasPendingSchedule = false }
     }
 
     /// One audio track's strip (M4 ii sandwich):
@@ -235,6 +278,15 @@ final class PlaybackGraph {
     }
 
     private let engine: AVAudioEngine
+    /// m20-c (m19-k Phase 1): the graph's processing rate, injected at
+    /// construction. Production owners ALWAYS pass one — `AudioEngine`
+    /// injects the device rate read at build time, `OfflineRenderer` its own
+    /// render rate — so the rate is a build-time fact of the graph, never a
+    /// live query: a mid-life device-rate flip can no longer half-update
+    /// chain rates through `applyParameters` (the graph stays coherent until
+    /// the next full rebuild). nil (headless test graphs only) keeps the
+    /// legacy call-time output-node query in `graphFormat()`.
+    private let graphRate: Double?
     private var trackNodes: [UUID: TrackNode] = [:]
     private var instrumentNodes: [UUID: InstrumentNode] = [:]
     private var busNodes: [UUID: BusNode] = [:]
@@ -487,8 +539,9 @@ final class PlaybackGraph {
         !trackNodes.isEmpty || !instrumentNodes.isEmpty || !busNodes.isEmpty
     }
 
-    init(engine: AVAudioEngine) {
+    init(engine: AVAudioEngine, graphRate: Double? = nil) {
         self.engine = engine
+        self.graphRate = graphRate
     }
 
     // MARK: - Teardown discipline (M9 crash-a → m13-a engine-discard)
@@ -1261,6 +1314,14 @@ final class PlaybackGraph {
         masterAutomationRenderer
     }
 
+    /// The LIVE graph rate exactly as `graphFormat()` resolves it (the
+    /// hardware default output device's rate, 48 kHz fallback when the query
+    /// answers 0). m19-j: device-rate-derived test expectations read this so
+    /// latency pins hold at ANY default-device rate — a 24 kHz Bluetooth
+    /// headset in mic mode is a rate every AirPods user's default device
+    /// actually runs at.
+    var graphSampleRateForTesting: Double { graphFormat().sampleRate }
+
     // MARK: - Parameters
 
     /// Applies volume/pan/mute/solo to each audio and instrument track's mixer
@@ -1825,17 +1886,32 @@ final class PlaybackGraph {
     /// The explicit graph-rate stereo format for every mixer-level
     /// connection. `format: nil` would keep a fresh mixer's default 44.1 kHz
     /// output and force a second SRC in the main mixer, breaking sample
-    /// accuracy (measured: 32-frame onset error at 48 kHz). The output node
-    /// reports the manual-rendering format offline and the hardware format
-    /// live; the 48 kHz fallback covers a not-yet-configured output.
+    /// accuracy (measured: 32-frame onset error at 48 kHz). m20-c: the rate
+    /// is the INJECTED construction rate — every production owner passes one
+    /// (the device rate at build time live, the render rate offline). Only
+    /// un-injected graphs (headless test rigs) keep the legacy call-time
+    /// query: the output node reports the manual-rendering format offline
+    /// and the hardware format live; the 48 kHz fallback covers a
+    /// not-yet-configured output.
     private func graphFormat() -> AVAudioFormat {
-        let outputRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-        let graphRate = outputRate > 0 ? outputRate : 48_000
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: graphRate, channels: 2) else {
-            preconditionFailure("standard \(graphRate) Hz stereo format must exist")
+        let rate: Double
+        if let graphRate {
+            rate = graphRate
+        } else {
+            let outputRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
+            rate = outputRate > 0 ? outputRate : 48_000
+        }
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2) else {
+            preconditionFailure("standard \(rate) Hz stereo format must exist")
         }
         return format
     }
+
+    /// The graph's processing rate exactly as `graphFormat()` resolves it —
+    /// the ONE value AU prepare keys and the metronome's attach format must
+    /// share with every graph edge (m20-c: consumers read the injected
+    /// build-time rate here instead of querying the output node live).
+    var graphSampleRate: Double { graphFormat().sampleRate }
 
     /// One mixer node (attach + meter tap, NO output connect) — shared by
     /// source tracks and buses. Output wiring is the reconcile routing step's
@@ -1987,6 +2063,27 @@ final class PlaybackGraph {
     /// containment soak counts its transitions and pins the bound.
     var loopPrunedBelowCycle: Int? { loopUnroll?.prunedBelowCycle }
 
+    /// Test seam (m19-f R1): one clip player's enqueue-ledger flag — nil
+    /// when the clip has no node (missing media, stretch pending, unknown
+    /// id). Read by IdlePlayerSkipTests T1/T3–T5.
+    func clipHasPendingSchedule(clipID: UUID) -> Bool? {
+        clipNode(for: clipID)?.hasPendingSchedule
+    }
+
+    /// Test seam (m19-f R1): one clip's player node, for `isPlaying`
+    /// observation in the skip gates. Never used by production code — no
+    /// in-tree consumer reads clip-player state (design §5 invariant).
+    func clipPlayerForTesting(clipID: UUID) -> AVAudioPlayerNode? {
+        clipNode(for: clipID)?.player
+    }
+
+    private func clipNode(for clipID: UUID) -> ClipNode? {
+        for node in trackNodes.values {
+            if let clip = node.clips[clipID] { return clip }
+        }
+        return nil
+    }
+
     /// Schedules every clip player-relative: player sample time 0 ≡ transport
     /// position `fromBeat`. All math is in file-rate frames. m12-b: clip
     /// boundaries convert through the tempo-map integral (signed for pre-roll
@@ -2084,12 +2181,10 @@ final class PlaybackGraph {
             // never call player API inline.
             guard plan.needsBake else {
                 // No fades → the pre-i-b single streamed segment, byte for byte.
-                clip.player.scheduleSegment(
-                    clip.file,
+                clip.enqueueSegment(
                     startingFrame: sourceStart,
                     frameCount: AVAudioFrameCount(frameCount),
-                    at: when,
-                    completionHandler: nil
+                    at: when
                 )
                 return
             }
@@ -2129,10 +2224,10 @@ final class PlaybackGraph {
                     code: "clip-fades-skipped",
                     message: "Fades on '\(clip.clip.name)' couldn't be applied this pass — the clip played on time, without its fades.",
                     beat: clip.key.startBeat))
-                clip.player.scheduleSegment(
-                    clip.file, startingFrame: sourceStart,
+                clip.enqueueSegment(
+                    startingFrame: sourceStart,
                     frameCount: AVAudioFrameCount(frameCount),
-                    at: when, completionHandler: nil)
+                    at: when)
                 return
             }
 
@@ -2147,20 +2242,16 @@ final class PlaybackGraph {
                 return anchor
             }
             if let fadeInBuffer {
-                clip.player.scheduleBuffer(fadeInBuffer, at: takeAnchor(),
-                                           options: [], completionHandler: nil)
+                clip.enqueueBuffer(fadeInBuffer, at: takeAnchor())
             }
             if plan.middleFrames > 0 {
-                clip.player.scheduleSegment(
-                    clip.file,
+                clip.enqueueSegment(
                     startingFrame: fileOffsetFrames + plan.fadeInEnd,
                     frameCount: AVAudioFrameCount(plan.middleFrames),
-                    at: takeAnchor(),
-                    completionHandler: nil)
+                    at: takeAnchor())
             }
             if let fadeOutBuffer {
-                clip.player.scheduleBuffer(fadeOutBuffer, at: takeAnchor(),
-                                           options: [], completionHandler: nil)
+                clip.enqueueBuffer(fadeOutBuffer, at: takeAnchor())
             }
         }
 
@@ -2444,6 +2535,22 @@ final class PlaybackGraph {
     private func enqueueLoopCycle(_ cycle: Int, state: LoopUnrollState) {
         let cycleStartSec = state.headSeconds + Double(cycle - 1) * state.cycleSeconds
         for plan in state.clipPlans {
+            // R1 anti-freeze tripwire (m19-f design §2.4-6, the §1.3
+            // invariant): once the roll has STARTED (`midiRollContext`
+            // non-nil — set by `startAllPlayers`, cleared by
+            // `stopAllPlayers`), every plan node must already carry a
+            // schedule — its flag was raised by the pre-start
+            // `topUpLoopCycles(elapsed: 0)` at the latest, so the player
+            // was started. A mid-roll enqueue onto a flag-false node means
+            // the player was skipped at start and the content would NEVER
+            // sound (LoopPrimitiveProbe fact 1: a drained/never-started
+            // player ignores later enqueues at any anchor lead). Pre-start
+            // calls are exempt: the initial top-up is legitimately the
+            // FIRST enqueue for a behind-the-playhead clip inside the loop
+            // window (design §2.1 case row 3).
+            assert(plan.node.hasPendingSchedule || midiRollContext == nil,
+                   "loop cycle enqueue onto a never-scheduled player mid-roll — "
+                   + "it would never sound (LoopPrimitiveProbe fact 1)")
             let whenSample = AVAudioFramePosition(
                 ((cycleStartSec + plan.anchorOffsetSeconds) * plan.fileRate).rounded())
             // First piece carries the explicit anchor; the rest queue
@@ -2454,12 +2561,10 @@ final class PlaybackGraph {
                 anchor = nil
                 switch item {
                 case .buffer(let buffer):
-                    plan.node.player.scheduleBuffer(buffer, at: at, options: [],
-                                                    completionHandler: nil)
+                    plan.node.enqueueBuffer(buffer, at: at)
                 case .segment(let startingFrame, let frameCount):
-                    plan.node.player.scheduleSegment(
-                        plan.node.file, startingFrame: startingFrame,
-                        frameCount: frameCount, at: at, completionHandler: nil)
+                    plan.node.enqueueSegment(startingFrame: startingFrame,
+                                             frameCount: frameCount, at: at)
                 }
             }
         }
@@ -2591,11 +2696,10 @@ final class PlaybackGraph {
                 code: "clip-envelope-skipped",
                 message: "The gain envelope on '\(clip.clip.name)' couldn't be applied this pass — the clip played on time, without its envelope or fades.",
                 beat: clip.key.startBeat))
-            clip.player.scheduleSegment(
-                clip.file,
+            clip.enqueueSegment(
                 startingFrame: fileOffsetFrames + segmentStart,
                 frameCount: AVAudioFrameCount(frameCount),
-                at: when, completionHandler: nil)
+                at: when)
             return
         }
         var anchor: AVAudioTime? = when
@@ -2605,15 +2709,12 @@ final class PlaybackGraph {
         }
         for (index, piece) in pieces.enumerated() {
             if let buffer = baked[index] {
-                clip.player.scheduleBuffer(buffer, at: takeAnchor(),
-                                           options: [], completionHandler: nil)
+                clip.enqueueBuffer(buffer, at: takeAnchor())
             } else {
-                clip.player.scheduleSegment(
-                    clip.file,
+                clip.enqueueSegment(
                     startingFrame: fileOffsetFrames + piece.start,
                     frameCount: AVAudioFrameCount(piece.frameCount),
-                    at: takeAnchor(),
-                    completionHandler: nil)
+                    at: takeAnchor())
             }
         }
     }
@@ -2658,6 +2759,21 @@ final class PlaybackGraph {
             beat: node.key.startBeat))
     }
 
+    /// Count of clip players the NEXT `startAllPlayers` will actually start
+    /// (m19-f R2′ leg 2): nodes whose enqueue ledger is raised — post-R1
+    /// that is ACTIVE players only, idle players contribute nothing.
+    /// `AudioEngine.startPlayers` reads this AFTER the schedule pass (and
+    /// loop top-up) to scale the shared-anchor lead so the serial
+    /// `play(at:)` loop finishes before the anchor arrives — a late call
+    /// starts SHIFTED-ORIGIN (probe-pinned 2026-07-16: timeline zero = the
+    /// actual late start; the player-relative schedule plays late by the
+    /// lateness for the rest of the roll, never retroactively re-anchored).
+    var startablePlayerCount: Int {
+        var count = 0
+        forEachClip { if $0.hasPendingSchedule { count += 1 } }
+        return count
+    }
+
     /// Preloads render resources so `play(at:)` can honor a near-future anchor.
     /// m16-a Leg 0: the same playability guard + per-node barrier as
     /// `startAllPlayers` — `prepare(withFrameCount:)` on a detached/
@@ -2666,6 +2782,9 @@ final class PlaybackGraph {
     /// notice, one per skipped clip per transport start, not two.
     func prepareAllPlayers(withFrameCount frameCount: AVAudioFrameCount) {
         forEachClip { node in
+            // R1 (m19-f): a schedule-empty player will be skipped by
+            // `startAllPlayers` — prepaying its decode would be pure waste.
+            guard node.hasPendingSchedule else { return }
             guard isPlayable(node) else { return }
             try? withObjCExceptionBarrier("clip player prepare") {
                 node.player.prepare(withFrameCount: frameCount)
@@ -2718,6 +2837,14 @@ final class PlaybackGraph {
         // SAME honest notice and every other player still starts — never a
         // crash, never a silent skip.
         forEachClip { node in
+            // R1 (m19-f): nothing enqueued since the last stop — nothing to
+            // play. No ~6 ms `play(at:)` handshake, and NO notice: a
+            // disconnected clip with an EMPTY schedule had nothing to play,
+            // so the old `clip-unplayable` there was a false alarm
+            // (deliberate behavior delta, design §2.4-3). The player stays
+            // stopped — strictly more capable than started-empty (a stopped
+            // player can always be scheduled + started fresh next roll).
+            guard node.hasPendingSchedule else { return }
             guard isPlayable(node) else {
                 postClipUnplayable(node)
                 return
@@ -2793,7 +2920,21 @@ final class PlaybackGraph {
     func stopAllPlayers() {
         loopUnroll = nil
         midiRollContext = nil
-        forEachClip { $0.player.stop() }
+        // R1 (m19-f): the skip predicate is the LEDGER FLAG, never "was
+        // started" — flag false ⇒ zero enqueues since the last stop ⇒ the
+        // queue is already empty AND (under R1) play was never called, so
+        // `stop()` would be a ~1 ms semantic no-op. The asymmetry is
+        // deliberate (design §2.3): a node whose `play(at:)` RAISED under
+        // the m16-a barrier (or was isPlayable-skipped) keeps flag=true and
+        // a non-empty queue — its `stop()` MUST still run to clear the
+        // queue (the reschedule primitive's contract). Teardown paths
+        // (reconcile remove/re-key, engine discard) stay unconditional.
+        forEachClip { node in
+            if node.hasPendingSchedule {
+                node.player.stop()
+                node.noteStopped()
+            }
+        }
         for node in instrumentNodes.values {
             node.renderer.publish(nil)
             node.renderer.requestFlush()

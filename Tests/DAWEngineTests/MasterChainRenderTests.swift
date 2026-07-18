@@ -245,8 +245,17 @@ struct MasterChainRenderTests {
         let engine = AudioEngine()
         engine.tracksDidChange([limited, dry])
 
+        // m19-j: the LIVE graph rate follows the hardware default output
+        // device (a Bluetooth headset in mic mode really runs at 24 kHz), so
+        // the limiter's 5 ms lookahead is DERIVED from the engine's actual
+        // rate — 240 was only ever the 48 kHz value. Same formula as
+        // LimiterEffect.prepare.
+        let rate = engine.graph.graphSampleRateForTesting
+        let lookahead = Int((LimiterParams.lookaheadSeconds * rate).rounded())
+        #expect(lookahead > 0)  // a degenerate device rate must fail loudly, never vacuously
+
         let before = try #require(engine.pdcReport())
-        #expect(before.trackStageSamples == 240)
+        #expect(before.trackStageSamples == lookahead)
         #expect(before.masterChainLatencySamples == 0)
         #expect(before.outputLatencySamples == before.maxPathLatencySamples)
         let compBefore = before.strips.mapValues(\.compensationSamples)
@@ -260,8 +269,8 @@ struct MasterChainRenderTests {
               + "\(with.outputLatencySamples) (masterChain \(with.masterChainLatencySamples)); "
               + "per-strip comp unchanged "
               + "\(with.strips.mapValues(\.compensationSamples) == compBefore)")
-        #expect(with.masterChainLatencySamples == 240)
-        #expect(with.outputLatencySamples == with.maxPathLatencySamples + 240)
+        #expect(with.masterChainLatencySamples == lookahead)
+        #expect(with.outputLatencySamples == with.maxPathLatencySamples + lookahead)
         #expect(with.trackStageSamples == before.trackStageSamples)
         #expect(with.busStageSamples == before.busStageSamples)
         // The common-path proof: every strip's ring target is byte-equal.

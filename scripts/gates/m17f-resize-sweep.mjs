@@ -1,13 +1,20 @@
-// m17-f resize sweep — window-size matrix (debug.windowFrame; OS clamps HEIGHT to the display, width unclamped)
-// x ARRANGE/MIX x Simple/Pro + captureUI frames for pixel review. Pairs with m17f-barlines detector below.
-// Staging: DAW_CONTROL_PORT=17695. Promoted from session scratchpad 2026-07-16 (m17-g).
-// m17-f resize sweep: sizes x surfaces x densities, capture each frame.
-// Pass 1 (editor closed): arrange Simple / arrange Pro / mix Simple / mix Pro.
-// Pass 2 (piano roll open on the CC clip): arrange Pro + controller strip,
-//          then the same with an effect-editor card open.
-// Resize via debug.windowFrame (AppleScript impossible on the unbundled
-// staging binary — m17-b measured), settle ~300 ms after each stage.
-// Usage: node sweep.mjs <outdir> [ccClipId eqTrackId eqEffectId]
+// m17-f resize sweep — window-size x workspace x density capture matrix
+// (debug.windowFrame; OS clamps HEIGHT to the display, width unclamped).
+// CAPTURE-ONLY: no pass/fail assertions here — frames are for pixel review.
+// Pass 1 (editor closed), 4 sizes x arrange-simple / arrange-pro / mix-simple
+// / mix-pro. Pass 2 (piano roll open on the CC clip, Pro everywhere), 4 sizes
+// x arrange-pro-editor, then optionally the same with an effect-editor card
+// open (arrange-pro-fxcard) when eqTrackId/eqEffectId are given — the fxcard
+// leg switches workspaceMode to .mix (debug.effectEditor open does this BY
+// DESIGN, Sources/DAWApp/DAWProApp.swift effectEditorDebug) and this script
+// switches back to arrange after close so later legs frame what their name
+// says. Resize via debug.windowFrame (AppleScript impossible on the
+// unbundled staging binary — m17-b measured); settle ~300 ms after each
+// stage. Pairs with the barline detector at scripts/gates/m17f-barlines-detector.swift
+// (a separate file, not below this one).
+// Staging: DAW_CONTROL_PORT=17695.
+// Usage: node m17f-resize-sweep.mjs <outdir> [ccClipId eqTrackId eqEffectId]
+// Promoted from session scratchpad 2026-07-16 (m17-g).
 const PORT = process.env.PORT || "17695";
 const OUT = process.argv[2];
 const CC_CLIP = process.argv[3];
@@ -96,6 +103,11 @@ if (CC_CLIP) {
       await sleep(300);
       await cap(`${s.name}-arr-pro-fxcard`);
       await must("debug.effectEditor", { close: true });
+      // close does NOT revert workspaceMode (effectEditorDebug's close path
+      // only clears effectEditorTarget/effectEditor — it never touches
+      // workspaceMode). open:true forced .mix; switch back to arrange the
+      // same way pass 1 does, or every later *-arr-pro-editor leg lies.
+      await must("ui.showMixer", { show: false });
       await sleep(200);
     }
   }

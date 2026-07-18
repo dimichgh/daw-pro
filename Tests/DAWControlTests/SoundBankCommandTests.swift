@@ -398,11 +398,17 @@ struct SoundBankCommandTests {
         // arrange.insertBars + arrange.deleteBars took it 120 → 123. m16-b2's
         // clip.setControllerLane + clip.removeControllerLane took it 123 → 125.
         // m16-e's project.recoveryBundles (the per-slug autosave listing seam,
-        // audit F3) took it 125 → 126. The three instrument commands must stay.
-        #expect(CommandRouter.allCommands.count == 126)
+        // audit F3) took it 125 → 126. m19-c's instrument.importSampleLibrary
+        // (the journaled .sfz sample-library import onto the built-in Sampler)
+        // took it 126 → 127. The three instrument commands must stay.
+        // m10-p-3's vc.sidecarStatus/vc.sidecarStart/vc.sidecarStop (the RVC
+        // voice-conversion sidecar's lifecycle trio, additive alongside the
+        // untouched ai.sidecar* names) took it 127 -> 130.
+        #expect(CommandRouter.allCommands.count == 130)
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBanks"))
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBankPrograms"))
         #expect(CommandRouter.allCommands.contains("instrument.importSoundBank"))
+        #expect(CommandRouter.allCommands.contains("instrument.importSampleLibrary"))
         #expect(CommandRouter.allCommands.contains("clip.crossfade"))
         #expect(CommandRouter.allCommands.contains("track.bounceInPlace"))
         #expect(CommandRouter.allCommands.contains("clip.duplicate"))

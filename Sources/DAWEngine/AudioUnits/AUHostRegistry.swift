@@ -531,12 +531,29 @@ public final class AUHostRegistry {
                 }
             }
 
-            try au.allocateRenderResources()
+            // m19-j — the m18-d law EXTENDS to initialize: DLS-family
+            // `allocateRenderResources` (AudioUnitInitialize) opens/touches
+            // the SAME process-global bank state as LoadInstrument and
+            // dispose. Measured (4× .ips on 2026-07-16, 14:37 pre-dating the
+            // m19-j cooperative render, 3× after it widened the interleaving
+            // window): main-actor AudioUnitInitialize racing a queued
+            // load/dispose → CAVerboseAbort EXC_BREAKPOINT inside
+            // CoreAudio. The AU is pre-publish exclusive (§5.3a), so the
+            // whole allocate legally hops onto `dlsBankQueue`; non-DLS
+            // components keep the main-actor call (their initialize touches
+            // no shared DLS state, and v3/XPC components stay off the
+            // audio-adjacent queue).
+            let isDLS = Self.isDLSFamily(key.component)
+            if isDLS {
+                try await Self.allocateRenderResourcesOnDLSQueue(au)
+            } else {
+                try au.allocateRenderResources()
+            }
             // Post-allocate rate assertion: a format the AU silently refused
             // would render silence (or garbage) — fail readably instead.
             let allocatedRate = au.outputBusses[0].format.sampleRate
             guard allocatedRate == sampleRate else {
-                au.deallocateRenderResources()
+                Self.deallocateRenderResources(au, serialized: isDLS)
                 throw EngineError.renderFailed(
                     "output bus allocated at \(allocatedRate) Hz, wanted \(sampleRate) Hz")
             }
@@ -550,7 +567,7 @@ public final class AUHostRegistry {
                     try await Self.loadSoundBank(into: au, config: soundBank.config,
                                                  resolvedURL: soundBank.url)
                 } catch {
-                    au.deallocateRenderResources()
+                    Self.deallocateRenderResources(au, serialized: isDLS)
                     throw error
                 }
             }
@@ -578,6 +595,38 @@ public final class AUHostRegistry {
             status[id] = .failed(
                 "Audio Unit preparation timed out after \(timeout) — component may be stalled")
         }
+    }
+
+    /// m19-j — DLS-family `allocateRenderResources` on the bank gate. The
+    /// same `@unchecked Sendable` pre-publish-exclusive crossing as
+    /// `loadSoundBank`; the main actor AWAITS (never blocks), so a queued
+    /// dispose's internal bounce-to-main cannot deadlock. Swift errors from
+    /// the allocate propagate unchanged.
+    private static func allocateRenderResourcesOnDLSQueue(_ au: AUAudioUnit) async throws {
+        struct UnitBox: @unchecked Sendable { let au: AUAudioUnit }  // pre-publish exclusive (§5.3a)
+        let box = UnitBox(au: au)
+        let result: Result<Void, any Error> = await withCheckedContinuation { continuation in
+            dlsBankQueue.async {
+                continuation.resume(returning: Result { try box.au.allocateRenderResources() })
+            }
+        }
+        try result.get()
+    }
+
+    /// m19-j — the prepare-failure deallocate, serialized for DLS-family
+    /// instances (dispose mutates the same process-global bank state — the
+    /// 07-16-100906 load-vs-dispose signature); everyone else deallocates
+    /// in place, exactly as before. Fire-and-forget on the queue: the AU is
+    /// pre-publish exclusive and about to die by ARC, and its deinit
+    /// hand-off already lands on this same queue.
+    private static func deallocateRenderResources(_ au: AUAudioUnit, serialized: Bool) {
+        guard serialized else {
+            au.deallocateRenderResources()
+            return
+        }
+        struct UnitBox: @unchecked Sendable { let au: AUAudioUnit }  // pre-publish exclusive (§5.3a)
+        let box = UnitBox(au: au)
+        dlsBankQueue.async { box.au.deallocateRenderResources() }
     }
 
     /// Loads one SF2/DLS program into a freshly allocated AUSampler (m10-n

@@ -271,4 +271,40 @@ struct SamplerTests {
         #expect(zd.maxPitch == 127)
         #expect(zd.gain == 1)
     }
+
+    // 10. m20-g loop fields: init clamps raise, never swap (the endFrame idiom),
+    //     and nil stays nil (the additive-Codable contract).
+    @Test("loop fields clamp with the raise-not-swap idiom; nil stays nil")
+    func loopFieldClamps() {
+        // nil everywhere — the pre-m20-g contract.
+        let plain = zone(ping)
+        #expect(plain.loopMode == nil)
+        #expect(plain.loopStart == nil)
+        #expect(plain.loopEnd == nil)
+
+        // Present values survive; loopEnd ≤ loopStart RAISES to loopStart + 1,
+        // never swaps.
+        let raised = SamplerZone(audioFileURL: ping, loopMode: .sustain,
+                                 loopStart: 1_000, loopEnd: 500)
+        #expect(raised.loopMode == .sustain)
+        #expect(raised.loopStart == 1_000)
+        #expect(raised.loopEnd == 1_001)   // raised, not swapped
+
+        // Negative loopStart clamps to 0; loopEnd raises against the clamped start.
+        let negative = SamplerZone(audioFileURL: ping, loopMode: .continuous,
+                                   loopStart: -5, loopEnd: -3)
+        #expect(negative.loopStart == 0)
+        #expect(negative.loopEnd == 1)
+
+        // loopEnd alone raises against the implicit start of 0.
+        let endOnly = SamplerZone(audioFileURL: ping, loopMode: .continuous, loopEnd: 0)
+        #expect(endOnly.loopStart == nil)
+        #expect(endOnly.loopEnd == 1)
+
+        // A valid span is untouched.
+        let valid = SamplerZone(audioFileURL: ping, loopMode: .continuous,
+                                loopStart: 4_410, loopEnd: 48_510)
+        #expect(valid.loopStart == 4_410)
+        #expect(valid.loopEnd == 48_510)
+    }
 }

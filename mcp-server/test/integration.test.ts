@@ -255,7 +255,9 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // count is a bijection" check (commands.length + exception-table-B size).
   // Hardcoded here (per the brief) as a fast, focused real-transport check —
   // if this drifts, audit-tools.test.ts is the source of truth for why.
-  assert.equal(result.tools.length, 129);
+  // m10-p-3's vc_sidecar_status/vc_sidecar_start/vc_sidecar_stop (the RVC
+  // voice-conversion sidecar's lifecycle trio) took it 130 -> 133.
+  assert.equal(result.tools.length, 133);
 });
 
 // ---------------------------------------------------------------------------

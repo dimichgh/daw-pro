@@ -70,6 +70,17 @@ public final class CommandRouter {
     /// conforming to `SidecarManaging` instead.
     private let sidecarManager: SidecarManaging
 
+    /// Local RVC voice-conversion sidecar lifecycle (m10-p-3) — the
+    /// `sidecarManager` twin for the SECOND local sidecar (127.0.0.1:8002,
+    /// `scripts/rvc/`). Process management only, same split as
+    /// `sidecarManager`/`songGenerator`: `vc.convertVocals`/`vc.trainVoice`
+    /// (a later roadmap item) will get their own `VoiceConversionClient`
+    /// dependency, kept separate from this one. Defaults to the real
+    /// `VoiceConversionManager` resolving `scripts/rvc/` relative to the
+    /// repo/executable; tests inject a fake conforming to
+    /// `VoiceConversionManaging` instead.
+    private let voiceConversionManager: VoiceConversionManaging
+
     /// Song generation (M6 ii) — defaults to the real `ACEStepClient` talking
     /// to the local sidecar's job-queue REST API; tests inject a fake
     /// conforming to `SongGenerating` instead. Kept separate from
@@ -172,6 +183,7 @@ public final class CommandRouter {
         "instrument.listSoundBanks",
         "instrument.listSoundBankPrograms",
         "instrument.importSoundBank",
+        "instrument.importSampleLibrary",
         "mixer.setMasterVolume",
         "mixer.applyPreset",
         "mixer.masterAnalysis",
@@ -259,11 +271,15 @@ public final class CommandRouter {
         "plugin.openUI",
         "plugin.closeUI",
         "plugin.listOpenUIs",
+        "vc.sidecarStatus",
+        "vc.sidecarStart",
+        "vc.sidecarStop",
     ]
 
     public init(
         store: ProjectStore,
         sidecarManager: SidecarManaging = SidecarManager(),
+        voiceConversionManager: VoiceConversionManaging = VoiceConversionManager(),
         songGenerator: SongGenerating = ACEStepClient(),
         keyStore: APIKeyStoring = KeychainKeyStore(),
         keyEnvironment: [String: String] = ProcessInfo.processInfo.environment,
@@ -273,6 +289,7 @@ public final class CommandRouter {
     ) {
         self.store = store
         self.sidecarManager = sidecarManager
+        self.voiceConversionManager = voiceConversionManager
         self.songGenerator = songGenerator
         self.keyStore = keyStore
         self.keyEnvironment = keyEnvironment
@@ -802,6 +819,45 @@ public final class CommandRouter {
             let importedBank = try store.importSoundBank(
                 from: URL(fileURLWithPath: importRawPath))
             return .success(request.id, .object(["bank": soundBankInfoJSON(importedBank)]))
+
+        case "instrument.importSampleLibrary":
+            // params: trackId (required, an INSTRUMENT track), path (required,
+            // absolute or ~-prefixed; .sfz or .dspreset), dryRun? (default false:
+            // parse + map + full report, project untouched), force? (default
+            // false: overrides the 4 GB sample-size refusal; the 500 MB
+            // warning always reports). Imports a sample LIBRARY onto the
+            // track's built-in Sampler — deliberately unlike the library-only
+            // instrument.importSoundBank above, this IS a project mutation:
+            // ONE journaled "Change Instrument" edit (edit.undo restores the
+            // previous instrument). Copy law: imports .sfz (documented
+            // subset) and .dspreset sample-library files; the §2.3
+            // degradation policy is REPORTED (skippedRegions/ignoredOpcodes/
+            // degradations), never silently applied. Response {report:
+            // <SampleLibraryImportReport as JSON>, applied: bool}. Errors via
+            // the LocalizedError mapping: wrong extension (.dslibrary carries
+            // the unzip hint), missing file, preprocessor aborts (missing/
+            // cyclic #include, undefined $VAR), malformed .dspreset XML /
+            // wrong root element, zero-zones-on-apply (skip summary in the
+            // message), size refusal (names the flag).
+            // MCP twin: `instrument_import_sample_library` (mcp-server).
+            try params.rejectUnknownKeys(
+                ["trackId", "path", "dryRun", "force"],
+                verb: "instrument.importSampleLibrary")
+            let sampleLibTrackID = try params.requireTrackID()
+            let sampleLibRawPath = try params.require("path", \.stringValue)
+            let sampleLibPath = (sampleLibRawPath as NSString).expandingTildeInPath
+            guard sampleLibPath.hasPrefix("/") else {
+                throw ControlError("'path' must be an absolute path")
+            }
+            let sampleLibDryRun = params["dryRun"]?.boolValue ?? false
+            let sampleLibForce = params["force"]?.boolValue ?? false
+            let sampleLibReport = try store.importSampleLibrary(
+                trackID: sampleLibTrackID, path: sampleLibPath,
+                dryRun: sampleLibDryRun, force: sampleLibForce)
+            return .success(request.id, .object([
+                "report": try JSONValue(encoding: sampleLibReport),
+                "applied": .bool(!sampleLibDryRun),
+            ]))
 
         case "fx.add":
             // params: trackId (required — a track/bus UUID or the "master"
@@ -3111,6 +3167,58 @@ public final class CommandRouter {
                 "windows": .array(pluginUI.listOpenUIs().map { pluginUIWindowJSON($0) }),
             ]))
 
+        case "vc.sidecarStatus":
+            // No params. Health-probes the local RVC voice-conversion sidecar
+            // (GET /health on 127.0.0.1:8002, loopback only — see
+            // scripts/rvc/README.md) and reports which of notInstalled/
+            // installedNotRunning/starting/healthy/error applies — never a
+            // bare connection-failure error, so a client can tell "run
+            // scripts/rvc/install.sh" apart from "call vc.sidecarStart"
+            // without guessing. `message` is always a human-actionable
+            // string; `version`/`engine`/`baseModelPresent`/`voiceCount` are
+            // populated only when healthy (`voiceCount` is 0 until training
+            // ships — a later roadmap item — and never counts the reserved
+            // "base" smoke-target model). `phase` is deliberately always nil
+            // for this sidecar (see `VoiceConversionStatus.phase`'s doc — no
+            // phase classifier exists yet, unlike ai.sidecarStatus's ACE-Step
+            // one); `startingForSeconds` behaves identically to
+            // ai.sidecarStatus's M10-b tracking. Response: the model's own
+            // VoiceConversionStatus Codable (AIServices) — {state, message,
+            // version?, engine?, baseModelPresent?, voiceCount?, pid?,
+            // phase?, startingForSeconds?}. Additive and independent of
+            // ai.sidecarStatus — this is a SECOND, separate local sidecar.
+            // This is process-lifecycle management only — voice-conversion/
+            // training tools arrive in a later roadmap item.
+            let vcStatus = await voiceConversionManager.status()
+            return .success(request.id, try JSONValue(encoding: vcStatus))
+
+        case "vc.sidecarStart":
+            // No params. Spawns scripts/rvc/run.sh (loopback-only FastAPI
+            // facade) if not already healthy, then polls /health up to a
+            // startup timeout (~30s, blocking). Throws notInstalled
+            // (verbatim, points at scripts/rvc/install.sh) if the sidecar
+            // was never installed, or a launch error if the process exits
+            // during startup. A timeout without reaching healthy is NOT an
+            // error — it returns state "starting" with an honest message
+            // naming elapsed time and the log path; every LATER
+            // vc.sidecarStatus poll keeps reporting "starting" with a
+            // truthfully increasing startingForSeconds (the same M10-b
+            // discipline ai.sidecarStart applies). Response:
+            // VoiceConversionStatus (see vc.sidecarStatus for field shape).
+            try params.rejectUnknownKeys([], verb: "vc.sidecarStart")
+            let startedVCStatus = try await voiceConversionManager.start()
+            return .success(request.id, try JSONValue(encoding: startedVCStatus))
+
+        case "vc.sidecarStop":
+            // No params. Graceful stop (SIGTERM via the pidfile, escalating
+            // to SIGKILL if it doesn't exit in time) of a running sidecar; a
+            // no-op success (not an error) if it wasn't running. Response:
+            // VoiceConversionStatus (state settles to installedNotRunning/
+            // notInstalled).
+            try params.rejectUnknownKeys([], verb: "vc.sidecarStop")
+            let stoppedVCStatus = try await voiceConversionManager.stop()
+            return .success(request.id, try JSONValue(encoding: stoppedVCStatus))
+
         default:
             // App-installed surface (see `appCommandHandler`): a non-nil return
             // wraps as success; nil (or no handler) falls through to the
@@ -4253,6 +4361,16 @@ public final class CommandRouter {
     /// Errors are field-path'd in the notes[i] style, e.g.
     /// `sampler.zones[0].path is required`. `path` expands a leading `~`. Zone
     /// files are validated (existence + readability) later, in the store.
+    /// m19-a selection fields ride along per zone (minVelocity/maxVelocity/
+    /// group/seqLength/seqPosition/randMin/randMax) — all optional; omitted =
+    /// nil = the pre-m19 pitch-only first-match behavior.
+    /// m19-b playback scalars ride along the same way (tuneCents/pan/
+    /// ampVelTrack/oneShot/startFrame/endFrame/attack/decay/sustain/release);
+    /// omitted = nil = the pre-m19-b playback law. Zone `gain` now reaches
+    /// 2.0 (+6 dB, amendment A5); range clamping stays the model init's job.
+    /// m20-g loop fields ride along too (loopMode "sustain"/"continuous",
+    /// loopStart/loopEnd source frames, end exclusive); omitted = nil = no
+    /// loop. loopMode wins over oneShot on a looping zone (engine law).
     private func parseSampler(_ value: JSONValue?) throws -> SamplerParams? {
         guard let value else { return nil }
         guard case .object(let obj) = value else {
@@ -4275,12 +4393,77 @@ public final class CommandRouter {
                 let lo = try Self.optionalPitch(zone["minPitch"], "sampler.zones[\(i)].minPitch")
                 let hi = try Self.optionalPitch(zone["maxPitch"], "sampler.zones[\(i)].maxPitch")
                 let zoneGain = try Self.optionalNumber(zone["gain"], "sampler.zones[\(i)].gain")
+                let minVel = try Self.optionalPitch(
+                    zone["minVelocity"], "sampler.zones[\(i)].minVelocity")
+                let maxVel = try Self.optionalPitch(
+                    zone["maxVelocity"], "sampler.zones[\(i)].maxVelocity")
+                let group = try Self.optionalInteger(zone["group"], "sampler.zones[\(i)].group")
+                let seqLength = try Self.optionalInteger(
+                    zone["seqLength"], "sampler.zones[\(i)].seqLength")
+                let seqPosition = try Self.optionalInteger(
+                    zone["seqPosition"], "sampler.zones[\(i)].seqPosition")
+                let randMin = try Self.optionalNumber(
+                    zone["randMin"], "sampler.zones[\(i)].randMin")
+                let randMax = try Self.optionalNumber(
+                    zone["randMax"], "sampler.zones[\(i)].randMax")
+                let tuneCents = try Self.optionalNumber(
+                    zone["tuneCents"], "sampler.zones[\(i)].tuneCents")
+                let pan = try Self.optionalNumber(zone["pan"], "sampler.zones[\(i)].pan")
+                let ampVelTrack = try Self.optionalNumber(
+                    zone["ampVelTrack"], "sampler.zones[\(i)].ampVelTrack")
+                let zoneOneShot = try Self.optionalBool(
+                    zone["oneShot"], "sampler.zones[\(i)].oneShot")
+                let startFrame = try Self.optionalInteger(
+                    zone["startFrame"], "sampler.zones[\(i)].startFrame")
+                let endFrame = try Self.optionalInteger(
+                    zone["endFrame"], "sampler.zones[\(i)].endFrame")
+                let zoneAttack = try Self.optionalNumber(
+                    zone["attack"], "sampler.zones[\(i)].attack")
+                let zoneDecay = try Self.optionalNumber(
+                    zone["decay"], "sampler.zones[\(i)].decay")
+                let zoneSustain = try Self.optionalNumber(
+                    zone["sustain"], "sampler.zones[\(i)].sustain")
+                let zoneRelease = try Self.optionalNumber(
+                    zone["release"], "sampler.zones[\(i)].release")
+                var loopMode: SamplerLoopMode?
+                if let loopModeValue = zone["loopMode"] {
+                    guard let raw = loopModeValue.stringValue,
+                          let mode = SamplerLoopMode(rawValue: raw) else {
+                        throw ControlError(
+                            "sampler.zones[\(i)].loopMode must be \"sustain\" or \"continuous\"")
+                    }
+                    loopMode = mode
+                }
+                let loopStart = try Self.optionalInteger(
+                    zone["loopStart"], "sampler.zones[\(i)].loopStart")
+                let loopEnd = try Self.optionalInteger(
+                    zone["loopEnd"], "sampler.zones[\(i)].loopEnd")
                 zones.append(SamplerZone(
                     audioFileURL: URL(fileURLWithPath: path),
                     rootPitch: root ?? 60,
                     minPitch: lo ?? 0,
                     maxPitch: hi ?? 127,
-                    gain: zoneGain ?? 1
+                    gain: zoneGain ?? 1,
+                    minVelocity: minVel,
+                    maxVelocity: maxVel,
+                    group: group,
+                    seqLength: seqLength,
+                    seqPosition: seqPosition,
+                    randMin: randMin,
+                    randMax: randMax,
+                    tuneCents: tuneCents,
+                    pan: pan,
+                    ampVelTrack: ampVelTrack,
+                    oneShot: zoneOneShot,
+                    startFrame: startFrame,
+                    endFrame: endFrame,
+                    attack: zoneAttack,
+                    decay: zoneDecay,
+                    sustain: zoneSustain,
+                    release: zoneRelease,
+                    loopMode: loopMode,
+                    loopStart: loopStart,
+                    loopEnd: loopEnd
                 ))
             }
         }
@@ -4307,6 +4490,27 @@ public final class CommandRouter {
             throw ControlError("\(field) must be an integer 0-127")
         }
         return Int(number)
+    }
+
+    /// An optional plain-integer field (zone group / round-robin indices):
+    /// absent → nil; present-but-not-a-whole-number → a field-path error.
+    /// Range is left to the model's clamping init.
+    private static func optionalInteger(_ value: JSONValue?, _ field: String) throws -> Int? {
+        guard let value else { return nil }
+        guard let number = value.doubleValue, isInteger(number) else {
+            throw ControlError("\(field) must be an integer")
+        }
+        return Int(number)
+    }
+
+    /// An optional boolean field (m19-b zone oneShot): absent → nil (inherit);
+    /// present-but-not-a-bool → a field-path error.
+    private static func optionalBool(_ value: JSONValue?, _ field: String) throws -> Bool? {
+        guard let value else { return nil }
+        guard case .bool(let flag) = value else {
+            throw ControlError("\(field) must be a boolean")
+        }
+        return flag
     }
 
     /// An optional numeric field: absent → nil; present-but-not-a-number → a
@@ -4621,15 +4825,65 @@ public final class CommandRouter {
                 "gain": .number(poly.gain),
             ]),
             "sampler": .object([
-                "zones": .array(sampler.zones.map { zone in
-                    .object([
+                "zones": .array(sampler.zones.map { zone -> JSONValue in
+                    // m19-a selection fields are emitted only when SET, so a
+                    // legacy zone's wire shape is byte-identical to pre-m19
+                    // (and agents read back exactly what they configured).
+                    var object: [String: JSONValue] = [
                         "id": .string(zone.id.uuidString),
                         "path": .string(zone.audioFileURL.path),
                         "rootPitch": .number(Double(zone.rootPitch)),
                         "minPitch": .number(Double(zone.minPitch)),
                         "maxPitch": .number(Double(zone.maxPitch)),
                         "gain": .number(zone.gain),
-                    ])
+                    ]
+                    if let minVelocity = zone.minVelocity {
+                        object["minVelocity"] = .number(Double(minVelocity))
+                    }
+                    if let maxVelocity = zone.maxVelocity {
+                        object["maxVelocity"] = .number(Double(maxVelocity))
+                    }
+                    if let group = zone.group { object["group"] = .number(Double(group)) }
+                    if let seqLength = zone.seqLength {
+                        object["seqLength"] = .number(Double(seqLength))
+                    }
+                    if let seqPosition = zone.seqPosition {
+                        object["seqPosition"] = .number(Double(seqPosition))
+                    }
+                    if let randMin = zone.randMin { object["randMin"] = .number(randMin) }
+                    if let randMax = zone.randMax { object["randMax"] = .number(randMax) }
+                    // m19-b playback scalars: same only-when-SET emission
+                    // (A-imp-1 idiom) — a legacy zone's wire shape stays
+                    // byte-identical.
+                    if let tuneCents = zone.tuneCents {
+                        object["tuneCents"] = .number(tuneCents)
+                    }
+                    if let pan = zone.pan { object["pan"] = .number(pan) }
+                    if let ampVelTrack = zone.ampVelTrack {
+                        object["ampVelTrack"] = .number(ampVelTrack)
+                    }
+                    if let oneShot = zone.oneShot { object["oneShot"] = .bool(oneShot) }
+                    if let startFrame = zone.startFrame {
+                        object["startFrame"] = .number(Double(startFrame))
+                    }
+                    if let endFrame = zone.endFrame {
+                        object["endFrame"] = .number(Double(endFrame))
+                    }
+                    if let attack = zone.attack { object["attack"] = .number(attack) }
+                    if let decay = zone.decay { object["decay"] = .number(decay) }
+                    if let sustain = zone.sustain { object["sustain"] = .number(sustain) }
+                    if let release = zone.release { object["release"] = .number(release) }
+                    // m20-g loop fields: same only-when-SET emission.
+                    if let loopMode = zone.loopMode {
+                        object["loopMode"] = .string(loopMode.rawValue)
+                    }
+                    if let loopStart = zone.loopStart {
+                        object["loopStart"] = .number(Double(loopStart))
+                    }
+                    if let loopEnd = zone.loopEnd {
+                        object["loopEnd"] = .number(Double(loopEnd))
+                    }
+                    return .object(object)
                 }),
                 "oneShot": .bool(sampler.oneShot),
                 "attack": .number(sampler.attack),

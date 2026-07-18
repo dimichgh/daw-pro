@@ -35,6 +35,7 @@ struct VelocityLane: View {
         // The beat↔x mapping is affine (`PianoRollModel.x(forBeat:)`), reproduced inline.
         let draft = model.draft
         let ppb = model.pixelsPerBeat
+        let clipLengthBeats = model.clipLengthBeats
         let selectedIDs = model.selection
         let activeNoteID = activeNote
         let noteColor = noteColor
@@ -44,24 +45,48 @@ struct VelocityLane: View {
                 Path(CGRect(x: 0, y: size.height - 0.5, width: size.width, height: 0.5)),
                 with: .color(DAWTheme.hairline)
             )
+            // Out-of-clip shade + 1 pt neutral clip-end hairline (m19-g): the
+            // note grid / CTRL strip boundary grammar, so the latent region
+            // reads as one continuous boundary column across all three bands
+            // (same beat→x space, same 0.28 black + gridEmphasis chrome).
+            let clipX = CGFloat(clipLengthBeats) * ppb
+            if clipX < size.width {
+                context.fill(
+                    Path(CGRect(x: clipX, y: 0, width: size.width - clipX, height: size.height)),
+                    with: .color(Color.black.opacity(0.28))
+                )
+                context.fill(
+                    Path(CGRect(x: clipX - 0.5, y: 0, width: 1, height: size.height)),
+                    with: .color(DAWTheme.gridEmphasis)
+                )
+            }
             for note in draft {
                 let x = CGFloat(note.startBeat) * ppb
                 let fraction = CGFloat(note.velocity) / 127
                 let stemHeight = size.height * fraction
                 let selected = selectedIDs.contains(note.id) || activeNoteID == note.id
+                // m19-g: a stem marks the ONSET velocity, and the onset fires
+                // iff the engine plays the note (`playableEndBeat` non-nil —
+                // one boundary definition). A truncated tail still FIRES its
+                // onset, so its stem stays lit; only a wholly-latent note
+                // ghosts (flat dim, no state escalation — the m18-e grammar;
+                // the drag readout below still shows, editing is
+                // boundary-blind).
+                let latent = PianoRollModel.playableEndBeat(
+                    of: note, clipLengthBeats: clipLengthBeats) == nil
                 let rect = CGRect(
                     x: x, y: size.height - stemHeight,
                     width: Self.stemWidth, height: stemHeight
                 )
                 context.fill(
                     Path(roundedRect: rect, cornerRadius: 1.5),
-                    with: .color(noteColor.opacity(selected ? 1.0 : 0.55))
+                    with: .color(noteColor.opacity(latent ? 0.35 : (selected ? 1.0 : 0.55)))
                 )
                 // Knob at the top of the stem.
                 context.fill(
                     Path(ellipseIn: CGRect(x: x - 1, y: size.height - stemHeight - 2,
                                            width: Self.stemWidth + 2, height: Self.stemWidth + 2)),
-                    with: .color(noteColor.opacity(selected ? 1.0 : 0.7))
+                    with: .color(noteColor.opacity(latent ? 0.45 : (selected ? 1.0 : 0.7)))
                 )
                 // Value readout above the active stem.
                 if selected {

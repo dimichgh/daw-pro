@@ -1,10 +1,22 @@
-// m17-h orchestrator gate — generation presence card seam matrix (bare-read law, import-origin seed, failed
-// reason verbatim, snapshot carries ZERO card keys, bad-phase teaching error, clear verb, dead-sidecar wire
-// generate -> boot narration). NOTES: capture verb is debug.captureUI; card elapsed echoes as a formatted
-// STRING ("0:33"); the G leg kicks a REAL sidecar boot — kill scripts/ace-step/.ace-step.pid after to restore.
-// Staging: DAW_CONTROL_PORT=17695. Promoted from session scratchpad 2026-07-16 (m17-g).
-// m17-h orchestrator disjoint gate: seam matrix + wire-dead-sidecar boot narration.
-// NOTE: capture/output paths point at /tmp/daw-gate-out — `mkdir -p /tmp/daw-gate-out` before running.
+// m17-h orchestrator gate — generation presence card seam matrix: bare-read
+// law (A), import-origin seed (B), failed-row reason echoed verbatim (C),
+// project snapshot carries ZERO card keys (D), bad-phase teaching error (E),
+// clear verb (F), dead-sidecar wire generate -> boot narration (G).
+// NOTES: card elapsed echoes as a formatted STRING ("0:33"), not a number —
+// the echo has no raw-seconds field (DAWProApp.generationCardState), so leg
+// B's elapsed check parses the m:ss/h:mm:ss string into seconds inline;
+// leg B's capture call uses debug.captureUI (the only registered capture
+// command). Both were PRE-EXISTING bugs in this gate's own logic (never app
+// bugs) that made leg B permanently 2-fail, filed at m20-f and fixed here
+// at m20-i.
+// leg G requires the sidecar STOPPED on entry and kicks a REAL sidecar boot
+// as its own test — kill scripts/ace-step/.ace-step.pid after running to
+// restore stopped-as-found.
+// Staging: DAW_CONTROL_PORT=17695.
+// Usage: node m17h-generation-card.mjs
+// Output: captures land under /tmp/daw-gate-out/m17h-orch/ —
+// `mkdir -p /tmp/daw-gate-out/m17h-orch` before running.
+// Promoted from session scratchpad 2026-07-16 (m17-g).
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function connect() {
   for (let i = 0; i < 20; i++) {
@@ -51,8 +63,8 @@ await sleep(400);
 r = await cmd("debug.generationCard");
 const bj = r.result?.jobs?.find(j => j.origin === "import");
 check("B card visible with import row", r.ok && r.result.visible === true && !!bj, JSON.stringify(r.result ?? {}));
-check("B import row echoes progress/stage/elapsed", !!bj && Math.abs(bj.progress - 0.42) < 0.001 && /batch size/.test(bj.stage ?? "") && bj.elapsed >= 33, JSON.stringify(bj ?? {}));
-r = await cmd("app.captureUI", { path: "/tmp/daw-gate-out/m17h-orch/cap-import-running.png" });
+check("B import row echoes progress/stage/elapsed", !!bj && Math.abs(bj.progress - 0.42) < 0.001 && /batch size/.test(bj.stage ?? "") && bj.elapsed.split(":").map(Number).reverse().reduce((acc, v, i) => acc + v * 60 ** i, 0) >= 33, JSON.stringify(bj ?? {}));
+r = await cmd("debug.captureUI", { path: "/tmp/daw-gate-out/m17h-orch/cap-import-running.png" });
 check("B capture import card", r.ok, JSON.stringify(r.error ?? ""));
 
 // C: seed failed row with verbatim reason; then clear

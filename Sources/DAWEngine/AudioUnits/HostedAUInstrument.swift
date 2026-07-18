@@ -126,7 +126,17 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
         guard sampleRate != preparedSampleRate else { return }
         MainActor.assumeIsolated {
             do {
-                auAudioUnit.deallocateRenderResources()
+                // m19-j: DLS-family dealloc/alloc mutate AudioToolbox's
+                // process-global bank state (the m18-d law now covers
+                // AudioUnitInitialize too) — hop them onto the bank gate
+                // SYNCHRONOUSLY, exactly like the bank re-load below already
+                // does. Measured: a main-actor AudioUnitInitialize on this
+                // path racing a parallel bank load → CAVerboseAbort
+                // EXC_BREAKPOINT (07-16-172320.ips,
+                // SoundBankHostingTests.loadedBankSurvivesRateRenegotiation).
+                // Bounded like the renegotiation itself; non-DLS components
+                // stay in place.
+                withBankGateIfDLS { auAudioUnit.deallocateRenderResources() }
                 auAudioUnit.maximumFramesToRender = AUAudioFrameCount(maxFramesPerQuantum)
                 guard let format = AVAudioFormat(
                     standardFormatWithSampleRate: sampleRate,
@@ -135,7 +145,7 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
                     throw EngineError.renderFailed("no standard format at \(sampleRate) Hz")
                 }
                 try auAudioUnit.outputBusses[0].setFormat(format)
-                try auAudioUnit.allocateRenderResources()
+                try withBankGateIfDLS { try auAudioUnit.allocateRenderResources() }
                 // Reallocation destroys per-instance sampler state (measured,
                 // m10-n T6) — restore it BEFORE the next render pull. The AU
                 // is initialized here, so the re-load is synchronous on this
@@ -149,6 +159,16 @@ public final class HostedAUInstrument: InstrumentRendering, @unchecked Sendable 
                     "HostedAUInstrument: rate renegotiation to \(sampleRate) Hz failed: \(error) — instrument may render silence\n".utf8))
             }
         }
+    }
+
+    /// m19-j: runs `body` on `AUHostRegistry.dlsBankQueue` (synchronous — the
+    /// renegotiation path is a documented bounded main-actor stall) for
+    /// DLS-family instances; in place for everyone else. `self` is
+    /// `@unchecked Sendable` and the AU is main-actor-owned setup state, so
+    /// the crossing is the sanctioned m18-d pattern.
+    private func withBankGateIfDLS<T>(_ body: () throws -> T) rethrows -> T {
+        guard serializedBankTeardown else { return try body() }
+        return try AUHostRegistry.dlsBankQueue.sync(execute: body)
     }
 
     // MARK: - InstrumentRendering (render thread)

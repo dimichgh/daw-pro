@@ -184,6 +184,27 @@ public final class PianoRollModel {
         max(content, max(0, viewport))
     }
 
+    /// The clip-relative beat where a note's AUDIBLE span ends under the
+    /// engine's schedule rule, or nil when the note never sounds — THE ONE
+    /// boundary definition for the m19-g note-pill ghost treatment, the
+    /// note-grid sibling of `ControllerStripModel.playableCount`
+    /// (DESIGN-LANGUAGE "Controller strips"). Engine truth
+    /// (`MIDISchedule.buildEvents`): a note sounds iff its onset is strictly
+    /// inside `[0, clipLengthBeats)` — strict `<`, an onset exactly AT the end
+    /// is latent — and its note-off lands at `min(endBeat, clipLengthBeats)`,
+    /// so a tail past the clip end is TRUNCATED, never sounded. Reading the
+    /// result: `nil` = whole pill (and its VEL stem) ghosts; `< endBeat` =
+    /// lit body to the boundary, ghost tail past it; `== endBeat` = fully
+    /// lit. The Canvas draw sites call this — never re-derived beat math in a
+    /// draw closure. `nonisolated` so `@Sendable` renderers can call it (pure
+    /// value math, never actor state).
+    public nonisolated static func playableEndBeat(
+        of note: MIDINote, clipLengthBeats: Double
+    ) -> Double? {
+        guard note.startBeat < clipLengthBeats else { return nil }
+        return Swift.min(note.endBeat, clipLengthBeats)
+    }
+
     /// A note's rectangle in content coordinates. A minimum drawn width keeps a
     /// very short note clickable.
     public func rect(for note: MIDINote) -> CGRect {

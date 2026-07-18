@@ -109,3 +109,9 @@ Reasoning:
 - https://machinelearning.apple.com/research/stable-diffusion-coreml-apple-silicon (ANE ceiling reference)
 - https://developer.apple.com/forums/thread/727547 ("Large ML Models on the Neural Engine")
 - Internal: `docs/research/2026-07-05-ace-step-local-song-generation.md`, `docs/AI-INTEGRATIONS.md`, `Sources/AIServices/ACEStepClient.swift`
+
+---
+
+## Tripwire re-check verdicts
+
+**2026-07-16 (m19-i, same-day check):** Trigger NOT fired — sidecar stays. `mlx-audio-swift`'s module list is unchanged (MLXAudioCodecs / TTS / STT / VAD / STS / UI — still no diffusion/music-generation model class), and `mlx-swift-examples` shows no music-generation addition. Only adjacent motion in the ecosystem: the **Python** `mlx-audio` release of 2026-07-09 ships a diffusion-based **TTS** pipeline (Conditional Flow Matching, DiT backbone, WAV-VAE codec @ 24 kHz) — architecturally a cousin of what a music-gen class would need, but it is TTS, and it is Python, so it changes nothing for the native-Swift question this doc settled. The watch condition stands as written in the takeaways above: re-open only if `mlx-swift`/`mlx-audio-swift` ships a diffusion/music-generation model class. This closes roadmap item (m19-i); the trigger continues life as a docs/research watch-list condition, not a recurring roadmap checkbox.

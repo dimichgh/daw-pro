@@ -1504,6 +1504,12 @@ struct CommandRouterTests {
                 // — excluded here to avoid that real-FS side effect; proven by
                 // SoundBankCommandTests with injected temp dirs.
                 "instrument.importSoundBank",
+                // instrument.importSampleLibrary (m19-c) reads a REAL .sfz +
+                // sample files off disk — a fixture this bare loop doesn't
+                // stage. Proven end-to-end (happy path, dryRun, every error
+                // shape, undo, offline-render gate) by SampleLibraryCommandTests
+                // with temp-dir fixtures.
+                "instrument.importSampleLibrary",
                 "ai.sidecarStart", "ai.sidecarStop",
                 "ai.generateSong", "ai.generationStatus",
                 // ai.importGeneration (M6 iii-a) needs a succeeded jobId from a

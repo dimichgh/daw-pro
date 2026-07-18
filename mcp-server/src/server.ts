@@ -717,10 +717,194 @@ const samplerZoneSchema = z.object({
   gain: z
     .number()
     .min(0)
+    .max(2)
+    .optional()
+    .describe(
+      "This zone's own output level, 0-2, on top of the sampler's overall `gain`. Values " +
+        "above 1 boost — 2.0 = +6 dB, matching what imported sample libraries can ask for. " +
+        "Defaults to 1."
+    ),
+  minVelocity: z
+    .number()
+    .int()
+    .min(0)
+    .max(127)
+    .optional()
+    .describe(
+      "Lowest MIDI velocity, 0-127, this zone responds to (inclusive). Together with " +
+        "`maxVelocity` this selects the VELOCITY LAYER: give soft/loud recordings of the same " +
+        "key adjacent velocity ranges (e.g. 0-62 and 63-127) and the played velocity picks " +
+        "which sample sounds. Defaults to 0 (all velocities)."
+    ),
+  maxVelocity: z
+    .number()
+    .int()
+    .min(0)
+    .max(127)
+    .optional()
+    .describe(
+      "Highest MIDI velocity, 0-127, this zone responds to (inclusive). Defaults to 127. " +
+        "See `minVelocity` for how velocity ranges build layered instruments."
+    ),
+  group: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      "Layering identity (integer ≥ 0). Zones in DIFFERENT groups LAYER — one note-on fires " +
+        "one voice per group, so put e.g. a close-mic and a room-mic sample in two groups to " +
+        "hear both together. Zones in the SAME group ALTERNATE — at most one of them sounds " +
+        "per note-on (velocity ranges, round-robin, and random gates decide which). Omitted " +
+        "= group 0, matching all other omitted-group zones (the classic first-match keymap)."
+    ),
+  seqLength: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      "Round-robin cycle length N: this zone plays only on its `seqPosition`-th of every N " +
+        "consecutive matching note-ons. Give 4 alternate takes of the same drum hit " +
+        "seqLength 4 with seqPosition 1,2,3,4 and repeated hits rotate through them. " +
+        "Omitted or 1 = no round-robin (the zone is always eligible)."
+    ),
+  seqPosition: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      "This zone's 1-based slot in its `seqLength` round-robin cycle, 1-seqLength. " +
+        "Defaults to 1. Meaningless unless `seqLength` is 2 or more."
+    ),
+  randMin: z
+    .number()
+    .min(0)
     .max(1)
     .optional()
     .describe(
-      "This zone's own output level, 0-1, on top of the sampler's overall `gain`. Defaults to 1."
+      "Lower edge, 0-1, of this zone's random-alternation window. Each note-on draws one " +
+        "random number in [0,1) and the zone is eligible only when the draw falls in " +
+        "[randMin, randMax). Split same-group zones over e.g. 0-0.5 and 0.5-1 for " +
+        "humanized 50/50 sample alternation. Defaults to 0."
+    ),
+  randMax: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe(
+      "Upper edge, 0-1, of this zone's random-alternation window (exclusive, except 1.0 " +
+        "which closes the interval so a full-span zone always qualifies). Defaults to 1. " +
+        "See `randMin`."
+    ),
+  tuneCents: z
+    .number()
+    .min(-4800)
+    .max(4800)
+    .optional()
+    .describe(
+      "Fine/coarse pitch offset for this zone in CENTS (100 cents = 1 semitone), " +
+        "-4800 to +4800. Use small values to tune slightly-off samples into pitch " +
+        "(e.g. -12), or multiples of 100 to transpose a sample without changing its " +
+        "keyzone. Omitted = 0 (no retune)."
+    ),
+  pan: z
+    .number()
+    .min(-1)
+    .max(1)
+    .optional()
+    .describe(
+      "Stereo placement for this zone, -1 (hard left) to +1 (hard right), constant-power " +
+        "law. Place multi-sampled drums across the stereo field (hi-hat slightly left, " +
+        "ride right) without extra tracks. NOTE: omitting pan keeps the zone's legacy " +
+        "full-level dual-mono behavior; an EXPLICIT 0 engages the pan law's -3 dB center — " +
+        "slightly quieter than omitted. Omit it unless you want panning."
+    ),
+  ampVelTrack: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe(
+      "How strongly velocity drives this zone's loudness, 0-1. 1 (default) = full " +
+        "tracking (velocity 64 plays at ~half level); 0 = velocity ignored — every hit " +
+        "plays at full level, useful for consistent drum samples or organs; between = " +
+        "reduced dynamic range. Amplitude = (1 - t + t*velocity/127) * gain."
+    ),
+  oneShot: z
+    .boolean()
+    .optional()
+    .describe(
+      "Per-zone one-shot override. true = this zone's notes always play to the sample's " +
+        "end, ignoring note-off — the drum/percussion behavior — even when the sampler's " +
+        "global `oneShot` is false. false = this zone follows note-off (releases) even " +
+        "under a global one-shot. Omitted = inherit the sampler's global `oneShot`."
+    ),
+  startFrame: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      "First SOURCE-FILE frame to play, in the sample file's own frames (at ITS sample " +
+        "rate, e.g. frame 44100 = 1.0 s into a 44.1 kHz file). Use it to skip silence or " +
+        "an unwanted transient at the head of a sample. Omitted = 0 (play from the start)."
+    ),
+  endFrame: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      "Last SOURCE-FILE frame (exclusive) to play — the voice ends there instead of at " +
+        "the file's end. Must exceed `startFrame` (it is raised to startFrame+1 if not); " +
+        "both clamp to the real file length. Use with startFrame to excerpt one hit from " +
+        "a longer recording. Omitted = the file's end."
+    ),
+  attack: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe(
+      "Per-zone amplitude envelope ATTACK in seconds, 0-1: fade-in time from note-on to " +
+        "full level. Overrides the sampler's global `attack` for this zone only. " +
+        "Omitted = use the global attack."
+    ),
+  decay: z
+    .number()
+    .min(0)
+    .max(8)
+    .optional()
+    .describe(
+      "Per-zone amplitude envelope DECAY in seconds, 0-8: after the attack peak, how long " +
+        "the level takes to fall to `sustain`. Together with sustain this shapes pluck/pad " +
+        "character from the same sample (short decay + low sustain = plucky). Omitted or " +
+        "0 = no decay stage (the level holds at peak — the classic sampler behavior)."
+    ),
+  sustain: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe(
+      "Per-zone amplitude envelope SUSTAIN level, 0-1: the level held after the decay " +
+        "stage until note-off (1 = hold at full peak, 0.3 = held notes settle much " +
+        "quieter, 0 = notes decay to silence even while held). Only audible when `decay` " +
+        "is set. Omitted = 1."
+    ),
+  release: z
+    .number()
+    .min(0.001)
+    .max(8)
+    .optional()
+    .describe(
+      "Per-zone amplitude envelope RELEASE in seconds, 0.001-8: fade-out time after " +
+        "note-off. Overrides the sampler's global `release` for this zone only — give a " +
+        "piano-like zone a longer tail than the kit around it. Omitted = use the global " +
+        "release."
     ),
 });
 
@@ -729,12 +913,16 @@ const samplerSchema = z
     zones: z
       .array(samplerZoneSchema)
       .describe(
-        "The sampler's keyzone map, checked in array order: for a played note, the FIRST " +
-          "zone whose minPitch-maxPitch range contains that note's pitch is the one that " +
-          "plays (zones are not layered — exactly one, if any, sounds per note). Use one " +
-          "zone for a single mapped sample, or several zones with non-overlapping ranges to " +
-          "split different samples across the keyboard (e.g. a multi-sampled drum kit or " +
-          "instrument with per-register recordings)."
+        "The sampler's keyzone map. For a played note, each GROUP of zones fires at most " +
+          "one voice: within a group, the first zone (array order) whose pitch AND velocity " +
+          "ranges contain the note and whose round-robin/random gates pass is the one that " +
+          "plays; zones in different `group`s layer simultaneously. Zones without the " +
+          "optional selection fields all share group 0 with full ranges and no gates, so " +
+          "the classic behavior holds: the FIRST zone containing the pitch plays, exactly " +
+          "one voice per note. Use one zone for a single mapped sample; non-overlapping " +
+          "pitch ranges to split samples across the keyboard; velocity ranges for " +
+          "soft/loud layers; `seqLength`/`seqPosition` or `randMin`/`randMax` within a " +
+          "group for round-robin/random alternation; different `group`s to stack sounds."
       ),
     oneShot: z
       .boolean()
@@ -1321,6 +1509,80 @@ registerTool(
     },
   },
   async ({ path }) => toToolResult(() => bridge.send("instrument.importSoundBank", { path }))
+);
+
+registerTool(
+  "instrument_import_sample_library",
+  {
+    title: "Import a sample library onto a track's Sampler",
+    description:
+      "Import a sample LIBRARY file (a multi-sample instrument definition — key/velocity " +
+      "zones mapped to audio files, e.g. a sampled piano or drum kit) and load it onto the " +
+      "given INSTRUMENT track's built-in Sampler. Imports .sfz (documented subset) and " +
+      ".dspreset sample-library files (see docs/SFZ-SUPPORT.md for exactly what each format " +
+      "keeps, reports, and skips); a `.dslibrary` path is rejected with a hint to unzip it " +
+      "first and import the `.dspreset` inside (it's a zip archive, not a library file " +
+      "itself). RECOMMENDED WORKFLOW: call this once with `dryRun: true` first to inspect " +
+      "the report before touching the project — its `skippedRegions` (reason -> count, e.g. " +
+      "regions triggered by a release or a CC that this build doesn't map), `ignoredOpcodes` " +
+      "(opcode -> count) and `degradations` (plain-English sentences, e.g. keyswitch " +
+      "reduction to a default articulation) tell you exactly what will and won't survive the " +
+      "import; once the report looks right, call again with `dryRun` omitted/false to apply " +
+      "it for real. Sustain loops play for real: SFZ loop_mode/loop_start/loop_end, " +
+      ".dspreset loopEnabled/loopStart/loopEnd, and loops embedded in a WAV's smpl chunk " +
+      "when the text authored none — the report's `loopedZones` counts them. Unlike " +
+      "instrument_import_sound_bank (which only copies a file into a " +
+      "shared library and never touches any project), this call IS a project mutation when " +
+      "applied: it replaces the track's instrument in ONE journaled \"Change Instrument\" " +
+      "edit, undoable with edit_undo like any other edit — a dry run makes no project change " +
+      "and creates no undo entry. `force` (default false) overrides ONLY the 4 GB total-" +
+      "sample-size refusal for unusually large libraries; a 500 MB warning is always reported " +
+      "regardless of `force` (it never blocks the import, just flags it). Returns " +
+      "`{report: <SampleLibraryImportReport>, applied}` where `applied` is true only when the " +
+      "import actually landed on the track (i.e. `dryRun` was false); the report shape is " +
+      "identical on both dry runs and real applies so you can compare before/after. Missing " +
+      "file, wrong extension, a preprocessor error (missing/cyclic #include, an undefined " +
+      "$VAR macro), malformed .dspreset XML, zero zones surviving mapping, or the size " +
+      "refusal all surface as readable errors naming the problem.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .min(1)
+        .describe("Id (UUID) of the INSTRUMENT track to load the sample library onto, from project_snapshot."),
+      path: z
+        .string()
+        .min(1)
+        .describe(
+          "Absolute (or ~-prefixed) path to the .sfz or .dspreset sample-library file on " +
+            "this Mac to import. A relative path is rejected."
+        ),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: parse and map the library and return the full report WITHOUT touching the " +
+            "project (no instrument change, no undo entry) — use this first to inspect what " +
+            "will and won't survive the import. Omit or false: apply it for real. Default false."
+        ),
+      force: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: override the 4 GB total-sample-size refusal so an unusually large library can " +
+            "still be imported. Has no effect on the 500 MB warning, which is always reported " +
+            "regardless of this flag. Omit or false: the 4 GB refusal stands. Default false."
+        ),
+    },
+  },
+  async ({ trackId, path, dryRun, force }) =>
+    toToolResult(() =>
+      bridge.send("instrument.importSampleLibrary", {
+        trackId,
+        path,
+        ...(dryRun !== undefined ? { dryRun } : {}),
+        ...(force !== undefined ? { force } : {}),
+      })
+    )
 );
 
 // ---------------------------------------------------------------------------
@@ -4662,6 +4924,92 @@ registerTool(
     inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("ai.sidecarStop"))
+);
+
+// ---------------------------------------------------------------------------
+// Voice-conversion sidecar (m10-p-3)
+// ---------------------------------------------------------------------------
+//
+// A SECOND, SEPARATE local sidecar (a Python FastAPI facade over the pinned
+// Acelogic/Retrieval-based-Voice-Conversion-MLX fork, on 127.0.0.1:8002,
+// loopback only — see scripts/rvc/README.md) — additive alongside the
+// ai_sidecar_* trio above, which is untouched. Same shape/discipline as
+// ai_sidecar_status/start/stop (thin passthroughs over bridge.send, never a
+// direct provider HTTP call): process lifecycle only. There is deliberately
+// NO convert/train tool yet — those (vc_convert_vocals/vc_train_voice) arrive
+// with a later roadmap item once the wire commands exist; until then the
+// facade has no voices to convert with (voiceCount stays 0) and training
+// always answers a reserved "not yet available" error. Policy note carried
+// in every description below: voices are trained ONLY from a user's OWN
+// recordings — never a celebrity or third-party voice model, and this trio
+// implies no product-compatibility claim about the underlying engine.
+
+server.registerTool(
+  "vc_sidecar_status",
+  {
+    title: "Check the local voice-conversion sidecar",
+    description:
+      "Check the status of the local RVC voice-conversion sidecar — the " +
+      "offline engine that will convert vocals to a voice trained from the " +
+      "user's OWN recordings (never a celebrity or third-party voice; " +
+      "training arrives with a later roadmap item — this tool is " +
+      "lifecycle/health only for now). No params. Always succeeds (never " +
+      "throws) and returns one of five states: `notInstalled` (run " +
+      "scripts/rvc/install.sh first), `installedNotRunning` (call " +
+      "vc_sidecar_start), `starting` (a vc_sidecar_start call is in " +
+      "flight — poll again shortly), `healthy` (ready — `version`/`engine`/" +
+      "`baseModelPresent`/`voiceCount` report what's loaded; `voiceCount` " +
+      "is 0 until a voice has been trained), or `error` (the sidecar " +
+      "responded but unexpectedly — check scripts/rvc/runtime/logs/" +
+      "rvc-facade.log). Returns `{state, message, version?, engine?, " +
+      "baseModelPresent?, voiceCount?, pid?}` — `message` is always a " +
+      "human-actionable next step, never a bare code. This is a SEPARATE " +
+      "sidecar from ai_sidecar_status (song generation) — call this before " +
+      "vc_sidecar_start to avoid an unnecessary spawn attempt, and after " +
+      "it to confirm readiness.",
+  },
+  async () => toToolResult(() => bridge.send("vc.sidecarStatus"))
+);
+
+registerTool(
+  "vc_sidecar_start",
+  {
+    title: "Start the local voice-conversion sidecar",
+    description:
+      "Start the local RVC voice-conversion sidecar (spawns " +
+      "scripts/rvc/run.sh, a FastAPI facade bound to 127.0.0.1:8002 only) " +
+      "if it isn't already healthy, then waits for it to report ready. No " +
+      "params — safe to call even if it's already starting or healthy " +
+      "(idempotent: a healthy sidecar returns immediately, a boot already " +
+      "in flight is simply observed). Errors with an actionable message if " +
+      "the sidecar was never installed (points at scripts/rvc/install.sh) " +
+      "or if the process exits during startup (points at the log). A slow " +
+      "load is NOT an error — if the health check doesn't succeed within " +
+      "the startup timeout, this still returns ok with `state: " +
+      "\"starting\"`; call vc_sidecar_status again a little later rather " +
+      "than retrying vc_sidecar_start. Returns the same `{state, message, " +
+      "version?, engine?, baseModelPresent?, voiceCount?, pid?}` shape as " +
+      "vc_sidecar_status.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("vc.sidecarStart"))
+);
+
+registerTool(
+  "vc_sidecar_stop",
+  {
+    title: "Stop the local voice-conversion sidecar",
+    description:
+      "Stop the local RVC voice-conversion sidecar (graceful SIGTERM via " +
+      "its pidfile, escalating to a forced kill if it doesn't exit " +
+      "promptly) to free the memory its loaded models hold. No params. " +
+      "Succeeds as a no-op (not an error) if it wasn't running. Returns " +
+      "the same `{state, message, version?, engine?, baseModelPresent?, " +
+      "voiceCount?, pid?}` shape as vc_sidecar_status (state settles to " +
+      "`installedNotRunning`).",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("vc.sidecarStop"))
 );
 
 server.registerTool(

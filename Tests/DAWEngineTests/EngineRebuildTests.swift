@@ -190,7 +190,14 @@ struct EngineRebuildTests {
 
         engine.tracksDidChange([keys, limited, plain, bus])
         let graphBefore = ObjectIdentifier(engine.graph)
-        #expect(engine.insertChainLatencySamples(forTrack: limited.id) == 240)
+        // m19-j: the LIVE graph prepares the limiter at the hardware default
+        // device's rate (24 kHz Bluetooth headsets are real) — derive the
+        // 5 ms lookahead from the engine's actual rate, never pin 240.
+        // Same formula as LimiterEffect.prepare.
+        let lookahead = Int(
+            (LimiterParams.lookaheadSeconds * engine.graph.graphSampleRateForTesting).rounded())
+        #expect(lookahead > 0)  // degenerate device rate: fail loudly, never vacuously
+        #expect(engine.insertChainLatencySamples(forTrack: limited.id) == lookahead)
 
         // The "once-rendered" precondition without hardware — exactly what a
         // successful prepare() sets. The announce-class rewire below then
@@ -208,13 +215,13 @@ struct EngineRebuildTests {
         #expect(!engine.graph.needsEngineRebuild)  // the fresh graph carries no debt
         // Chain state rebuilt from descriptors on the fresh graph: the
         // limiter's lookahead latency is reproduced exactly.
-        #expect(engine.insertChainLatencySamples(forTrack: limited.id) == 240)
+        #expect(engine.insertChainLatencySamples(forTrack: limited.id) == lookahead)
         // PDC recomputed against the rebuilt strips: the limiter strip
         // reports its chain, the plain strip pads to the track stage.
         let report = try #require(engine.pdcReport())
-        #expect(report.trackStageSamples == 240)
-        #expect(report.strips[limited.id]?.chainLatencySamples == 240)
-        #expect(report.strips[plain.id]?.compensationSamples == 240)
+        #expect(report.trackStageSamples == lookahead)
+        #expect(report.strips[limited.id]?.chainLatencySamples == lookahead)
+        #expect(report.strips[plain.id]?.compensationSamples == lookahead)
         // Instrument descriptors preserved in the rebuilt signature...
         #expect(engine.graph.instrumentSignature[keys.id]?.audioUnitComponent == Self.dls)
         // ...and the REGISTRY instance survived engine replacement by
@@ -440,9 +447,18 @@ struct EngineRebuildTests {
         #expect(!engine.graph.needsEngineRebuild)
 
         // Playback resumed: the playhead keeps advancing monotonically.
+        // Bounded POLL, not one fixed 300 ms sleep (m19-e de-flake): under
+        // the parallel full suite the main actor can be starved past any
+        // fixed window (the m19-e churn load tipped this test 1-in-2 runs
+        // with ZERO pushes landing in 300 ms). Healthy runs exit on the
+        // first 50 ms tick; a genuinely stalled playhead still fails —
+        // it never grows within 5 s. Assertions unchanged.
         let pushesAtRebuild = pushes.count
         let lastBeat = pushes.last ?? 0
-        try await Task.sleep(for: .milliseconds(300))
+        let pollDeadline = ContinuousClock.now + .seconds(5)
+        while pushes.count <= pushesAtRebuild, ContinuousClock.now < pollDeadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
         #expect(pushes.count > pushesAtRebuild)
         #expect((pushes.last ?? 0) >= lastBeat)
 

@@ -2655,6 +2655,51 @@ final class AppModel {
         instrumentPicker.importBank(from: url)
     }
 
+    /// Imports a sample library — .sfz (documented subset) or .dspreset —
+    /// onto the instrument picker's target track via NSOpenPanel (not
+    /// headless — the app view drives it), routing through the SAME store
+    /// method the wire's `instrument.importSampleLibrary` uses (one journaled
+    /// "Change Instrument" edit). The report's zone counts + degradation
+    /// sentences surface in the picker's neutral inline notice; refusals in
+    /// the inline error row (the `importSoundBankViaPanel` idiom). A
+    /// cancelled panel is a no-op. `.dslibrary` stays selectable ON PURPOSE:
+    /// picking one surfaces the teaching error ("unzip and import the
+    /// .dspreset inside") instead of an unexplained grayed-out file.
+    func importSampleLibraryViaPanel() {
+        guard let trackID = instrumentPickerTrackID else { return }
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "sfz"),
+                                     UTType(filenameExtension: "dspreset"),
+                                     UTType(filenameExtension: "dslibrary")].compactMap { $0 }
+        panel.prompt = "Import"
+        panel.message = "Choose a sample library — .sfz (documented subset) or .dspreset — to play on this track's Sampler."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let report = try store.importSampleLibrary(trackID: trackID, path: url.path)
+            var lines = [
+                "Imported \(report.zonesImported) zone\(report.zonesImported == 1 ? "" : "s") · \(report.velocityLayerCount) velocity layer\(report.velocityLayerCount == 1 ? "" : "s") · \(report.groupCount) group\(report.groupCount == 1 ? "" : "s")",
+            ]
+            if !report.skippedRegions.isEmpty {
+                let summary = report.skippedRegions.sorted { $0.key < $1.key }
+                    .map { "\($0.key) ×\($0.value)" }.joined(separator: ", ")
+                lines.append("Skipped: \(summary)")
+            }
+            lines += report.degradations
+            instrumentPicker.presentSampleLibraryOutcome(
+                notice: lines.joined(separator: "\n"), error: nil)
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            instrumentPicker.presentSampleLibraryOutcome(notice: nil, error: message)
+        }
+        // Refresh the picker's current-instrument highlight (now the Sampler
+        // on success) — the applyInstrumentChoice re-read discipline.
+        let descriptor = store.tracks.first { $0.id == trackID }?.instrument
+        instrumentPicker.updateCurrent(descriptor: descriptor,
+                                       status: store.audioUnitStatus(forTrack: trackID))
+    }
+
     /// `debug.instrumentPicker {trackId?, mode?, search?, bank?}` — stages the
     /// picker for a capture that the wire alone can't reach (the picker is UI
     /// chrome, off `allCommands`/MCP — the `debug.clipFixSeed` precedent). Opens

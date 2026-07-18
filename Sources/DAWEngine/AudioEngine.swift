@@ -307,8 +307,18 @@ public final class AudioEngine: AudioEngineControlling {
 
     /// Lead time between "now" and the shared player start anchor: long enough
     /// to cover a render quantum + scheduling jitter, short enough to feel
-    /// immediate.
+    /// immediate. This is the FLOOR — `startPlayers` scales the lead with the
+    /// startable-player count (m19-f R2′ leg 2) because the serial
+    /// `play(at:)` loop costs ~6 ms per player and a call completing AFTER
+    /// the anchor starts that player SHIFTED-ORIGIN (probe-pinned
+    /// 2026-07-16): its whole schedule runs late by the lateness, silently
+    /// off the grid for the rest of the roll. The metronome enable-mid-play
+    /// re-anchor keeps this constant — it starts ONE player.
     private static let startLeadSeconds = 0.06
+
+    /// Anchor-lead ceiling (m19-f R2′ leg 2): a 60+-active-player session
+    /// gets a visible stderr line instead of a silent ~1 s pre-roll gap.
+    private static let maxStartLeadSeconds = 0.5
 
     public private(set) var isRunning = false
     public private(set) var isTonePlaying = false
@@ -328,9 +338,22 @@ public final class AudioEngine: AudioEngineControlling {
     public var engineNoticeHandler: ((EngineNoticeEvent) -> Void)?
 
     public init() {
-        graph = PlaybackGraph(engine: engine)
+        graph = PlaybackGraph(engine: engine, graphRate: Self.currentDeviceRate(of: engine))
         wireGraphHooks()
         observeConfigurationChanges()
+    }
+
+    /// The default output device's nominal rate at CALL time, 48 kHz when
+    /// the output is not yet configured — the exact query-plus-guard that
+    /// lived in `PlaybackGraph.graphFormat()` before m20-c, now read ONCE
+    /// per live graph construction (init, `rebuildEngine`) and injected.
+    /// Build-time semantics are identical to the old live query; what
+    /// changed is mid-life: a device-rate flip no longer half-updates chain
+    /// rates through `applyParameters` — the graph keeps its build rate
+    /// until the next full rebuild.
+    private static func currentDeviceRate(of engine: AVAudioEngine) -> Double {
+        let outputRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
+        return outputRate > 0 ? outputRate : 48_000
     }
 
     /// Wires every AudioEngine-owned hook into the CURRENT `graph` — called
@@ -525,7 +548,8 @@ public final class AudioEngine: AudioEngineControlling {
                 installMeterTap(on: graph.masterChainHost ?? mixer)
                 // Lazy metronome attach: the player joins the graph once, whether or
                 // not the click is enabled — scheduling decides whether it sounds.
-                metronome.attach(to: engine)
+                // m20-c: the click edge forms at the graph's injected rate.
+                metronome.attach(to: engine, graphRate: graph.graphSampleRate)
                 engine.prepare()
                 try engine.start()
                 isRunning = true
@@ -817,7 +841,7 @@ public final class AudioEngine: AudioEngineControlling {
         isRunning = false
         masterAnalyzer?.reset()
         engine = AVAudioEngine()  // old engine's last reference dies here
-        graph = PlaybackGraph(engine: engine)
+        graph = PlaybackGraph(engine: engine, graphRate: Self.currentDeviceRate(of: engine))
         wireGraphHooks()
         observeConfigurationChanges()
         // 4. Cold build from the model — the offline renderer's proven
@@ -830,7 +854,7 @@ public final class AudioEngine: AudioEngineControlling {
         let mixer = engine.mainMixerNode  // touching it wires mixer → output
         graph.ensureMasterSandwich()
         installMeterTap(on: graph.masterChainHost ?? mixer)
-        metronome.attach(to: engine)
+        metronome.attach(to: engine, graphRate: graph.graphSampleRate)
         graph.reconcile(tracks: lastTracks)
         mixer.outputVolume = Float(masterVolume)
         graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
@@ -952,8 +976,10 @@ public final class AudioEngine: AudioEngineControlling {
     /// the silent placeholder; on success the node is invalidated and
     /// `tracksDidChange` re-enters to rebuild it with the real instrument.
     private func syncAudioUnitInstruments(_ tracks: [Track]) {
-        let graphRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-        let sampleRate = graphRate > 0 ? graphRate : 48_000
+        // m20-c: prepare keys embed the graph's injected build-time rate —
+        // the same value every edge and chain was built at — never a live
+        // device query (which could disagree with the edges mid-flip).
+        let sampleRate = graph.graphSampleRate
 
         var auTracks: [UUID: Track] = [:]
         for track in tracks
@@ -1003,8 +1029,9 @@ public final class AudioEngine: AudioEngineControlling {
     /// invalidated and re-synced (an atomic snapshot republish) — never a
     /// graph rebuild, never a playback interruption.
     private func syncAudioUnitEffects(_ tracks: [Track]) {
-        let graphRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-        let sampleRate = graphRate > 0 ? graphRate : 48_000
+        // m20-c: same rule as `syncAudioUnitInstruments` — the graph's
+        // injected build-time rate, never a live device query.
+        let sampleRate = graph.graphSampleRate
 
         var auEffects: [UUID: (trackID: UUID, config: AudioUnitConfig)] = [:]
         for track in tracks {
@@ -1259,16 +1286,20 @@ public final class AudioEngine: AudioEngineControlling {
         // work under the exception barrier — a raise converts and rethrows,
         // so `render.mixdown`/bounce commands fail with the teaching error
         // instead of poisoning the MainActor. (AU preparation above is async
-        // instantiation with its own internal error handling.)
+        // instantiation with its own internal error handling.) m19-j: the
+        // barrier moved INSIDE `renderCooperatively` (it cannot span an
+        // await) — same "offline render" context, identical conversion. The
+        // cooperative driver yields the main actor between quanta so a long
+        // bounce no longer wedges the app (measured: the >5 s integration
+        // bounce held the main actor 5.7 s — past the 2.5 s m18-b watchdog
+        // threshold — and every control command failed fast until recovery).
         do {
-            return try withObjCExceptionBarrier("offline render") {
-                try renderer.render(
-                    tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
-                    durationSeconds: durationSeconds, masterVolume: masterVolume,
-                    masterEffects: masterEffects,
-                    masterAutomation: masterAutomation
-                )
-            }
+            return try await renderer.renderCooperatively(
+                tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
+                durationSeconds: durationSeconds, masterVolume: masterVolume,
+                masterEffects: masterEffects,
+                masterAutomation: masterAutomation
+            )
         } catch {
             postEngineExceptionNotice(error)
             throw error
@@ -1833,7 +1864,33 @@ public final class AudioEngine: AudioEngineControlling {
         )
         let output = engine.outputNode
         let hardwareRate = output.outputFormat(forBus: 0).sampleRate
-        let leadHostTicks = AVAudioTime.hostTime(forSeconds: Self.startLeadSeconds)
+        // m19-f R2′ leg 2 (design §3.4): the anchor lead scales with the
+        // players `startAllPlayers` will ACTUALLY start (post-R1: nodes with
+        // a raised enqueue ledger — active players only; read AFTER the
+        // schedule pass and loop top-up above, so the count is current).
+        // The serial play(at:) loop costs 5.4–6.1 ms/player (m18-c
+        // measured); the constant 0.06 s lead overruns beyond ~10 active
+        // players, and the past-anchor probe (2026-07-16, scratchpad
+        // m19f-orch/past-anchor-probe, 5/5 runs) pinned the SDK's late-call
+        // behavior as SHIFTED-ORIGIN: offset ≈ lateness + IO-quantum
+        // roundup, never retroactive — every overrun player runs silently
+        // late for the whole roll. 8 ms/player covers the measured cost +
+        // variance; n ≤ 5 keeps the lead at exactly 0.06 (null case
+        // byte-identical). Everything downstream inherits the scaled value:
+        // currentAnchor, the metronome's clickAnchorHost, additive count-in
+        // ticks, and derivedBeats' negative-elapsed clamp already handles
+        // arbitrary leads.
+        let startableCount = graph.startablePlayerCount
+        var startLead = max(Self.startLeadSeconds,
+                            0.02 + Double(startableCount) * 0.008)
+        if startLead > Self.maxStartLeadSeconds {
+            FileHandle.standardError.write(Data(
+                ("AudioEngine: anchor lead capped at \(Self.maxStartLeadSeconds) s "
+                 + "for \(startableCount) startable players — the serial start "
+                 + "loop may overrun the anchor\n").utf8))
+            startLead = Self.maxStartLeadSeconds
+        }
+        let leadHostTicks = AVAudioTime.hostTime(forSeconds: startLead)
         let countInHostTicks = AVAudioTime.hostTime(forSeconds: countIn.delaySeconds)
 
         if renderClockTrusted,
@@ -1842,7 +1899,7 @@ public final class AudioEngine: AudioEngineControlling {
             let clickAnchorHost = renderTime.hostTime + leadHostTicks
             let anchorHost = clickAnchorHost + countInHostTicks
             let anchorSample = renderTime.sampleTime + AVAudioFramePosition(
-                ((Self.startLeadSeconds + countIn.delaySeconds) * hardwareRate).rounded()
+                ((startLead + countIn.delaySeconds) * hardwareRate).rounded()
             )
             currentAnchor = PlaybackAnchor(
                 startBeats: beats,

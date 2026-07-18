@@ -151,8 +151,79 @@ public final class OfflineRenderer {
                        masterAutomation: [AutomationLane] = [],
                        metronomeEnabled: Bool = false,
                        meterMap: MeterMap = MeterMap(constant: TimeSignature())) throws -> RenderedAudio {
+        let session = try beginSession(
+            tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
+            durationSeconds: durationSeconds, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            metronomeEnabled: metronomeEnabled, meterMap: meterMap)
+        while !session.isComplete {
+            try session.pullNextQuantum()
+        }
+        return session.finish()
+    }
+
+    /// m19-j — the COOPERATIVE render: the identical pull sequence to
+    /// `render` (same session, same quantum math, bit-identical output), but
+    /// the loop yields the main actor between quanta. A long bounce used to
+    /// hold the main actor for its whole wall time (measured 5.7 s for the
+    /// MCP integration suite's >5 s program on a debug build — past the
+    /// 2.5 s m18-b wedge threshold, so every control command failed fast on
+    /// the watchdog intercept until the backlog drained; a full-length song
+    /// is ~25 s of frozen UI). Yielding every quantum caps the block at ONE
+    /// quantum (~85 ms of audio) and lets liveness pongs, meter deliveries,
+    /// and control commands interleave. Interleaved commands are safe by
+    /// construction: this renderer owns a fresh engine/graph/registry, and
+    /// the track list is a value-type snapshot taken at call time (the
+    /// bounce renders the project as requested — WYSIWYG).
+    ///
+    /// The m16-a exception barrier moves INSIDE (it cannot span an await):
+    /// every synchronous AVFAudio section runs under the same
+    /// "offline render" context `AudioEngine.renderOffline` used to apply
+    /// around the whole call — raise conversion is behavior-identical.
+    public func renderCooperatively(
+        tracks: [Track], tempoMap: TempoMap,
+        fromBeat: Double = 0,
+        durationSeconds: Double,
+        masterVolume: Double = 1,
+        masterEffects: [EffectDescriptor] = [],
+        masterAutomation: [AutomationLane] = [],
+        metronomeEnabled: Bool = false,
+        meterMap: MeterMap = MeterMap(constant: TimeSignature())
+    ) async throws -> RenderedAudio {
+        let session = try withObjCExceptionBarrier("offline render") {
+            try beginSession(
+                tracks: tracks, tempoMap: tempoMap, fromBeat: fromBeat,
+                durationSeconds: durationSeconds, masterVolume: masterVolume,
+                masterEffects: masterEffects, masterAutomation: masterAutomation,
+                metronomeEnabled: metronomeEnabled, meterMap: meterMap)
+        }
+        while !session.isComplete {
+            try withObjCExceptionBarrier("offline render") {
+                try session.pullNextQuantum()
+            }
+            await Task.yield()
+        }
+        return try withObjCExceptionBarrier("offline render") {
+            session.finish()
+        }
+    }
+
+    /// The shared setup for both render drivers: builds the offline engine +
+    /// graph, schedules everything, starts players, and returns the pull-loop
+    /// state. Extracted VERBATIM from the original `render` body (m19-j) —
+    /// call order is load-bearing (see the inline measurement notes).
+    private func beginSession(tracks: [Track], tempoMap: TempoMap,
+                              fromBeat: Double,
+                              durationSeconds: Double,
+                              masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              metronomeEnabled: Bool,
+                              meterMap: MeterMap) throws -> OfflineRenderSession {
         let engine = AVAudioEngine()
-        let graph = PlaybackGraph(engine: engine)
+        // m20-c: the graph's rate is injected — the renderer's own rate, the
+        // same value `enableManualRenderingMode` below pins on the engine.
+        let graph = PlaybackGraph(engine: engine, graphRate: sampleRate)
         graph.meterSink = meterSink
         // Telemetry lands before reconcile — node creation is where the
         // context is captured (renderers at init, chain hosts via setter).
@@ -233,7 +304,7 @@ public final class OfflineRenderer {
         let metronome: Metronome?
         if metronomeEnabled {
             let click = Metronome()
-            click.attach(to: engine)
+            click.attach(to: engine, graphRate: sampleRate)
             metronome = click
         } else {
             metronome = nil
@@ -279,14 +350,54 @@ public final class OfflineRenderer {
             throw EngineError.renderFailed("could not allocate render buffer")
         }
 
-        let totalFrames = Int((durationSeconds * sampleRate).rounded())
-        var channelData = [[Float]](repeating: [], count: channelCount)
-        for channel in 0..<channelCount {
-            channelData[channel].reserveCapacity(totalFrames)
+        return OfflineRenderSession(
+            engine: engine, graph: graph, metronome: metronome, buffer: buffer,
+            sampleRate: sampleRate, channelCount: channelCount,
+            maximumFrameCount: maximumFrameCount,
+            totalFrames: Int((durationSeconds * sampleRate).rounded()))
+    }
+
+    /// One in-flight offline render's pull-loop state (m19-j): the started
+    /// engine, the graph and metronome KEPT ALIVE for the render's duration
+    /// (nodes, taps, and click players die with them), the reusable pull
+    /// buffer, and the accumulated channel data. Both drivers — `render`
+    /// (synchronous, tests and planners) and `renderCooperatively` (yields
+    /// between quanta) — run the byte-identical pull sequence through here.
+    @MainActor
+    final class OfflineRenderSession {
+        private let engine: AVAudioEngine
+        private let graph: PlaybackGraph
+        private let metronome: Metronome?
+        private let buffer: AVAudioPCMBuffer
+        private let sampleRate: Double
+        private let channelCount: Int
+        private let maximumFrameCount: Int
+        private let totalFrames: Int
+        private var channelData: [[Float]]
+        private var renderedFrames = 0
+
+        init(engine: AVAudioEngine, graph: PlaybackGraph, metronome: Metronome?,
+             buffer: AVAudioPCMBuffer, sampleRate: Double, channelCount: Int,
+             maximumFrameCount: Int, totalFrames: Int) {
+            self.engine = engine
+            self.graph = graph
+            self.metronome = metronome
+            self.buffer = buffer
+            self.sampleRate = sampleRate
+            self.channelCount = channelCount
+            self.maximumFrameCount = maximumFrameCount
+            self.totalFrames = totalFrames
+            channelData = [[Float]](repeating: [], count: channelCount)
+            for channel in 0..<channelCount {
+                channelData[channel].reserveCapacity(totalFrames)
+            }
         }
 
-        var renderedFrames = 0
-        while renderedFrames < totalFrames {
+        var isComplete: Bool { renderedFrames >= totalFrames }
+
+        /// Renders one quantum and appends it — the original loop body,
+        /// verbatim. Failure stops the engine and throws, exactly as before.
+        func pullNextQuantum() throws {
             let request = AVAudioFrameCount(min(totalFrames - renderedFrames, maximumFrameCount))
             let status = try engine.renderOffline(request, to: buffer)
             switch status {
@@ -307,8 +418,11 @@ public final class OfflineRenderer {
             }
         }
 
-        engine.stop()
-        return RenderedAudio(sampleRate: sampleRate, channelData: channelData)
+        /// Stops the engine and hands the accumulated audio over.
+        func finish() -> RenderedAudio {
+            engine.stop()
+            return RenderedAudio(sampleRate: sampleRate, channelData: channelData)
+        }
     }
 
     /// The full-session per-strip compensation targets EXACTLY as the
@@ -321,7 +435,10 @@ public final class OfflineRenderer {
     /// rule). Empty when the graph can't form (no strips, format failure).
     func compensationPlanTargets(tracks: [Track]) -> [UUID: Int] {
         let engine = AVAudioEngine()
-        let graph = PlaybackGraph(engine: engine)
+        // m20-c: injected rate, same rule as `beginSession` — and no longer
+        // dependent on `enableManualRenderingMode` landing before the first
+        // `graphFormat()` call.
+        let graph = PlaybackGraph(engine: engine, graphRate: sampleRate)
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: sampleRate,
             channels: AVAudioChannelCount(channelCount)

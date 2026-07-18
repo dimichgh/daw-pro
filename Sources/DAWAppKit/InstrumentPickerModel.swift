@@ -90,6 +90,13 @@ public final class InstrumentPickerModel {
     /// inline alert. Cleared on the next import attempt or `clearImportError`.
     public private(set) var importError: String?
 
+    /// Sample-library import outcome (m19-c): the honest "imported, but…"
+    /// summary — zone/layer/group counts plus the report's degradation
+    /// sentences — shown as a NEUTRAL inline notice under the Built-in
+    /// section (degradations are facts, not failures, so they never wear the
+    /// red error chrome). Cleared on `prepare` or `clearImportNotice`.
+    public private(set) var importNotice: String?
+
     public init(
         soundBanks: @escaping () -> [SoundBankInfo],
         programs: @escaping (SoundBankSource) -> (programs: [SoundBankProgram], namesParsed: Bool),
@@ -127,6 +134,7 @@ public final class InstrumentPickerModel {
         drilledNamesParsed = true
         collapsedCategories = []
         importError = nil
+        importNotice = nil
         refresh()
     }
 
@@ -255,6 +263,19 @@ public final class InstrumentPickerModel {
 
     /// Clears the inline import error.
     public func clearImportError() { importError = nil }
+
+    /// Presents a sample-library import outcome inline (m19-c): exactly one
+    /// of `notice` (imported — the report summary) or `error` (refused — the
+    /// structured import error's message) at a time, mirroring how a fresh
+    /// `importBank` attempt replaces the previous error. The model stays
+    /// store-free — the app's panel flow computes both strings.
+    public func presentSampleLibraryOutcome(notice: String?, error: String?) {
+        importNotice = notice
+        importError = error
+    }
+
+    /// Clears the inline sample-library notice.
+    public func clearImportNotice() { importNotice = nil }
 
     // MARK: - Choice construction
 

@@ -4,8 +4,9 @@ import DAWCore
 import Foundation
 
 /// The built-in sampler (M3 v): pitched multisample + one-shot playback.
-/// 16 voices, oldest stolen when full; noteOff pairs by noteID (same policies
-/// as `PolySynthInstrument`).
+/// 64 voices (m19-a: 16 → 64 for velocity-layered content under the pedal),
+/// oldest stolen when full; noteOff pairs by noteID (same policies as
+/// `PolySynthInstrument`).
 ///
 /// m16-b2 controllers (design-m16b §4.3): honors PITCH BEND (±2 st GM range,
 /// playback-rate factor 2^(semitones/12) on every voice) and SUSTAIN (CC64 ≥
@@ -15,19 +16,59 @@ import Foundation
 ///
 /// Zone audio is loaded FULLY in init — reconcile time, never the render
 /// thread — into immutable deinterleaved Float32 buffers at each file's
-/// native rate. A voice triggers on the FIRST zone in array order whose span
-/// contains the pitch (no zone → the note is silently ignored) and advances a
+/// native rate. Zone SELECTION (m19-a, design 2026-07-16 §4.2): zones are
+/// stable-sorted by `group` in init; a note-on makes ONE random draw, then one
+/// pass over the sorted array fires ONE voice per group — the first zone in
+/// each group that matches the pitch AND velocity spans and passes its
+/// round-robin (`seqLength`/`seqPosition`, per-zone counters advancing on
+/// every range match — the ARIA convention) and random (`randMin`/`randMax`
+/// vs the draw) gates. Legacy zones all land in implicit group 0 with full
+/// spans and no gates, so the loop degenerates to the original first-match
+/// scan exactly (no zone → the note is silently ignored). A voice advances a
 /// fractional playhead through the source at
 ///
 ///     2^((pitch − rootPitch)/12) × fileRate / graphRate
 ///
-/// with linear interpolation, freeing itself at buffer end. Mono files play
-/// on both output channels. Amplitude = velocity/127 × zone.gain × params.gain.
+/// with linear interpolation, freeing itself at the zone's end frame (m19-b:
+/// `startFrame`/`endFrame` trim the source span; nil = the whole file). Mono
+/// files play on both output channels, scaled by the zone's constant-power
+/// pan gains (nil pan = unity 1.0/1.0 — the legacy dual-mono law, see
+/// `LoadedZone`). Amplitude (m19-b, design §4.5):
 ///
-/// Envelope: `attack` is a linear anti-click ramp on trigger; noteOff starts a
-/// linear release ramp that reaches EXACTLY 0 after `release` seconds and
-/// frees the voice (true zeros from then on). `oneShot == true` ignores
-/// noteOff entirely — every trigger plays to buffer end.
+///     (1 − vt + vt × velocity/127) × zone.gain × params.gain
+///
+/// with vt = ampVelTrack (nil → 1 ⇒ the original velocity/127 law,
+/// bit-for-bit). `tuneCents` multiplies a precomputed `exp2(cents/1200)`
+/// factor into the playback increment.
+///
+/// Envelope (m19-b, design §4.4): per-voice linear 4-stage ADSR — the
+/// `PolySynthInstrument` stage machine — with coefficients computed at
+/// TRIGGER time from the zone's attack/decay/sustain/release, falling back to
+/// the LIVE global coefficients for nil fields. Nil defaults (decay 0,
+/// sustain 1) collapse to the original attack→hold→release law byte-for-byte.
+/// The release ramp reaches EXACTLY 0 after `release` seconds and frees the
+/// voice (true zeros from then on). One-shot (global, or per-zone override —
+/// zone wins, nil inherits the LIVE global at noteOff time) ignores noteOff —
+/// every trigger plays to the zone's end.
+///
+/// Known accepted semantic shift (design §4.4): because envelope coefficients
+/// are captured per voice at trigger, a GLOBAL attack/release hot-swap now
+/// affects only NEWLY triggered voices without a zone override — negligible
+/// at anti-click time scales.
+///
+/// Sustain loops (m20-g): a zone with `loopMode` loops `[loopStart, loopEnd)`
+/// — `.sustain` while the note (or the CC64 pedal) holds, disarming at true
+/// release start so playback continues linearly past the loop end into the
+/// natural tail; `.continuous` loops through the release and frees ONLY at
+/// envelope zero. The seam is a render-time equal-gain (linear) crossfade
+/// over the final min(512, loopStart, loopLength) source frames of each
+/// pass, blending in the pre-loop-start material `[loopStart − X, loopStart)`
+/// time-aligned to land exactly on loopStart at the wrap — zero per-voice
+/// crossfade state, pure arithmetic on the fractional playhead. loopStart 0
+/// degrades to a raw wrap (no pre-start material exists). A looping voice is
+/// NEVER one-shot (loopMode wins over `oneShot` — a continuous voice under
+/// global one-shot would otherwise drone until stolen). Nil loop fields
+/// render byte-identically to the pre-m20-g path.
 ///
 /// Parameter split: ZONES are structural — a zones change rebuilds the whole
 /// instrument via `PlaybackGraph.InstrumentTrackKey` (fresh init reloads the
@@ -47,7 +88,18 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
 
     /// POD descriptor of one successfully loaded zone. `left`/`right` point
     /// into buffers owned by `ownedChannelBuffers`; for mono files both point
-    /// at the same buffer.
+    /// at the same buffer. m19-a selection and m19-b playback fields are
+    /// resolved from the model zone's optionals ONCE in init (nil → the
+    /// legacy-law values) so the render path never touches an Optional.
+    ///
+    /// Pan bit-compat rule (m19-b): `pan == nil` resolves to
+    /// `panL = panR = 1.0` EXACTLY — the legacy unity dual-mono gains, so a
+    /// nil-field zone renders byte-identically to pre-m19-b (×1.0 is a float
+    /// identity). A PRESENT pan engages the constant-power law
+    /// `panL = cos((p+1)·π/4)`, `panR = sin((p+1)·π/4)`, which puts an
+    /// EXPLICIT center (pan 0) at 0.7071 (−3 dB) per channel — the standard
+    /// pan law. nil ≠ 0.0 here by design: the legacy suite forbids a −3 dB
+    /// shift on nil zones.
     private struct LoadedZone {
         var left: UnsafePointer<Float>
         var right: UnsafePointer<Float>
@@ -57,6 +109,36 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         var minPitch: Int32
         var maxPitch: Int32
         var gain: Float
+        var minVel: Int32            // nil → 0
+        var maxVel: Int32            // nil → 127
+        var group: Int32             // nil → 0 (implicit legacy group)
+        var seqLength: Int32         // nil/≤1 → 1 (no round-robin gate)
+        var seqPosition: Int32       // nil → 1; clamped into 1...seqLength
+        var randLo: Float            // nil → 0
+        var randHi: Float            // nil → 1
+        // m19-b playback scalars (design §4.1) —
+        var tuneFactor: Double       // exp2(tuneCents/1200), init-time; nil → 1.0
+        var panL: Float              // nil → 1.0 EXACTLY (see pan rule above)
+        var panR: Float
+        var ampVelTrack: Float       // nil → 1 (the velocity/127 law)
+        var oneShotOverride: Int8    // -1 = inherit the LIVE global / 0 / 1
+        var startFrame: Int          // resolved into 0..<frameCount; nil → 0
+        var endFrame: Int            // resolved into (startFrame+1)...frameCount; nil → frameCount
+        // Per-zone envelope, seconds/level. attack/release carry a -1
+        // sentinel = "inherit the LIVE global coefficient at trigger time"
+        // (design §4.4); decay/sustain have constant nil-defaults (0 / 1) and
+        // are resolved here.
+        var envAttack: Float         // seconds; -1 → global attackStep
+        var envDecay: Float          // seconds; nil → 0 (no decay stage)
+        var envSustain: Float        // level 0...1; nil → 1 (hold at peak)
+        var envRelease: Float        // seconds; -1 → global releaseSlope
+        // m20-g loops (§3.2) — all resolved once in init, POD stays POD.
+        var loopMode: UInt8          // 0 = none, 1 = sustain, 2 = continuous
+        var loopStart: Int           // resolved into 0..<frames (valid loops only)
+        var loopEndExcl: Int         // resolved into (loopStart+1)...endFrame
+        var loopLen: Double          // Double(loopEndExcl - loopStart), precomputed
+        var loopXfade: Int           // min(512, loopStart, loopEndExcl - loopStart); 0 = raw wrap
+        var invLoopXfade: Float      // loopXfade > 0 ? 1/Float(loopXfade) : 0
     }
 
     // MARK: - Published scalar snapshot
@@ -90,22 +172,48 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
 
     // MARK: - Voice
 
+    /// The 4-stage envelope state machine (m19-b) — the exact
+    /// `PolySynthInstrument.Stage` pattern.
+    private enum Stage {
+        static let attack: UInt8 = 1
+        static let decay: UInt8 = 2
+        static let sustain: UInt8 = 3
+        static let release: UInt8 = 4
+    }
+
     private struct Voice {
         var active = false
         var noteID: UInt64 = 0
         var serial: UInt64 = 0       // steal order: lowest serial = oldest voice
         var zoneIndex: Int32 = 0
-        var releasing = false
+        var stage: UInt8 = 0         // m19-b: Stage.attack...release
         var sustained = false        // noteOff deferred by the pedal (m16-b2, CC64)
+        // m19-b one-shot tri-state, copied from the zone at trigger: -1 =
+        // inherit — noteOff resolves it against the LIVE global `oneShot`, so
+        // a mid-note global toggle changes noteOff handling exactly as it did
+        // pre-m19-b; 0/1 = the zone's override wins over the global.
+        var oneShotOverride: Int8 = -1
         var position = 0.0           // fractional playhead, source-file frames
         var increment = 0.0          // baseIncrement × bendFactor
         var baseIncrement = 0.0      // unbent source frames per output frame (m16-b2)
-        var amp: Float = 0           // velocity/127 × zone.gain
+        var gainL: Float = 0         // amp × zone.panL (amp = velocity law × zone.gain)
+        var gainR: Float = 0         // amp × zone.panR
         var level: Float = 0         // envelope, 0...1
         var releaseFrom: Float = 0   // level captured at noteOff (release anchor)
+        // m19-b per-voice envelope coefficients, computed at TRIGGER time
+        // (design §4.4) — zone fields, or the then-live globals for nil.
+        var attackStep: Float = 0    // level units per sample
+        var decayStep: Float = 0
+        var sustainLevel: Float = 0
+        var releaseSlope: Float = 0  // fraction of releaseFrom per sample
+        // m20-g loops (§3.2), both copied from the zone at trigger:
+        var looping = false          // armed at trigger when zone.loopMode != 0;
+                                     // disarmed at release start for sustain mode
+        var loopMode: UInt8 = 0      // zone.loopMode copy — the disarm rule reads
+                                     // it without a zones deref in the noteOff path
     }
 
-    private static let voiceCount = 16
+    private static let voiceCount = 64
 
     private let voices: UnsafeMutablePointer<Voice>
     private let paramsSlot: UnsafeMutablePointer<daw_atomic_ptr>
@@ -134,6 +242,16 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     private var bendFactor = 1.0
     private var pedalDown = false
     private static let bendRangeSemitones = 2.0
+    // m19-a RR/RNG runtime state (design §4.3): per-zone round-robin counters
+    // and one xorshift64* state var — allocated/seeded in init (main actor),
+    // mutated ONLY inside `apply(event:)` on the render thread, the same
+    // single-writer discipline as `bendFactor`/`pedalDown`. Never model,
+    // params, snapshot, or wire state; a zones change is structural, so the
+    // rebuild resets counters (matches instrument-reload behavior). `reset()`
+    // deliberately does NOT touch them — flush ≠ round-robin restart; offline
+    // determinism comes from fresh init + the `randomSeed` test seam.
+    private let rrCounters: UnsafeMutablePointer<UInt32>
+    private var rngState: UInt64
     // Coefficients derived from the adopted snapshot — recomputed per
     // GENERATION change, never per sample.
     private var oneShot = false
@@ -150,10 +268,18 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     /// Loads every zone's audio file synchronously. Construction happens at
     /// reconcile time on the main actor (PlaybackGraph's instrument factory) —
     /// NEVER on the render thread. `sampleRate` is a provisional graph rate;
-    /// `prepare()` overrides it before the node ever renders.
-    init(params: SamplerParams, sampleRate: Double = 48_000) {
+    /// `prepare()` overrides it before the node ever renders. `randomSeed` is
+    /// the m19-a TEST SEAM: nil (production) seeds the selection RNG from
+    /// `SystemRandomNumberGenerator`; a fixed seed makes random-gate zone
+    /// selection — and therefore whole renders — deterministic.
+    init(params: SamplerParams, sampleRate: Double = 48_000, randomSeed: UInt64? = nil) {
         self.sampleRate = sampleRate
         lastAppliedScalars = ScalarParams(params)
+        // xorshift64* has one degenerate state: 0 sticks at 0. Substitute a
+        // fixed odd constant so a (vanishingly unlikely) zero seed still runs.
+        var systemGenerator = SystemRandomNumberGenerator()
+        let seed = randomSeed ?? systemGenerator.next()
+        rngState = seed == 0 ? 0x9E37_79B9_7F4A_7C15 : seed
 
         var loaded: [LoadedZone] = []
         for zone in params.zones {
@@ -190,6 +316,64 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                 } else {
                     rightBase = UnsafePointer(left.baseAddress!)  // mono → both channels
                 }
+                // m19-a: resolve the optional selection fields ONCE, here —
+                // nil collapses to the full-span/no-gate values so a legacy
+                // zone is exactly the pre-m19 degenerate case.
+                let seqLength = Int32(clamping: max(1, zone.seqLength ?? 1))
+                // m19-b: playback scalars, resolved once (nil → the legacy
+                // law — see the LoadedZone doc, especially the pan rule).
+                let panL: Float
+                let panR: Float
+                if let pan = zone.pan {
+                    let angle = (pan + 1) * Double.pi / 4
+                    panL = Float(cos(angle))
+                    panR = Float(sin(angle))
+                } else {
+                    panL = 1.0  // EXACT unity — the nil bit-compat contract
+                    panR = 1.0
+                }
+                // start into 0..<frames, end into (start+1)...frames so at
+                // least one frame always survives. The model init guarantees
+                // start ≥ 0 and end > start, but a raw Codable decode
+                // bypasses it — and these two bound POINTER reads, so the
+                // engine re-clamps defensively; degenerate inputs get a note.
+                let startFrame = min(max(0, zone.startFrame ?? 0), frames - 1)
+                let endFrame = min(max(startFrame + 1, zone.endFrame ?? frames), frames)
+                if zone.startFrame.map({ $0 != startFrame }) == true
+                    || zone.endFrame.map({ $0 != endFrame }) == true {
+                    zoneLoadNotes.append(
+                        "zone start/end clamped to \(startFrame)..\(endFrame) "
+                        + "(\(zone.audioFileURL.lastPathComponent) has \(frames) frames)")
+                }
+                // m20-g: loop resolution — model optionals collapse ONCE, defensively
+                // re-clamped against the REAL file length (raw Codable decode bypasses the
+                // model init, and these bound POINTER reads — the startFrame/endFrame rule).
+                // loopEndExcl clamps to the resolved endFrame (not frames): an `end=` trim
+                // bounds the loop too, and loopEndExcl ≤ endFrame is the invariant that
+                // lets a looping voice never trip the `idx >= zone.endFrame` free check.
+                var loopMode: UInt8 = 0
+                var loopStart = 0
+                var loopEndExcl = endFrame
+                if let mode = zone.loopMode {                       // .sustain / .continuous
+                    loopStart = min(max(0, zone.loopStart ?? 0), frames - 1)
+                    loopEndExcl = min(max(loopStart + 1, zone.loopEnd ?? endFrame), endFrame)
+                    if loopEndExcl <= loopStart {                   // loop outside the span
+                        zoneLoadNotes.append(
+                            "zone loop disabled (loop \(zone.loopStart ?? 0)..\(zone.loopEnd ?? endFrame) "
+                            + "outside the playable span \(startFrame)..\(endFrame) of "
+                            + "\(zone.audioFileURL.lastPathComponent))")
+                    } else {
+                        loopMode = mode == .sustain ? 1 : 2
+                        if (zone.loopStart.map { $0 != loopStart } == true)
+                            || (zone.loopEnd.map { $0 != loopEndExcl } == true) {
+                            zoneLoadNotes.append(
+                                "zone loop clamped to \(loopStart)..\(loopEndExcl) "
+                                + "(\(zone.audioFileURL.lastPathComponent) has \(frames) frames)")
+                        }
+                    }
+                }
+                let loopXfade = loopMode == 0 ? 0
+                    : min(512, loopStart, loopEndExcl - loopStart)
                 loaded.append(LoadedZone(
                     left: UnsafePointer(left.baseAddress!),
                     right: rightBase,
@@ -198,18 +382,56 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                     rootPitch: Int32(zone.rootPitch),
                     minPitch: Int32(zone.minPitch),
                     maxPitch: Int32(zone.maxPitch),
-                    gain: Float(zone.gain)))
+                    gain: Float(zone.gain),
+                    minVel: Int32(zone.minVelocity ?? 0),
+                    maxVel: Int32(zone.maxVelocity ?? 127),
+                    group: Int32(clamping: zone.group ?? 0),
+                    seqLength: seqLength,
+                    seqPosition: min(Int32(clamping: max(1, zone.seqPosition ?? 1)), seqLength),
+                    randLo: Float(zone.randMin ?? 0),
+                    randHi: Float(zone.randMax ?? 1),
+                    tuneFactor: zone.tuneCents.map { exp2($0 / 1_200.0) } ?? 1.0,
+                    panL: panL,
+                    panR: panR,
+                    ampVelTrack: Float(zone.ampVelTrack ?? 1),
+                    oneShotOverride: zone.oneShot.map { $0 ? 1 : 0 } ?? -1,
+                    startFrame: startFrame,
+                    endFrame: endFrame,
+                    envAttack: zone.attack.map { Float($0) } ?? -1,
+                    envDecay: Float(zone.decay ?? 0),
+                    envSustain: Float(zone.sustain ?? 1),
+                    envRelease: zone.release.map { Float($0) } ?? -1,
+                    loopMode: loopMode,
+                    loopStart: loopStart,
+                    loopEndExcl: loopEndExcl,
+                    loopLen: Double(loopEndExcl - loopStart),
+                    loopXfade: loopXfade,
+                    invLoopXfade: loopXfade > 0 ? 1 / Float(loopXfade) : 0))
             } catch {
                 zoneLoadNotes.append(
                     "zone skipped (\(zone.audioFileURL.lastPathComponent)): "
                     + error.localizedDescription)
             }
         }
-        zoneCount = loaded.count
-        zones = .allocate(capacity: max(1, loaded.count))
-        for (index, zone) in loaded.enumerated() {
+        // m19-a (design §4.1): stable-sort by group — explicit original-index
+        // tiebreaker, so legacy zones (all group 0) keep their relative order
+        // and today's first-match behavior byte-for-byte.
+        let sorted = loaded.enumerated()
+            .sorted { a, b in
+                a.element.group != b.element.group
+                    ? a.element.group < b.element.group
+                    : a.offset < b.offset
+            }
+            .map(\.element)
+        zoneCount = sorted.count
+        zones = .allocate(capacity: max(1, sorted.count))
+        for (index, zone) in sorted.enumerated() {
             zones.advanced(by: index).initialize(to: zone)
         }
+        // Round-robin counters, one per (sorted) zone — zeroed at build, so a
+        // structural rebuild restarts every cycle (design §4.3).
+        rrCounters = .allocate(capacity: max(1, sorted.count))
+        rrCounters.initialize(repeating: 0, count: max(1, sorted.count))
         // Init runs at reconcile time — stderr here is fine (same convention
         // as PlaybackGraph's unopenable-clip note), and never the render path.
         for note in zoneLoadNotes {
@@ -235,6 +457,8 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         voices.deallocate()
         zones.deinitialize(count: zoneCount)
         zones.deallocate()
+        rrCounters.deinitialize(count: max(1, zoneCount))
+        rrCounters.deallocate()
         for buffer in ownedChannelBuffers {
             buffer.deallocate()
         }
@@ -331,6 +555,10 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     /// true zeros until the next noteOn.
     /// m16-b2: controller state neutralizes with the voice wipe — bend to
     /// center, pedal up (design-m16b §4.3).
+    /// m19-a: round-robin counters and the RNG deliberately SURVIVE — a
+    /// mid-song stop/seek must not restart every alternation cycle (flush ≠
+    /// RR restart, design §4.3); determinism comes from fresh structural init
+    /// plus the `randomSeed` seam.
     func reset() {
         for index in 0..<Self.voiceCount {
             voices[index] = Voice()
@@ -346,48 +574,114 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         var left: Float = 0
         var right: Float = 0
         for index in 0..<Self.voiceCount where voices[index].active {
-            // 1. Envelope — linear segments. The release ramp subtracts a
-            //    fixed fraction of the level captured at noteOff, so it
-            //    reaches EXACTLY 0 after `release` seconds and frees the
-            //    voice (true zeros from then on).
-            if voices[index].releasing {
-                voices[index].level -= voices[index].releaseFrom * releaseSlope
+            // 1. Envelope — linear segments through the m19-b 4-stage machine
+            //    (the PolySynthInstrument pattern), per-voice coefficients
+            //    captured at trigger. Nil-field zones carry decayStep 0 /
+            //    sustainLevel 1, which reproduces the original
+            //    attack→hold→release level sequence sample-for-sample. The
+            //    release ramp subtracts a fixed fraction of the level
+            //    captured at noteOff, so it reaches EXACTLY 0 after `release`
+            //    seconds and frees the voice (true zeros from then on).
+            switch voices[index].stage {
+            case Stage.attack:
+                voices[index].level += voices[index].attackStep
+                if voices[index].level >= 1 {
+                    voices[index].level = 1
+                    voices[index].stage = Stage.decay
+                }
+            case Stage.decay:
+                voices[index].level -= voices[index].decayStep
+                if voices[index].level <= voices[index].sustainLevel {
+                    voices[index].level = voices[index].sustainLevel
+                    voices[index].stage = Stage.sustain
+                }
+            case Stage.sustain:
+                // Holds the PER-VOICE sustain level captured at trigger — no
+                // live tracking (there is no global sustain to track).
+                voices[index].level = voices[index].sustainLevel
+            default:  // Stage.release
+                voices[index].level -= voices[index].releaseFrom * voices[index].releaseSlope
                 if voices[index].level <= 0 {
                     voices[index] = Voice()  // freed — contributes nothing
                     continue
                 }
-            } else if voices[index].level < 1 {
-                voices[index].level += attackStep
-                if voices[index].level > 1 { voices[index].level = 1 }
             }
 
             // 2. Source read at the CURRENT playhead with linear
-            //    interpolation (toward 0 past the last frame), then advance.
-            //    The voice frees itself at buffer end.
+            //    interpolation, then advance. The looping branch (m20-g §3.5)
+            //    wraps sample-accurately and crossfades the seam; the
+            //    non-looping branch is the pre-m20-g path kept VERBATIM — the
+            //    byte-identity guarantee for every non-looping voice (old
+            //    projects, no-loop zones, sustain voices after disarm).
             let zone = zones[Int(voices[index].zoneIndex)]
-            let position = voices[index].position
-            let idx = Int(position)
-            if idx >= zone.frameCount {
-                voices[index] = Voice()
-                continue
+            if voices[index].looping {
+                var position = voices[index].position
+                // 2a. Sample-accurate wrap BEFORE the read, so idx < loopEndExcl
+                //     always. One truncatingRemainder handles ANY overshoot (a
+                //     tiny loop under a huge pitch-up increment can overshoot by
+                //     multiples of loopLen) — constant-time libm, no allocation
+                //     (render-thread precedent: exp2 in the bend path).
+                if position >= Double(zone.loopEndExcl) {
+                    position = Double(zone.loopStart)
+                        + (position - Double(zone.loopStart))
+                            .truncatingRemainder(dividingBy: zone.loopLen)
+                    voices[index].position = position
+                }
+                let idx = Int(position)
+                let frac = Float(position - Double(idx))
+                // 2b. Seam interpolation: the frame AFTER loopEndExcl−1 is
+                //     loopStart — never 0, never left[loopEndExcl].
+                let next = idx + 1 >= zone.loopEndExcl ? zone.loopStart : idx + 1
+                let l0 = zone.left[idx], r0 = zone.right[idx]
+                var sL = l0 + (zone.left[next] - l0) * frac
+                var sR = r0 + (zone.right[next] - r0) * frac
+                // 2c. Equal-gain seam crossfade over the final loopXfade frames
+                //     of the pass: blend toward the pre-loop-start material,
+                //     time-aligned to land exactly on loopStart at the wrap.
+                if zone.loopXfade > 0 {
+                    let into = position - Double(zone.loopEndExcl - zone.loopXfade)
+                    if into >= 0 {
+                        let g = Float(into) * zone.invLoopXfade      // 0 → 1 across the window
+                        let inPos = position - zone.loopLen          // ∈ [loopStart−X, loopStart)
+                        let inIdx = Int(inPos)                       // ≥ 0 because X ≤ loopStart
+                        let inFrac = Float(inPos - Double(inIdx))
+                        let inNext = inIdx + 1                       // ≤ loopStart ≤ frames−1: in bounds
+                        let i0 = zone.left[inIdx], j0 = zone.right[inIdx]
+                        let iL = i0 + (zone.left[inNext] - i0) * inFrac
+                        let iR = j0 + (zone.right[inNext] - j0) * inFrac
+                        sL += (iL - sL) * g                          // (1−g)·current + g·incoming
+                        sR += (iR - sR) * g
+                    }
+                }
+                left += sL * (voices[index].level * voices[index].gainL)
+                right += sR * (voices[index].level * voices[index].gainR)
+                voices[index].position = position + voices[index].increment
+            } else {
+                let position = voices[index].position
+                let idx = Int(position)
+                if idx >= zone.endFrame {
+                    voices[index] = Voice()
+                    continue
+                }
+                let frac = Float(position - Double(idx))
+                let next = idx + 1
+                let l0 = zone.left[idx]
+                let r0 = zone.right[idx]
+                let l1 = next < zone.endFrame ? zone.left[next] : 0
+                let r1 = next < zone.endFrame ? zone.right[next] : 0
+                left += (l0 + (l1 - l0) * frac) * (voices[index].level * voices[index].gainL)
+                right += (r0 + (r1 - r0) * frac) * (voices[index].level * voices[index].gainR)
+                voices[index].position = position + voices[index].increment
             }
-            let frac = Float(position - Double(idx))
-            let next = idx + 1
-            let l0 = zone.left[idx]
-            let r0 = zone.right[idx]
-            let l1 = next < zone.frameCount ? zone.left[next] : 0
-            let r1 = next < zone.frameCount ? zone.right[next] : 0
-            let gainNow = voices[index].level * voices[index].amp
-            left += (l0 + (l1 - l0) * frac) * gainNow
-            right += (r0 + (r1 - r0) * frac) * gainNow
-            voices[index].position = position + voices[index].increment
         }
         return (left, right)
     }
 
     /// Render thread, once per adopted snapshot generation — pure float math,
     /// no allocation. `max(1, …)` makes attack = 0 a single-frame jump to
-    /// full level rather than a divide-by-zero.
+    /// full level rather than a divide-by-zero. The global attackStep/
+    /// releaseSlope stay hot-swappable and are the trigger-time fallback for
+    /// zones without their own envelope fields (design §4.4).
     private func recomputeCoefficients(_ params: ScalarParams) {
         oneShot = params.oneShot
         attackStep = Float(1.0 / max(1.0, params.attack * sampleRate))
@@ -399,48 +693,50 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
 
     private func apply(_ event: ScheduledMIDIEvent) {
         if event.kind == ScheduledMIDIEvent.noteOn {
-            // FIRST zone in array order whose span contains the pitch;
-            // no matching zone → the note is silently ignored.
+            // m19-a selection (design §4.2): ONE random draw per note-on (SFZ
+            // semantics), then one pass over the group-sorted zone array
+            // firing ONE voice per group — the first zone in each group that
+            // matches both spans and passes its round-robin + random gates.
+            // Legacy zones (all group 0, full spans, no gates) degenerate to
+            // the original first-match scan; no eligible zone → the note is
+            // silently ignored. O(zoneCount) compares, no allocation.
             let pitch = Int32(event.pitch)
-            var zoneIndex = -1
-            for index in 0..<zoneCount
-            where pitch >= zones[index].minPitch && pitch <= zones[index].maxPitch {
-                zoneIndex = index
-                break
-            }
-            guard zoneIndex >= 0 else { return }
-            let zone = zones[zoneIndex]
-
-            var slot = -1
-            var oldestSerial = UInt64.max
-            var oldestIndex = 0
-            for index in 0..<Self.voiceCount {
-                if !voices[index].active {
-                    slot = index
-                    break
+            let velocity = Int32(event.velocity)
+            let draw = nextRandom01()
+            var lastFiredGroup = Int32.min  // sentinel: no group fired yet
+            for index in 0..<zoneCount {
+                let zone = zones[index]
+                guard pitch >= zone.minPitch, pitch <= zone.maxPitch,
+                      velocity >= zone.minVel, velocity <= zone.maxVel else { continue }
+                // The round-robin counter advances on EVERY range match (the
+                // ARIA per-region convention) — even when a later gate or the
+                // one-per-group rule skips the zone this time.
+                rrCounters[index] &+= 1
+                let count = rrCounters[index] &- 1
+                if zone.seqLength > 1,
+                   Int32(count % UInt32(zone.seqLength)) != zone.seqPosition - 1 {
+                    continue
                 }
-                if voices[index].serial < oldestSerial {
-                    oldestSerial = voices[index].serial
-                    oldestIndex = index
+                // Random gate: [randLo, randHi), closed at the top when
+                // randHi ≥ 1 so a hirand=1 zone can never lose the draw.
+                guard zone.randLo <= draw, draw < zone.randHi || zone.randHi >= 1 else {
+                    continue
                 }
+                if zone.group == lastFiredGroup { continue }  // group already fired
+                trigger(zoneIndex: index, event: event)
+                lastFiredGroup = zone.group
             }
-            if slot < 0 { slot = oldestIndex }  // steal the oldest voice
-
-            var voice = Voice()
-            voice.active = true
-            voice.noteID = event.noteID
-            voice.serial = nextSerial
-            voice.zoneIndex = Int32(zoneIndex)
-            voice.baseIncrement = exp2((Double(event.pitch) - Double(zone.rootPitch)) / 12.0)
-                * zone.fileRate / sampleRate
-            voice.increment = voice.baseIncrement * bendFactor  // bend applies now
-            voice.amp = Float(event.velocity) / 127.0 * zone.gain
-            voices[slot] = voice
-            nextSerial &+= 1
         } else if event.kind == ScheduledMIDIEvent.noteOff {
-            if oneShot { return }  // one-shot: every trigger plays to buffer end
             for index in 0..<Self.voiceCount
             where voices[index].active && voices[index].noteID == event.noteID {
+                // m19-b per-voice one-shot: the zone override (0/1) wins; the
+                // inherit sentinel (-1) resolves against the LIVE global at
+                // noteOff time — exactly the pre-m19-b semantics, where a
+                // mid-note global toggle changed noteOff handling. A one-shot
+                // voice ignores its noteOff and never marks `sustained`, so
+                // the pedal-up sweep stays a structural no-op for it.
+                let oneShotState = voices[index].oneShotOverride
+                if oneShotState < 0 ? oneShot : oneShotState == 1 { continue }
                 if pedalDown {
                     // Sustain (m16-b2): the pedal DEFERS the release — the
                     // voice keeps sounding, marked for the pedal-up sweep.
@@ -448,7 +744,10 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                 } else if voices[index].level <= 0 {
                     voices[index] = Voice()  // off before the first audible sample
                 } else {
-                    voices[index].releasing = true
+                    // m20-g: a sustain loop disarms at true release start —
+                    // the voice plays THROUGH the loop end into the tail.
+                    if voices[index].loopMode == 1 { voices[index].looping = false }
+                    voices[index].stage = Stage.release
                     voices[index].releaseFrom = voices[index].level
                 }
             }
@@ -468,7 +767,10 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                         if voices[index].level <= 0 {
                             voices[index] = Voice()
                         } else {
-                            voices[index].releasing = true
+                            // m20-g: the pedal-up sweep is the OTHER true
+                            // release start — sustain loops disarm here too.
+                            if voices[index].loopMode == 1 { voices[index].looping = false }
+                            voices[index].stage = Stage.release
                             voices[index].releaseFrom = voices[index].level
                         }
                     }
@@ -488,5 +790,89 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         }
         // Channel pressure (kind 4) and any future kind fall through
         // silently — the C4 unknown-kind contract.
+    }
+
+    /// Starts one voice on `zoneIndex` — the same slot-scan/oldest-steal
+    /// policy as ever, factored out so the m19-a selection loop can fire one
+    /// voice per GROUP on a single note-on. Render thread; no allocation.
+    @inline(__always)
+    private func trigger(zoneIndex: Int, event: ScheduledMIDIEvent) {
+        let zone = zones[zoneIndex]
+        var slot = -1
+        var oldestSerial = UInt64.max
+        var oldestIndex = 0
+        for index in 0..<Self.voiceCount {
+            if !voices[index].active {
+                slot = index
+                break
+            }
+            if voices[index].serial < oldestSerial {
+                oldestSerial = voices[index].serial
+                oldestIndex = index
+            }
+        }
+        if slot < 0 { slot = oldestIndex }  // steal the oldest voice
+
+        var voice = Voice()
+        voice.active = true
+        voice.noteID = event.noteID
+        voice.serial = nextSerial
+        voice.zoneIndex = Int32(zoneIndex)
+        voice.stage = Stage.attack
+        voice.oneShotOverride = zone.oneShotOverride
+        // m20-g (§3.4): arm the loop; a looping voice is NEVER one-shot —
+        // forcing the explicit non-one-shot override beats both the zone
+        // override and the live global (§2.1: loopMode wins over oneShot).
+        voice.loopMode = zone.loopMode
+        voice.looping = zone.loopMode != 0
+        if voice.looping { voice.oneShotOverride = 0 }
+        voice.position = Double(zone.startFrame)
+        // m19-b: the zone's precomputed tune factor rides the SAME multiply
+        // chain (×1.0 for nil zones is a float identity — bit-compat).
+        voice.baseIncrement = exp2((Double(event.pitch) - Double(zone.rootPitch)) / 12.0)
+            * zone.tuneFactor * zone.fileRate / sampleRate
+        voice.increment = voice.baseIncrement * bendFactor  // bend applies now
+        // Amp law (design §4.5): (1 − vt + vt·velocity/127) × zone.gain, with
+        // params.gain staying in outputGain (hot-swap preserved). vt = 1 (nil)
+        // reduces to (0 + velocity/127) × gain — today's law bit-for-bit; the
+        // per-channel gains fold in the pan (nil → ×1.0 identity).
+        let velocityAmp = 1 - zone.ampVelTrack
+            + zone.ampVelTrack * (Float(event.velocity) / 127.0)
+        let amp = velocityAmp * zone.gain
+        voice.gainL = amp * zone.panL
+        voice.gainR = amp * zone.panR
+        // Envelope coefficients (design §4.4): four divides at trigger; the
+        // -1 sentinel falls back to the LIVE global coefficients, so nil
+        // zones keep following global attack/release hot-swaps for voices
+        // triggered AFTER the swap (the documented semantic shift: already-
+        // sounding voices no longer retarget).
+        voice.attackStep = zone.envAttack < 0
+            ? attackStep
+            : Float(1.0 / max(1.0, Double(zone.envAttack) * sampleRate))
+        // Time-accurate decay (the PolySynth law): 1 → sustain in `decay`
+        // seconds. decay 0 / sustain 1 (the nil defaults) yield step 0 with
+        // an immediate decay→sustain transition at level 1 — the legacy hold.
+        voice.decayStep = Float((1.0 - Double(zone.envSustain))
+            / max(1.0, Double(zone.envDecay) * sampleRate))
+        voice.sustainLevel = zone.envSustain
+        voice.releaseSlope = zone.envRelease < 0
+            ? releaseSlope
+            : Float(1.0 / max(1.0, Double(zone.envRelease) * sampleRate))
+        voices[slot] = voice
+        nextSerial &+= 1
+    }
+
+    /// One xorshift64* step → a Float in [0, 1) from the top 24 bits of the
+    /// scrambled state (m19-a random-gate draw, design §4.3). Render thread;
+    /// a handful of integer ops, no allocation.
+    @inline(__always)
+    private func nextRandom01() -> Float {
+        var x = rngState
+        x ^= x >> 12
+        x ^= x << 25
+        x ^= x >> 27
+        rngState = x
+        let scrambled = x &* 0x2545_F491_4F6C_DD1D
+        return Float(scrambled >> 40) * (1.0 / 16_777_216.0)
     }
 }

@@ -273,4 +273,89 @@ struct PianoRollModelTests {
         // floors at 0 and passes content through untouched.
         #expect(PianoRollModel.drawnWidth(content: content, viewport: -10) == content)
     }
+
+    // MARK: - m19-g beyond-clip boundary (playableEndBeat)
+
+    // 19. playableEndBeat mirrors the engine's note rule EXACTLY (MIDISchedule
+    //    strict `<`): an onset strictly inside [0, clipLen) plays, an onset
+    //    exactly AT the clip end is latent — the ghost treatment's one split
+    //    value (the ControllerStripModel.playableCount sibling).
+    @Test("m19-g playableEndBeat is strict-< at the clip end (engine-honest)")
+    func playableEndBeatStrictBoundary() {
+        // Onset just inside → plays.
+        let inside = MIDINote(pitch: 60, startBeat: 3.9, lengthBeats: 0.1)
+        #expect(PianoRollModel.playableEndBeat(of: inside, clipLengthBeats: 4) == 4)
+        // Onset exactly AT the end → latent (strict <).
+        let atEnd = MIDINote(pitch: 60, startBeat: 4, lengthBeats: 1)
+        #expect(PianoRollModel.playableEndBeat(of: atEnd, clipLengthBeats: 4) == nil)
+        // Onset wholly beyond → latent.
+        let beyond = MIDINote(pitch: 60, startBeat: 9, lengthBeats: 1)
+        #expect(PianoRollModel.playableEndBeat(of: beyond, clipLengthBeats: 4) == nil)
+        // Zero-length clip → everything latent.
+        let atZero = MIDINote(pitch: 60, startBeat: 0, lengthBeats: 1)
+        #expect(PianoRollModel.playableEndBeat(of: atZero, clipLengthBeats: 0) == nil)
+    }
+
+    // 20. Partial overhang — the engine TRUNCATES the note-off at the clip end
+    //    (`min(endBeat, clipLength)`, MIDISchedule.buildEvents): the playable
+    //    end is the boundary, not the note's own end — lit body to the
+    //    boundary, ghost tail past it. A fully-inside note plays untouched.
+    @Test("m19-g partial overhang truncates at the boundary; inside notes play in full")
+    func playableEndBeatOverhang() {
+        let overhang = MIDINote(pitch: 62, startBeat: 7, lengthBeats: 3)   // ends at 10
+        #expect(PianoRollModel.playableEndBeat(of: overhang, clipLengthBeats: 8) == 8)
+        let inside = MIDINote(pitch: 64, startBeat: 2, lengthBeats: 1.5)
+        #expect(PianoRollModel.playableEndBeat(of: inside, clipLengthBeats: 8) == inside.endBeat)
+    }
+
+    // 21. Extension re-lights (the window grows over latent data): the same
+    //    notes flip nil → playing / truncated → full as clipLengthBeats grows —
+    //    the live re-light a wire `clip.trim` extension produces via reseed.
+    @Test("m19-g extension re-lights: ghosts come alive as the window grows")
+    func playableEndBeatExtensionRelights() {
+        let overhang = MIDINote(pitch: 62, startBeat: 7, lengthBeats: 3)   // ends at 10
+        let latent = MIDINote(pitch: 69, startBeat: 9, lengthBeats: 1)     // ends at 10
+        // At 8 beats: overhang truncated, latent silent.
+        #expect(PianoRollModel.playableEndBeat(of: overhang, clipLengthBeats: 8) == 8)
+        #expect(PianoRollModel.playableEndBeat(of: latent, clipLengthBeats: 8) == nil)
+        // Extended to 13: both fully lit.
+        #expect(PianoRollModel.playableEndBeat(of: overhang, clipLengthBeats: 13) == overhang.endBeat)
+        #expect(PianoRollModel.playableEndBeat(of: latent, clipLengthBeats: 13) == latent.endBeat)
+    }
+
+    // 22. Trim ghosts (the window shrinks): a formerly in-window note goes
+    //    truncated, then latent, as the boundary crosses it.
+    @Test("m19-g trim ghosts former in-window notes as the window shrinks")
+    func playableEndBeatTrimGhosts() {
+        let note = MIDINote(pitch: 60, startBeat: 2, lengthBeats: 2)       // [2, 4)
+        #expect(PianoRollModel.playableEndBeat(of: note, clipLengthBeats: 8) == 4)   // full
+        #expect(PianoRollModel.playableEndBeat(of: note, clipLengthBeats: 3) == 3)   // truncated
+        #expect(PianoRollModel.playableEndBeat(of: note, clipLengthBeats: 2) == nil) // latent
+    }
+
+    // 23. Editing stays boundary-blind (the m18-e rule): a ghost pill hit-tests,
+    //    moves, and resizes exactly like a lit one, and dragging across the
+    //    boundary flips its treatment live in both directions.
+    @Test("m19-g ghost pills stay first-class edit targets; drags flip treatment live")
+    func ghostPillsStayEditable() {
+        let ghost = MIDINote(pitch: 69, startBeat: 10, lengthBeats: 1)     // beyond the 8-beat clip
+        let m = makeModel(notes: [ghost], length: 8)
+        // Hit-test lands on the ghost pill at its drawn position.
+        let inside = CGPoint(x: m.x(forBeat: 10.5), y: m.y(forPitch: 69) + 5)
+        #expect(m.hitTest(inside)?.id == ghost.id)
+        // Move it back inside the clip → it re-lights.
+        m.selectOnly(ghost.id)
+        m.beginMove()
+        m.moveSelection(deltaBeats: -6, deltaPitch: 0, resolution: .beat)
+        let moved = m.draft[0]
+        #expect(moved.startBeat == 4)
+        #expect(PianoRollModel.playableEndBeat(of: moved, clipLengthBeats: 8) == moved.endBeat)
+        // Resize its tail past the clip end → truncated (lit body, ghost tail).
+        m.resizeNote(id: ghost.id, toEndBeat: 10, resolution: .beat)
+        #expect(PianoRollModel.playableEndBeat(of: m.draft[0], clipLengthBeats: 8) == 8)
+        // Move it wholly out again → latent (no clamp; the store accepts it).
+        m.beginMove()
+        m.moveSelection(deltaBeats: 5, deltaPitch: 0, resolution: .beat)
+        #expect(PianoRollModel.playableEndBeat(of: m.draft[0], clipLengthBeats: 8) == nil)
+    }
 }

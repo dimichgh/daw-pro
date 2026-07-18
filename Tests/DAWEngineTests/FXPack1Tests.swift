@@ -303,6 +303,17 @@ struct FXPack1Tests {
         let limiter44 = LimiterEffect()
         limiter44.prepare(sampleRate: 44_100, maxFramesPerQuantum: 512, channelCount: 2)
         #expect(limiter44.latencySamples == 221)
+
+        // m19-j: 24 kHz — the rate a Bluetooth headset's default device
+        // really runs at in mic mode (AirPods). The latency is
+        // round(lookaheadSeconds × rate) at EVERY rate, never a constant;
+        // this is the by-construction proof behind the device-rate-derived
+        // PDC expectations in MasterChainRenderTests C7 / EngineRebuildTests.
+        let limiter24 = LimiterEffect()
+        limiter24.prepare(sampleRate: 24_000, maxFramesPerQuantum: 512, channelCount: 2)
+        #expect(limiter24.latencySamples == 120)
+        #expect(limiter24.latencySamples
+            == Int((LimiterParams.lookaheadSeconds * 24_000).rounded()))
     }
 
     // MARK: - Chain latency + determinism (graph level)

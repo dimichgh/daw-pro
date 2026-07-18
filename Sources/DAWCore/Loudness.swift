@@ -429,3 +429,59 @@ public enum Loudness {
         return maxAbs
     }
 }
+
+extension Loudness {
+    /// `measure(_:)` off the caller's actor: identical result (pure function,
+    /// determinism test-pinned), but the O(frames) work runs on the global
+    /// concurrent executor so a long program never wedges the main actor
+    /// (the m19-j residual). Explicit Task.detached — NOT a nonisolated async
+    /// function — so the executor is pinned regardless of SE-0338 vs SE-0461
+    /// (NonisolatedNonsendingByDefault) language-mode semantics.
+    public static func measureDetached(_ audio: RenderedAudio) async -> LoudnessMeasurement {
+        await Task.detached(priority: .userInitiated) { measure(audio) }.value
+    }
+
+    /// `applyGain(linear:)` + the mandatory re-measure fused into ONE unit off
+    /// the caller's actor (m20-h): the in-place gain loop alone held the main
+    /// actor ~1.1 s on a 162 s program (m20-f measurement), and fusing the
+    /// re-measure avoids a second detached round-trip. Results are identical
+    /// to the synchronous sequence (both deterministic; test-pinned exact).
+    /// Explicit Task.detached — NOT a nonisolated async function — so the
+    /// executor is pinned regardless of SE-0338 vs SE-0461
+    /// (NonisolatedNonsendingByDefault) language-mode semantics.
+    ///
+    /// Ownership (SE-0377): the parameter is `consuming` and rides a
+    /// single-owner handoff cell, so the buffer's ONLY reference crosses the
+    /// hop and `applyGain`'s in-place no-copy contract survives — an ordinary
+    /// escaping-closure capture would pin a second reference for the
+    /// closure's whole run and force a full copy-on-write duplication of what
+    /// may be a multi-hundred-MB buffer at the first mutated sample. Peak
+    /// memory stays 1×; storage identity is test-pinned. Call it with
+    /// `consume audio` and reassign the caller's binding from the returned
+    /// pair.
+    public static func applyGainAndMeasureDetached(
+        _ audio: consuming RenderedAudio, linear gain: Float
+    ) async -> (audio: RenderedAudio, measurement: LoudnessMeasurement) {
+        let cell = GainHopCell(consume audio)
+        let measurement = await Task.detached(priority: .userInitiated) {
+            cell.audio.applyGain(linear: gain)
+            return measure(cell.audio)
+        }.value
+        return (cell.audio, measurement)
+    }
+
+    /// Single-owner handoff cell for `applyGainAndMeasureDetached`: moves the
+    /// one buffer reference into the detached task (class capture = pointer,
+    /// not a value copy) and hands it back after the await.
+    ///
+    /// `@unchecked Sendable` justification: access is temporally exclusive by
+    /// construction — the creating frame writes only in `init`, then never
+    /// touches the cell again until `Task.detached`'s value has been awaited;
+    /// task creation and task completion are the happens-before edges either
+    /// side of the detached mutation. The type is private to this file so no
+    /// other access pattern can exist.
+    private final class GainHopCell: @unchecked Sendable {
+        var audio: RenderedAudio
+        init(_ audio: consuming RenderedAudio) { self.audio = audio }
+    }
+}

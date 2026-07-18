@@ -819,8 +819,26 @@ private struct PianoRollGrid: View {
             Path(CGRect(x: clipX, y: 0, width: size.width - clipX, height: size.height)),
             with: .color(Color.black.opacity(0.28))
         )
+        // 1 pt neutral clip-end hairline (m19-g — the m18-e CTRL-strip boundary
+        // grammar, now in all three bands at the same x): the latent region
+        // reads as a deliberate boundary, not a rendering seam. gridEmphasis is
+        // the grid's own bar-line chrome — no accent, no glow (a boundary is
+        // chrome, not state). Drawn over the shade; where the clip end lands on
+        // a bar line the two same-color lines merge — never a second visible
+        // hairline.
+        context.fill(
+            Path(CGRect(x: clipX - 0.5, y: 0, width: 1, height: size.height)),
+            with: .color(DAWTheme.gridEmphasis)
+        )
     }
 
+    /// Note pills, split at the clip boundary (m19-g ghost treatment —
+    /// DESIGN-LANGUAGE "Controller strips"): a note whose onset the engine
+    /// plays takes the full neon treatment; latent data — an onset at/past the
+    /// clip end, or the truncated tail of a note crossing it — draws as a dim
+    /// flat core with NO bloom (glow is earned; inert data earns none, the
+    /// m18-e ghost grammar). The split comes from the model's engine-honest
+    /// `playableEndBeat` — ONE boundary definition, never view beat math.
     private nonisolated static func drawNotes(_ context: inout GraphicsContext, s: GridSnapshot) {
         for note in s.draft {
             let rect = CGRect(
@@ -830,22 +848,71 @@ private struct PianoRollGrid: View {
                 height: s.rowHeight
             ).insetBy(dx: 0.5, dy: 1.5)
             let selected = s.selectedIDs.contains(note.id)
-            let velocity = Double(note.velocity) / 127
-            let opacity = 0.45 + 0.5 * velocity
             let path = Path(roundedRect: rect, cornerRadius: 3)
-            if selected {
-                // Subtle bloom behind a selected note.
-                context.fill(
-                    Path(roundedRect: rect.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 4),
-                    with: .color(s.noteColor.opacity(0.28))
-                )
+            guard let playableEnd = PianoRollModel.playableEndBeat(
+                of: note, clipLengthBeats: s.clipLengthBeats) else {
+                // Onset at/past the clip end — the engine never sounds it.
+                drawGhostPill(&context, path: path, selected: selected, s: s)
+                continue
             }
-            context.fill(path, with: .color(s.noteColor.opacity(selected ? min(1, opacity + 0.2) : opacity)))
-            context.stroke(
-                path,
-                with: .color(selected ? DAWTheme.textPrimary.opacity(0.9) : s.noteColor.opacity(0.9)),
-                lineWidth: selected ? 1 : 0.5
+            if playableEnd >= note.endBeat {
+                drawLitPill(&context, rect: rect, path: path, note: note, selected: selected, s: s)
+            } else {
+                // Partial overhang: the engine truncates the note-off at the
+                // clip end (`min(endBeat, clipLength)`), so the body is lit to
+                // the boundary and the silent tail ghosts past it. Clipped
+                // copies of the context split the one rounded pill at exactly
+                // the boundary x (the bloom stays inside the lit side — glow
+                // never spills into latent space).
+                let boundaryX = CGFloat(playableEnd) * s.pixelsPerBeat
+                let pad: CGFloat = 4
+                var lit = context
+                lit.clip(to: Path(CGRect(x: rect.minX - pad, y: rect.minY - pad,
+                                         width: boundaryX - (rect.minX - pad),
+                                         height: rect.height + pad * 2)))
+                drawLitPill(&lit, rect: rect, path: path, note: note, selected: selected, s: s)
+                var ghost = context
+                ghost.clip(to: Path(CGRect(x: boundaryX, y: rect.minY - pad,
+                                           width: (rect.maxX + pad) - boundaryX,
+                                           height: rect.height + pad * 2)))
+                drawGhostPill(&ghost, path: path, selected: selected, s: s)
+            }
+        }
+    }
+
+    /// The full neon pill treatment (unchanged from pre-m19-g): velocity →
+    /// fill opacity, selected = brighter + hairline + subtle bloom.
+    private nonisolated static func drawLitPill(_ context: inout GraphicsContext, rect: CGRect, path: Path,
+                                                note: MIDINote, selected: Bool, s: GridSnapshot) {
+        let velocity = Double(note.velocity) / 127
+        let opacity = 0.45 + 0.5 * velocity
+        if selected {
+            // Subtle bloom behind a selected note.
+            context.fill(
+                Path(roundedRect: rect.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 4),
+                with: .color(s.noteColor.opacity(0.28))
             )
         }
+        context.fill(path, with: .color(s.noteColor.opacity(selected ? min(1, opacity + 0.2) : opacity)))
+        context.stroke(
+            path,
+            with: .color(selected ? DAWTheme.textPrimary.opacity(0.9) : s.noteColor.opacity(0.9)),
+            lineWidth: selected ? 1 : 0.5
+        )
+    }
+
+    /// The m19-g ghost pill: a flat dim core (fill 0.35 / hairline 0.45 — the
+    /// m18-e ghost-handle ratios) with velocity NO LONGER modulating opacity
+    /// (latent data reads uniformly inert). Selection keeps its neutral
+    /// hairline stroke — a selected ghost must still read selected (editing is
+    /// boundary-blind) — but never the bloom: no glow layers on latent data.
+    private nonisolated static func drawGhostPill(_ context: inout GraphicsContext, path: Path,
+                                                  selected: Bool, s: GridSnapshot) {
+        context.fill(path, with: .color(s.noteColor.opacity(0.35)))
+        context.stroke(
+            path,
+            with: .color(selected ? DAWTheme.textPrimary.opacity(0.9) : s.noteColor.opacity(0.45)),
+            lineWidth: selected ? 1 : 0.5
+        )
     }
 }

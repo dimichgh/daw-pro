@@ -51,6 +51,16 @@ No download required for any of this:
 - **Sampler** — DAW Pro's own key-zone sample player: map audio files across the keyboard with
   key-span, pitch offset, and gain per zone; one-shot or looped playback. Zone audio is bundled
   into the `.dawproj` file.
+- **Sample-library import** — imports `.sfz` (documented subset) and `.dspreset` sample-library
+  files straight onto the built-in Sampler: key/velocity zones, layering groups, round-robins,
+  per-zone tuning/pan/envelope, all defined by the library author — no manual mapping. This
+  unlocks the big free community libraries (Salamander Grand Piano, VSCO2 Community Edition,
+  Virtual Playing Orchestra, Karoryfer, and similar) natively, with no plugin in the chain.
+  Import via the Instrument Picker's "Import Sample Library…" button or the
+  `instrument.importSampleLibrary` command; every import returns an honest report of anything
+  skipped or ignored. The exact supported/reported/ignored boundary for both formats is
+  documented in [SFZ-SUPPORT.md](SFZ-SUPPORT.md). (`.dslibrary` is a zip — unzip it and import
+  the `.dspreset` inside.)
 - **Sound-bank import** — load any `.sf2` (SoundFont2) or `.dls` file as an instrument, played back
   through the system AUSampler. DAW Pro also ships a **zero-setup General MIDI bank** (macOS's own
   `gs_instruments.dls`) so every project has usable instruments with no download at all. Import a
@@ -104,13 +114,13 @@ INSTRUMENT, Vital, Surge XT, Dexed, TAL-NoiseMaker, Decent Sampler, sforzando, K
 2, OB-Xd) ships an AU build on macOS. We'd revisit this only if a genuinely must-have plugin turned
 out to be VST3-only on macOS with no AU equivalent.
 
-## Appendix: filed follow-up spike — SFZ / DecentSampler import
+## Appendix: SFZ / `.dspreset` import — SHIPPED (was: filed follow-up spike)
 
-DAW Pro's built-in Sampler currently only reads audio files you map by hand. Teaching it to import
-the **SFZ** format (and the closely related `.dspreset`/`.dslibrary` DecentSampler format) natively
-would let it load huge free community sample libraries — Pianobook, VSCO2, and similar — directly,
-with zones, loops, and round-robins already defined by the library author, no manual mapping
-required. This is attractive because it multiplies DAW Pro's built-in content for free without
-adding a plugin-hosting dependency (sforzando/Decent Sampler above cover this today via AU, but a
-native importer would mean one fewer plugin in the signal chain). This is filed as a **spike
-candidate only** — not scoped, not committed, not on the roadmap yet.
+This appendix originally filed native sample-library import as a spike candidate. The spike ran,
+the design said GO, and the importer now ships: DAW Pro's built-in Sampler **imports `.sfz`
+(documented subset) and `.dspreset` sample-library files natively** — zones, velocity layers,
+layering groups, round-robins, and per-zone playback scalars, with every degradation reported
+honestly (see the "Sample-library import" bullet above and [SFZ-SUPPORT.md](SFZ-SUPPORT.md) for
+the exact boundary). Sustain loops are the one deferred playback feature (imported without
+looping, noted in the report). sforzando / Decent Sampler above remain the full-format AU route
+for content outside the documented subset.

@@ -37,7 +37,7 @@ extension ProjectStore {
             forcedCompensationTargets: nil
         )
         return LoudnessMeasureResult(
-            measurement: Loudness.measure(audio),
+            measurement: await Loudness.measureDetached(audio),
             durationSeconds: audio.sampleRate > 0
                 ? Double(audio.frameCount) / audio.sampleRate : 0,
             sampleRate: audio.sampleRate
@@ -63,7 +63,9 @@ extension ProjectStore {
     /// `lufsTarget` ∈ [−70, 0], `truePeakCeilingDb` ∈ [−20, 0]. `path` nil →
     /// a unique file under NSTemporaryDirectory()/DAWPro/; explicit paths
     /// expand `~`, append `.wav`, create parents, and overwrite (the caller
-    /// chose the path). Blocking; v0 accepts the main-actor stall.
+    /// chose the path). The heavy stages run off the main actor (cooperative
+    /// render; detached measure m20-a; detached gain+re-measure m20-h) — only
+    /// the ~20 ms-class `writeAudioFile` remains on-actor (measured, m20-f).
     public func renderBounce(toPath path: String? = nil, fromBeat: Double = 0,
                              durationSeconds: Double? = nil, lufsTarget: Double? = nil,
                              truePeakCeilingDb: Double = -1.0) async throws -> BounceResult {
@@ -81,7 +83,7 @@ extension ProjectStore {
             fromBeat: startBeat, durationSeconds: duration,
             forcedCompensationTargets: nil
         )
-        let input = Loudness.measure(audio)
+        let input = await Loudness.measureDetached(audio)
 
         // Gain policy (spec §4.1): static gain toward the target, ceiling-
         // clamped — louder-than-target is impossible, and the report says so.
@@ -101,9 +103,16 @@ extension ProjectStore {
 
         let output: LoudnessMeasurement
         if appliedGainDb != 0 {
-            audio.applyGain(linear: Float(pow(10.0, appliedGainDb / 20.0)))
-            // Re-measured, not derived — exact for the buffer that hits disk.
-            output = Loudness.measure(audio)
+            // Gain + re-measure fused into ONE detached unit (m20-h): the
+            // in-place gain loop alone held the main actor ~1.1 s on a 162 s
+            // program (m20-f). `consume` hands the buffer's only reference
+            // across the hop so the mutation stays in place — no CoW copy of
+            // a multi-hundred-MB buffer. Re-measured, not derived — exact
+            // for the buffer that hits disk.
+            let gained = await Loudness.applyGainAndMeasureDetached(
+                consume audio, linear: Float(pow(10.0, appliedGainDb / 20.0)))
+            audio = gained.audio
+            output = gained.measurement
         } else {
             // No gain applied: the input measurement IS the output's.
             output = input
@@ -191,7 +200,7 @@ extension ProjectStore {
                 fromBeat: startBeat, durationSeconds: duration,
                 forcedCompensationTargets: targets
             )
-            let measurement = Loudness.measure(audio)
+            let measurement = await Loudness.measureDetached(audio)
             let url = dir.appendingPathComponent(descriptor.fileName)
             let info = try engine.writeAudioFile(audio, to: url)
             sampleRate = info.sampleRate
@@ -218,7 +227,7 @@ extension ProjectStore {
                 forcedCompensationTargets: targets
             )
             let url = dir.appendingPathComponent("00 Mixdown.wav")
-            let measurement = Loudness.measure(audio)
+            let measurement = await Loudness.measureDetached(audio)
             _ = try engine.writeAudioFile(audio, to: url)
             mixdown = MixdownFile(path: url.path, measurement: measurement)
         }

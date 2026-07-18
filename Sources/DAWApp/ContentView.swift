@@ -295,6 +295,7 @@ struct ContentView: View {
                 densityStore: model.panelDensity,
                 onChoose: { model.applyInstrumentChoice($0) },
                 onImport: { model.importSoundBankViaPanel() },
+                onImportSampleLibrary: { model.importSampleLibraryViaPanel() },
                 onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeInstrumentPicker() } }
             )
         }

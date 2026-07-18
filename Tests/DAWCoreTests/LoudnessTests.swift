@@ -302,7 +302,84 @@ struct LoudnessWireTests {
         #expect(Loudness.measure(audio) == Loudness.measure(audio))
     }
 
-    // 2. Codable round-trip preserves every field (this struct IS the wire shape).
+    // 2. The m20-a detached hop is a pure executor change: `measureDetached`
+    //    must equal `measure` EXACTLY on the same buffer (the determinism pin
+    //    above makes this exact equality, not tolerance). Varied multi-segment
+    //    program (> 3 s, level steps, an inter-sample-peak segment) so every
+    //    measurement field is non-nil and the equality is meaningful.
+    @Test("measureDetached equals measure exactly on a varied program")
+    func detachedHopEqualsSynchronous() async {
+        var samples = sine(frequency: 997, dbfs: -33, seconds: 3, sampleRate: 48_000)
+        samples += sine(frequency: 440, dbfs: -23, seconds: 3, sampleRate: 48_000)
+        samples += sine(frequency: 12_000, dbfs: -6, seconds: 2, sampleRate: 48_000,
+                        phaseRadians: .pi / 4)
+        let audio = stereo(samples, sampleRate: 48_000)
+        let synchronous = Loudness.measure(audio)
+        let detached = await Loudness.measureDetached(audio)
+        #expect(detached == synchronous)
+        // The fixture exercises every field — nil == nil would be vacuous.
+        #expect(synchronous.integratedLufs != nil)
+        #expect(synchronous.truePeakDbtp != nil)
+        #expect(synchronous.maxMomentaryLufs != nil)
+        #expect(synchronous.maxShortTermLufs != nil)
+    }
+
+    // 3. The m20-h fused hop (applyGain + re-measure in ONE detached unit)
+    //    must equal the synchronous sequence EXACTLY: byte-for-byte channel
+    //    data (`==` on the arrays) AND an identical measurement (determinism
+    //    makes both exact, not tolerance). Same varied 3-segment 8 s fixture
+    //    idiom as the m20-a pin above so every measurement field is non-nil
+    //    and the equality is meaningful.
+    @Test("applyGainAndMeasureDetached equals synchronous applyGain + measure exactly")
+    func gainHopEqualsSynchronous() async {
+        var samples = sine(frequency: 997, dbfs: -33, seconds: 3, sampleRate: 48_000)
+        samples += sine(frequency: 440, dbfs: -23, seconds: 3, sampleRate: 48_000)
+        samples += sine(frequency: 12_000, dbfs: -6, seconds: 2, sampleRate: 48_000,
+                        phaseRadians: .pi / 4)
+        let gain = Float(pow(10.0, -3.5 / 20.0))
+
+        // Synchronous reference: the pre-m20-h call-site sequence.
+        var reference = stereo(samples, sampleRate: 48_000)
+        reference.applyGain(linear: gain)
+        let referenceMeasurement = Loudness.measure(reference)
+
+        let hopped = await Loudness.applyGainAndMeasureDetached(
+            stereo(samples, sampleRate: 48_000), linear: gain)
+        #expect(hopped.audio.channelData == reference.channelData)
+        #expect(hopped.audio.sampleRate == reference.sampleRate)
+        #expect(hopped.measurement == referenceMeasurement)
+        // The fixture exercises every field — nil == nil would be vacuous.
+        #expect(referenceMeasurement.integratedLufs != nil)
+        #expect(referenceMeasurement.truePeakDbtp != nil)
+        #expect(referenceMeasurement.maxMomentaryLufs != nil)
+        #expect(referenceMeasurement.maxShortTermLufs != nil)
+    }
+
+    // 4. The hop's ownership contract: `consume` hands the ONLY reference
+    //    across the detached unit, so the in-place mutation never triggers a
+    //    copy-on-write duplication — pinned by storage identity (the gained
+    //    buffers live at the SAME base addresses the originals did). Distinct
+    //    per-channel buffers on purpose: the shared-buffer `stereo` fixture
+    //    aliases both channels to one storage, which forces one legitimate
+    //    CoW split inside applyGain itself.
+    @Test("the gain hop mutates the consumed buffer in place (storage identity held)")
+    func gainHopKeepsStorageUnique() async {
+        let audio = RenderedAudio(
+            sampleRate: 48_000,
+            channelData: [sine(frequency: 997, dbfs: -23, seconds: 2, sampleRate: 48_000),
+                          sine(frequency: 440, dbfs: -23, seconds: 2, sampleRate: 48_000)])
+        let before = audio.channelData.map { channel in
+            channel.withUnsafeBufferPointer { UInt(bitPattern: $0.baseAddress) }
+        }
+        let hopped = await Loudness.applyGainAndMeasureDetached(consume audio, linear: 0.5)
+        let after = hopped.audio.channelData.map { channel in
+            channel.withUnsafeBufferPointer { UInt(bitPattern: $0.baseAddress) }
+        }
+        #expect(after == before)
+        #expect(before.allSatisfy { $0 != 0 })  // anti-vacuity: real storage
+    }
+
+    // 5. Codable round-trip preserves every field (this struct IS the wire shape).
     @Test("LoudnessMeasurement round-trips through JSON")
     func codableRoundTrip() throws {
         let m = LoudnessMeasurement(integratedLufs: -23.0, truePeakDbtp: -1.2,
@@ -312,7 +389,7 @@ struct LoudnessWireTests {
         #expect(decoded == m)
     }
 
-    // 3. Degenerate inputs never crash and report nothing.
+    // 6. Degenerate inputs never crash and report nothing.
     @Test("empty buffers → all-nil measurement")
     func emptyBuffers() {
         #expect(Loudness.measure(RenderedAudio(sampleRate: 48_000, channelData: []))

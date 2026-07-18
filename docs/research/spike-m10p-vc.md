@@ -1,6 +1,8 @@
 # M10 (m10-p-1) — Voice-conversion hands-on feasibility spike: findings
 
-**Date**: 2026-07-11 · **Method**: live clone/venv/run of the candidate engine against a real ACE-Step vocal stem, in an isolated scratch directory (never touching `scripts/ace-step/` or shipped code). Machine: M5 Max, 128 GB unified memory, macOS 26.4. Timeboxed to ~45 min wall time per the task; stopped at the network blocker described below rather than fighting it further.
+**Date**: 2026-07-11 (measurement half completed 2026-07-17) · **Method**: live clone/venv/run of the candidate engine against a real vocal stem, in an isolated scratch directory (never touching `scripts/ace-step/` or shipped code). Machine: Apple M5 Max, 128 GB unified memory, macOS 26.4. Timeboxed per the task.
+
+> **STATUS 2026-07-17: COMPLETE — GO.** The 2026-07-11 run was PARTIAL, blocked on a corp-network window that prevented every neural-asset fetch. That window has lifted; on 2026-07-17 all required assets were acquired and the missing neural numbers were measured on this M5 Max. **Engine verdict: GO** — the MLX fork's inference path runs end-to-end fast (RMVPE warm RTF 94.8×, ContentVec/HuBERT warm RTF 574×, full MLX pipeline warm RTF 38×) and the PyTorch-MPS training path runs a real GAN step with zero MPS CPU fallbacks (3.23 steps/s). Full details in the **"2026-07-17 continuation"** section below. The 07-11 narrative and blocker evidence are preserved unedited as the historical record.
 
 Desk research this spike verifies/corrects: `docs/research/2026-07-11-vocals-voice-conversion.md` §2a, §2f, §3a, §4b, §4c.
 
@@ -29,9 +31,97 @@ The one thing measured against **real audio with zero downloaded weights** was c
 | `uv sync` (full dep install, PyPI) | ✅ succeeds, no corp-network issues | torch 2.4.0, torchaudio 2.4.0, torchvision 0.19.0, mlx (mlx-metal 42.9 MB), transformers 4.57.3, faiss-cpu, librosa, numba, llvmlite, scikit-learn, matplotlib, pyworld, etc. — 91 packages resolved, `.venv` = 1.0 GB on disk |
 | `torch.backends.mps.is_available()` | `True`; live MPS 1000×1000 matmul executed | PyTorch-MPS backend is real and usable on this venv |
 | `mlx.core.default_device()` | `Device(gpu, 0)`; live `mx.array` op executed | MLX GPU backend is real and usable on this venv |
-| **Neural inference (RVC content encoder / RMVPE / decoder)** | **NOT MEASURED — blocked** | Requires HuBERT/ContentVec (378.3 MB) + RMVPE (181.2 MB) at minimum, neither downloadable (see Blockers) |
-| **Neural training probe (Applio/RVC on MPS)** | **SKIPPED — blocked before any compute ran** | Needs the same pretrain assets (`f0G40k.pth` 69.7 MB / `f0D40k.pth` 136.3 MB minimum) to even initialize a fine-tune run; install-time asset fetch is what fails, not the training loop itself — correctly falls under this task's "skip and record as open risk" instruction, not the 15-minute compute cap (zero compute time was spent; the block is pre-compute) |
+| ~~**Neural inference (RVC content encoder / RMVPE / decoder)** — NOT MEASURED — blocked~~ | **MEASURED 2026-07-17 (network unblocked, assets acquired)** — see rows below and the 2026-07-17 continuation | The 07-11 block was a network window, not a permanent block; assets now cached under `~/.cache/huggingface/daw-pro-rvc/` |
+| → RMVPE neural pitch (MLX) on 30 s stem | **warm RTF 94.8× (0.316 s) · cold RTF 49.7× (0.604 s)** | 3001 frames, 90% voiced, F0 mean 244 Hz, finite; best-of-3 warm |
+| → ContentVec/HuBERT content encoder (MLX) on 30 s stem | **warm RTF 574× (0.052 s) · cold RTF 412× (0.073 s)** | out (1, 1499, 768), finite, all 211/211 weight tensors loaded (no random layers); best-of-3 warm |
+| → Full pipeline end-to-end (MLX, **untrained base target**, sid=0) | **warm RTF 38.0× (0.790 s) · cold RTF 14.3× (2.10 s)** | output 29.98 s / 40 kHz, finite, RMS 0.34 — NOT a real voice conversion (base/untrained emb); exercises TextEncoder+Flow+HiFiGAN-NSF end-to-end |
+| ~~**Neural training probe (Applio/RVC on MPS)** — SKIPPED — blocked~~ | **MEASURED 2026-07-17: 3.23 steps/s (310 ms/step)** @ B=2, 900 frames, 40 k; 20.8 s first-step MPS compile; **NO MPS CPU fallbacks** | Real Applio GAN step (net_g+net_d forward/backward, mel/kl/fm/adv losses, AdamW.step) from the generic base pretrains; losses decreasing (disc 5.2→1.8, gen_all 93.8→82.9). One benign warning: >3-dim constant pad uses MPS View-Ops path (stays on GPU). Timebox not hit (24 s total). See continuation |
 | `pyworld.harvest` F0 extraction on real 30 s stem (DSP-only, no weights) | **2.141 s wall, RTF 14.0×, 1395/3001 voiced frames (46%)** | CPU-only classical pitch tracker, not RMVPE (the project's neural default) and not voice conversion — included only as an honest "what actually ran against real audio" data point per the task's fallback instruction |
+
+## 2026-07-17 continuation — network unblocked, neural numbers acquired
+
+The measurement half of this spike was re-launched on 2026-07-17 after the orchestrator confirmed the corp large-binary/LFS block had lifted. Everything below was run in a fresh session scratch clone (`.../scratchpad/m10p1-work/rvc-mlx`), same proven recipe (`uv venv --python 3.11` + `uv sync`, 91 pkgs from plain PyPI, clean — reconfirmed). Machine: Apple M5 Max, 128 GB, macOS 26.4. Env versions: torch 2.4.0, transformers 4.57.3, mlx 0.30.1, faiss-cpu, Python 3.11. `OMP_NUM_THREADS=1` set per the fork's benchmark README.
+
+### Network unblock — confirmed
+
+The 07-11 prediction ("likely a network-window condition, not permanent") was correct. On 2026-07-17 the exact blocker-#1 URL shape now serves large binaries: a ranged probe `curl -sSL -r 0-1048575 https://huggingface.co/IAHispano/Applio/resolve/main/Resources/predictors/rmvpe.pt` returned **HTTP 206**, 1,048,576 bytes, and full downloads sustained **6–9 MB/s** (far above the orchestrator's earlier 1–2.4 MB/s probe). No HF token was needed — all files are public; nothing required auth (per the hard rule, no key was used or would have helped a network-layer block anyway). `curl -L` is required (the `resolve/main/...` path 302-redirects to `/api/resolve-cache/...`).
+
+### Asset acquisition record
+
+Downloaded one file per call with resumable `curl -L -C -`. All byte sizes match the 07-11 API-derived sizes exactly (the "Exact install shape" table). Durable cache (task-allowed): `~/.cache/huggingface/daw-pro-rvc/IAHispano-Applio/Resources/`, symlinked into the fork's expected `rvc/models/...` tree.
+
+| File (Applio `Resources/…`) | Bytes | sha256 | DL wall |
+|---|---|---|---|
+| `predictors/rmvpe.pt` | 181,184,272 | `6d62215f4306e3ca278246188607209f09af3dc77ed4232efdd069798c4ec193` | 20.3 s |
+| `embedders/contentvec/pytorch_model.bin` | 378,342,945 | `d8dd400e054ddf4e6be75dab5a2549db748cc99e756a097c496c099f65a4854e` | 46.4 s |
+| `embedders/contentvec/config.json` | 1,388 | `2ddde063b795d38d9051a7215a092fecf4cfe148b54251e38de51d88d356898b` | <1 s |
+| `pretrained_v2/f0G40k.pth` | 73,106,273 | `3b2c44035e782c4b14ddc0bede9e2f4a724d025cd073f736d4f43708453adfcb` | 11.9 s |
+| `pretrained_v2/f0D40k.pth` | 142,875,703 | `6b6ab091e70801b28e3f41f335f2fc5f3f35c75b39ae2628d419644ec2b0fa09` | 16.5 s |
+
+Total ≈ 775 MB in ≈ 95 s of transfer. `fcpe.pt` (alt pitch extractor, ~41 MB) was NOT fetched — RMVPE is the fork's default and the only pitch method the MLX path supports (`--f0_method {rmvpe}`); not needed for the measured path.
+
+**Derived asset (conversion artifact, not a download):** `embedders/contentvec/model.safetensors` (378,298,184 B) — see the toolchain gotcha below.
+
+### Toolchain gotcha p-2 MUST handle (new, blocking without the workaround)
+
+The fork's `tools/convert_hubert.py` loads ContentVec via `transformers`' `HubertModelWithFinalProj.from_pretrained(...)`, which with the pinned **torch 2.4.0** now hard-**errors**: transformers 4.57.3 refuses `torch.load` of a `.bin` unless torch ≥ 2.6 (CVE-2025-32434). Two clean fixes; I used (a):
+- **(a)** Convert `pytorch_model.bin` → `model.safetensors` once (load state-dict with `torch.load(weights_only=True)`, re-save with `safetensors.torch.save_file`); `from_pretrained` then prefers the safetensors path and skips the guard. This is what p-2's install step should do — ship/produce a `model.safetensors` next to the `.bin`.
+- **(b)** Alternatively bump torch to ≥ 2.6 (risks other pin drift in this stack; not tested here).
+This gotcha is NOT a network issue and would hit a clean install regardless of network — p-2 must bake the safetensors conversion (or a torch bump) into `install.sh`, or `convert_hubert` fails on first run.
+
+### MLX weight conversion (required before MLX inference)
+
+The MLX inference path consumes MLX-native `.npz`, not the raw PyTorch weights. All three conversions ran clean via the fork's own `tools/`:
+- `convert_rmvpe.py`: `rmvpe.pt` → `rvc_mlx/models/predictors/rmvpe_mlx.npz` (741 → 623 tensors, ~0.8 s).
+- `convert_hubert.py`: ContentVec → `rvc/models/embedders/contentvec/hubert_mlx.npz` (213 → 211 tensors, ~1.8 s; needs the safetensors fix above).
+- `convert_pth_to_mlx.py`: base `f0G40k.pth` → `rvc_mlx/models/checkpoints/base_f0G40k.npz` (560 tensors, weight-norm folded, ~69.6 MB) — used only to give the full pipeline a loadable (untrained) Synthesizer.
+
+### Per-leg neural numbers (this M5 Max)
+
+All against the 30.00 s synthetic vocal stem (see provenance). Timing uses a warmup pass to amortize MLX JIT, then best-of-3; "cold" = first full-length call including compile.
+
+| Leg | Warm wall / RTF | Cold wall / RTF | Output check |
+|---|---|---|---|
+| RMVPE neural pitch (MLX) | 0.316 s / **94.8×** | 0.604 s / 49.7× | 3001 frames, 90.0% voiced, F0 mean 244 Hz (min 160 / max 343), finite |
+| ContentVec/HuBERT encoder (MLX) | 0.052 s / **574×** | 0.073 s / 412× | shape (1, 1499, 768), finite, mean −0.01 std 0.32; **211/211 param tensors loaded** (verified none left at random init — the fast number is real, not a skipped forward) |
+| Full pipeline end-to-end (MLX) | 0.790 s / **38.0×** | 2.10 s / 14.3× | output 29.98 s @ 40 kHz, 1,199,200 samples, finite, RMS 0.34, peak 0.99 |
+
+The full-pipeline output is **intact but not a meaningful voice** — it ran against the generic Applio base pretrain (sid=0, untrained 109-speaker emb), so it exercises the complete synthesis graph (content encode → RMVPE pitch → TextEncoder → Flow → HiFiGAN-NSF generator) for a real end-to-end timing, but produces base-model timbre, not a conversion to any target. This is exactly the roadmap contract's anticipated stopping point: **there is no legitimate conversion target to spike against — real target voices arrive only via p-6 training on the user's own recordings.** No celebrity/demo checkpoint was downloaded, run, or referenced (the fork's demo voices remain the flagged-off celebrity models from correction #3).
+
+Reference: the fork's own `benchmarks/README.md` claims ~28–30× realtime RMVPE and ~1.7× MLX-vs-MPS on the authors' M1/M2/M3; this M5 Max comfortably exceeds those (RMVPE 94.8× warm), so the fork's perf claims are conservative on current hardware, not optimistic.
+
+### PyTorch-MPS training probe (timeboxed — a few steps only, NOT a full run)
+
+Built a tiny stem-derived batch and ran real Applio GAN steps on the MPS backend, initialised from the generic base pretrains `f0G40k.pth`/`f0D40k.pth` (109-speaker generator + MPD/MSD v2 discriminator). Batch: B=2, 900 frames (9 s) @ 40 kHz — real linear spectrogram + real stem-derived content features (2×-repeated HuBERT) + real RMVPE pitch, exactly the tensor shapes the fork's `data_utils` collate produces. Each step = generator forward → discriminator step (backward+AdamW) → generator step (mel-L1 + KL + feature-matching + adversarial, backward+AdamW), matching `rvc/train/train.py` lines 683–782.
+
+- **Throughput: 3.23 steps/s (309.8 ms/step)**, best over 6 steps after a **20.8 s first-step MPS kernel-compile** warmup.
+- **Convergence signal:** losses moved (disc 5.24 → 1.82, gen_all 93.76 → 82.87) across the few steps — backprop genuinely updates the base model. (Convergence *quality* over a real run is still unproven and out of scope — this is a steps/sec + op-coverage probe only.)
+- **MPS op coverage: NO CPU fallbacks.** With `PYTORCH_ENABLE_MPS_FALLBACK=1` set, zero `aten::… falling back to CPU` warnings were emitted across the whole GAN step (STFT/mel, conv1d, conv-transpose, attention, MPD/MSD). The **only** MPS warning was benign: *"MPS: The constant padding of more than 3 dimensions is not currently supported natively. It uses View Ops default implementation to run"* — this stays on the GPU (a perf note, not a CPU fallback). This upgrades correction #1: not only does training code exist, a real MPS training **step executes natively** on this Mac.
+- Timebox: the whole probe finished in **24 s** wall — nowhere near the 15-min cap.
+
+Caveat carried forward: 3.23 steps/s at B=2 is a *per-step* number, not a *time-to-a-usable-voice* number. Applio's own guidance is hundreds of epochs over a few-minutes dataset; extrapolating a total training wall time from one warm step is not something this probe justifies. p-6 must do its own timed real run. But the two things that could have killed the plan — "does an RVC training step even run on MPS" and "does it hit an unsupported op" — are now answered YES / NO-unsupported-op.
+
+### License re-check (2026-07-17)
+
+**Unchanged from 07-11: still no license grant.** `gh repo view Acelogic/Retrieval-based-Voice-Conversion-MLX --json licenseInfo` → `{"licenseInfo": null}` (repo last pushed 2026-03-05, i.e. the maintainer has pushed *since* the 07-11 check and still added no LICENSE). `find` over the fresh clone tree → no `LICENSE*` file anywhere; the GitHub Contents API for the default branch lists none. The only license assertion remains `pyproject.toml`'s `license = { text = "MIT" }` self-declaration, which GitHub's detector does not accept as a grant. **Correction #2 stands verbatim: do not upgrade to "confirmed MIT."** Before shipping anything derived from this fork, p-2/vi-b must either get a real `LICENSE` file added upstream (file an issue) or consume Applio's own MIT-licensed code paths (Applio ships a real `LICENSE`) for the parts that matter. All *assets* used here are from `IAHispano/Applio` (MIT, has LICENSE) — the license gap is specifically the MLX *fork's code*, not the model weights.
+
+### Test-stem provenance (disclosed)
+
+The 07-11 stem (a real ACE-Step vocal) died with its session, so this run used a **fully synthetic, rights-clear stem** generated in-session (`scratchpad/m10p1-work/make_stem.py`, no external audio, no real person's voice, no ACE sidecar started): a sung-vowel-like source — harmonic glottal pulse train (40 harmonics, 1/n glottal rolloff) driven by a stepwise 16-note melody around A3 (220 Hz) with 5.5 Hz vibrato, three formant band-passes for an "ah" vowel color, per-note ADSR envelopes, and short band-limited breath-noise segments between notes for unvoiced content. Output: 30.00 s, 48 kHz, 16-bit PCM, 2ch, RMS 0.294, peak 0.90, 85% voiced. This gives RMVPE real trackable pitch (it recovered F0 mean 244 Hz over 90% voiced frames — sane for the melody) and HuBERT real spectro-temporal structure. It is *cleaner and more periodic* than a human take, so absolute RTFs here are, if anything, a mild best case for the pitch tracker; the order-of-magnitude verdict is unaffected. Because the ACE sidecar was never needed, its port 8001 / `.ace-step.pid` were untouched (rule honored trivially).
+
+### Final engine verdict (2026-07-17) — GO
+
+**GO on the MLX fork as the primary VC engine, with a PyTorch-MPS training path now proven to execute a real GAN step natively on this Mac.** This supersedes the 07-11 "Conditional GO, scope-adjusted" (kept below as history). What changed: the only thing ever missing — the neural numbers — now exists, and every one is positive:
+- Inference is fast and correct: RMVPE 94.8× and ContentVec/HuBERT 574× warm RTF, full MLX pipeline 38× warm RTF, all producing finite, correctly-shaped, sane-RMS output; even the cold (with-JIT) full pipeline is 14.3× realtime, so processing a ~30 s clip costs ~2 s worst case.
+- Training is viable on-device: a real Applio GAN step runs on MPS at 3.23 steps/s with **zero unsupported-op CPU fallbacks** and moving losses — the "will training even run on MPS / will it hit a missing op" risk is retired.
+- No engine-level blocker surfaced. The remaining gates are process, not feasibility: (1) the fork's **missing LICENSE** (unchanged — resolve upstream or fall back to Applio's MIT code before shipping the fork's *code*; the assets are already MIT via IAHispano/Applio), and (2) there is **no legitimate target voice** until p-6 trains one on the user's own audio.
+
+**Install-shape confirmations/corrections for p-2** (deltas vs the "Exact install shape" section immediately below, which is otherwise reconfirmed accurate):
+1. **Network is NOT a hard blocker anymore** — the 07-11 "make asset-fetch the first thing p-2 proves; assume corp network can't fetch weights" caution is downgraded: the standard `resolve/main/...` LFS path works (`curl -L`, HTTP 206 ranged, 6–9 MB/s). Keep the actionable-error fallback in `install.sh` (the block was a window and could recur), but it need not be p-2's first gating task. All ~775 MB now live at `~/.cache/huggingface/daw-pro-rvc/IAHispano-Applio/Resources/` for reuse.
+2. **NEW blocker p-2 must bake in:** the torch-2.4 / transformers-4.57 `torch.load`-of-`.bin` guard (CVE-2025-32434) breaks `convert_hubert.py` on a clean install. `install.sh` must produce `model.safetensors` from `pytorch_model.bin` (or pin torch ≥ 2.6). Not optional — first-run HuBERT conversion fails otherwise.
+3. **MLX inference needs a conversion step, not just a download.** p-2's asset stage must run `convert_rmvpe.py`, `convert_hubert.py`, and (per trained model) `convert_pth_to_mlx.py`/`convert_rvc_model.py` to produce `rmvpe_mlx.npz` / `hubert_mlx.npz` / model `.npz`; the raw `.pt`/`.bin` are not consumed by the MLX runtime directly. RMVPE MLX loader path: `rvc_mlx/models/predictors/rmvpe_mlx.npz`; HuBERT loader path: `rvc_mlx/models/embedders/contentvec/hubert_mlx.npz` then `rvc/models/.../hubert_mlx.npz`.
+4. **`OMP_NUM_THREADS=1` is mandatory** at runtime (faiss segfault guard, per the fork's benchmark README) — set it in the sidecar launch env.
+5. Everything else in the "Exact install shape" section (Python 3.11, `uv venv` + `uv sync`, 91 pkgs from plain PyPI, torch/torchaudio/torchvision 2.4.0, ~1.0 GB venv) reproduced exactly on 2026-07-17 — no drift.
 
 ## Exact install shape for p-2
 
@@ -69,6 +159,8 @@ Every attempt below hit the same wall — recorded per the task's instructions s
 5. Not tried (out of timebox): authenticated `huggingface-cli`/`hf_hub_download` with a token (unlikely to route around a network-layer TLS-proxy block, since it's the same underlying HTTPS connection); a corporate Artifactory generic-file proxy for HF (unknown if one exists — worth asking IT/checking `~/.npmrc`'s sibling configs for a `pip.conf`/generic-artifact mirror before p-2, since the existing `~/.npmrc` already proves this org runs an internal Artifactory that could plausibly mirror HF too).
 
 ## GO/NO-GO recommendation for p-2
+
+> **HISTORICAL (2026-07-11, written under the network block).** Superseded by the "Final engine verdict (2026-07-17) — GO" in the continuation section above, which has the measured numbers. Kept verbatim for the record; item 2 (network as hard prerequisite) is downgraded and item 3 (training unproven) is now partially answered — see the 07-17 verdict.
 
 **Conditional GO, scope-adjusted: ship p-2 as an inference-only sidecar install script, with training explicitly deferred, and make the asset-fetch step the first thing p-2 proves — before writing any client/wire code.**
 
