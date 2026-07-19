@@ -256,8 +256,11 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // Hardcoded here (per the brief) as a fast, focused real-transport check —
   // if this drifts, audit-tools.test.ts is the source of truth for why.
   // m10-p-3's vc_sidecar_status/vc_sidecar_start/vc_sidecar_stop (the RVC
-  // voice-conversion sidecar's lifecycle trio) took it 130 -> 133.
-  assert.equal(result.tools.length, 133);
+  // voice-conversion sidecar's lifecycle trio) took it 130 -> 133. m10-p-4's
+  // vc_convert_vocals/vc_train_voice (the convert/train pipeline glue) took
+  // it 133 -> 135. m10-p-5's vc_list_voices (the Voice panel made
+  // voice-listing user-facing) took it 135 -> 136.
+  assert.equal(result.tools.length, 136);
 });
 
 // ---------------------------------------------------------------------------

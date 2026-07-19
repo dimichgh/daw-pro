@@ -116,6 +116,32 @@ final class AppModel {
     /// the clip-selection affordance and the `ui.showClipFix` debug command.
     var showClipFix = false
 
+    /// The local RVC voice-conversion sidecar's lifecycle manager + typed
+    /// client (m10-p-5) — the `sidecarManager`/`songGenerator` split for the
+    /// SECOND local sidecar (127.0.0.1:8002, `scripts/rvc/`). SHARED with the
+    /// control router (the `sidecarManager` precedent) so the Voice panel and
+    /// the `vc.*` wire path never diverge on sidecar/boot state.
+    let voiceConversionManager: VoiceConversionManager
+    let voiceConversionClient: VoiceConversionClient
+
+    /// The Voice panel's headless model (m10-p-5): local voice DATASETS under
+    /// app support, the voice-engine banner (user copy), the facade voice
+    /// list, the honest Train state machine, and the convert-clip action.
+    /// Owned here (like `clipFix`) so `debug.voicePanel` can drive it and
+    /// `debug.captureUI` renders the same instance the live panel shows.
+    /// Convert rides the SAME store/client seams as the wire's
+    /// `vc.convertVocals` (no parallel mutation path).
+    let voicePanel: VoicePanelModel
+
+    /// Whether the Voice panel is open in the Arrange workspace. Driven by the
+    /// header VOICE chip and `debug.voicePanel`.
+    var showVoicePanel = false
+
+    /// The audio clip the "Convert to Voice…" sheet is open for (nil =
+    /// closed). Set by the clip context menu and `debug.voicePanel`; the sheet
+    /// renders as a centered overlay (the named in-window modal pattern).
+    var voiceConvertClipID: UUID?
+
     /// The instrument picker's headless model (m10-n-3): the three-section browser
     /// + GM program browser + Simple "Instrument Sets" + `InstrumentChoice`
     /// construction. Owned here (like `clipFix`) so the `debug.instrumentPicker`
@@ -643,6 +669,45 @@ final class AppModel {
         self.songGenerator = songGenerator
         self.sidecarManager = sidecarManager
 
+        // The SECOND local sidecar (m10-p-5): one RVC voice-conversion manager
+        // + one typed client, shared with the router below (the
+        // sidecarManager/songGenerator precedent) so the Voice panel's Start
+        // button and the wire's vc.sidecarStart track the SAME boot, and the
+        // panel's convert/train ride the SAME client the vc.* commands use.
+        let voiceConversionManager = VoiceConversionManager()
+        let voiceConversionClient = VoiceConversionClient()
+        self.voiceConversionManager = voiceConversionManager
+        self.voiceConversionClient = voiceConversionClient
+
+        // The Voice panel model (m10-p-5): datasets under app support
+        // (recordings are app-side data; trained MODELS stay facade-owned in
+        // scripts/rvc/runtime/voices/ — never duplicated here), sidecar
+        // status/start through the shared manager, voices/train/convert
+        // through the shared client, and the clip-source + import seams
+        // through the SAME two store methods the wire's vc.convertVocals
+        // calls (`voiceConversionSource` / `importConvertedVoice`) — the
+        // m10-n-3 "one command surface" law.
+        self.voicePanel = VoicePanelModel(
+            datasetsRoot: VoicePanelModel.defaultDatasetsRoot(),
+            sidecarStatus: { [voiceConversionManager] in await voiceConversionManager.status() },
+            startSidecar: { [voiceConversionManager] in try await voiceConversionManager.start() },
+            // The SAME composed list the wire's vc.listVoices serves
+            // (availableVoiceTargets: the reserved "base" smoke target from
+            // its own status endpoint + the real-voices-only list) — UI and
+            // wire can never diverge on what's convertible.
+            voices: { [voiceConversionClient] in try await voiceConversionClient.availableVoiceTargets() },
+            train: { [voiceConversionClient] in try await voiceConversionClient.train($0) },
+            convert: { [voiceConversionClient] in try await voiceConversionClient.convert($0) },
+            clipSource: { [weak store] clipID in
+                guard let store else { throw DebugError("project store unavailable") }
+                return try store.voiceConversionSource(clipId: clipID)
+            },
+            importConverted: { [weak store] url, trackName, atBeat in
+                guard let store else { throw DebugError("project store unavailable") }
+                return try store.importConvertedVoice(
+                    fileURL: url, trackName: trackName, atBeat: atBeat)
+            })
+
         // The unified generation-progress registry (m17-h): its own polls read
         // the RAW client (never a decorator — no self-observation loop) and the
         // sidecar manager's own status; a sidecar death mid-job posts an
@@ -884,6 +949,10 @@ final class AppModel {
         let port = portResolution.port
         let router = CommandRouter(
             store: store, sidecarManager: sidecarManager,
+            // The RVC sidecar's manager + client, SHARED with the Voice panel
+            // (m10-p-5) so vc.* wire calls and the panel see one truth.
+            voiceConversionManager: voiceConversionManager,
+            voiceConverting: voiceConversionClient,
             // The wire's origin-tagged observer (m17-h): every `ai.*` job an
             // agent submits lands on the unified progress card tagged "wire";
             // the import seam gets its own "import"-tagged wrapper. Both wrap
@@ -1105,6 +1174,8 @@ final class AppModel {
                 return self.clipFixSeed(params)
             case "debug.clipFixState":
                 return self.clipFixStateResponse()
+            case "debug.voicePanel":
+                return try self.voicePanelDebug(params)
             case "debug.instrumentPicker":
                 return self.instrumentPickerDebug(params)
             case "debug.quantizePanel":
@@ -1999,6 +2070,175 @@ final class AppModel {
         } else {
             await refreshSketchpadSidecar()
         }
+    }
+
+    // MARK: - Voice panel actions (m10-p-5)
+
+    /// Opens/closes the Voice panel (header VOICE chip). Opening rescans the
+    /// local datasets and kicks a sidecar re-probe so the banner is current.
+    func toggleVoicePanel() {
+        showVoicePanel.toggle()
+        if showVoicePanel {
+            voicePanel.rescanDatasets()
+            Task { await voicePanel.refreshSidecar() }
+        }
+    }
+
+    /// Opens the "Convert to Voice…" sheet on an audio clip (the clip context
+    /// menu / `debug.voicePanel`). Fresh transient state each open.
+    func openVoiceConvert(clipID: UUID) {
+        voicePanel.resetConvertState()
+        workspaceMode = .arrange
+        voiceConvertClipID = clipID
+    }
+
+    /// Closes the convert sheet and clears its transient state.
+    func closeVoiceConvert() {
+        voiceConvertClipID = nil
+        voicePanel.resetConvertState()
+    }
+
+    // MARK: - Voice panel debug command (m10-p-5, capture support)
+
+    /// `debug.voicePanel {open?, close?, sidecarState?, sidecarMessage?,
+    /// startingForSeconds?, sidecarClear?, seedVoices?, refreshVoices?,
+    /// rescan?, createVoice?, sampleVoice?+samplePath?/sampleClip?, train?,
+    /// convertSheet?, convertGo?+convertVoiceId?+convertPitch?, closeSheet?}`
+    /// — stages the Voice panel + convert sheet for captures/E2E (app-level,
+    /// debug tier — off `allCommands`/MCP, the `debug.instrumentPicker`
+    /// precedent). Async paths (`refreshVoices`/`train`/`convertGo`) kick a
+    /// Task through the SAME model methods the live UI calls and echo state —
+    /// the caller sleeps/re-reads (the `debug.sketchpadGenerate` cadence). A
+    /// bare call is READ-ONLY (echoes state, never re-opens — the m11-a law).
+    private func voicePanelDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["open"]?.boolValue == true {
+            workspaceMode = .arrange
+            showVoicePanel = true
+            voicePanel.rescanDatasets()
+        }
+        if params["close"]?.boolValue == true { showVoicePanel = false }
+
+        // Sidecar seeding (the `debug.sidecarSeed` idiom, for banner states a
+        // capture can't wait for) / clear = re-probe the real manager.
+        if params["sidecarClear"]?.boolValue == true {
+            Task { await self.voicePanel.refreshSidecar() }
+        } else if let stateRaw = params["sidecarState"]?.stringValue {
+            guard let state = SidecarState(rawValue: stateRaw) else {
+                throw DebugError(
+                    "debug.voicePanel sidecarState must be notInstalled|installedNotRunning|starting|healthy|error")
+            }
+            let seconds = state == .starting
+                ? params["startingForSeconds"]?.doubleValue.map { Int($0) } : nil
+            voicePanel.updateSidecar(VoiceConversionStatus(
+                state: state,
+                message: params["sidecarMessage"]?.stringValue ?? "seeded (\(stateRaw))",
+                startingForSeconds: seconds))
+        }
+
+        // Voice-list staging: seedVoices plants the facade's real at-rest
+        // shape (just "base") without a live sidecar; refreshVoices asks the
+        // REAL client (live-gate path).
+        if params["seedVoices"]?.boolValue == true {
+            voicePanel.setVoicesForCapture([VoiceDescriptor(
+                id: "base", name: "Base (untrained)", state: "ready", kind: "builtin",
+                trained: false,
+                note: "pipeline smoke target — proves conversion runs, not a real voice")])
+        }
+        if params["refreshVoices"]?.boolValue == true {
+            Task { await self.voicePanel.refreshVoices() }
+        }
+
+        if params["rescan"]?.boolValue == true { voicePanel.rescanDatasets() }
+        if let name = params["createVoice"]?.stringValue {
+            _ = voicePanel.createVoice(named: name)
+        }
+        if let voiceName = params["sampleVoice"]?.stringValue {
+            if let path = params["samplePath"]?.stringValue {
+                _ = voicePanel.importSamples(
+                    [URL(fileURLWithPath: (path as NSString).expandingTildeInPath)],
+                    intoVoice: voiceName)
+            }
+            if let clipRaw = params["sampleClip"]?.stringValue {
+                guard let clipID = UUID(uuidString: clipRaw) else {
+                    throw DebugError("sampleClip is not a valid UUID: \(clipRaw)")
+                }
+                _ = voicePanel.addClipAsSample(clipID: clipID, intoVoice: voiceName)
+            }
+        }
+        if let trainName = params["train"]?.stringValue {
+            Task { await self.voicePanel.train(voiceNamed: trainName) }
+        }
+
+        // Convert sheet: open on a clip; convertGo drives the SAME
+        // model.convertClip the sheet's button calls (the UI path seam the
+        // live gate exercises).
+        if let sheetRaw = params["convertSheet"]?.stringValue {
+            guard let clipID = UUID(uuidString: sheetRaw) else {
+                throw DebugError("convertSheet is not a valid UUID: \(sheetRaw)")
+            }
+            openVoiceConvert(clipID: clipID)
+        }
+        if params["convertGo"]?.boolValue == true {
+            guard let clipID = voiceConvertClipID else {
+                throw DebugError("debug.voicePanel convertGo needs the convert sheet open (pass convertSheet first)")
+            }
+            guard let voiceID = params["convertVoiceId"]?.stringValue else {
+                throw DebugError("debug.voicePanel convertGo requires convertVoiceId")
+            }
+            let pitch = params["convertPitch"]?.doubleValue.map { Int($0) } ?? 0
+            Task {
+                _ = await self.voicePanel.convertClip(
+                    clipID: clipID, voiceID: voiceID, pitchSemitones: pitch)
+            }
+        }
+        if params["closeSheet"]?.boolValue == true { closeVoiceConvert() }
+
+        return voicePanelStateResponse()
+    }
+
+    /// The `debug.voicePanel` state echo (read-only; also what every staging
+    /// call returns).
+    private func voicePanelStateResponse() -> JSONValue {
+        var trainStates: [String: JSONValue] = [:]
+        for dataset in voicePanel.localVoices {
+            let state: String = switch voicePanel.trainState(forVoice: dataset.name) {
+            case .idle: "idle"
+            case .submitting: "submitting"
+            case .progress: "progress"
+            case .comingSoon(let message): "comingSoon: \(message)"
+            case .failed(let message): "failed: \(message)"
+            }
+            trainStates[dataset.name] = .string(state)
+        }
+        var response: [String: JSONValue] = [
+            "visible": .bool(showVoicePanel),
+            "sidecarState": .string(voicePanel.sidecarStatus?.state.rawValue ?? "unknown"),
+            "voices": .array(voicePanel.voices.map { .string($0.id) }),
+            "localVoices": .array(voicePanel.localVoices.map { dataset in
+                .object([
+                    "name": .string(dataset.name),
+                    "samples": .array(dataset.samples.map { .string($0.name) }),
+                ])
+            }),
+            "trainStates": .object(trainStates),
+            "isConverting": .bool(voicePanel.isConverting),
+            "datasetsRoot": .string(voicePanel.datasetsRoot.path),
+        ]
+        if let clipID = voiceConvertClipID {
+            response["convertSheetClipId"] = .string(clipID.uuidString)
+        }
+        if let error = voicePanel.convertError { response["convertError"] = .string(error) }
+        if let error = voicePanel.datasetError { response["datasetError"] = .string(error) }
+        if let error = voicePanel.voicesError { response["voicesError"] = .string(error) }
+        if let outcome = voicePanel.lastConversion {
+            response["lastConversion"] = .object([
+                "voiceId": .string(outcome.voiceID),
+                "trackName": .string(outcome.trackName),
+                "realConversion": .bool(outcome.realConversion),
+                "note": outcome.note.map { .string($0) } ?? .null,
+            ])
+        }
+        return .object(response)
     }
 
     // MARK: - Sketchpad debug commands (capture support, not agent-facing)

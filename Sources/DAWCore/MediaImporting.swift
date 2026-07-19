@@ -133,6 +133,11 @@ public enum ProjectError: Error, LocalizedError {
     // meter-boundary-crossing delete that can't splice) built at throw time —
     // the invalidClipEdit precedent for a case carrying a ready-to-show string.
     case invalidArrangeEdit(String)
+    // Voice conversion (m10-p-4): vc.convertVocals resolves its `clipId` param
+    // to that clip's backing audio file — a MIDI clip (or, structurally
+    // unreachable via any current store mutation, an audio clip with no
+    // backing file) has none to convert.
+    case voiceConversionRequiresAudioClip(UUID)
 
     public var errorDescription: String? {
         switch self {
@@ -417,6 +422,9 @@ public enum ProjectError: Error, LocalizedError {
             // offending group / meter boundary); surfaced verbatim — the
             // invalidClipEdit precedent for a ready-to-show string.
             return message
+        case .voiceConversionRequiresAudioClip(let id):
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "clip \(id.uuidString) is a MIDI clip — vc.convertVocals converts an audio clip's backing recording only (pass 'path' instead, or point clipId at a real audio clip)"
         }
     }
 }

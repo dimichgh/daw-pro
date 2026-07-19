@@ -123,6 +123,10 @@ struct TimelineLanesView: View {
     var onOpenQuantize: (_ clip: Clip) -> Void = { _ in }
     /// Opens the Quantize panel focused on the extract affordance (both kinds).
     var onExtractGroove: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the "Convert to Voice…" sheet for an AUDIO clip (m10-p-5, Pro clip
+    /// menu; sp-c). UI-only — routes to `openVoiceConvert`, whose sheet rides
+    /// the SAME client/store seams as the wire's `vc.convertVocals`.
+    var onConvertToVoice: (_ clip: Clip) -> Void = { _ in }
     /// Crossfades two adjacent/overlapping audio clips (m11-d, Pro clip menu),
     /// wired to `ProjectStore.crossfadeClips`.
     var onCrossfadeClips: (_ trackID: UUID, _ clipID: UUID, _ otherClipID: UUID,
@@ -836,6 +840,7 @@ struct TimelineLanesView: View {
                     },
                     onOpenQuantize: { onOpenQuantize(clip) },
                     onExtractGroove: { onExtractGroove(clip) },
+                    onConvertToVoice: { onConvertToVoice(clip) },
                     crossfadeNextClipID: isPro ? crossfadeNeighbor(for: clip, in: track) : nil,
                     onCrossfadeWithNext: { length in
                         if let other = crossfadeNeighbor(for: clip, in: track) {
@@ -1774,6 +1779,13 @@ private struct ClipBlock: View {
     /// `groove.extract` supports MIDI onsets and audio transients).
     var onExtractGroove: () -> Void = {}
 
+    // MARK: Convert to voice (m10-p-5)
+
+    /// "Convert to Voice…" (audio clips only, Pro menu — sp-c): opens the
+    /// convert sheet, which rides the SAME client/store seams as the wire's
+    /// `vc.convertVocals` clipId-form.
+    var onConvertToVoice: () -> Void = {}
+
     // MARK: Crossfade (m11-d)
 
     /// The id of this clip's eligible crossfade partner — the adjacent-or-
@@ -2671,6 +2683,14 @@ private struct ClipBlock: View {
                 Button("Quantize…") { onOpenQuantize() }
             }
             Button("Extract Groove…") { onExtractGroove() }
+            // Convert to voice (m10-p-5): AUDIO clips only — a MIDI clip has no
+            // recording to convert (the store's voiceConversionSource law), so
+            // the item simply doesn't exist there (hidden, never
+            // offered-then-errored). Pro-only like every clip-menu entry (sp-c).
+            if !clip.isMIDI {
+                Divider()
+                Button("Convert to Voice…") { onConvertToVoice() }
+            }
         }
     }
 

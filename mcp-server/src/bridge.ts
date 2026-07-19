@@ -29,6 +29,19 @@ const LONG_RUNNING_COMMANDS: ReadonlySet<string> = new Set([
   "render.stems",
   "render.measureLoudness",
 ]);
+/** vc.convertVocals (m10-p-4) BLOCKS on a real RVC voice conversion —
+ * measured ~37x real time (m10-p-2) plus a cold-engine load, so a real
+ * multi-minute source clip can legitimately take minutes. The app's own
+ * HTTP call to the sidecar budgets 300s
+ * (`VoiceConversionClient.Configuration.convertTimeoutSeconds`,
+ * Sources/AIServices/VoiceConversionClient.swift) — this bridge-side wait
+ * must be AT LEAST that plus headroom, not the shorter 180s render budget
+ * above (which would time out the MCP call while the app-side conversion is
+ * still legitimately in flight and would otherwise succeed). vc.trainVoice
+ * stays on the default REQUEST_TIMEOUT_MS: the facade answers today's
+ * 400/501 fast, by design. */
+const VOICE_CONVERT_TIMEOUT_MS = 330000;
+const VOICE_CONVERT_COMMANDS: ReadonlySet<string> = new Set(["vc.convertVocals"]);
 
 interface ControlResponse {
   id: string;
@@ -72,7 +85,11 @@ export class DawBridge {
   async send(command: string, params: Record<string, unknown> = {}): Promise<unknown> {
     const socket = await this.ensureConnected();
     const id = `mcp-${this.nextId++}-${Date.now()}`;
-    const timeoutMs = LONG_RUNNING_COMMANDS.has(command) ? LONG_RUNNING_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+    const timeoutMs = VOICE_CONVERT_COMMANDS.has(command)
+      ? VOICE_CONVERT_TIMEOUT_MS
+      : LONG_RUNNING_COMMANDS.has(command)
+        ? LONG_RUNNING_TIMEOUT_MS
+        : REQUEST_TIMEOUT_MS;
 
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {

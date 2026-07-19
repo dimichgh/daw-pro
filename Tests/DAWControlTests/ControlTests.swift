@@ -1511,6 +1511,16 @@ struct CommandRouterTests {
                 // with temp-dir fixtures.
                 "instrument.importSampleLibrary",
                 "ai.sidecarStart", "ai.sidecarStop",
+                // vc.sidecarStart/Stop (m10-p-3): the EXACT ai.sidecarStart/Stop
+                // rationale above, for the RVC voice-conversion sidecar — the
+                // default (real) VoiceConversionManager would spawn/signal a
+                // REAL process here (and DID, on machines with scripts/rvc
+                // installed, until this orchestrator-audit exclusion caught up
+                // with the m10-p-3 landing; on a fresh checkout start throws
+                // notInstalled and would fail this loop). vc.sidecarStatus is
+                // side-effect-free and stays IN the loop, like ai.sidecarStatus.
+                // Proven by VoiceConversionCommandTests (fake VoiceConversionManaging).
+                "vc.sidecarStart", "vc.sidecarStop",
                 "ai.generateSong", "ai.generationStatus",
                 // ai.importGeneration (M6 iii-a) needs a succeeded jobId from a
                 // REAL generation — proven by SongGenerationCommandTests /
@@ -1553,7 +1563,35 @@ struct CommandRouterTests {
                 // PluginUICommandTests (router + a fake PluginUIControlling).
                 // plugin.listOpenUIs is NOT excluded: it answers ok with
                 // {available:false} when the seam is nil.
-                "plugin.openUI", "plugin.closeUI"].contains(command) {
+                "plugin.openUI", "plugin.closeUI",
+                // vc.convertVocals/vc.trainVoice (m10-p-4) hit a REAL
+                // VoiceConversionClient talking to a REAL (almost certainly
+                // not-running-in-CI, and stopped again by the vc.sidecarStop
+                // call earlier in THIS SAME loop) sidecar — the ai.generateSong/
+                // ai.repaintAudio precedent. Neither also has a fixture this
+                // shared, single-clip project can supply (a required voiceId,
+                // and EXACTLY ONE of clipId/path or name/datasetDir), so both
+                // are excluded here exactly like their ai.* siblings. Proven by
+                // dedicated tests: DAWCoreTests/VoiceConversionImportTests
+                // (store import/undo/rejections), DAWControlTests/
+                // VoiceConversionConvertCommandTests (routing/param-shape/
+                // error-surfacing via a fake VoiceConverting), and
+                // AIServicesTests/VoiceConversionClientTests (convert/train
+                // against a stub facade).
+                "vc.convertVocals", "vc.trainVoice",
+                // vc.listVoices (m10-p-5) likewise hits the REAL
+                // VoiceConversionClient talking to a REAL (almost certainly
+                // not-running-in-CI, and stopped again by the vc.sidecarStop
+                // call earlier in THIS SAME loop) sidecar — the
+                // vc.convertVocals/vc.trainVoice rationale above verbatim
+                // (vc.sidecarStatus, side-effect-free AND never erroring,
+                // stays IN the loop). Proven by dedicated tests:
+                // DAWControlTests/VoiceListCommandTests (routing/no-params/
+                // verbatim-descriptors/error-surfacing via a fake
+                // VoiceConverting) and AIServicesTests/
+                // VoiceConversionClientTests (listVoices against a stub
+                // facade).
+                "vc.listVoices"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

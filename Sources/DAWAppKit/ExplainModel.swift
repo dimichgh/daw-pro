@@ -217,6 +217,17 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// The unified generation-progress card (m17-h) — the canonical violet
     /// status surface every AI song job reports to, whatever started it.
     case generationCard
+    /// The Voice panel + its header chip (m10-p-5) — an AI surface (violet):
+    /// named local voice datasets, the voice-engine banner, the facade voice
+    /// list, and the Train affordance share this ONE honest entry (the panel
+    /// is a single coherent surface, the Canvas honest-scope rule).
+    case voicePanel
+    /// The per-voice TRAIN affordance in the Voice panel — real training
+    /// arrives with a later update, and the copy says so honestly.
+    case voiceTrain
+    /// The "Convert to Voice…" clip action + its sheet (m10-p-5) — one shared
+    /// id wherever the affordance renders.
+    case voiceConvert
 
     // MARK: Settings
     case settingsGear
@@ -494,6 +505,15 @@ public enum ExplainCatalog {
         .generationCard: ExplainEntry(
             title: "AI Generation",
             body: "Shows every AI song job in one place — the stage it is in, how far along it is, and how long it has been working. If a job fails, the card says so and shows the exact reason."),
+        .voicePanel: ExplainEntry(
+            title: "Voice",
+            body: "Builds a singing voice of your own from recordings you have the rights to use, then re-sings vocal clips with it. Everything runs on this Mac — your recordings never leave it."),
+        .voiceTrain: ExplainEntry(
+            title: "Train Voice",
+            body: "Teaches the voice engine to sing like the recordings in this set. Real training arrives with a coming update — until then this button explains that honestly instead of pretending."),
+        .voiceConvert: ExplainEntry(
+            title: "Convert to Voice",
+            body: "Re-sings the chosen audio clip in the voice you pick and lands the result on a new track at the same spot. Your original clip stays untouched, and one undo removes the new take."),
 
         // MARK: Settings
         .settingsGear: ExplainEntry(

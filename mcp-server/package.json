@@ -12,7 +12,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "build:test": "tsc -p tsconfig.test.json",
-    "test": "npm run build && npm run build:test && node --test dist-test/test/ai.test.js dist-test/test/arrange-ergonomics.test.js dist-test/test/audit-tools.test.js dist-test/test/automation-master.test.js dist-test/test/clip-time-range.test.js dist-test/test/connection-info.test.js dist-test/test/controller-lane.test.js dist-test/test/copilot.test.js dist-test/test/sample-library.test.js dist-test/test/sound-banks.test.js dist-test/test/tempo-lint.test.js dist-test/test/vc.test.js dist-test/test/integration.test.js"
+    "test": "npm run build && npm run build:test && node --test dist-test/test/ai.test.js dist-test/test/arrange-ergonomics.test.js dist-test/test/audit-tools.test.js dist-test/test/automation-master.test.js dist-test/test/clip-time-range.test.js dist-test/test/connection-info.test.js dist-test/test/controller-lane.test.js dist-test/test/copilot.test.js dist-test/test/sample-library.test.js dist-test/test/sound-banks.test.js dist-test/test/tempo-lint.test.js dist-test/test/vc.test.js dist-test/test/vc-convert.test.js dist-test/test/integration.test.js"
   },
   "engines": {
     "node": ">=22"

@@ -285,3 +285,18 @@ struct VoiceConversionClientTrainTests {
         #expect(sentJSON["epochs"] as? Int == 50)
     }
 }
+
+@Suite("VoiceConversionClient — Configuration timeouts (m10-p-4)")
+struct VoiceConversionClientTimeoutConfigTests {
+    @Test("convertTimeoutSeconds defaults to >= 300s, separate from and without inflating requestTimeoutSeconds")
+    func convertGetsALongTimeoutWithoutSlowingFastCalls() {
+        let config = VoiceConversionClient.Configuration()
+        // vc.convertVocals: real conversion can legitimately take minutes
+        // (m10-p-2 measured ~37x real time plus a cold-engine load).
+        #expect(config.convertTimeoutSeconds >= 300)
+        // health/list/status/train must NOT inherit convert's long timeout —
+        // train answers today's 400/501 fast, by design (see `train(_:)`'s
+        // own doc), and health/list/status are polled frequently.
+        #expect(config.requestTimeoutSeconds == 10)
+    }
+}

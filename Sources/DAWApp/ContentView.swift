@@ -113,6 +113,21 @@ struct ContentView: View {
                 )
             }
         }
+        // "Convert to Voice…" sheet (m10-p-5): a centered dark-glass modal over a
+        // scrim (the Quantize idiom) — rendered INSIDE the window so
+        // `debug.captureUI` can snapshot it. Opened by an audio clip's context
+        // menu and `debug.voicePanel`; the convert rides the SAME client/store
+        // seams as the wire's `vc.convertVocals` clipId-form (one undoable edit).
+        .overlay {
+            if let clipID = model.voiceConvertClipID {
+                VoiceConvertSheet(
+                    model: model.voicePanel,
+                    clipID: clipID,
+                    clipName: voiceConvertClipName(clipID),
+                    onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeVoiceConvert() } }
+                )
+            }
+        }
         // Undo-history panel (m11-b): a centered dark-glass modal over a scrim (the
         // Quantize idiom) — rendered INSIDE the window so `debug.captureUI` can
         // snapshot it. Opened by the arrange-toolbar HISTORY chip and
@@ -433,6 +448,11 @@ struct ContentView: View {
                 ClipFixPanel(model: model.clipFix)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
+
+            if model.showVoicePanel {
+                VoicePanel(model: model.voicePanel)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
         .frame(maxHeight: .infinity)
         // Keep the fix panel's composer pointed at the live audio selection. The
@@ -559,6 +579,9 @@ struct ContentView: View {
             onExtractGroove: { clip in
                 model.openQuantizePanel(clipID: clip.id, startExtract: true)
             },
+            // Convert to voice (m10-p-5, Pro clip menu): opens the sheet, which
+            // rides the SAME seams as the wire's vc.convertVocals.
+            onConvertToVoice: { clip in model.openVoiceConvert(clipID: clip.id) },
             // Crossfade two adjacent/overlapping audio clips (m11-d, Pro clip menu).
             onCrossfadeClips: { trackID, clipID, otherClipID, length in
                 _ = try? store.crossfadeClips(trackId: trackID, clipId: clipID,
@@ -974,6 +997,8 @@ struct ContentView: View {
                 .explainable(.aiCopilot)
             sketchpadToggle
                 .explainable(.aiSketchpad)
+            voiceToggle
+                .explainable(.voicePanel)
             inputDevicePicker
             settingsToggle
                 .explainable(.settingsGear)
@@ -1102,6 +1127,45 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help("Open the AI Sketchpad — generate a song from a prompt")
+    }
+
+    /// Violet VOICE toggle chip (m10-p-5): opens the Voice panel — your own
+    /// trained voices + their training recordings. Violet because a voice model
+    /// is AI identity and conversion output is AI-generated audio
+    /// (docs/DESIGN-LANGUAGE.md Rule 3). Lit + glowing when the panel is open.
+    private var voiceToggle: some View {
+        Button { withAnimation(.easeOut(duration: 0.18)) { model.toggleVoicePanel() } } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "person.wave.2.fill")
+                    .font(.system(size: 9, weight: .bold))
+                Text("VOICE")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+            }
+            .foregroundStyle(model.showVoicePanel ? DAWTheme.ai : DAWTheme.textDim)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(model.showVoicePanel ? DAWTheme.ai.opacity(0.14) : DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(model.showVoicePanel ? DAWTheme.ai.opacity(0.6) : DAWTheme.hairline, lineWidth: 1)
+            )
+            .glow(model.showVoicePanel ? DAWTheme.ai : .clear, radius: 5, intensity: 0.6)
+        }
+        .buttonStyle(.plain)
+        .help("Open the Voice panel — build a voice of your own and convert vocals to it")
+    }
+
+    /// The convert sheet's header clip name, resolved against the live store
+    /// (falls back to the track name for an unnamed clip).
+    private func voiceConvertClipName(_ id: UUID) -> String {
+        for track in store.tracks {
+            if let clip = track.clips.first(where: { $0.id == id }) {
+                return clip.name.isEmpty ? track.name : clip.name
+            }
+        }
+        return "Audio Clip"
     }
 
     /// Settings gear chip: opens the glass Settings overlay (API keys). Neutral

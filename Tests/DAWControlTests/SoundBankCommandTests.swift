@@ -403,8 +403,11 @@ struct SoundBankCommandTests {
         // took it 126 → 127. The three instrument commands must stay.
         // m10-p-3's vc.sidecarStatus/vc.sidecarStart/vc.sidecarStop (the RVC
         // voice-conversion sidecar's lifecycle trio, additive alongside the
-        // untouched ai.sidecar* names) took it 127 -> 130.
-        #expect(CommandRouter.allCommands.count == 130)
+        // untouched ai.sidecar* names) took it 127 -> 130. m10-p-4's
+        // vc.convertVocals/vc.trainVoice (the convert/train pipeline glue)
+        // took it 130 -> 132. m10-p-5's vc.listVoices (the Voice panel made
+        // voice-listing user-facing) took it 132 -> 133.
+        #expect(CommandRouter.allCommands.count == 133)
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBanks"))
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBankPrograms"))
         #expect(CommandRouter.allCommands.contains("instrument.importSoundBank"))

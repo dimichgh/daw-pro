@@ -72,14 +72,21 @@ public final class CommandRouter {
 
     /// Local RVC voice-conversion sidecar lifecycle (m10-p-3) — the
     /// `sidecarManager` twin for the SECOND local sidecar (127.0.0.1:8002,
-    /// `scripts/rvc/`). Process management only, same split as
-    /// `sidecarManager`/`songGenerator`: `vc.convertVocals`/`vc.trainVoice`
-    /// (a later roadmap item) will get their own `VoiceConversionClient`
-    /// dependency, kept separate from this one. Defaults to the real
+    /// `scripts/rvc/`). Process management only — kept separate from
+    /// `voiceConverting` below (convert/train calls), same split as
+    /// `sidecarManager`/`songGenerator`. Defaults to the real
     /// `VoiceConversionManager` resolving `scripts/rvc/` relative to the
     /// repo/executable; tests inject a fake conforming to
     /// `VoiceConversionManaging` instead.
     private let voiceConversionManager: VoiceConversionManaging
+
+    /// `vc.convertVocals`/`vc.trainVoice` (m10-p-4) — the RVC facade's typed
+    /// convert/train calls, kept separate from `voiceConversionManager`
+    /// (process lifecycle vs. conversion calls, the `songGenerator`/
+    /// `sidecarManager` split precedent). Defaults to the real
+    /// `VoiceConversionClient` talking to the same local sidecar; tests
+    /// inject a fake conforming to `VoiceConverting` instead.
+    private let voiceConverting: VoiceConverting
 
     /// Song generation (M6 ii) — defaults to the real `ACEStepClient` talking
     /// to the local sidecar's job-queue REST API; tests inject a fake
@@ -274,12 +281,16 @@ public final class CommandRouter {
         "vc.sidecarStatus",
         "vc.sidecarStart",
         "vc.sidecarStop",
+        "vc.convertVocals",
+        "vc.trainVoice",
+        "vc.listVoices",
     ]
 
     public init(
         store: ProjectStore,
         sidecarManager: SidecarManaging = SidecarManager(),
         voiceConversionManager: VoiceConversionManaging = VoiceConversionManager(),
+        voiceConverting: VoiceConverting = VoiceConversionClient(),
         songGenerator: SongGenerating = ACEStepClient(),
         keyStore: APIKeyStoring = KeychainKeyStore(),
         keyEnvironment: [String: String] = ProcessInfo.processInfo.environment,
@@ -290,6 +301,7 @@ public final class CommandRouter {
         self.store = store
         self.sidecarManager = sidecarManager
         self.voiceConversionManager = voiceConversionManager
+        self.voiceConverting = voiceConverting
         self.songGenerator = songGenerator
         self.keyStore = keyStore
         self.keyEnvironment = keyEnvironment
@@ -3219,6 +3231,171 @@ public final class CommandRouter {
             let stoppedVCStatus = try await voiceConversionManager.stop()
             return .success(request.id, try JSONValue(encoding: stoppedVCStatus))
 
+        case "vc.convertVocals":
+            // BLOCKING (m10-p-4) — the facade's POST /v1/voice/convert is
+            // synchronous and runs at roughly 37x real time (m10-p-2
+            // measurement) plus a cold-engine load, so this call can
+            // legitimately take minutes on a real multi-minute source clip;
+            // this is a render.mixdown-class call, not an ai.generateSong-
+            // class async job (no job registry here). VoiceConversionClient
+            // gives ONLY this one call its own long timeout
+            // (config.convertTimeoutSeconds, default 300s) — health/list/
+            // status/train stay on the fast default.
+            //
+            // params: EXACTLY ONE of clipId (an existing AUDIO clip — its
+            // FULL backing recording is what gets converted; clip trims/
+            // stretch are NOT applied to the source audio fed to the
+            // converter, only to how the RESULT is later placed) or path
+            // (absolute or ~-expanded local audio file). voiceId (required —
+            // a trained voice's id, or the reserved "base" smoke target,
+            // which exercises the full pipeline honestly WITHOUT a real
+            // trained voice — its result always carries realConversion:false
+            // plus a note explaining why). pitchSemitones (optional int,
+            // -24..24 — NOT re-validated here; an out-of-range value reaches
+            // the wire as the facade's own pitchOutOfRange teaching error,
+            // verbatim). trackName (optional — defaults to "Voice:
+            // <voiceId>"). atBeat (optional — defaults to the source clip's
+            // own start beat when clipId was given, else 0).
+            //
+            // Always imports the result as a NEW AI-flagged audio track +
+            // clip (violet in the UI) in ONE undoable "Import Converted
+            // Voice" edit — there is no separate ai.importGeneration-style
+            // second step (a blocking call already has the finished file in
+            // hand). Response: {trackId, clipId, outputPath, realConversion,
+            // inputSeconds, inferSeconds, rtf?, sampleRate, note?}.
+            //
+            // Own-voice-only policy: voices are trained ONLY from a user's
+            // OWN recordings (vc.trainVoice) — never a celebrity or
+            // third-party voice model. Throws the SidecarManager-style
+            // actionable guidance (pointing at vc.sidecarStart, or
+            // scripts/rvc/install.sh if never installed) when the sidecar
+            // isn't reachable, instead of a bare connection error.
+            try params.rejectUnknownKeys(
+                ["clipId", "path", "voiceId", "pitchSemitones", "trackName", "atBeat"],
+                verb: "vc.convertVocals")
+            let vcVoiceId = try params.require("voiceId", \.stringValue)
+            let vcClipIdRaw = params["clipId"]?.stringValue
+            let vcPathRaw = params["path"]?.stringValue
+            if vcClipIdRaw != nil, vcPathRaw != nil {
+                throw ControlError(
+                    "vc.convertVocals: pass either 'clipId' or 'path', not both — "
+                        + "they name the source audio two different ways")
+            }
+            let vcInputPath: String
+            let vcDefaultAtBeat: Double
+            if let vcClipIdRaw {
+                guard let vcClipId = UUID(uuidString: vcClipIdRaw) else {
+                    throw ControlError("'clipId' is not a valid UUID: \(vcClipIdRaw)")
+                }
+                let vcSource = try store.voiceConversionSource(clipId: vcClipId)
+                vcInputPath = vcSource.url.path
+                vcDefaultAtBeat = vcSource.startBeat
+            } else if let vcPathRaw {
+                let vcExpandedPath = (vcPathRaw as NSString).expandingTildeInPath
+                guard vcExpandedPath.hasPrefix("/") else {
+                    throw ControlError("'path' must be an absolute path")
+                }
+                vcInputPath = vcExpandedPath
+                vcDefaultAtBeat = 0
+            } else {
+                throw ControlError("vc.convertVocals: pass either 'clipId' or 'path' naming the source audio")
+            }
+            let vcPitchSemitones = params["pitchSemitones"]?.doubleValue.map { Int($0) } ?? 0
+            let vcTrackNameRaw = params["trackName"]?.stringValue
+            let vcAtBeat = params["atBeat"]?.doubleValue ?? vcDefaultAtBeat
+            do {
+                let vcResult = try await voiceConverting.convert(VoiceConvertRequest(
+                    inputPath: vcInputPath, voiceId: vcVoiceId, pitchSemitones: vcPitchSemitones))
+                let vcResolvedTrackName = (vcTrackNameRaw?.isEmpty == false) ? vcTrackNameRaw! : "Voice: \(vcVoiceId)"
+                let (vcTrackID, vcClipID) = try store.importConvertedVoice(
+                    fileURL: URL(fileURLWithPath: vcResult.outputPath),
+                    trackName: vcResolvedTrackName,
+                    atBeat: vcAtBeat)
+                var vcResponse: [String: JSONValue] = [
+                    "trackId": .string(vcTrackID.uuidString),
+                    "clipId": .string(vcClipID.uuidString),
+                    "outputPath": .string(vcResult.outputPath),
+                    "realConversion": .bool(vcResult.realConversion),
+                    "inputSeconds": .number(vcResult.inputSeconds),
+                    "inferSeconds": .number(vcResult.inferSeconds),
+                    "sampleRate": .number(Double(vcResult.sampleRate)),
+                ]
+                if let rtf = vcResult.rtf { vcResponse["rtf"] = .number(rtf) }
+                if let note = vcResult.note { vcResponse["note"] = .string(note) }
+                return .success(request.id, .object(vcResponse))
+            } catch {
+                throw await translateVoiceConversionError(error)
+            }
+
+        case "vc.listVoices":
+            // No params (m10-p-5 — the Voice panel made voice-listing
+            // user-facing, so the CLAUDE.md convention requires the wire
+            // command). Returns every voice a vc.convertVocals voiceId can
+            // name: {voices: [{id, name, state, hasIndex?, createdAt?,
+            // kind?, trained?, note?}, ...]} — the reserved "base" smoke
+            // target FIRST (kind "builtin", trained false, plus its note; a
+            // real conversion target that proves the pipeline without a
+            // trained voice — see vc.convertVocals), then every real
+            // user-trained voice. Composed by VoiceConverting
+            // .availableVoiceTargets — the facade's /v1/voice/list is
+            // real-voices-only BY ITS OWN DESIGN, so base is fetched from
+            // its own /v1/voice/base/status endpoint; descriptor CONTENTS
+            // are the facade's own, verbatim (nothing invented or edited).
+            // The SAME helper feeds the Voice panel, so UI and wire can
+            // never diverge. Real voices appear once training ships
+            // (m10-p-6). Unreachable sidecar → the manager's state-specific
+            // actionable message (never a bare connection error), via
+            // translateVoiceConversionError — the vc.convertVocals/
+            // vc.trainVoice precedent. Own-voice-only policy: any real
+            // voice listed here was trained from the user's OWN recordings
+            // — never a celebrity or third-party voice model.
+            try params.rejectUnknownKeys([], verb: "vc.listVoices")
+            do {
+                let vlDescriptors = try await voiceConverting.availableVoiceTargets()
+                return .success(request.id, .object([
+                    "voices": try JSONValue(encoding: vlDescriptors),
+                ]))
+            } catch {
+                throw await translateVoiceConversionError(error)
+            }
+
+        case "vc.trainVoice":
+            // params: name (required — the new voice's display name).
+            // datasetDir (required — absolute or ~-expanded local directory
+            // of the user's OWN clean dry vocal recordings; own-voice-only,
+            // NEVER a celebrity or third-party voice). voiceId (optional — a
+            // specific id for the new voice; omit to let the facade derive
+            // one from name). epochs (optional — training-length override).
+            // Today the facade validates shape then ALWAYS answers a
+            // structured 501 trainingNotYetAvailable (contract-reserved —
+            // training ships with the Voice panel, m10-p-5/p-6) — that
+            // teaching error reaches the wire VERBATIM via the LocalizedError
+            // mapping in `handle(_:)`; this handler does not rewrite it. A
+            // future 2xx response's raw JSON body passes through unchanged
+            // rather than inventing a response schema now (see
+            // `VoiceConversionClient.train`'s own doc comment).
+            try params.rejectUnknownKeys(
+                ["name", "datasetDir", "voiceId", "epochs"], verb: "vc.trainVoice")
+            let vtName = try params.require("name", \.stringValue)
+            let vtDatasetDirRaw = try params.require("datasetDir", \.stringValue)
+            let vtDatasetDir = (vtDatasetDirRaw as NSString).expandingTildeInPath
+            guard vtDatasetDir.hasPrefix("/") else {
+                throw ControlError("'datasetDir' must be an absolute path")
+            }
+            let vtVoiceId = params["voiceId"]?.stringValue
+            let vtEpochs = params["epochs"]?.doubleValue.map { Int($0) }
+            do {
+                let vtData = try await voiceConverting.train(VoiceTrainRequest(
+                    name: vtName, datasetDir: vtDatasetDir, voiceId: vtVoiceId, epochs: vtEpochs))
+                guard let vtValue = try? JSONDecoder().decode(JSONValue.self, from: vtData) else {
+                    throw ControlError(
+                        "vc.trainVoice: sidecar responded 2xx but the body could not be parsed as JSON")
+                }
+                return .success(request.id, vtValue)
+            } catch {
+                throw await translateVoiceConversionError(error)
+            }
+
         default:
             // App-installed surface (see `appCommandHandler`): a non-nil return
             // wraps as success; nil (or no handler) falls through to the
@@ -3248,6 +3425,22 @@ public final class CommandRouter {
     private func translateSongGeneratorError(_ error: Error) async -> Error {
         if case ACEStepError.sidecarUnreachable = error {
             let status = await sidecarManager.status()
+            return ControlError(status.message)
+        }
+        return error
+    }
+
+    /// The `translateSongGeneratorError` precedent for the RVC voice-
+    /// conversion sidecar (m10-p-4): a bare connection failure is replaced
+    /// with `VoiceConversionManager`'s own state-specific actionable message
+    /// (notInstalled vs. installedNotRunning vs. still-starting), so
+    /// `vc.convertVocals`/`vc.trainVoice` never surface a raw "connection
+    /// refused" — everything else (including the facade's own teaching
+    /// errors, e.g. voiceNotReady/pitchOutOfRange/trainingNotYetAvailable)
+    /// passes through UNCHANGED, verbatim.
+    private func translateVoiceConversionError(_ error: Error) async -> Error {
+        if case VoiceConversionError.sidecarUnreachable = error {
+            let status = await voiceConversionManager.status()
             return ControlError(status.message)
         }
         return error

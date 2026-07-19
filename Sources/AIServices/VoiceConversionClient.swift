@@ -33,7 +33,40 @@ import Foundation
 /// response `Data` on any future 2xx and throws the teaching error verbatim
 /// otherwise — exactly what this roadmap item calls for ("train will surface
 /// the facade's 501 teaching error verbatim; that is correct for now").
-public actor VoiceConversionClient {
+///
+/// `convert`/`train` are wired to `vc.convertVocals`/`vc.trainVoice` (m10-p-4)
+/// through the `VoiceConverting` seam below; `listVoices` joined the seam in
+/// m10-p-5 when the Voice panel made voice-listing user-facing (the CLAUDE.md
+/// convention then requires a wire command — `vc.listVoices` — and commands
+/// route through this protocol so tests can fake them).
+public protocol VoiceConverting: Sendable {
+    func listVoices() async throws -> [VoiceDescriptor]
+    func voiceStatus(voiceID: String) async throws -> VoiceDescriptor
+    func convert(_ request: VoiceConvertRequest) async throws -> VoiceConvertResult
+    @discardableResult
+    func train(_ request: VoiceTrainRequest) async throws -> Data
+}
+
+extension VoiceConverting {
+    /// The user-facing "what can I convert to" list (m10-p-5), shared by the
+    /// wire's `vc.listVoices` AND the Voice panel so the two can never
+    /// diverge: the reserved `"base"` smoke target FIRST (fetched from its
+    /// own `GET /v1/voice/base/status` endpoint — the facade's `/v1/voice/
+    /// list` is real-user-voices-only BY ITS OWN m10-p-2 DESIGN, so base
+    /// never appears there), then every real trained voice from the list
+    /// endpoint. Descriptor CONTENTS are the facade's own, verbatim — base
+    /// arrives honestly self-labeled (`kind:"builtin"`, `trained:false`, its
+    /// explanatory note, and a real `state` reflecting whether the smoke
+    /// checkpoint is actually on disk) — this helper only composes WHICH
+    /// endpoints are read, it never invents or edits a field.
+    public func availableVoiceTargets() async throws -> [VoiceDescriptor] {
+        let base = try await voiceStatus(voiceID: "base")
+        let real = try await listVoices()
+        return [base] + real
+    }
+}
+
+public actor VoiceConversionClient: VoiceConverting {
     public let config: Configuration
     private let session: URLSession
 
@@ -92,15 +125,24 @@ public actor VoiceConversionClient {
             note: object["note"] as? String)
     }
 
-    // MARK: - Convert (M10-p-4 will wire this behind `vc.convertVocals`)
+    // MARK: - Convert (m10-p-4: wired behind `vc.convertVocals`)
 
+    /// BLOCKING — the facade's `POST /v1/voice/convert` is synchronous and
+    /// measured at ~37x real time (m10-p-2), so a multi-minute source clip
+    /// can take a while even before the engine-load cold-start cost. Uses
+    /// `config.convertTimeoutSeconds` (default 300s) rather than the fast
+    /// `config.requestTimeoutSeconds` every other call on this client uses
+    /// (health/list/status/train all stay fast) — the `ACEStepClient.post`
+    /// per-call `timeoutSeconds` override precedent (`POST /v1/init`'s
+    /// `modelInitTimeoutSeconds`), not a second client instance.
     public func convert(_ request: VoiceConvertRequest) async throws -> VoiceConvertResult {
         let body: [String: Any] = [
             "inputPath": request.inputPath,
             "voiceId": request.voiceId,
             "pitchSemitones": request.pitchSemitones,
         ]
-        let data = try await post(path: "v1/voice/convert", body: body)
+        let data = try await post(
+            path: "v1/voice/convert", body: body, timeoutSeconds: config.convertTimeoutSeconds)
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw VoiceConversionError.malformedResponse("POST /v1/voice/convert response is not a JSON object")
         }
@@ -140,10 +182,14 @@ public actor VoiceConversionClient {
 
     // MARK: - HTTP plumbing
 
-    private func post(path: String, body: [String: Any]) async throws -> Data {
+    /// `timeoutSeconds` defaults to `config.requestTimeoutSeconds` (the fast
+    /// JSON calls); `convert(_:)` overrides it with `config.convertTimeoutSeconds`
+    /// for `POST /v1/voice/convert`, which can run for minutes on a real
+    /// source clip (the `ACEStepClient.post` `POST /v1/init` precedent).
+    private func post(path: String, body: [String: Any], timeoutSeconds: Double? = nil) async throws -> Data {
         var urlRequest = URLRequest(url: config.baseURL.appendingPathComponent(path))
         urlRequest.httpMethod = "POST"
-        urlRequest.timeoutInterval = config.requestTimeoutSeconds
+        urlRequest.timeoutInterval = timeoutSeconds ?? config.requestTimeoutSeconds
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
         return try await send(urlRequest, pathForErrors: "POST /\(path)")
@@ -210,14 +256,29 @@ public actor VoiceConversionClient {
 extension VoiceConversionClient {
     public struct Configuration: Sendable {
         public var baseURL: URL
+        /// Timeout for the fast JSON calls (`/health`, `/v1/voice/list`,
+        /// `/v1/voice/{id}/status`, `/v1/voice/train` — the facade answers
+        /// train fast today, always a 400/501 shape/contract error; see
+        /// `train(_:)`'s own doc). Unchanged from m10-p-3.
         public var requestTimeoutSeconds: Double
+        /// Timeout for `POST /v1/voice/convert` ONLY (m10-p-4) — real
+        /// conversion runs ~37x real time (m10-p-2 measurement) plus a
+        /// cold-engine load, so a multi-minute source clip can legitimately
+        /// take minutes. Deliberately generous and deliberately NOT shared
+        /// with `requestTimeoutSeconds`, so health/list/status/train stay
+        /// fast-timeout even while a convert call is slow — the
+        /// `ACEStepClient.Configuration.modelInitTimeoutSeconds` precedent
+        /// for "one call on this client legitimately needs its own budget".
+        public var convertTimeoutSeconds: Double
 
         public init(
             baseURL: URL = URL(string: "http://127.0.0.1:8002")!,
-            requestTimeoutSeconds: Double = 10
+            requestTimeoutSeconds: Double = 10,
+            convertTimeoutSeconds: Double = 300
         ) {
             self.baseURL = baseURL
             self.requestTimeoutSeconds = requestTimeoutSeconds
+            self.convertTimeoutSeconds = convertTimeoutSeconds
         }
 
         /// `RVC_API_URL` env override wins if set (same variable
@@ -338,6 +399,28 @@ public struct VoiceConvertResult: Codable, Sendable, Equatable {
     /// Present only for the `"base"` smoke target, explaining it is not a
     /// real voice conversion.
     public var note: String?
+
+    /// m10-p-4 addition (the `VoiceConversionHealth`/`VoiceDescriptor`
+    /// precedent in this same file, and `SongGenerationSubmission`'s in
+    /// `Providers.swift`): an explicit public init, since the auto-
+    /// synthesized memberwise init a bare `public struct` gets is only
+    /// `internal` — callers outside AIServices (DAWControl's fakes for
+    /// `VoiceConverting`) need to construct one without `@testable import`.
+    public init(
+        outputPath: String, voiceId: String, inputSeconds: Double, engineLoadSeconds: Double,
+        inferSeconds: Double, rtf: Double? = nil, sampleRate: Int, realConversion: Bool,
+        note: String? = nil
+    ) {
+        self.outputPath = outputPath
+        self.voiceId = voiceId
+        self.inputSeconds = inputSeconds
+        self.engineLoadSeconds = engineLoadSeconds
+        self.inferSeconds = inferSeconds
+        self.rtf = rtf
+        self.sampleRate = sampleRate
+        self.realConversion = realConversion
+        self.note = note
+    }
 }
 
 /// `POST /v1/voice/train` request body. `"base"` is rejected for both `name`

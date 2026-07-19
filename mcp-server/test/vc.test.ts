@@ -185,6 +185,74 @@ test("vc_sidecar_stop rejects an unrecognized argument at the MCP boundary (neve
 });
 
 // ---------------------------------------------------------------------------
+// vc_list_voices (m10-p-5)
+// ---------------------------------------------------------------------------
+
+test("vc_list_voices takes no params and forwards to vc.listVoices with no arguments", async () => {
+  const stubbedList = {
+    voices: [
+      {
+        id: "base",
+        name: "Base (untrained)",
+        state: "ready",
+        kind: "builtin",
+        trained: false,
+        note: "pipeline smoke target — not a real voice",
+      },
+      { id: "my-voice", name: "My Voice", state: "ready", hasIndex: true, createdAt: "2026-07-19T00:00:00Z" },
+    ],
+  };
+  queuedResult = stubbedList;
+
+  const result = await client.callTool({ name: "vc_list_voices", arguments: {} });
+
+  assert.equal(calls.length, 1, "exactly one bridge call");
+  assert.equal(calls[0]!.command, "vc.listVoices");
+  assert.deepEqual(calls[0]!.params, {}, "no arguments are forwarded — this command takes no params");
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(!r.isError);
+  assert.deepEqual(parseJSON(r), stubbedList, "the app's descriptor list round-trips back verbatim");
+});
+
+test("vc_list_voices rejects an unrecognized argument at the MCP boundary (never reaches the bridge)", async () => {
+  const result = await client.callTool({ name: "vc_list_voices", arguments: { voiceId: "base" } });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(r.isError, "the strict schema must reject an unknown key");
+  assert.equal(calls.length, 0, "the strict schema rejects before bridge.send is ever invoked");
+});
+
+test("vc_list_voices surfaces the app's unreachable-sidecar teaching error verbatim", async () => {
+  queuedError = new Error(
+    "RVC voice-conversion sidecar is installed but not running — call vc.sidecarStart."
+  );
+
+  const result = await client.callTool({ name: "vc_list_voices", arguments: {} });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "vc.listVoices");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(r.isError, "a bridge-side failure must be a tool error, never a silent success");
+  assert.match(
+    r.content[0].text as string,
+    /installed but not running/,
+    "the actionable teaching message passes through verbatim"
+  );
+});
+
+test("vc_list_voices carries the own-voice-only policy line in its description", async () => {
+  const listed = await client.listTools();
+  const tool = listed.tools.find((t) => t.name === "vc_list_voices");
+  assert.ok(tool, "vc_list_voices is registered");
+  assert.match(tool!.description ?? "", /OWN recordings/, "the policy copy is present");
+  assert.match(tool!.description ?? "", /NEVER a celebrity/, "the no-celebrity line is present");
+});
+
+// ---------------------------------------------------------------------------
 // Additive guarantee: the sibling ai_sidecar_* tools are unaffected.
 // ---------------------------------------------------------------------------
 

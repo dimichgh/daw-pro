@@ -4935,14 +4935,12 @@ registerTool(
 // loopback only — see scripts/rvc/README.md) — additive alongside the
 // ai_sidecar_* trio above, which is untouched. Same shape/discipline as
 // ai_sidecar_status/start/stop (thin passthroughs over bridge.send, never a
-// direct provider HTTP call): process lifecycle only. There is deliberately
-// NO convert/train tool yet — those (vc_convert_vocals/vc_train_voice) arrive
-// with a later roadmap item once the wire commands exist; until then the
-// facade has no voices to convert with (voiceCount stays 0) and training
-// always answers a reserved "not yet available" error. Policy note carried
-// in every description below: voices are trained ONLY from a user's OWN
-// recordings — never a celebrity or third-party voice model, and this trio
-// implies no product-compatibility claim about the underlying engine.
+// direct provider HTTP call): process lifecycle only. The convert/train pair
+// (vc_convert_vocals/vc_train_voice, m10-p-4) is registered right after this
+// trio, below. Policy note carried in every description in both groups:
+// voices are trained ONLY from a user's OWN recordings — never a celebrity
+// or third-party voice model, and none of this implies a product-
+// compatibility claim about the underlying engine.
 
 server.registerTool(
   "vc_sidecar_status",
@@ -5010,6 +5008,180 @@ registerTool(
     inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("vc.sidecarStop"))
+);
+
+// ---------------------------------------------------------------------------
+// Voice conversion pipeline (m10-p-4)
+// ---------------------------------------------------------------------------
+//
+// The convert/train pair the trio above deferred. `vc_convert_vocals` BLOCKS
+// (the facade's convert endpoint is synchronous, unlike ACE-Step's async job
+// queue) — start the sidecar first (vc_sidecar_start), then call this
+// directly; there is no separate poll/import step, the result is already
+// landed as a new track + clip when this returns. `vc_train_voice` always
+// answers a reserved "not yet available" error today (training ships with a
+// later roadmap item) — call it anyway if asked; the error IS the honest
+// answer. OWN-VOICE-ONLY POLICY (every description below carries this):
+// voices are trained ONLY from a user's OWN recordings that they have the
+// rights to use — NEVER a celebrity or third-party voice model, and this
+// pair implies no product-compatibility claim about the underlying engine.
+
+registerTool(
+  "vc_convert_vocals",
+  {
+    title: "Convert vocals to a voice",
+    description:
+      "Convert an existing vocal recording to a target voice with the local " +
+      "RVC voice-conversion sidecar. BLOCKS until the conversion finishes " +
+      "(no separate poll/import step — unlike generate_song, this is a " +
+      "render_mixdown-class call, not an async job) and lands the result as " +
+      "a NEW AI-flagged audio track + clip in the project automatically, in " +
+      "one undoable edit (edit_undo removes it). Call vc_sidecar_start first " +
+      "if vc_sidecar_status isn't healthy. TYPICAL FLOW for \"turn this " +
+      "vocal into voice X\": generate or import a song, extract_stems with " +
+      "trackNames:[\"vocals\"] (or import an existing a cappella recording), " +
+      "then convert_vocals the resulting vocal clip/file to the target " +
+      "voice. OWN-VOICE-ONLY POLICY: voiceId must be a voice trained from " +
+      "the user's OWN recordings (vc_train_voice) that they have the rights " +
+      "to use — NEVER a celebrity or third-party voice. The reserved id " +
+      "\"base\" is a legitimate SMOKE-TEST target: it exercises the full " +
+      "pipeline honestly WITHOUT a real trained voice, and its result always " +
+      "carries realConversion:false plus a note explaining why — use it to " +
+      "prove the pipeline works end-to-end before any real voice exists. " +
+      "Pass EXACTLY ONE of clipId or path to name the source audio: clipId " +
+      "converts an EXISTING audio clip's FULL backing recording (clip trims/ " +
+      "time-stretch are NOT applied to what gets converted, only to how the " +
+      "RESULT is later placed) and defaults atBeat to that clip's own start " +
+      "beat; path converts a local audio file directly (absolute or " +
+      "~-expanded) and defaults atBeat to 0. Returns {trackId, clipId, " +
+      "outputPath, realConversion, inputSeconds, inferSeconds, rtf?, " +
+      "sampleRate, note?} — realConversion is false only for the \"base\" " +
+      "smoke target, true for a real trained voice.",
+    inputSchema: {
+      clipId: z
+        .string()
+        .optional()
+        .describe(
+          "Id of an existing AUDIO clip whose FULL backing recording gets converted (from " +
+            "project_snapshot or a prior clip_add_audio/import result). Pass EXACTLY ONE of " +
+            "clipId or path — passing both, or neither, is rejected. A MIDI clip's id is " +
+            "rejected (no audio to convert)."
+        ),
+      path: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute or ~-expanded local path to an audio file to convert directly. Pass " +
+            "EXACTLY ONE of clipId or path — passing both, or neither, is rejected."
+        ),
+      voiceId: z
+        .string()
+        .min(1)
+        .describe(
+          "The target voice's id: either a real voice trained from the user's OWN " +
+            "recordings (vc_train_voice; own-voice-only, never a celebrity or third-party " +
+            "voice), or the reserved smoke-test id \"base\" (untrained generic synthesizer — " +
+            "proves the pipeline runs, NOT a real voice conversion; its result always carries " +
+            "realConversion:false plus an explanatory note)."
+        ),
+      pitchSemitones: z
+        .number()
+        .int()
+        .min(-24)
+        .max(24)
+        .optional()
+        .describe(
+          "Pitch shift applied during conversion, in semitones (+12 = up an octave). Integer, " +
+            "-24..24. Omit for no shift (0)."
+        ),
+      trackName: z
+        .string()
+        .optional()
+        .describe('Name for the new track/clip. Omit for a default like "Voice: <voiceId>".'),
+      atBeat: z
+        .number()
+        .min(0)
+        .optional()
+        .describe(
+          "Where the converted clip lands, in beats (quarter notes) from timeline start. " +
+            "Omit to default to the source clip's own start beat (clipId form) or 0 (path form)."
+        ),
+    },
+  },
+  async ({ clipId, path, voiceId, pitchSemitones, trackName, atBeat }) =>
+    toToolResult(() =>
+      bridge.send("vc.convertVocals", { clipId, path, voiceId, pitchSemitones, trackName, atBeat })
+    )
+);
+
+registerTool(
+  "vc_train_voice",
+  {
+    title: "Train a new voice from the user's own recordings",
+    description:
+      "Train a new voice for vc_convert_vocals from a local directory of " +
+      "clean, dry vocal recordings. OWN-VOICE-ONLY POLICY: datasetDir must " +
+      "contain ONLY recordings the user has the rights to use as their own " +
+      "voice (or a voice they have explicit permission for) — NEVER a " +
+      "celebrity or third-party voice; this tool implies no product-" +
+      "compatibility claim about the underlying engine. TODAY this always " +
+      "answers a reserved \"training not yet available\" error (the facade " +
+      "validates the request shape, then answers that the feature ships " +
+      "with a later roadmap item, the in-app Voice panel) — call it anyway " +
+      "if a user asks to train a voice; the error IS the honest, actionable " +
+      "answer, not a bug. Use the \"base\" smoke-test target on " +
+      "vc_convert_vocals in the meantime to prove the pipeline itself " +
+      "works.",
+    inputSchema: {
+      name: z.string().min(1).describe("Display name for the new voice."),
+      datasetDir: z
+        .string()
+        .min(1)
+        .describe(
+          "Absolute or ~-expanded local directory of the user's OWN clean, dry vocal " +
+            "recordings to train from (own-voice-only — never a celebrity or third-party voice)."
+        ),
+      voiceId: z
+        .string()
+        .optional()
+        .describe("Specific id for the new voice. Omit to let the facade derive one from name."),
+      epochs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Training-length override, in epochs. Omit for the facade's default."),
+    },
+  },
+  async ({ name, datasetDir, voiceId, epochs }) =>
+    toToolResult(() => bridge.send("vc.trainVoice", { name, datasetDir, voiceId, epochs }))
+);
+
+registerTool(
+  "vc_list_voices",
+  {
+    title: "List the available conversion voices",
+    description:
+      "List every voice the local RVC voice-conversion sidecar can convert " +
+      "to (for vc_convert_vocals's voiceId). No params. Returns `{voices: " +
+      "[{id, name, state, hasIndex?, createdAt?, kind?, trained?, note?}]}` " +
+      "— the sidecar's own descriptors verbatim. The reserved id \"base\" " +
+      "is ALWAYS listed (kind \"builtin\", trained false, plus a note): it " +
+      "is the pipeline SMOKE-TEST target, not a real voice — converting to " +
+      "it proves the pipeline runs and always carries realConversion:false. " +
+      "Real voices appear here once trained (vc_train_voice — arriving with " +
+      "a later update). `state` is \"ready\" (usable now), " +
+      "\"needsConversion\" (trained but not yet prepared for this engine), " +
+      "or \"incomplete\". Requires the sidecar to be running — call " +
+      "vc_sidecar_start first if vc_sidecar_status isn't healthy; an " +
+      "unreachable sidecar errors with the actionable next step, never a " +
+      "bare connection failure. OWN-VOICE-ONLY POLICY: any real voice " +
+      "listed here was trained from the user's OWN recordings that they " +
+      "have the rights to use — NEVER a celebrity or third-party voice " +
+      "model.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("vc.listVoices"))
 );
 
 server.registerTool(
