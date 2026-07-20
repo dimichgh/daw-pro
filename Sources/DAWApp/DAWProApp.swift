@@ -504,6 +504,23 @@ final class AppModel {
     /// control-server port. The Settings → Copilot section edits it.
     let copilotLimitsStore = CopilotLimitsStore(backing: UserDefaultsCopilotLimitsBacking())
 
+    /// The in-app Copilot model SETTING (M10-p-6). Like `copilotLimitsStore`
+    /// it's an app-side sticky PREFERENCE (never project data) — the
+    /// UserDefaults backing persists it under
+    /// `AnthropicModelCatalog.userDefaultsKey`. `CopilotEngine` reads its
+    /// `effectiveModel` FRESH at the start of each turn's provider
+    /// resolution, so a change takes effect on the copilot's next reply — no
+    /// restart. A future Settings section will edit it; today it's driven by
+    /// the `ai.copilotGetModel`/`ai.copilotSetModel` wire commands.
+    let copilotModelStore = CopilotModelStore(backing: UserDefaultsCopilotModelBacking())
+
+    /// The copilot rail's transient presentation state (M10-p-6 UI phase):
+    /// per-entry thinking disclosures + the model-picker open flag. Session-only
+    /// (never persisted — a reading aid, not a preference), owned here (not
+    /// rail-local `@State`) so `debug.copilotSeed` can stage every visual state
+    /// for captures/E2E — the `explain`/`voicePanel` staging precedent.
+    let copilotRailUI = CopilotRailUIModel()
+
     /// Explain-mode state (M8 ex-a): the transient violet "?" EXPLAIN overlay's
     /// on/off flag + an optional capture focus. Owned here (like `panelDensity`) so
     /// the `debug.explainMode` staging command can drive it. NOT persisted — unlike
@@ -653,11 +670,22 @@ final class AppModel {
         // event). SIGTERM/pkill does NOT reach AppKit termination for this
         // process (verified live) — it dies like a crash, and since nothing
         // saves on the way down, the next launch correctly offers recovery.
-        // The lock URL is a Sendable value, so the observer needs no actor hop.
+        // The lock URL is a Sendable value, so the lock removal needs no
+        // actor hop; the clean-quit autosave DOES touch the store, and the
+        // `.main` queue guarantees the main thread, so `assumeIsolated` is
+        // sound (the store itself is Sendable via its @MainActor isolation).
         let lockURL = store.crashLockURL
         terminationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
-        ) { _ in
+        ) { [weak store] _ in
+            // Clean-quit autosave (chat-persist §4.4), BEFORE the lock goes:
+            // a titled session saves in place, an untitled one writes its
+            // recovery bundle — so an edit or a copilot conversation
+            // finished seconds before quit is never lost (previously only
+            // the crash path would have covered it).
+            MainActor.assumeIsolated {
+                store?.autosaveIfNeeded()
+            }
             try? FileManager.default.removeItem(at: lockURL)
         }
 
@@ -984,7 +1012,14 @@ final class AppModel {
         let copilotEngine = CopilotEngine(
             store: store,
             dispatch: { await router.handle($0) },
-            maxToolRounds: { [copilotLimitsStore] in copilotLimitsStore.maxRounds })
+            maxToolRounds: { [copilotLimitsStore] in copilotLimitsStore.maxRounds },
+            // M10-p-6: same fresh-read-per-turn pattern as maxToolRounds,
+            // for the persisted model setting. `modelSetter` discards
+            // `commit`'s returned id — `ai.copilotSetModel` already
+            // validated against `AnthropicModelCatalog.curated` before ever
+            // calling `copilotEngine.setModel`, so this call can't fail.
+            modelResolver: { [copilotModelStore] in copilotModelStore.effectiveModel },
+            modelSetter: { [copilotModelStore] modelID in copilotModelStore.commit(modelID) })
         self.copilotEngine = copilotEngine
         router.copilotEngine = copilotEngine
         // Plugin windows (M3 vi-b): the app owns the manager; the router holds it
@@ -3352,28 +3387,82 @@ final class AppModel {
         return copilotStateResponse()
     }
 
-    /// `debug.copilotSeed {mode}` — stages the copilot rail for a capture/E2E
-    /// that can't be reached from the wire alone (no AI provider key on the
-    /// capture machine — the `debug.clipFixSeed` precedent). Seeds a scripted
-    /// transcript straight into the engine via `seedForCapture` (never a provider
-    /// call). Opens the rail; `mode`:
+    /// `debug.copilotSeed {mode, expandThinking?, modelPicker?, model?}` — stages
+    /// the copilot rail for a capture/E2E that can't be reached from the wire
+    /// alone (no AI provider key on the capture machine — the `debug.clipFixSeed`
+    /// precedent). Seeds a scripted transcript straight into the engine via
+    /// `seedForCapture` (never a provider call). Opens the rail; `mode`:
     ///   - `conversation` (default): a user turn, assistant prose, two toolCall
     ///     chips (distinct commands), an ok toolResult + an error toolResult, a
     ///     closing assistant line, with `status = running` so the working shimmer
     ///     shows — the state-variety shot.
+    ///   - `streaming` (M10-p-6): a mid-round live-streaming turn — a FINALIZED
+    ///     thinking entry (the settled REASONED disclosure), tool traffic, then a
+    ///     PARTIAL thinking entry and a PARTIAL assistant entry (both `partial:
+    ///     true`, the breathing-dot streaming states), `status = running`.
     ///   - `failed`: a short turn that ends in a `failure` entry (`status =
     ///     failed`) so the failure strip + reset affordance read.
     ///   - `idle`/`empty`: resets the engine to an empty idle rail (the first-use
     ///     hint shot).
+    /// Additive presentation staging (any mode; M10-p-6):
+    ///   - `expandThinking: true/false` expands/collapses ALL thinking entries
+    ///     (the `CopilotRailUIModel` disclosure state).
+    ///   - `modelPicker: true/false` opens/closes the in-rail model picker.
+    ///   - `model: "<id>"` routes through `engine.setModel` — the SAME path the
+    ///     picker rows commit through (an unknown id no-ops, the store's own
+    ///     validation; NOTE it persists like any real selection).
+    /// Chat-persist Phase D staging (additive; capture-tier only):
+    ///   - `droppedEntries: N` rides the seed into the engine (`seedForCapture`'s
+    ///     additive param) so the L6 truncation banner renders; ignored by
+    ///     `idle`/`empty` (a fresh chat has nothing trimmed).
+    ///   - `seedChats: N` (clamped 0…8) archives N scripted sample chats through
+    ///     `store.archiveCopilotChat` — the REAL archive path, so list order,
+    ///     upsert, and eviction behave exactly as live. One sample carries
+    ///     `droppedEntries` so the row's "trimmed" honesty tag can be captured.
+    ///     NOTE: they land in the open project's chat list and arm `chatsDirty`
+    ///     like any archive — staging boxes / scratch projects only.
+    ///   - `chatList: true/false` opens/closes the in-rail chat-history list.
+    ///   - `renameChat: true` begins an inline rename on the newest archived
+    ///     row; `confirmDelete: true` arms its delete confirmation (the two
+    ///     capture states §8.6 needs; rename wins if both are sent, matching
+    ///     the model's one-sub-state rule).
     /// Off `allCommands`/MCP. Returns the resulting rail state.
     private func copilotSeed(_ params: [String: JSONValue]) -> JSONValue {
         let mode = params["mode"]?.stringValue ?? "conversation"
         showCopilot = true
         typealias Kind = CopilotEngine.TranscriptEntry.Kind
         let turnID = "seed-turn"
+        let seedDropped = (params["droppedEntries"]?.doubleValue).map(Int.init) ?? 0
         switch mode {
         case "idle", "empty":
             copilotEngine.reset()
+            copilotRailUI.collapseAllThinking()
+        case "streaming":
+            typealias Entry = CopilotEngine.TranscriptEntry
+            copilotEngine.seedForCapture(turnID: turnID, status: .running, transcript: [
+                Entry(id: UUID(), turnID: turnID,
+                      kind: .user("tighten up the drum timing, then brighten the mix a little")),
+                Entry(id: UUID(), turnID: turnID,
+                      kind: .thinking("The drums live on track 2 with a loose 1/16 feel — quantizing at "
+                        + "80% strength tightens the timing without making it robotic. For brightness, "
+                        + "a gentle master high-shelf is safer than reshaping each track.")),
+                Entry(id: UUID(), turnID: turnID,
+                      kind: .assistant("I'll tighten the drum timing first, then add a touch of top end.")),
+                Entry(id: UUID(), turnID: turnID,
+                      kind: .toolCall(command: "clip.quantize",
+                                      argsSummary: #"{"clipId": "a1b2c3d4", "grid": 0.25, "strength": 0.8}"#)),
+                Entry(id: UUID(), turnID: turnID,
+                      kind: .toolResult(command: "clip.quantize", ok: true,
+                                        summary: #"{"notesMoved": 14}"#)),
+                Entry(id: UUID(), turnID: turnID,
+                      kind: .thinking("Drums are tightened. Now checking the master chain for room to "
+                        + "lift the highs without pushing the loudest peaks into"),
+                      partial: true),
+                Entry(id: UUID(), turnID: turnID,
+                      kind: .assistant("Done — the drums now sit right on the grid. Next I'm brightening "
+                        + "the top end with a gentle"),
+                      partial: true),
+            ], droppedEntries: seedDropped)
         case "failed":
             copilotEngine.seedForCapture(turnID: turnID, status: .failed, entries: [
                 .user("add a punchy drum track and set the tempo to 120"),
@@ -3382,7 +3471,7 @@ final class AppModel {
                 .toolResult(command: "track.add", ok: true, summary: #"{"trackId": "a1b2c3d4", "name": "Drums"}"#),
                 .toolCall(command: "transport.setTempo", argsSummary: #"{"bpm": 120}"#),
                 .failure("the AI provider returned an error: rate limit exceeded — wait a moment, then send again"),
-            ])
+            ], droppedEntries: seedDropped)
         default:   // "conversation"
             copilotEngine.seedForCapture(turnID: turnID, status: .running, entries: [
                 .user("set the tempo to 120 and add a bass track"),
@@ -3393,19 +3482,97 @@ final class AppModel {
                 .toolResult(command: "track.add", ok: false,
                             summary: #"unknown kind "instrument" — expected "audio" or "midi""#),
                 .assistant("That kind isn't valid — retrying the bass as a MIDI track."),
-            ])
+            ], droppedEntries: seedDropped)
+        }
+        // Presentation staging (M10-p-6) — applied AFTER seeding so entry ids exist.
+        if let expand = params["expandThinking"]?.boolValue {
+            if expand {
+                for entry in copilotEngine.transcript {
+                    if case .thinking = entry.kind { copilotRailUI.expandThinking(entry.id) }
+                }
+            } else {
+                copilotRailUI.collapseAllThinking()
+            }
+        }
+        if let pickerOpen = params["modelPicker"]?.boolValue {
+            copilotRailUI.isModelPickerOpen = pickerOpen
+        }
+        if let model = params["model"]?.stringValue {
+            copilotEngine.setModel(model)   // the picker's own commit path; invalid ids no-op
+        }
+        // Chat-persist Phase D staging (additive; capture-tier).
+        if let count = (params["seedChats"]?.doubleValue).map(Int.init), count > 0 {
+            seedSampleChats(min(count, 8))
+        }
+        if let listOpen = params["chatList"]?.boolValue {
+            if listOpen { copilotRailUI.openChatList() } else { copilotRailUI.closeChatList() }
+        }
+        // Sorted like the list renders (newest updatedAt first) so "the first
+        // archived row" means the row a capture actually shows on top.
+        let newestArchived = store.copilotChats.max { $0.updatedAt < $1.updatedAt }
+        if params["confirmDelete"]?.boolValue == true, let target = newestArchived {
+            copilotRailUI.requestDeleteConfirm(target.id)
+        }
+        if params["renameChat"]?.boolValue == true, let target = newestArchived {
+            copilotRailUI.beginRename(target.id, currentTitle: target.title)
         }
         return copilotStateResponse()
     }
 
+    /// Archives `count` scripted sample chats through the REAL
+    /// `store.archiveCopilotChat` path (staggered ages/titles; the second
+    /// one carries a `droppedEntries` count so the row's "trimmed" tag can
+    /// be captured). Capture-tier only — they enter the open project's chat
+    /// list and arm `chatsDirty` exactly like live archives.
+    private func seedSampleChats(_ count: Int) {
+        let samples: [(title: String, minutesAgo: Double, dropped: Int?)] = [
+            ("add a funky bassline", 4, nil),
+            ("balance the mix for streaming", 75, 40),
+            ("fix the chorus vocals", 26 * 60, nil),
+            ("build a four-bar drum groove", 2 * 24 * 60, nil),
+            ("sketch a bridge in a minor key", 5 * 24 * 60, nil),
+            ("tighten the hi-hats", 9 * 24 * 60, nil),
+            ("make the intro punchier", 16 * 24 * 60, nil),
+            ("automate a slow filter sweep", 30 * 24 * 60, nil),
+        ]
+        for sample in samples.prefix(count) {
+            let stamp = Date().addingTimeInterval(-sample.minutesAgo * 60)
+            let turn = UUID().uuidString
+            let chat = CopilotChatDocument(
+                id: UUID(),
+                title: sample.title,
+                createdAt: stamp.addingTimeInterval(-300),
+                updatedAt: stamp,
+                model: nil,
+                droppedEntries: sample.dropped,
+                transcript: [
+                    .init(turnId: turn, kind: "user", text: sample.title),
+                    .init(turnId: turn, kind: "assistant",
+                          text: "Done — take a listen and tell me what to adjust."),
+                ],
+                providerMessages: [])
+            store.archiveCopilotChat(chat)
+        }
+    }
+
     /// `debug.copilotState` — read-only echo of the rail (visibility + the
     /// engine's own `ai.copilotState` wire shape: status, transcript, current
-    /// turn) so an E2E flow can assert on the seeded transcript. Off
-    /// `allCommands`/MCP.
+    /// turn, plus the M10-p-6 presentation state: the effective model, the
+    /// model-picker open flag, and the expanded-thinking count; plus the
+    /// Phase D chat-list presentation: list open, archived count, the
+    /// rename/confirm sub-states) so an E2E flow can assert on the seeded
+    /// state. Off `allCommands`/MCP.
     private func copilotStateResponse() -> JSONValue {
         .object([
             "visible": .bool(showCopilot),
             "state": copilotEngine.stateJSON(turnID: nil),
+            "model": .string(copilotEngine.currentModel),
+            "modelPickerOpen": .bool(copilotRailUI.isModelPickerOpen),
+            "expandedThinking": .number(Double(copilotRailUI.expandedThinkingIDs.count)),
+            "chatListOpen": .bool(copilotRailUI.isChatListOpen),
+            "archivedChats": .number(Double(store.copilotChats.count)),
+            "renamingChat": .bool(copilotRailUI.renamingChatID != nil),
+            "confirmingDelete": .bool(copilotRailUI.confirmingDeleteChatID != nil),
         ])
     }
 

@@ -87,12 +87,21 @@ public final class AutosaveManager {
     /// The sentinel means "nothing autosaved yet / just invalidated" — so the next
     /// dirty tick always writes (this is what re-protects freshly recovered work).
     private(set) var lastAutosavedEditSeq: Int = AutosaveManager.noAutosaveSeq
+    /// Chat-revision high-water mark of the LAST successful autosave — the
+    /// chat twin of `lastAutosavedEditSeq` (chat-persist design §4.4), so a
+    /// chat-only session still crash-autosaves while a quiet tick still
+    /// rewrites nothing. Same sentinel semantics; sentinel-reset in
+    /// `invalidate()`. In-memory only — `manifest.json` is untouched.
+    private(set) var lastAutosavedChatRevision: UInt64 = AutosaveManager.noAutosaveChatRevision
     /// Whether a prior session's lock was present at `beginSession` — latched so
     /// `recoveryStatus` can gate on "a crash happened" the whole session.
     private(set) var crashDetectedAtLaunch = false
 
     /// Sentinel high-water mark: no autosave has landed since the last invalidate.
     static let noAutosaveSeq = Int.min
+    /// Chat-revision sentinel (`.max`, since revisions start at 0 and only
+    /// climb — the UInt64 twin of `noAutosaveSeq`).
+    static let noAutosaveChatRevision = UInt64.max
 
     /// The rolling snapshot bundle.
     var autosaveBundleURL: URL {
@@ -133,8 +142,10 @@ public final class AutosaveManager {
     /// manifest OFF the main actor, and advances the high-water mark. `document`
     /// must carry ABSOLUTE media refs (zero copies) — the recovery-bundle contract
     /// — so a restore resolves media from the original files. Best-effort: a write
-    /// failure leaves the high-water mark UNCHANGED so the next tick retries.
-    func recordAutosave(document: ProjectDocument, sourcePath: String?, editSeq: Int) async {
+    /// failure leaves the high-water marks UNCHANGED so the next tick retries.
+    /// `chatRevision` is additive/defaulted (chat-persist §4.4) — existing
+    /// callers advance only the edit-seq mark, exactly as before.
+    func recordAutosave(document: ProjectDocument, sourcePath: String?, editSeq: Int, chatRevision: UInt64 = 0) async {
         let manifest = AutosaveManifest(savedAt: clock(), sourcePath: sourcePath, editCount: editSeq)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -160,7 +171,10 @@ public final class AutosaveManager {
                 return false
             }
         }.value
-        if ok { lastAutosavedEditSeq = editSeq }
+        if ok {
+            lastAutosavedEditSeq = editSeq
+            lastAutosavedChatRevision = chatRevision
+        }
     }
 
     // MARK: - Status / recovery reads
@@ -206,7 +220,10 @@ public final class AutosaveManager {
     /// don't inject a temp `directory`) from ever touching the real profile's
     /// Autosave dir when they save/open/new.
     func invalidate() {
-        defer { lastAutosavedEditSeq = Self.noAutosaveSeq }
+        defer {
+            lastAutosavedEditSeq = Self.noAutosaveSeq
+            lastAutosavedChatRevision = Self.noAutosaveChatRevision
+        }
         guard lastAutosavedEditSeq != Self.noAutosaveSeq || crashDetectedAtLaunch else { return }
         // The offer is resolved (recover/discard) or superseded (save/new/open):
         // drop the latch too, or the NEXT autosave write this session would

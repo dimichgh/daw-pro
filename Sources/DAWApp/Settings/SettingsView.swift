@@ -140,7 +140,7 @@ private struct SettingsPanel: View {
                     // Seed the port field from the persisted setting (blank shows
                     // the "17600" placeholder).
                     portDraft = portStore.configuredPort.map(String.init) ?? ""
-                    // Seed the Copilot rounds field (blank shows the "8" placeholder).
+                    // Seed the Copilot rounds field (blank shows the default placeholder).
                     roundsDraft = copilotLimits.configuredMaxRounds.map(String.init) ?? ""
                     if revealBeta { proxy.scrollTo(Self.betaAnchorID, anchor: .bottom) }
                     if revealConnection { proxy.scrollTo(Self.connectionAnchorID, anchor: .center) }
@@ -300,10 +300,11 @@ private struct SettingsPanel: View {
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(DAWTheme.hairline, lineWidth: 1))
     }
 
-    /// The persisted max-rounds field: shows the current setting (or the "8"
-    /// placeholder), commits through the validator on Return or focus loss, flags an
-    /// inline error on out-of-range input, and reminds that a change applies to the
-    /// next reply. Mirrors `connectionPortRow` (the validate/revert idiom).
+    /// The persisted max-rounds field: shows the current setting (or the default
+    /// placeholder from `CopilotLimits`), commits through the validator on Return or
+    /// focus loss, flags an inline error on out-of-range input, and reminds that a
+    /// change applies to the next reply. Mirrors `connectionPortRow` (the
+    /// validate/revert idiom).
     private var copilotRoundsRow: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
@@ -311,7 +312,7 @@ private struct SettingsPanel: View {
                     .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                     .tracking(1)
                     .foregroundStyle(DAWTheme.textDim)
-                TextField("8", text: $roundsDraft)
+                TextField("\(CopilotLimits.defaultMaxRounds)", text: $roundsDraft)
                     .textFieldStyle(.plain)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(DAWTheme.textPrimary)

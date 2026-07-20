@@ -343,6 +343,41 @@ public final class ProjectStore {
     /// this to `engine.effectState(forEffect:)`; headless tests leave it nil.
     public var effectStateProvider: (@MainActor (UUID) -> Data?)?
 
+    // MARK: - Copilot chats (persisted; docs/research/design-copilot-chat-persistence.md)
+
+    /// ARCHIVED copilot conversations only — the ACTIVE conversation lives in
+    /// `CopilotEngine` (DAWControl) and is captured through
+    /// `copilotActiveChatProvider` at serialization time. Restored on
+    /// open/recover from `ProjectDocument.copilotChats`; mutated only by the
+    /// chat verbs below — never journaled, never an undo entry (L4).
+    public private(set) var copilotChats: [CopilotChatDocument] = []
+    /// Chat-content twin of `isDirty` (L4): set by chat mutations, cleared by
+    /// save/open/new. Deliberately SEPARATE — the UI unsaved-changes
+    /// indicator, the copilot context "(unsaved changes)" line, and the edit
+    /// journal all keep keying on `isDirty` alone; chats ride the autosave
+    /// paths silently.
+    public private(set) var chatsDirty = false
+    /// Monotonic chat mutation counter — the crash-autosave staleness token
+    /// for chats (the `lastEditEvent.seq` analogue; never journaled, L4).
+    public private(set) var chatRevision: UInt64 = 0
+    /// Bumped on every session replacement (open/new/recover). CopilotEngine
+    /// captures it at turn start and refuses to dispatch tools across a
+    /// boundary (chat-persist §5.4) — the defense-in-depth guard behind the
+    /// boundary handler.
+    public private(set) var projectGeneration: UInt64 = 0
+
+    /// Save-time capture of the ACTIVE chat (the `instrumentStateProvider`
+    /// precedent). Wired by `CopilotEngine`'s init to its
+    /// `persistableChatSnapshot()`; nil (a headless store, or an empty chat)
+    /// means "nothing to add".
+    @ObservationIgnored public var copilotActiveChatProvider: (@MainActor () -> CopilotChatDocument?)?
+    /// Session-boundary notification (the `engine?.projectWillReplace()`
+    /// analogue, pointed the other way). Wired to
+    /// `CopilotEngine.projectDidTransition()`; fired by open/new/recover
+    /// AFTER any flush succeeded, so a flush failure aborts the transition
+    /// with the engine completely untouched (chat-persist §4.5).
+    @ObservationIgnored public var copilotProjectBoundaryHandler: (@MainActor () -> Void)?
+
     private var playbackTask: Task<Void, Never>?
 
     // MARK: Recording state (snapshotted per take)
@@ -4459,6 +4494,19 @@ public final class ProjectStore {
         let effectiveName = adoptName
             ? bundleURL.deletingPathExtension().lastPathComponent
             : projectName
+        // Copilot chats join every titled save (chat-persist §4.3): the
+        // archived list plus the live active chat, captured through the
+        // save-time provider closure. Project-level honesty: past 4 MiB the
+        // save WARNS (never refuses — the audioUnitStateSoftCapBytes
+        // precedent) and names the fix.
+        let persistedChats = copilotChatsForPersistence()
+        if !persistedChats.isEmpty,
+           let chatBytes = try? JSONEncoder().encode(persistedChats),
+           chatBytes.count > CopilotChatLimits.totalChatBytesWarningThreshold {
+            stateWarnings.append(
+                "copilot chat history is large (\(chatBytes.count / (1024 * 1024)) MiB) — "
+                + "delete old chats (ai.copilotDeleteChat) to slim the project")
+        }
         let document = ProjectDocument(
             name: effectiveName,
             transport: transport,
@@ -4469,7 +4517,8 @@ public final class ProjectStore {
             markers: markers,
             tempoMapRevision: mapRevision,
             masterEffects: masterEffects,
-            masterAutomation: masterAutomation
+            masterAutomation: masterAutomation,
+            copilotChats: persistedChats
         )
         do {
             try ProjectBundle.write(document: document, plan: plan, to: bundleURL)
@@ -4516,6 +4565,9 @@ public final class ProjectStore {
         if anyURLChanged { engine?.tracksDidChange(tracks) }
 
         isDirty = false
+        // Chats rode this save (copilotChatsForPersistence above), so their
+        // dirty flag clears with it (chat-persist §4.3).
+        chatsDirty = false
         // A titled save supersedes any untitled-recovery bundle.
         deleteRecoveryBundle()
         // A manual save also supersedes the crash-recovery snapshot (crash-b): the
@@ -4581,6 +4633,11 @@ public final class ProjectStore {
         // Flush can throw .unsavedChanges; it too changes nothing on failure.
         if !discardChanges { try flushForTransition() }
         if transport.isPlaying { stop() }
+        // Chat-persist §4.5: the engine clears WITHOUT archiving — the old
+        // chat is already on the OLD project's disk via the flush above (or
+        // deliberately discarded via discardChanges, L5). Fired only after
+        // the flush succeeded, so a flush failure leaves the engine untouched.
+        copilotProjectBoundaryHandler?()
         return applyOpenedState(document, bundleURL: bundleURL)
     }
 
@@ -4593,6 +4650,10 @@ public final class ProjectStore {
         }
         if !discardChanges { try flushForTransition() }
         if transport.isPlaying { stop() }
+        // Chat-persist §4.5: same law as open — clear the engine WITHOUT
+        // archiving, after the flush protected (or discard dropped) the old
+        // session's chats.
+        copilotProjectBoundaryHandler?()
 
         projectName = "Untitled Session"
         tracks = []
@@ -4602,6 +4663,10 @@ public final class ProjectStore {
         masterAutomation = []  // m15-c: … and no master automation
         grooveTemplates = []
         markers = []
+        // Copilot chats belong to the replaced session (chat-persist §4.5).
+        copilotChats = []
+        chatsDirty = false
+        projectGeneration &+= 1
         // Fresh session → the map is trivial and its revision resets (m12-d).
         mapRevision = 0
         masterMeter = .silence
@@ -4655,6 +4720,14 @@ public final class ProjectStore {
         // Markers (m11-c) restore directly — no media; re-sort so a hand-edited
         // (unsorted) file still lands beat-sorted (the store's invariant).
         markers = Self.markersSortedByBeat(document.markers ?? [])
+        // Copilot chats (chat-persist §4.5) restore directly — no media. ALL
+        // persisted chats (including the one active at save time) land in
+        // the archive; the engine starts fresh-idle, and continuation is one
+        // explicit ai.copilotResumeChat away. A corrupt element was skipped
+        // by the lossy decode; the count surfaces in the warnings below (L6).
+        copilotChats = document.copilotChats ?? []
+        chatsDirty = false
+        projectGeneration &+= 1
 
         masterMeter = .silence
         trackMeters = [:]
@@ -4688,14 +4761,22 @@ public final class ProjectStore {
         // coalesced by construction), the opened session's missing-media facts
         // land in the ring so the snapshot agrees with the warnings returned.
         echoMissingMediaNotices()
-        return runtime.warnings
+        var warnings = runtime.warnings
+        if document.copilotChatsDroppedOnLoad > 0 {
+            warnings.append(
+                "\(document.copilotChatsDroppedOnLoad) copilot chats could not be read and were dropped")
+        }
+        return warnings
     }
 
     /// Flushes unsaved edits before an open/new. Titled → save in place;
     /// untitled → write a recovery bundle. Any failure is wrapped as
     /// `.unsavedChanges` so the transition aborts with nothing changed.
     private func flushForTransition() throws {
-        guard isDirty else { return }
+        // Chat-only sessions still flush (chat-persist §4.4): a titled save
+        // in place persists the chats; an untitled recovery bundle carries
+        // them via `buildAutosaveDocument`.
+        guard isDirty || chatsDirty else { return }
         do {
             if projectPath != nil {
                 try saveProject(to: nil)
@@ -4705,6 +4786,93 @@ public final class ProjectStore {
         } catch {
             throw ProjectError.unsavedChanges(Self.reason(error))
         }
+    }
+
+    // MARK: - Copilot chat verbs (chat-persist design §4.2 — @MainActor, none journaled, L4)
+
+    /// Archives one chat, upserting by id (a re-archived resumed chat
+    /// replaces its old record, never duplicates). At the cap
+    /// (`CopilotChatLimits.maxArchivedChats`), evicts the oldest-`updatedAt`
+    /// PREVIOUSLY archived chat and returns its id (nil otherwise) — the
+    /// just-archived newcomer is exempt: "archive" must never destroy the
+    /// conversation it was asked to keep, and eviction is never silent (the
+    /// id rides to the wire as `evictedChatId`, L6). Bumps `chatRevision`,
+    /// sets `chatsDirty`; never touches `isDirty`/the journal (L4).
+    @discardableResult
+    public func archiveCopilotChat(_ chat: CopilotChatDocument) -> UUID? {
+        defer { noteCopilotChatActivity() }
+        if let index = copilotChats.firstIndex(where: { $0.id == chat.id }) {
+            copilotChats[index] = chat
+            return nil
+        }
+        copilotChats.append(chat)
+        guard copilotChats.count > CopilotChatLimits.maxArchivedChats else { return nil }
+        let candidates = copilotChats.indices.dropLast()
+        guard let oldest = candidates.min(by: {
+            copilotChats[$0].updatedAt < copilotChats[$1].updatedAt
+        }) else { return nil }
+        let evictedID = copilotChats[oldest].id
+        copilotChats.remove(at: oldest)
+        return evictedID
+    }
+
+    /// Removes and returns a chat for resumption (it becomes the engine's
+    /// active chat). Bumps `chatRevision`, sets `chatsDirty`. nil for an
+    /// unknown id (nothing changes).
+    public func takeCopilotChat(id: UUID) -> CopilotChatDocument? {
+        guard let index = copilotChats.firstIndex(where: { $0.id == id }) else { return nil }
+        let chat = copilotChats.remove(at: index)
+        noteCopilotChatActivity()
+        return chat
+    }
+
+    /// Deletes an archived chat — the one destructive chat verb (L5).
+    /// Returns false for an unknown id (nothing changes).
+    @discardableResult
+    public func removeCopilotChat(id: UUID) -> Bool {
+        guard let index = copilotChats.firstIndex(where: { $0.id == id }) else { return false }
+        copilotChats.remove(at: index)
+        noteCopilotChatActivity()
+        return true
+    }
+
+    /// Renames an archived chat. Over-length titles are clamped to
+    /// `CopilotChatLimits.maxTitleLength` (never an error — the wire's §6.4
+    /// rule, enforced here too so the store's own invariant holds headless).
+    /// Returns false for an unknown id (nothing changes).
+    @discardableResult
+    public func renameCopilotChat(id: UUID, title: String) -> Bool {
+        guard let index = copilotChats.firstIndex(where: { $0.id == id }) else { return false }
+        copilotChats[index].title = String(title.prefix(CopilotChatLimits.maxTitleLength))
+        noteCopilotChatActivity()
+        return true
+    }
+
+    /// The engine's turn-boundary dirty hook: `send()` and turn completion
+    /// call this so the ACTIVE chat's growth (which the store cannot see)
+    /// still arms the autosave paths. Bumps `chatRevision`, sets `chatsDirty`
+    /// — and deliberately NOTHING else: no `markDirty`, no journal entry, no
+    /// `lastEditEvent` bump, no engine notification (L4).
+    public func noteCopilotChatActivity() {
+        chatRevision &+= 1
+        chatsDirty = true
+    }
+
+    /// archived ⊎ active snapshot (upserted by id via
+    /// `copilotActiveChatProvider`; nil provider / empty chat skipped),
+    /// sorted by `updatedAt` ascending. The ONE array every serialization
+    /// pathway passes to `ProjectDocument` — titled save, untitled recovery
+    /// bundle, crash autosave, and recovery restore all ride it for free.
+    func copilotChatsForPersistence() -> [CopilotChatDocument] {
+        var chats = copilotChats
+        if let active = copilotActiveChatProvider?() {
+            if let index = chats.firstIndex(where: { $0.id == active.id }) {
+                chats[index] = active
+            } else {
+                chats.append(active)
+            }
+        }
+        return chats.sorted { $0.updatedAt < $1.updatedAt }
     }
 
     // MARK: - Autosave
@@ -4729,13 +4897,15 @@ public final class ProjectStore {
     }
 
     /// One synchronous autosave tick. Saves only when there are unsaved edits
-    /// and the transport isn't recording. A titled session saves in place
-    /// (clearing dirty, deleting the recovery bundle); an untitled session
-    /// writes a JSON-only recovery bundle and STAYS dirty (projectPath
-    /// untouched). Failures log to stderr and keep the session dirty so the next
-    /// tick retries.
-    func autosaveIfNeeded() {
-        guard isDirty, !transport.isRecording else { return }
+    /// OR unsaved chat content (chat-persist §4.4) and the transport isn't
+    /// recording. A titled session saves in place (clearing dirty, deleting
+    /// the recovery bundle); an untitled session writes a JSON-only recovery
+    /// bundle and STAYS dirty (projectPath untouched). Failures log to stderr
+    /// and keep the session dirty so the next tick retries. Public so the
+    /// app's clean-quit path (`applicationWillTerminate`) can flush a
+    /// conversation finished seconds before quit.
+    public func autosaveIfNeeded() {
+        guard isDirty || chatsDirty, !transport.isRecording else { return }
         do {
             if projectPath != nil {
                 try saveProject(to: nil)
@@ -4764,7 +4934,13 @@ public final class ProjectStore {
     /// ABSOLUTE path so re-opening resolves media from the originals. Shared by the
     /// legacy untitled-recovery bundle and the crash-recovery autosave (crash-b) —
     /// one serialization path, verbatim to the existing on-disk format.
-    func buildAutosaveDocument() -> ProjectDocument {
+    ///
+    /// `includeChats` (chat-persist §4.3): copilot chats ride every
+    /// recovery-grade snapshot by default; the ONE exception is the feedback
+    /// bundle (`writeFeedbackBundle` passes false) — conversations may carry
+    /// personal/lyrical content and must never ride a diagnostics bundle,
+    /// even with `includeProject: true`.
+    func buildAutosaveDocument(includeChats: Bool = true) -> ProjectDocument {
         let persistedTracks = tracksWithCapturedAudioUnitState()
         var refs: [UUID: String?] = [:]
         for track in persistedTracks {
@@ -4787,7 +4963,8 @@ public final class ProjectStore {
             markers: markers,
             tempoMapRevision: mapRevision,
             masterEffects: masterEffects,
-            masterAutomation: masterAutomation
+            masterAutomation: masterAutomation,
+            copilotChats: includeChats ? copilotChatsForPersistence() : []
         )
     }
 
@@ -4802,17 +4979,22 @@ public final class ProjectStore {
     /// user's file — this is a crash snapshot, not a save. The file write runs off
     /// the main actor inside the manager, so this adds no edit-path latency.
     public func autosaveTick() async {
-        guard isDirty, !transport.isRecording else { return }
+        guard isDirty || chatsDirty, !transport.isRecording else { return }
         // An unresolved crash-recovery offer parks the writer: the rolling
         // snapshot is the crashed session's ONLY copy, and wire edits bypass the
         // launch sheet — overwriting it before the offer is accepted/declined
         // would silently destroy that work. Resolving the offer (recover,
         // discard, or a manual save/new/open) clears it and ticks resume.
         guard !crashRecovery.recoveryStatus().available else { return }
+        // Staleness (chat-persist §4.4): fire when EITHER high-water mark is
+        // behind — a chat-only session still crash-autosaves, and a quiet
+        // tick still rewrites nothing ("2 ticks = 1 file").
         let seq = lastEditEvent?.seq ?? 0
-        guard seq != crashRecovery.lastAutosavedEditSeq else { return }
+        guard seq != crashRecovery.lastAutosavedEditSeq
+            || chatRevision != crashRecovery.lastAutosavedChatRevision else { return }
         await crashRecovery.recordAutosave(
-            document: buildAutosaveDocument(), sourcePath: projectPath, editSeq: seq)
+            document: buildAutosaveDocument(), sourcePath: projectPath, editSeq: seq,
+            chatRevision: chatRevision)
     }
 
     /// Background 30-s crash-recovery autosave loop (idempotent). The app calls
@@ -4854,13 +5036,16 @@ public final class ProjectStore {
     /// SAME `buildAutosaveDocument()` serialization the crash-recovery autosave
     /// uses (absolute media refs, zero copies, no model mutation). Everything is
     /// LOCAL — nothing phones home. Throws `DiagnosticsError.writeFailed` on a real
-    /// filesystem failure.
+    /// filesystem failure. Copilot chats are EXCLUDED by construction
+    /// (`includeChats: false` — the chat-persist §4.3 privacy exception):
+    /// conversations may contain personal/lyrical content and never ride a
+    /// diagnostics bundle, even with `includeProject: true`.
     public func writeFeedbackBundle(includeProject: Bool) throws -> FeedbackBundleSummary {
         try diagnostics.writeBundle(
             host: .current(),
             engine: EngineDiagnostics(watchdog: watchdogStatus(), performance: performanceStats()),
             overview: overview(),
-            projectDocument: includeProject ? buildAutosaveDocument() : nil
+            projectDocument: includeProject ? buildAutosaveDocument(includeChats: false) : nil
         )
     }
 
@@ -4894,6 +5079,13 @@ public final class ProjectStore {
         }
         let (document, sourcePath) = try crashRecovery.readRecoveredDocument()
         if transport.isPlaying { stop() }
+        // Chat-persist §4.5: a recover is a session replacement like open —
+        // the engine clears WITHOUT archiving (any live active chat is
+        // dropped un-archived: the pre-recover session is being replaced
+        // wholesale, the same law as discardChanges; in practice recovery
+        // happens at launch with an empty chat). Fired only after
+        // `readRecoveredDocument` succeeded, so a bad bundle changes nothing.
+        copilotProjectBoundaryHandler?()
         let warnings = applyRecoveredState(document, sourcePath: sourcePath)
         invalidateCrashRecovery()
         return .recovered(warnings: warnings)
@@ -4920,6 +5112,12 @@ public final class ProjectStore {
         mapRevision = document.tempoMapRevision ?? 0
         grooveTemplates = document.grooveTemplates ?? []
         markers = Self.markersSortedByBeat(document.markers ?? [])
+        // Copilot chats ride the recovered snapshot (chat-persist §4.5) —
+        // chat-DIRTY, like everything else recovered: the content is unsaved
+        // by definition, so the next autosave keeps protecting it.
+        copilotChats = document.copilotChats ?? []
+        chatsDirty = true
+        projectGeneration &+= 1
 
         masterMeter = .silence
         trackMeters = [:]
@@ -4946,7 +5144,12 @@ public final class ProjectStore {
         // warning, so this echo is the ONLY open-time honesty the recovered
         // session gets (the audit §2-B3 recipe).
         echoMissingMediaNotices()
-        return runtime.warnings
+        var warnings = runtime.warnings
+        if document.copilotChatsDroppedOnLoad > 0 {
+            warnings.append(
+                "\(document.copilotChatsDroppedOnLoad) copilot chats could not be read and were dropped")
+        }
+        return warnings
     }
 
     /// Launch-time crash detection: latches whether the prior session left its lock

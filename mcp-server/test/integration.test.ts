@@ -259,8 +259,12 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // voice-conversion sidecar's lifecycle trio) took it 130 -> 133. m10-p-4's
   // vc_convert_vocals/vc_train_voice (the convert/train pipeline glue) took
   // it 133 -> 135. m10-p-5's vc_list_voices (the Voice panel made
-  // voice-listing user-facing) took it 135 -> 136.
-  assert.equal(result.tools.length, 136);
+  // voice-listing user-facing) took it 135 -> 136. m10-p-6's
+  // ai_copilot_get_model/ai_copilot_set_model (the model-selection wire pair)
+  // took it 136 -> 138. The chat-persist design's Phase C
+  // (ai_copilot_chats/ai_copilot_resume_chat/ai_copilot_delete_chat/
+  // ai_copilot_rename_chat) took it 138 -> 142.
+  assert.equal(result.tools.length, 142);
 });
 
 // ---------------------------------------------------------------------------

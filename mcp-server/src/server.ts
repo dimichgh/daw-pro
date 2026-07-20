@@ -5957,12 +5957,20 @@ registerTool(
 // AI Copilot (in-app chat rail, M6 rail-c)
 // ---------------------------------------------------------------------------
 //
-// These three tools drive the DAW app's OWN in-app AI copilot — a chat rail
+// These nine tools drive the DAW app's OWN in-app AI copilot — a chat rail
 // that executes control-protocol commands itself, through the same
 // CommandRouter every other tool here goes through, in-process (never a
 // second hop back out over this WebSocket). Depth is 1 by construction: MCP
 // -> copilot -> in-process dispatch. The copilot's own tool catalog
 // deliberately excludes ai_copilot_*, so it can never call itself.
+// ai_copilot_get_model/ai_copilot_set_model (M10-p-6) are the model-selection
+// pair — meta/settings commands like ai_copilot_reset, not part of the
+// copilot's own driven task surface. ai_copilot_chats/resume_chat/
+// delete_chat/rename_chat (the chat-persist design,
+// docs/research/design-copilot-chat-persistence.md §9) manage the SAVED
+// conversation history that lives inside the project file — also
+// meta/settings tools, also excluded from the copilot's own catalog for the
+// same recursion-hygiene reason.
 
 registerTool(
   "ai_copilot_send",
@@ -6022,8 +6030,12 @@ server.registerTool(
       "`{maxRounds, defaultMaxRounds, validMin, validMax}` — the effective per-turn " +
       "tool-round budget (the app setting, or the last ai_copilot_send call's " +
       "`maxRounds` override) alongside the app's built-in default (8) and the valid " +
-      "range (1-32), so you can introspect the budget without guessing. Call " +
-      "ai_copilot_send first to get a turnId.",
+      "range (1-32), so you can introspect the budget without guessing. Also carries " +
+      "the CURRENT conversation's identity (chat-persist design): `chatId` (always " +
+      "present — the id this conversation would archive under), `chatTitle` (present " +
+      "once derived from the first message, or after a rename), and `droppedEntries` " +
+      "(present only when a resumed conversation had earlier messages trimmed to fit " +
+      "the project file, > 0). Call ai_copilot_send first to get a turnId.",
     inputSchema: {
       turnId: z
         .string()
@@ -6043,12 +6055,164 @@ registerTool(
   {
     title: "Reset the in-app AI copilot",
     description:
-      "Cancel any in-flight copilot turn and clear its transcript/history back " +
-      "to idle. No params. Use this to start a fresh conversation, or to " +
-      "recover from a stuck/looping turn.",
+      "Cancel any in-flight copilot turn, ARCHIVE the current conversation into " +
+      "the project's saved chat history (it is never destroyed — see " +
+      "ai_copilot_chats/ai_copilot_resume_chat), and start a fresh empty chat. " +
+      "No params. Use this to start a fresh conversation, or to recover from a " +
+      "stuck/looping turn. Returns `{archivedChatId?, evictedChatId?}` — " +
+      "`archivedChatId` is present when there was a conversation to archive; " +
+      "`evictedChatId` is present only on the rare occasion archiving pushed the " +
+      "project past its saved-chat cap and the oldest one had to be dropped " +
+      "(never silent). Both absent (an empty result) is normal for a chat that " +
+      "was already empty.",
     inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("ai.copilotReset"))
+);
+
+server.registerTool(
+  "ai_copilot_get_model",
+  {
+    title: "Read the in-app AI copilot's current model + the curated model catalog",
+    description:
+      "Reads which Anthropic model the in-app copilot currently targets, plus " +
+      "the full curated picker it's chosen from. Returns `{model, catalog}` " +
+      "where `catalog` is an array of `{id, name, note}` — pass any `id` from " +
+      "it to ai_copilot_set_model. `model` defaults to \"claude-sonnet-5\" " +
+      "(balanced) until changed.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("ai.copilotGetModel"))
+);
+
+registerTool(
+  "ai_copilot_set_model",
+  {
+    title: "Set the in-app AI copilot's model",
+    description:
+      "Sets which Anthropic model the in-app copilot targets for SUBSEQUENT " +
+      "turns (an in-flight turn already resolved its provider, so this never " +
+      "retargets one mid-flight). `model` must be one of the curated ids from " +
+      "ai_copilot_get_model's `catalog` (e.g. \"claude-sonnet-5\" for balanced " +
+      "default use, \"claude-opus-4-8\" for the highest-reasoning flagship, " +
+      "\"claude-haiku-4-5\" for the fastest/cheapest option) — an unrecognized " +
+      "id errors with the full list of valid ids rather than silently falling " +
+      "back. Returns `{model}` echoing the now-effective model.",
+    inputSchema: {
+      model: z
+        .string()
+        .min(1)
+        .describe(
+          "A curated model id from ai_copilot_get_model's `catalog`, e.g. \"claude-sonnet-5\"."
+        ),
+    },
+  },
+  async ({ model }) => toToolResult(() => bridge.send("ai.copilotSetModel", { model }))
+);
+
+server.registerTool(
+  "ai_copilot_chats",
+  {
+    title: "List the in-app AI copilot's saved conversations",
+    description:
+      "List every saved copilot conversation in the OPEN project — conversations " +
+      "live INSIDE the project file (chat-persist design), so this always reflects " +
+      "the current project, not a global history. No params. Returns `{chats: " +
+      "[{chatId, title, createdAt, updatedAt, entryCount, model?, active?, " +
+      "droppedEntries?}], activeChatId}`, sorted newest-first by `updatedAt`. " +
+      "`active: true` marks the copilot's CURRENT conversation and is only present " +
+      "on that row (it's also only listed once it has at least one message — a " +
+      "brand-new empty chat isn't noise-listed); `activeChatId` is always present, " +
+      "even if the active chat isn't in `chats` yet. `droppedEntries` appears only " +
+      "when earlier messages of that conversation were trimmed to keep the project " +
+      "file a reasonable size (an honesty counter, never silent). Pass any `chatId` " +
+      "from here to ai_copilot_resume_chat / ai_copilot_delete_chat / " +
+      "ai_copilot_rename_chat.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("ai.copilotChats"))
+);
+
+registerTool(
+  "ai_copilot_resume_chat",
+  {
+    title: "Resume a saved copilot conversation",
+    description:
+      "Resume a previously saved copilot conversation so you can continue it with " +
+      "ai_copilot_send. RESUME IS ALWAYS EXPLICIT — the copilot never auto-resumes: " +
+      "ai_copilot_reset and reopening a project both leave it on a fresh empty " +
+      "chat, and it stays there until this tool is called. The CURRENT " +
+      "conversation is archived first if it holds any messages (never lost — its " +
+      "id comes back as `archivedChatId` when that happened). Safe to do after " +
+      "switching models: a saved conversation never carries hidden chain-of-" +
+      "thought, so any curated model can pick it back up. Returns `{chatId, title, " +
+      "entryCount, droppedEntries?, status: \"idle\", archivedChatId?}` " +
+      "(`droppedEntries`/`archivedChatId` present only when non-zero/applicable). " +
+      "Fails with a teaching error if a turn is currently running (finish it or " +
+      "call ai_copilot_reset first) or for an unrecognized chatId — list current " +
+      "ones with ai_copilot_chats.",
+    inputSchema: {
+      chatId: z
+        .string()
+        .uuid()
+        .describe("The conversation to resume — a `chatId` from ai_copilot_chats."),
+    },
+  },
+  async ({ chatId }) => toToolResult(() => bridge.send("ai.copilotResumeChat", { chatId }))
+);
+
+registerTool(
+  "ai_copilot_delete_chat",
+  {
+    title: "Permanently delete a saved copilot conversation",
+    description:
+      "Permanently deletes one saved copilot conversation — the ONLY destructive " +
+      "chat-history operation (resuming and renaming never destroy anything). " +
+      "Deleting the CURRENTLY ACTIVE conversation is allowed only while no turn is " +
+      "running: it drops that conversation for good and starts a fresh empty chat " +
+      "(`wasActive: true` in the result). Deleting an archived (not currently " +
+      "active) conversation is allowed at any time. Returns `{deleted: true, " +
+      "chatId, wasActive}`. Fails with a teaching error for an unrecognized chatId " +
+      "(list current ones with ai_copilot_chats), or when targeting the active " +
+      "chat while a turn is running (cancel it first with ai_copilot_reset, or " +
+      "wait for it to finish).",
+    inputSchema: {
+      chatId: z
+        .string()
+        .uuid()
+        .describe(
+          "The conversation to delete — a `chatId` from ai_copilot_chats. This cannot be undone."
+        ),
+    },
+  },
+  async ({ chatId }) => toToolResult(() => bridge.send("ai.copilotDeleteChat", { chatId }))
+);
+
+registerTool(
+  "ai_copilot_rename_chat",
+  {
+    title: "Rename a saved copilot conversation",
+    description:
+      "Renames a saved copilot conversation, active or archived. Titles longer " +
+      "than 120 characters are clamped, never rejected. Returns `{chatId, title}` " +
+      "echoing the stored (possibly clamped) title. Fails with a teaching error " +
+      "for an unrecognized chatId (list current ones with ai_copilot_chats), or " +
+      "for a title that's empty (or only whitespace).",
+    inputSchema: {
+      chatId: z
+        .string()
+        .uuid()
+        .describe("The conversation to rename — a `chatId` from ai_copilot_chats."),
+      title: z
+        .string()
+        .min(1)
+        .describe(
+          "New title for the conversation, e.g. \"funky bassline idea\". Over 120 " +
+            "characters is clamped, not rejected; whitespace-only is rejected."
+        ),
+    },
+  },
+  async ({ chatId, title }) => toToolResult(() => bridge.send("ai.copilotRenameChat", { chatId, title }))
 );
 
 // ---------------------------------------------------------------------------

@@ -9,9 +9,9 @@ import Testing
 @Suite("CopilotLimits — round-budget policy (beta m10-m)")
 struct CopilotLimitsTests {
 
-    @Test("the default and valid range are the documented policy (8; 1…32)")
+    @Test("the default and valid range are the documented policy (30; 1…32)")
     func policyConstants() {
-        #expect(CopilotLimits.defaultMaxRounds == 8)
+        #expect(CopilotLimits.defaultMaxRounds == 30)
         #expect(CopilotLimits.validRange == 1...32)
         #expect(CopilotLimits.validRange.contains(CopilotLimits.defaultMaxRounds))
     }
@@ -23,7 +23,8 @@ struct CopilotLimitsTests {
         #expect(CopilotLimits.clamp(0) == 1)      // below the floor → floor
         #expect(CopilotLimits.clamp(-5) == 1)     // well below → floor
         #expect(CopilotLimits.clamp(1) == 1)      // floor
-        #expect(CopilotLimits.clamp(8) == 8)      // the default, untouched
+        #expect(CopilotLimits.clamp(8) == 8)      // mid-range, untouched
+        #expect(CopilotLimits.clamp(30) == 30)    // the default, untouched
         #expect(CopilotLimits.clamp(32) == 32)    // ceiling
         #expect(CopilotLimits.clamp(33) == 32)    // just above → ceiling
         #expect(CopilotLimits.clamp(99) == 32)    // well above → ceiling
@@ -35,7 +36,8 @@ struct CopilotLimitsTests {
     func validateBoundaries() {
         #expect(CopilotLimits.validate("0") == nil)      // just below floor
         #expect(CopilotLimits.validate("1") == 1)        // floor
-        #expect(CopilotLimits.validate("8") == 8)        // the default
+        #expect(CopilotLimits.validate("8") == 8)        // mid-range
+        #expect(CopilotLimits.validate("30") == 30)      // the default
         #expect(CopilotLimits.validate("32") == 32)      // ceiling
         #expect(CopilotLimits.validate("33") == nil)     // just above ceiling
     }

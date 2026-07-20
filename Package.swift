@@ -64,7 +64,10 @@ let package = Package(
         .target(name: "DAWAppKit", dependencies: ["DAWCore", "AIServices"]),
         .executableTarget(
             name: "DAWApp",
-            dependencies: ["DAWCore", "DAWEngine", "DAWControl", "AIServices", "DAWAppKit"]
+            dependencies: ["DAWCore", "DAWEngine", "DAWControl", "AIServices", "DAWAppKit"],
+            // App-icon artifacts (glass-b): consumed by scripts/bundle.sh, not by
+            // the SwiftPM build — excluded so the build stays zero-warning.
+            exclude: ["Resources/AppIcon-master-1024.png", "Resources/AppIcon.icns"]
         ),
         .testTarget(name: "DAWCoreTests", dependencies: ["DAWCore"]),
         // DAWEngine is a TEST-ONLY dependency here (the DAWControl module

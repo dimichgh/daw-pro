@@ -76,6 +76,8 @@ struct ContentView: View {
                     if model.showCopilot {
                         CopilotRailView(
                             engine: model.copilotEngine,
+                            store: model.store,
+                            ui: model.copilotRailUI,
                             draftPrefill: model.copilotDraft,
                             onConsumeDraftPrefill: { model.copilotDraft = nil }
                         ) {

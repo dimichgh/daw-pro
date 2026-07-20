@@ -29,10 +29,10 @@ struct VoiceListCommandTests {
         return (router, voiceConverting)
     }
 
-    @Test("vc.listVoices is in the canonical command list; count moved 132 -> 133")
+    @Test("vc.listVoices is in the canonical command list; count moved 132 -> 133 (135 as of m10-p-6's ai.copilotGetModel/SetModel, 139 as of the chat-persist design's Phase C)")
     func commandIsCanonical() {
         #expect(CommandRouter.allCommands.contains("vc.listVoices"))
-        #expect(CommandRouter.allCommands.count == 133)
+        #expect(CommandRouter.allCommands.count == 139)
     }
 
     @Test("adding vc.listVoices left every existing vc.*/ai.sidecar* name untouched")

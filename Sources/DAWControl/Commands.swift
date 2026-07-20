@@ -273,6 +273,12 @@ public final class CommandRouter {
         "ai.copilotSend",
         "ai.copilotState",
         "ai.copilotReset",
+        "ai.copilotGetModel",
+        "ai.copilotSetModel",
+        "ai.copilotChats",
+        "ai.copilotResumeChat",
+        "ai.copilotDeleteChat",
+        "ai.copilotRenameChat",
         "app.feedbackBundle",
         "app.connectionInfo",
         "plugin.openUI",
@@ -3070,14 +3076,237 @@ public final class CommandRouter {
             return .success(request.id, copilotEngine.stateJSON(turnID: stateTurnID))
 
         case "ai.copilotReset":
-            // Cancels any in-flight turn and clears the transcript/history back
-            // to idle. No params (m16-e, audit F5 survey).
+            // Cancels any in-flight turn and ARCHIVES the conversation into the
+            // project's saved chat history (chat-persist design §1/§6.5, m16-e
+            // seeded the no-params shape) — reset() is "archive and start
+            // fresh", never destructive; the one destructive verb is
+            // ai.copilotDeleteChat (L5). No params. Response gains additive
+            // {archivedChatId?, evictedChatId?}: archivedChatId is present when
+            // the conversation held at least one entry (nothing to archive on
+            // an already-empty chat); evictedChatId is present only when
+            // archiving pushed the project's archive past its cap
+            // (CopilotChatLimits.maxArchivedChats) and the oldest archived chat
+            // was dropped to make room — never silent (§7.1). Both absent when
+            // nothing was archived/evicted, so a caller that ignores the
+            // result sees identical behavior modulo the chat list growing.
             try params.rejectUnknownKeys([], verb: "ai.copilotReset")
             guard let copilotEngine else {
                 throw ControlError("copilot engine not wired — app startup incomplete")
             }
-            copilotEngine.reset()
-            return .success(request.id)
+            let resetResult = copilotEngine.reset()
+            var resetFields: [String: JSONValue] = [:]
+            if let archivedChatId = resetResult.archivedChatId {
+                resetFields["archivedChatId"] = .string(archivedChatId.uuidString)
+            }
+            if let evictedChatId = resetResult.evictedChatId {
+                resetFields["evictedChatId"] = .string(evictedChatId.uuidString)
+            }
+            return .success(request.id, resetFields.isEmpty ? nil : .object(resetFields))
+
+        case "ai.copilotGetModel":
+            // Reads the copilot's currently effective Anthropic model plus
+            // the curated picker (M10-p-6). No params. Response: {model,
+            // catalog: [{id, name, note}]} — `catalog` is
+            // `AnthropicModelCatalog.curated` (the SAME table
+            // `ai.copilotSetModel`'s validation and the per-model
+            // max-output/thinking-config behavior read — see
+            // `AnthropicModelCatalog`), so the picker can never drift from
+            // what the engine actually does. A future UI phase renders this
+            // directly; this command exists so an agent/tester can drive
+            // model selection without one.
+            try params.rejectUnknownKeys([], verb: "ai.copilotGetModel")
+            guard let copilotEngine else {
+                throw ControlError("copilot engine not wired — app startup incomplete")
+            }
+            return .success(request.id, .object([
+                "model": .string(copilotEngine.currentModel),
+                "catalog": .array(AnthropicModelCatalog.curated.map { info in
+                    .object([
+                        "id": .string(info.id),
+                        "name": .string(info.name ?? info.id),
+                        "note": .string(info.note ?? ""),
+                    ])
+                }),
+            ]))
+
+        case "ai.copilotSetModel":
+            // Sets the copilot's model for subsequent turns (M10-p-6).
+            // params: model (required — a curated id from
+            // ai.copilotGetModel's `catalog`, e.g. "claude-sonnet-5").
+            // Unknown/uncurated ids throw a teaching error listing every
+            // valid id rather than silently falling back — the same
+            // "actionable, never silent" contract as every other copilot
+            // command. Takes effect on the NEXT turn (no need to reject
+            // mid-turn: an in-flight turn already resolved its provider).
+            // Response echoes the now-effective model: {model}.
+            try params.rejectUnknownKeys(["model"], verb: "ai.copilotSetModel")
+            guard let copilotEngine else {
+                throw ControlError("copilot engine not wired — app startup incomplete")
+            }
+            let requestedModel = try params.require("model", \.stringValue)
+            guard AnthropicModelCatalog.curated.contains(where: { $0.id == requestedModel }) else {
+                let validIDs = AnthropicModelCatalog.curated.map(\.id).joined(separator: ", ")
+                throw ControlError("unknown copilot model '\(requestedModel)' — valid ids: \(validIDs)")
+            }
+            copilotEngine.setModel(requestedModel)
+            return .success(request.id, .object(["model": .string(requestedModel)]))
+
+        case "ai.copilotChats":
+            // Lists every saved copilot conversation in the OPEN project
+            // (chat-persist design §6.1): every ARCHIVED chat
+            // (`store.copilotChats`) plus the ACTIVE conversation, but only
+            // when it holds at least one entry (a fresh empty chat is not
+            // noise-listed — `persistableChatSnapshot()` already returns nil
+            // for one, so that single call doubles as the presence check).
+            // No params. Response: {chats: [{chatId, title, createdAt,
+            // updatedAt, entryCount, model?, active?, droppedEntries?}],
+            // activeChatId}. Sorted by `updatedAt` descending — the store
+            // keeps its archive unsorted (it doesn't need order internally;
+            // `copilotChatsForPersistence()` sorts ASCENDING for disk, a
+            // different, save-path concern), so this is the one sort point
+            // for the wire. `active: true` is present only on the engine's
+            // current chat (the `partial` absent-when-false precedent);
+            // `model`/`droppedEntries` are present only when set/> 0.
+            // `activeChatId` is always present, even when the active chat
+            // isn't listed (empty). Never throws beyond the engine-wired
+            // guard.
+            try params.rejectUnknownKeys([], verb: "ai.copilotChats")
+            guard let copilotEngine else {
+                throw ControlError("copilot engine not wired — app startup incomplete")
+            }
+            let chatsFormatter = ISO8601DateFormatter()
+            var chatRows: [(chat: CopilotChatDocument, isActive: Bool)] =
+                store.copilotChats.map { ($0, false) }
+            if let activeSnapshot = copilotEngine.persistableChatSnapshot() {
+                chatRows.append((activeSnapshot, true))
+            }
+            chatRows.sort { $0.chat.updatedAt > $1.chat.updatedAt }
+            let chatsJSON: [JSONValue] = chatRows.map { row in
+                var object: [String: JSONValue] = [
+                    "chatId": .string(row.chat.id.uuidString),
+                    "title": .string(row.chat.title),
+                    "createdAt": .string(chatsFormatter.string(from: row.chat.createdAt)),
+                    "updatedAt": .string(chatsFormatter.string(from: row.chat.updatedAt)),
+                    "entryCount": .number(Double(row.chat.transcript.count)),
+                ]
+                if let model = row.chat.model {
+                    object["model"] = .string(model)
+                }
+                if row.isActive {
+                    object["active"] = .bool(true)
+                }
+                if let dropped = row.chat.droppedEntries, dropped > 0 {
+                    object["droppedEntries"] = .number(Double(dropped))
+                }
+                return .object(object)
+            }
+            return .success(request.id, .object([
+                "chats": .array(chatsJSON),
+                "activeChatId": .string(copilotEngine.currentChatID.uuidString),
+            ]))
+
+        case "ai.copilotResumeChat":
+            // Resumes an archived chat so it can be continued with
+            // ai.copilotSend (chat-persist design §6.2): archives the
+            // CURRENT non-empty conversation first (L5 — never lost; its id
+            // rides back additively as "archivedChatId" when that
+            // happened), then restores the chosen chat's transcript and
+            // SANITIZED provider history. Safe after a model switch by
+            // construction — persisted history never carries thinking
+            // blocks (L1), so any curated model can continue the
+            // conversation. params: chatId (required, the FULL UUID from
+            // ai.copilotChats — chat ids are not in the copilot's 8-char
+            // idMap). Response: {chatId, title, entryCount, droppedEntries?,
+            // status: "idle", archivedChatId?} (droppedEntries only when >
+            // 0). Throws while a turn is running ("a copilot turn is
+            // already running — wait for it (poll ai.copilotState) or
+            // ai.copilotReset to cancel and archive it first"), for an
+            // unknown id ("unknown chatId '<value>' — list chats with
+            // ai.copilotChats"), or for a malformed chatId ("'chatId' must
+            // be a UUID (from ai.copilotChats)").
+            try params.rejectUnknownKeys(["chatId"], verb: "ai.copilotResumeChat")
+            guard let copilotEngine else {
+                throw ControlError("copilot engine not wired — app startup incomplete")
+            }
+            let resumeChatIdRaw = try params.require("chatId", \.stringValue)
+            guard let resumeChatId = UUID(uuidString: resumeChatIdRaw) else {
+                throw ControlError("'chatId' must be a UUID (from ai.copilotChats)")
+            }
+            let resumeResult = try copilotEngine.resumeChat(id: resumeChatId)
+            var resumeFields: [String: JSONValue] = [
+                "chatId": .string(copilotEngine.currentChatID.uuidString),
+                "title": .string(copilotEngine.chatTitle ?? ""),
+                "entryCount": .number(Double(copilotEngine.transcript.count)),
+                "status": .string(copilotEngine.status.rawValue),
+            ]
+            if copilotEngine.chatDroppedEntries > 0 {
+                resumeFields["droppedEntries"] = .number(Double(copilotEngine.chatDroppedEntries))
+            }
+            if let archivedChatId = resumeResult.archivedChatId {
+                resumeFields["archivedChatId"] = .string(archivedChatId.uuidString)
+            }
+            return .success(request.id, .object(resumeFields))
+
+        case "ai.copilotDeleteChat":
+            // Permanently deletes a chat — the ONE destructive chat verb
+            // (chat-persist design §6.3, L5). Deleting the ACTIVE chat is
+            // allowed only while no turn is running: it drops the
+            // conversation permanently and mints a fresh empty chat
+            // (wasActive: true in the response). Deleting an ARCHIVED chat
+            // is allowed any time. params: chatId (required, full UUID).
+            // Response: {deleted: true, chatId, wasActive}. Throws for an
+            // unknown id ("unknown chatId '<value>' — list chats with
+            // ai.copilotChats"), a malformed chatId ("'chatId' must be a
+            // UUID (from ai.copilotChats)"), or deleting the active chat
+            // while a turn is running ("chat '<id>' is the active
+            // conversation and a turn is running — cancel it first
+            // (ai.copilotReset) or wait").
+            try params.rejectUnknownKeys(["chatId"], verb: "ai.copilotDeleteChat")
+            guard let copilotEngine else {
+                throw ControlError("copilot engine not wired — app startup incomplete")
+            }
+            let deleteChatIdRaw = try params.require("chatId", \.stringValue)
+            guard let deleteChatId = UUID(uuidString: deleteChatIdRaw) else {
+                throw ControlError("'chatId' must be a UUID (from ai.copilotChats)")
+            }
+            let wasActive = try copilotEngine.deleteChat(id: deleteChatId)
+            return .success(request.id, .object([
+                "deleted": .bool(true),
+                "chatId": .string(deleteChatId.uuidString),
+                "wasActive": .bool(wasActive),
+            ]))
+
+        case "ai.copilotRenameChat":
+            // Renames a chat, active or archived (chat-persist design §6.4).
+            // params: chatId (required, full UUID), title (required,
+            // non-empty after trimming whitespace — the ai.copilotSend
+            // empty-message precedent). Over-length titles are CLAMPED to
+            // CopilotChatLimits.maxTitleLength (never an error) — the clamp
+            // is computed here identically to CopilotEngine.renameChat's own
+            // clamp, so the echoed title always matches what was actually
+            // stored. Response: {chatId, title} (the stored, possibly
+            // clamped title). Throws for an unknown id ("unknown chatId
+            // '<value>' — list chats with ai.copilotChats"), a malformed
+            // chatId ("'chatId' must be a UUID (from ai.copilotChats)"), or
+            // an empty title ("'title' must not be empty").
+            try params.rejectUnknownKeys(["chatId", "title"], verb: "ai.copilotRenameChat")
+            guard let copilotEngine else {
+                throw ControlError("copilot engine not wired — app startup incomplete")
+            }
+            let renameChatIdRaw = try params.require("chatId", \.stringValue)
+            guard let renameChatId = UUID(uuidString: renameChatIdRaw) else {
+                throw ControlError("'chatId' must be a UUID (from ai.copilotChats)")
+            }
+            let renameTitle = try params.require("title", \.stringValue)
+            guard !renameTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ControlError("'title' must not be empty")
+            }
+            try copilotEngine.renameChat(id: renameChatId, title: renameTitle)
+            let clampedRenameTitle = String(renameTitle.prefix(CopilotChatLimits.maxTitleLength))
+            return .success(request.id, .object([
+                "chatId": .string(renameChatId.uuidString),
+                "title": .string(clampedRenameTitle),
+            ]))
 
         case "edit.undo":
             // No params (m16-e, audit F5 survey). Reverses the last edit.
@@ -5110,6 +5339,17 @@ struct ControlError: Error {
     static func noTrack(_ id: UUID) -> ControlError {
         ControlError("no track with id \(id.uuidString)")
     }
+}
+
+/// `LocalizedError` so in-process UI callers (the copilot rail's chat-list
+/// refusal strip, its send-error strip) surface the teaching message
+/// VERBATIM through `localizedDescription` — the refusal-bubble
+/// one-vocabulary law: the human reads the same words an agent gets over
+/// the wire, never Foundation's generic "operation couldn't be completed"
+/// dump. The router's own `catch let error as ControlError` branch matches
+/// FIRST, so wire behavior is byte-identical.
+extension ControlError: LocalizedError {
+    var errorDescription: String? { message }
 }
 
 extension [String: JSONValue] {

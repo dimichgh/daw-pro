@@ -13,12 +13,12 @@ import DAWCore
 @Suite("CopilotLimitsStore — round-budget setting (beta m10-m)")
 struct CopilotLimitsStoreTests {
 
-    @Test("a never-set store has no configured value and reports the default 8")
+    @Test("a never-set store has no configured value and reports the default 30")
     func storeDefaults() {
         let store = CopilotLimitsStore(backing: InMemoryCopilotLimitsBacking())
         #expect(store.configuredMaxRounds == nil)
         #expect(store.maxRounds == CopilotLimits.defaultMaxRounds)
-        #expect(store.maxRounds == 8)
+        #expect(store.maxRounds == 30)
     }
 
     @Test("commit persists a valid value and round-trips it through the backing")
@@ -55,10 +55,10 @@ struct CopilotLimitsStoreTests {
     @Test("an absent / corrupt persisted entry flows to the default (backing returns nil)")
     func storeCorruptLoadIsDefault() {
         // A backing that never had a value (or a corrupt one it chose to ignore)
-        // returns nil → the store has no setting and the default 8 flows.
+        // returns nil → the store has no setting and the default 30 flows.
         let store = CopilotLimitsStore(backing: InMemoryCopilotLimitsBacking(nil))
         #expect(store.configuredMaxRounds == nil)
-        #expect(store.maxRounds == 8)
+        #expect(store.maxRounds == 30)
     }
 
     @Test("an out-of-range persisted value is CLAMPED on load (not discarded)")

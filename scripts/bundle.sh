@@ -47,6 +47,11 @@ sed -e "s/__SHORT_VERSION__/$SHORT_VERSION/g" \
 # Classic APPL type/creator marker — harmless, keeps older Finder codepaths happy.
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# App icon (glass-b, 2026-07-19): the .icns is a COMMITTED artifact built from
+# the GPT-Image master (Sources/DAWApp/Resources/AppIcon-master-1024.png) via
+# iconutil; CFBundleIconFile=AppIcon in the plist template points at it.
+cp "Sources/DAWApp/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+
 echo "==> plutil -lint"
 plutil -lint "$APP/Contents/Info.plist"
 

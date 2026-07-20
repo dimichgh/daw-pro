@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "daw-pro",
+  "owner": {
+    "name": "dsemenov"
+  },
+  "description": "DAW Pro's own Claude Code plugin marketplace: the music-making agent team and workflow skills that drive the app over its MCP server.",
+  "plugins": [
+    {
+      "name": "daw-pro-music-team",
+      "source": "./claude-plugin",
+      "description": "A team of specialized agents and workflow skills that drive DAW Pro for real song creation and management, over its existing MCP server."
+    }
+  ]
+}

@@ -58,7 +58,7 @@ public final class CopilotLimitsStore {
     }
 
     /// The effective max tool-rounds the engine should honor: the persisted setting,
-    /// or `CopilotLimits.defaultMaxRounds` (8) when none is set. The bootstrap hands
+    /// or `CopilotLimits.defaultMaxRounds` (30) when none is set. The bootstrap hands
     /// the engine `{ store.maxRounds }` as its per-turn resolver.
     public var maxRounds: Int {
         configuredMaxRounds ?? CopilotLimits.defaultMaxRounds

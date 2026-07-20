@@ -202,6 +202,27 @@ public enum ExplainID: String, CaseIterable, Sendable {
     case aiSketchpad
     case aiFix
     case copilotInput
+    /// The copilot rail's MODEL chip (M10-p-6) — which AI model powers the
+    /// copilot's turns, chosen from the curated catalog.
+    case copilotModel
+    /// The rail's copy-to-clipboard affordances (the "make AI output
+    /// copyable" user request) — ONE shared id for the per-entry hover glyph
+    /// AND the header's whole-reply glyph (the shared-control rule). The
+    /// affordance itself is neutral chrome (copying isn't AI content), it
+    /// just lives on the violet rail.
+    case copilotCopy
+    /// The rail's chat-history affordance (chat-persist Phase D) — ONE
+    /// shared id for the header history glyph AND the in-rail session list
+    /// it opens (rows resume on click, rename inline, delete with an in-row
+    /// confirm; the honest-scope + shared-control rules).
+    case copilotChats
+    /// The header's new-chat affordance — the relabeled reset: it ARCHIVES
+    /// the conversation into Chat history and starts fresh, never destroys
+    /// (chat-persist §8.4, L5).
+    case copilotNewChat
+    /// The transcript-top truncation banner (L6) — shown when a chat's
+    /// oldest entries were trimmed to keep the project file small.
+    case copilotTrimmed
     case sketchpadStyle
     case sketchpadLyrics
     case sketchpadLength
@@ -460,7 +481,7 @@ public enum ExplainCatalog {
         // MARK: Effect editor (m17-a)
         .effectEditor: ExplainEntry(
             title: "Effect Controls",
-            body: "The controls for one insert effect — each slider shapes part of its sound, and you hear every change live. Double-click a slider to reset it, and use the switch at the top to bypass the effect while you compare before and after."),
+            body: "The knobs for one insert effect, grouped by the job they do — drag a knob up or down to shape the sound and hear every change live. Double-click a knob to reset it, and use the switch at the top to bypass the effect while you compare before and after."),
 
         // MARK: AI panels (violet affordances — Rule 3)
         .aiCopilot: ExplainEntry(
@@ -475,6 +496,21 @@ public enum ExplainCatalog {
         .copilotInput: ExplainEntry(
             title: "Ask the Copilot",
             body: "Type what you want done here and press send. The copilot reads your whole project, makes the change, and shows each step — so you can undo anything you did not want."),
+        .copilotModel: ExplainEntry(
+            title: "Copilot Model",
+            body: "Picks which AI model powers the copilot. Faster models reply quickly; stronger ones handle big, tricky requests better. A change applies from your next message."),
+        .copilotCopy: ExplainEntry(
+            title: "Copy Reply",
+            body: "Copies the copilot's words to the clipboard so you can paste them anywhere. Hover a reply for its own copy button; the one in the header grabs the whole latest reply."),
+        .copilotChats: ExplainEntry(
+            title: "Chat History",
+            body: "Lists every saved conversation in this project. Click one to pick it up where you left off — the chat you are in is filed away first, so nothing is lost. Hover a row to rename or delete it."),
+        .copilotNewChat: ExplainEntry(
+            title: "New Chat",
+            body: "Files the current conversation into Chat History and starts a fresh one. Nothing is deleted — you can reopen and continue any saved chat later."),
+        .copilotTrimmed: ExplainEntry(
+            title: "Trimmed Chat",
+            body: "Very long conversations drop their oldest messages so the project file stays small. The count shows how many were removed; everything recent is still here."),
         .sketchpadStyle: ExplainEntry(
             title: "Style",
             body: "Describe the sound you want in a few words — the genre, the mood, the instruments. The more vivid the description, the closer the generated song lands to what you are imagining."),

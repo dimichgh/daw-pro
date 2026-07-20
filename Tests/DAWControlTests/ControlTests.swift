@@ -1550,12 +1550,19 @@ struct CommandRouterTests {
                 // proven by WriteLyricsCommandTests (fake writer) and its wire
                 // shape by AIServicesTests/LyricsWriterTests (stub HTTP server).
                 "ai.writeLyrics",
-                // ai.copilot* (M6 rail-c) route through CommandRouter.copilotEngine,
-                // which is nil on this bare router (only DAWProApp wires it) — all
-                // three legitimately return the actionable "not wired" error here.
-                // Proven by CopilotCommandTests (a router with a real CopilotEngine
-                // + FakeCopilotProvider) and CopilotEngineTests (the turn loop itself).
+                // ai.copilot* (M6 rail-c; M10-p-6 added GetModel/SetModel; the
+                // chat-persist design Phase C added Chats/ResumeChat/
+                // DeleteChat/RenameChat) route through CommandRouter.copilotEngine,
+                // which is nil on this bare router (only DAWProApp wires it) —
+                // all nine legitimately return the actionable "not wired" error
+                // here. Proven by CopilotCommandTests (a router with a real
+                // CopilotEngine + FakeCopilotProvider), CopilotChatCommandTests
+                // (the four new chat verbs), and CopilotEngineTests (the turn
+                // loop itself).
                 "ai.copilotSend", "ai.copilotState", "ai.copilotReset",
+                "ai.copilotGetModel", "ai.copilotSetModel",
+                "ai.copilotChats", "ai.copilotResumeChat",
+                "ai.copilotDeleteChat", "ai.copilotRenameChat",
                 // plugin.openUI / plugin.closeUI (M3 vi-b) route through
                 // CommandRouter.pluginUI, the app-layer window seam, which is nil
                 // on this bare router (only DAWProApp wires it) — both legitimately

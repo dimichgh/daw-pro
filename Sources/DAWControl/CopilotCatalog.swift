@@ -161,6 +161,15 @@ public enum CopilotToolCatalog {
         "ai.copilotSend",
         "ai.copilotState",
         "ai.copilotReset",
+        "ai.copilotGetModel",
+        "ai.copilotSetModel",
+        // Chat-persist design (2026-07-19) — the copilot must not manage its
+        // own session history mid-turn either, same recursion-hygiene
+        // rationale as the rest of this denylist.
+        "ai.copilotChats",
+        "ai.copilotResumeChat",
+        "ai.copilotDeleteChat",
+        "ai.copilotRenameChat",
     ]
 
     /// The versioned catalog of commands exposed to the Copilot. `v1` is the

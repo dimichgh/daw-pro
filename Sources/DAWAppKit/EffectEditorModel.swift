@@ -16,6 +16,38 @@ public struct EffectEditorTarget: Equatable, Sendable {
     }
 }
 
+/// One SECTION of the grouped knob layout (m17-a v2 — the 2026-07-19
+/// knob-vs-slider report §6): a micro-header title ("TRIGGER", "TIME",
+/// "OUTPUT") plus the member param specs with their in-group display labels.
+/// Groups are the channel-strip precedent (SSL/Cubase/Pro-C3): sections run
+/// input/trigger → processing/time → OUTPUT, and the OUTPUT/mix group is
+/// always LAST — a hard layout rule, pinned by tests.
+public struct EffectParamGroup: Equatable, Sendable {
+    public struct Item: Equatable, Sendable {
+        /// The wire-named spec — the SAME `fx.describe` schema entry.
+        public let spec: EffectParamSpec
+        /// The in-group display label. Inside a titled band group the
+        /// redundant band prefix is dropped ("Low Shelf Freq" → "Freq" under
+        /// "LOW SHELF") — the tight-column abbreviation convention (§5).
+        public let label: String
+
+        public init(spec: EffectParamSpec, label: String) {
+            self.spec = spec
+            self.label = label
+        }
+    }
+
+    /// The section micro-header (already uppercase). Empty = a single-control
+    /// card that needs no header (gain).
+    public let title: String
+    public let items: [Item]
+
+    public init(title: String, items: [Item]) {
+        self.title = title
+        self.items = items
+    }
+}
+
 /// Headless state machine for the built-in insert EFFECT EDITOR card (m17-a):
 /// the spec-driven parameter rows a generic editor renders for every built-in
 /// kind, the current values read from the live `EffectDescriptor`, and the
@@ -94,6 +126,138 @@ public final class EffectEditorModel {
     /// `EffectParamSpec` table `fx.describe` serves (name/min/max/default/unit).
     public var specs: [EffectParamSpec] {
         kind.map { EffectParamSpec.specs(for: $0) } ?? []
+    }
+
+    /// The open insert's grouped sections (empty when closed/removed).
+    public var groups: [EffectParamGroup] {
+        kind.map { Self.groups(for: $0) } ?? []
+    }
+
+    // MARK: - Grouped layout (the 2026-07-19 knob-vs-slider report §6)
+
+    /// The per-kind section table: (title, [(wire name, label override)]).
+    /// Names only — every range/default/unit still resolves through
+    /// `EffectParamSpec.specs(for:)`, the single source of truth, so this
+    /// table can never fork the schema. Section order is input/trigger →
+    /// processing/time → OUTPUT-last (the SSL/Cubase/Pro-C3 strip precedent).
+    private static func groupTable(
+        for kind: EffectDescriptor.Kind
+    ) -> [(title: String, members: [(name: String, label: String?)])] {
+        switch kind {
+        case .gain:
+            // Single-knob card — no header needed.
+            return [("", [("gainLinear", nil)])]
+        case .eq:
+            // One band per group, low → high; short labels — the band prefix
+            // lives in the header (the tight-column abbreviation rule, §5).
+            return [
+                ("LOW SHELF", [("lowShelfFreq", "Freq"), ("lowShelfGainDb", "Gain")]),
+                ("PEAK 1", [("peak1Freq", "Freq"), ("peak1GainDb", "Gain"), ("peak1Q", "Q")]),
+                ("PEAK 2", [("peak2Freq", "Freq"), ("peak2GainDb", "Gain"), ("peak2Q", "Q")]),
+                ("HIGH SHELF", [("highShelfFreq", "Freq"), ("highShelfGainDb", "Gain")]),
+            ]
+        case .compressor:
+            // Pro-C3's own grouping: trigger/shape, then time smoothing,
+            // makeup last.
+            return [
+                ("TRIGGER", [("thresholdDb", nil), ("ratio", nil), ("kneeDb", nil)]),
+                ("TIME", [("attackMs", nil), ("releaseMs", nil)]),
+                ("OUTPUT", [("makeupDb", nil)]),
+            ]
+        case .limiter:
+            // Release before Ceiling — input→output even on a 2-knob card.
+            return [
+                ("TIME", [("releaseMs", nil)]),
+                ("OUTPUT", [("ceilingDb", nil)]),
+            ]
+        case .reverb:
+            return [
+                ("CHARACTER", [("roomSize", nil), ("damping", nil), ("width", nil)]),
+                ("TIME", [("preDelayMs", nil)]),
+                ("OUTPUT", [("mix", nil)]),
+            ]
+        case .delay:
+            return [
+                ("TIME", [("timeMs", nil)]),
+                ("REPEATS", [("feedback", nil), ("pingPong", nil), ("highCutHz", nil)]),
+                ("OUTPUT", [("mix", nil)]),
+            ]
+        case .saturator:
+            return [
+                ("DRIVE", [("driveDb", nil)]),
+                ("OUTPUT", [("mix", nil), ("outputDb", nil)]),
+            ]
+        case .gate:
+            return [
+                ("TRIGGER", [("thresholdDb", nil)]),
+                ("TIME", [("attackMs", nil), ("holdMs", nil), ("releaseMs", nil)]),
+            ]
+        case .chorus:
+            return [
+                ("MODULATION", [("rateHz", nil), ("depthMs", nil)]),
+                ("OUTPUT", [("mix", nil)]),
+            ]
+        case .audioUnit:
+            // AU params are not on the generic surface (M3 vi-b).
+            return []
+        }
+    }
+
+    /// The grouped sections for one kind, resolved against the spec table.
+    /// A table name missing from the schema is dropped (structurally
+    /// impossible while the tests pin exact-once coverage).
+    public static func groups(for kind: EffectDescriptor.Kind) -> [EffectParamGroup] {
+        let specs = EffectParamSpec.specs(for: kind)
+        return groupTable(for: kind).compactMap { title, members in
+            let items = members.compactMap { name, override -> EffectParamGroup.Item? in
+                guard let spec = specs.first(where: { $0.name == name }) else { return nil }
+                return EffectParamGroup.Item(spec: spec, label: override ?? label(for: spec))
+            }
+            return items.isEmpty ? nil : EffectParamGroup(title: title, items: items)
+        }
+    }
+
+    // MARK: - Knob geometry (unipolar sweep vs bipolar center-out)
+
+    /// How a knob FILLS its arc. `unipolar` sweeps from the range minimum
+    /// (freq/Q/time/threshold/ratio/mix); `bipolar` fills center-out from the
+    /// zero detent (±dB gain params — EQ band gains, saturator output), the
+    /// `PanKnob` shape.
+    public enum KnobStyle: Sendable, Equatable {
+        case unipolar
+        case bipolar
+    }
+
+    /// Bipolar iff the range genuinely spans zero on BOTH sides. A -60…0
+    /// threshold or -24…0 ceiling is unipolar — nothing to be "center-out"
+    /// about when zero is an endpoint.
+    public static func knobStyle(for spec: EffectParamSpec) -> KnobStyle {
+        spec.range.lowerBound < 0 && spec.range.upperBound > 0 ? .bipolar : .unipolar
+    }
+
+    /// The travel fraction a knob's value arc anchors from: 0 (min-start
+    /// sweep) for unipolar, the zero-crossing detent for bipolar.
+    public static func knobFillAnchor(for spec: EffectParamSpec) -> Double {
+        switch knobStyle(for: spec) {
+        case .unipolar: return 0
+        case .bipolar: return fraction(forValue: 0, spec: spec)
+        }
+    }
+
+    // MARK: - Toggle params (pingPong)
+
+    /// Delay `pingPong` is BINARY at the model layer — `DelayParams` rounds it
+    /// to 0/1 (Effects.swift) despite the continuous 0…1 spec — so it renders
+    /// as a TOGGLE, never a knob (report §3/§6). The wire shape is untouched:
+    /// the toggle still writes 0.0/1.0 through the same `set` path.
+    public static func isToggleParam(_ spec: EffectParamSpec) -> Bool {
+        spec.name == "pingPong"
+    }
+
+    /// The toggle read threshold — mirrors the model layer's `.rounded()`
+    /// (0.5 rounds up).
+    public static func toggleIsOn(_ value: Double) -> Bool {
+        value >= 0.5
     }
 
     /// The current value for one row — read from the live descriptor via the
@@ -223,10 +387,35 @@ public final class EffectEditorModel {
             .joined(separator: " ")
     }
 
+    /// Whether a 0…1 "linear" AMOUNT param reads as a PERCENTAGE (mix, room
+    /// size, damping, width, feedback — the report's Actionable-5 convention;
+    /// every cited competitor shows these as %). Excludes Q (0.1…18), linear
+    /// gain (0…4, dB-equivalent below), and the pingPong toggle. Formatter
+    /// side ONLY — the wire value stays the raw 0…1 fraction.
+    public static func isPercentParam(_ spec: EffectParamSpec) -> Bool {
+        spec.unit == "linear" && !isToggleParam(spec)
+            && spec.range.lowerBound == 0 && spec.range.upperBound <= 1
+    }
+
     /// The SF Mono readout for a value: `(text, unit)` — "3.0" + "kHz",
-    /// "-18.0" + "dB", "4.0:1" + "", "0.35" + "". Deterministic formats so
+    /// "-18.0" + "dB", "4.0:1" + "", "35" + "%". Deterministic formats so
     /// captures and tests pin exact strings.
     public static func readout(value: Double, spec: EffectParamSpec) -> (text: String, unit: String) {
+        // The binary pingPong reads as a state word, never a fraction (§6).
+        if isToggleParam(spec) {
+            return (toggleIsOn(value) ? "ON" : "OFF", "")
+        }
+        // 0…1 amount knobs read in % (report Actionable-5); wire stays 0…1.
+        if isPercentParam(spec) {
+            return (String(format: "%.0f", value * 100), "%")
+        }
+        // The gain utility's linear multiplier reads as its dB equivalent
+        // (20·log10) so every trim/gain knob in the app speaks one unit
+        // (report §6 `gain`); the wire keeps the linear value.
+        if spec.name == "gainLinear" {
+            guard value > 0 else { return ("-∞", "dB") }
+            return (String(format: "%.1f", 20 * log10(value)), "dB")
+        }
         switch spec.unit {
         case "dB":
             return (String(format: "%.1f", value), "dB")
@@ -241,6 +430,11 @@ public final class EffectEditorModel {
             }
             return (String(format: "%.0f", value), "Hz")
         case "ms":
+            if value >= 1_000 {
+                // Long delays/releases cross to seconds — the Hz→kHz
+                // crossover's twin (report §6 `delay`).
+                return (String(format: "%.2f", value / 1_000), "s")
+            }
             if value < 10 {
                 return (String(format: "%.1f", value), "ms")
             }

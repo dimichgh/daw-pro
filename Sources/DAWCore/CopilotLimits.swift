@@ -12,9 +12,11 @@ import Foundation
 /// DAWAppKit (the Settings store/field) and DAWControl (the engine resolver + the
 /// `ai.copilotSend` override + the `ai.copilotState` limits echo).
 public enum CopilotLimits {
-    /// The built-in default max tool-rounds per turn — byte-identical to the
-    /// pre-m10-m hardcoded `maxToolRounds` default of 8.
-    public static let defaultMaxRounds = 8
+    /// The built-in default max tool-rounds per turn. Was 8 (the pre-m10-m
+    /// hardcoded value) through 2026-07-19; raised to 30 at the user's request —
+    /// real composition turns routinely batch tools across many rounds, and 8
+    /// cut legitimate work short. Still inside `validRange`'s runaway bound.
+    public static let defaultMaxRounds = 30
 
     /// The valid range for a user-configured / caller-supplied round budget. A
     /// floor of 1 guarantees at least one provider round (a turn that can never

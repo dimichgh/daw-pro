@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "daw-pro-music-team",
+  "displayName": "DAW Pro Music Team",
+  "version": "0.1.0",
+  "description": "A team of specialized agents and workflow skills that drive DAW Pro (an AI-native macOS DAW) over its MCP server: plan, compose, arrange, sound-design, mix, and bounce a song end-to-end.",
+  "author": {
+    "name": "dsemenov"
+  },
+  "repository": "https://github.com/dimichgh/daw-pro",
+  "keywords": ["daw", "music", "audio", "mcp", "songwriting", "mixing", "mastering"]
+}

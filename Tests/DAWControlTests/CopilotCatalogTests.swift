@@ -28,6 +28,13 @@ struct CopilotCatalogTests {
         #expect(CopilotToolCatalog.neverInclude == [
             "project.new", "project.open", "project.save", "track.remove",
             "ai.copilotSend", "ai.copilotState", "ai.copilotReset",
+            // M10-p-6: the copilot's own model-selection plumbing — same
+            // recursion-prevention rationale as the other ai.copilot* trio.
+            "ai.copilotGetModel", "ai.copilotSetModel",
+            // Chat-persist design (2026-07-19 Phase C): the copilot's own
+            // session-history plumbing — same recursion-prevention rationale.
+            "ai.copilotChats", "ai.copilotResumeChat",
+            "ai.copilotDeleteChat", "ai.copilotRenameChat",
         ])
     }
 

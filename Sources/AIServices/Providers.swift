@@ -797,21 +797,40 @@ enum HTTP {
     static func postJSON(
         to url: URL,
         headers: [String: String],
-        body: [String: Any]
+        body: [String: Any],
+        timeoutSeconds: TimeInterval? = nil
     ) async throws -> (Data, Int) {
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        for (field, value) in headers {
-            request.setValue(value, forHTTPHeaderField: field)
-        }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let request = try makeRequest(to: url, headers: headers, body: body, timeoutSeconds: timeoutSeconds)
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
             throw AIServiceError.requestFailed(status: status, body: errorBodyText(data))
         }
         return (data, status)
+    }
+
+    /// Builds the outgoing `POST` request `postJSON` sends — split out (not
+    /// `private`) so a test can pin the `timeoutSeconds` wiring directly,
+    /// without a live network call. `timeoutSeconds == nil` leaves
+    /// `URLRequest`'s own 60s default `timeoutInterval` untouched, matching
+    /// every caller that predates the copilot-turn timeout.
+    static func makeRequest(
+        to url: URL,
+        headers: [String: String],
+        body: [String: Any],
+        timeoutSeconds: TimeInterval? = nil
+    ) throws -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        for (field, value) in headers {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+        if let timeoutSeconds {
+            request.timeoutInterval = timeoutSeconds
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return request
     }
 
     static func json(_ data: Data) throws -> [String: Any] {

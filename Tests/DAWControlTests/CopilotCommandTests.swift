@@ -206,15 +206,16 @@ struct CopilotCommandTests {
 
     @Test("ai.copilotState carries an additive limits object (maxRounds + policy bounds)")
     func stateCarriesLimits() async throws {
-        // A bare wired engine uses the default resolver, so maxRounds echoes 8.
+        // A bare wired engine uses the default resolver, so maxRounds echoes the
+        // `CopilotLimits.defaultMaxRounds` policy (30).
         // `router.copilotEngine` is weak (the two-phase DAWProApp pattern) — the
         // `engine` binding must be kept alive for the router to see it.
         let (router, _, engine) = makeWiredRouter()
         let state = await router.handle(ControlRequest(id: "1", command: "ai.copilotState"))
         #expect(state.ok)
         let limits = try #require(state.result?["limits"]?.objectValue)
-        #expect(limits["maxRounds"]?.doubleValue == 8)
-        #expect(limits["defaultMaxRounds"]?.doubleValue == 8)
+        #expect(limits["maxRounds"]?.doubleValue == 30)
+        #expect(limits["defaultMaxRounds"]?.doubleValue == 30)
         #expect(limits["validMin"]?.doubleValue == 1)
         #expect(limits["validMax"]?.doubleValue == 32)
         #expect(engine.status == .idle)   // keeps the weakly-held engine alive

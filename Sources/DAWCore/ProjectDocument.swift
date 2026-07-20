@@ -62,12 +62,22 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
     /// Codable IS the disk shape). v1 invariants (volume target only, one lane)
     /// are SANITIZED on load, not trusted from disk.
     public var masterAutomation: [AutomationLane]?
+    /// Persisted copilot conversations (chat-persist design, 2026-07-19).
+    /// Additive and optional; nil when there are none (omit-when-empty — the
+    /// `grooveTemplates` rule, no schemaVersion bump). Decoded LOSSILY: a
+    /// corrupt element is skipped (counted into `copilotChatsDroppedOnLoad`),
+    /// never fatal to the open.
+    public var copilotChats: [CopilotChatDocument]?
+    /// Transient decode fact, NOT coded (no CodingKey): how many chat
+    /// elements failed to decode. The open path surfaces it as a warning (L6).
+    public var copilotChatsDroppedOnLoad: Int = 0
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, savedAt, name, masterVolume, transport, tracks, grooveTemplates, markers
         case tempoMap, meterChanges, tempoMapRevision
         case masterEffects
         case masterAutomation
+        case copilotChats
     }
 
     /// Builds a document from runtime state. `mediaRefs` maps each clip id to
@@ -84,7 +94,8 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         markers: [Marker] = [],
         tempoMapRevision: UInt64 = 0,
         masterEffects: [EffectDescriptor] = [],
-        masterAutomation: [AutomationLane] = []
+        masterAutomation: [AutomationLane] = [],
+        copilotChats: [CopilotChatDocument] = []
     ) {
         self.schemaVersion = ProjectBundle.currentSchemaVersion
         self.savedAt = Date()
@@ -118,6 +129,10 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         // synthesized `encodeIfPresent` omits the key and pre-m15-c saves stay
         // byte-identical (the masterEffects rule).
         self.masterAutomation = masterAutomation.isEmpty ? nil : masterAutomation
+        // Copilot chats (chat-persist design): empty persists as nil → the
+        // key is omitted and a pre-chat project stays byte-identical (the
+        // grooveTemplates rule, no schemaVersion bump).
+        self.copilotChats = copilotChats.isEmpty ? nil : copilotChats
     }
 
     public init(from decoder: any Decoder) throws {
@@ -149,6 +164,14 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         // (canonical point order, clamped beats); v1 invariants sanitize in
         // `runtimeState`.
         masterAutomation = try c.decodeIfPresent([AutomationLane].self, forKey: .masterAutomation)
+        // Additive optional (chat-persist design): a pre-chat project has no
+        // key → nil. Decoded LOSSILY — a corrupt chat ELEMENT is skipped and
+        // counted (one corrupt chat never fails a whole project open); the
+        // count rides the transient (never-coded) `copilotChatsDroppedOnLoad`
+        // so the open path can surface it as a warning (L6).
+        let lossyChats = try c.decodeIfPresent(LossyArray<CopilotChatDocument>.self, forKey: .copilotChats)
+        copilotChats = lossyChats?.elements
+        copilotChatsDroppedOnLoad = lossyChats?.droppedCount ?? 0
     }
 
     /// Restores runtime state, resolving each clip's media reference against
