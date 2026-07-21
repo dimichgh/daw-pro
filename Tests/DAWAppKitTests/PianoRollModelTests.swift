@@ -35,11 +35,37 @@ struct PianoRollModelTests {
         // sixteenth = 0.25.
         #expect(m.snap(beat: 0.30, resolution: .sixteenth) == 0.25)
         #expect(m.snap(beat: 0.40, resolution: .sixteenth) == 0.5)
+        // m21-c finer divisions: thirtySecond = 0.125, sixtyFourth = 0.0625.
+        #expect(m.snap(beat: 0.19, resolution: .thirtySecond) == 0.25)
+        #expect(m.snap(beat: 0.18, resolution: .thirtySecond) == 0.125)
+        #expect(m.snap(beat: 0.10, resolution: .sixtyFourth) == 0.125)
+        #expect(m.snap(beat: 0.08, resolution: .sixtyFourth) == 0.0625)
         // never negative.
         #expect(m.snap(beat: -1, resolution: .beat) == 0)
     }
 
-    // 2. defaultLength per resolution (1 grid cell; 1 beat when off).
+    // 1b. m21-c triplet snap math: 1/8T = 1/3 beat, 1/16T = 1/6 beat — three
+    //    even notes in the straight pair's span, landing back on every beat.
+    @Test("m21-c triplet snaps land on thirds and sixths of a beat")
+    func snapTriplets() {
+        let m = makeModel()
+        #expect(abs(SnapResolution.eighthTriplet.beats! - 1.0 / 3.0) < 1e-12)
+        #expect(abs(SnapResolution.sixteenthTriplet.beats! - 1.0 / 6.0) < 1e-12)
+        // 1/8T: 0.4 → nearest third = 1/3; 0.55 → 2/3; 0.9 → the beat itself.
+        #expect(abs(m.snap(beat: 0.4, resolution: .eighthTriplet) - 1.0 / 3.0) < 1e-9)
+        #expect(abs(m.snap(beat: 0.55, resolution: .eighthTriplet) - 2.0 / 3.0) < 1e-9)
+        #expect(abs(m.snap(beat: 0.9, resolution: .eighthTriplet) - 1.0) < 1e-9)
+        // 1/16T: sixths are 0.1667 / 0.3333 / 0.5 … — 0.1 → 1/6, 0.26 → 2/6
+        // (0.26 sits nearer 0.3333 than 0.1667; a straight 1/4 is NOT on this grid).
+        #expect(abs(m.snap(beat: 0.1, resolution: .sixteenthTriplet) - 1.0 / 6.0) < 1e-9)
+        #expect(abs(m.snap(beat: 0.26, resolution: .sixteenthTriplet) - 2.0 / 6.0) < 1e-9)
+        // A triplet grid still contains every whole beat (k·grid lands on beats).
+        #expect(abs(m.snap(beat: 2.01, resolution: .eighthTriplet) - 2.0) < 1e-9)
+        #expect(abs(m.snap(beat: 3.99, resolution: .sixteenthTriplet) - 4.0) < 1e-9)
+    }
+
+    // 2. defaultLength per resolution (1 grid cell; 1 beat when off) — the ADD
+    //    default only; the resize floor is minResizeLength (m21-c).
     @Test("defaultLength is one grid cell, one beat when snapping is off")
     func defaultLength() {
         let m = makeModel()
@@ -48,6 +74,25 @@ struct PianoRollModelTests {
         #expect(m.defaultLength(for: .beat) == 1)
         #expect(m.defaultLength(for: .eighth) == 0.5)
         #expect(m.defaultLength(for: .sixteenth) == 0.25)
+        #expect(m.defaultLength(for: .thirtySecond) == 0.125)
+        #expect(m.defaultLength(for: .sixtyFourth) == 0.0625)
+        #expect(abs(m.defaultLength(for: .eighthTriplet) - 1.0 / 3.0) < 1e-12)
+        #expect(abs(m.defaultLength(for: .sixteenthTriplet) - 1.0 / 6.0) < 1e-12)
+    }
+
+    // 2b. m21-c: the resize floor is ONE grid step of the current snap — and
+    //    with snap OFF it is the store's own minimum, NOT the 1-beat add
+    //    default (the old conflation made short AI-authored notes viewable but
+    //    not editable).
+    @Test("m21-c minResizeLength is one grid step; snap off floors at the store minimum")
+    func minResizeLength() {
+        let m = makeModel()
+        #expect(m.minResizeLength(for: .off) == MIDINote.minLengthBeats)
+        #expect(m.minResizeLength(for: .bar) == 4)
+        #expect(m.minResizeLength(for: .beat) == 1)
+        #expect(m.minResizeLength(for: .sixteenth) == 0.25)
+        #expect(m.minResizeLength(for: .sixtyFourth) == 0.0625)
+        #expect(abs(m.minResizeLength(for: .sixteenthTriplet) - 1.0 / 6.0) < 1e-12)
     }
 
     // 3. beat <-> x round trip.
@@ -159,7 +204,7 @@ struct PianoRollModelTests {
     }
 
     // 11. Resize snaps and enforces a minimum length.
-    @Test("resizeNote snaps the end and floors length at one grid cell")
+    @Test("resizeNote snaps the end and floors length at one grid step")
     func resizeMinLength() {
         let note = MIDINote(pitch: 60, startBeat: 2, lengthBeats: 2)
         let m = makeModel(notes: [note])
@@ -170,6 +215,32 @@ struct PianoRollModelTests {
         m.resizeNote(id: note.id, toEndBeat: 0.1, resolution: .beat)
         #expect(m.draft[0].lengthBeats == 1)
         #expect(m.draft[0].startBeat == 2)     // start untouched
+        // m21-c: a finer snap shrinks the floor with it — one 1/64 step.
+        m.resizeNote(id: note.id, toEndBeat: 0.1, resolution: .sixtyFourth)
+        #expect(m.draft[0].lengthBeats == 0.0625)
+        // Snap off: the floor is the store's own minimum, not the 1-beat add
+        // default (the old conflation).
+        m.resizeNote(id: note.id, toEndBeat: 0.1, resolution: .off)
+        #expect(m.draft[0].lengthBeats == MIDINote.minLengthBeats)
+    }
+
+    // 11b. m21-c: an AI-authored SHORT note (shorter than any menu grid) stays
+    //     EDITABLE, not merely viewable — the store accepts it, so the editor
+    //     must too: growing works, and shrinking respects the honest floor.
+    @Test("m21-c a short AI-authored note is resizable in both directions")
+    func shortNoteStaysEditable() {
+        let short = MIDINote(pitch: 60, startBeat: 1, lengthBeats: 0.01)
+        let m = makeModel(notes: [short])
+        // Grow it: end 1.5 with snap off → exact length 0.5.
+        m.resizeNote(id: short.id, toEndBeat: 1.5, resolution: .off)
+        #expect(abs(m.draft[0].lengthBeats - 0.5) < 1e-9)
+        // Shrink it back below any menu grid: snap off honors the tiny target.
+        m.resizeNote(id: short.id, toEndBeat: 1.01, resolution: .off)
+        #expect(abs(m.draft[0].lengthBeats - 0.01) < 1e-9)
+        // With a grid ACTIVE the floor is that grid's step — the resize can't
+        // silently make it shorter than one 1/32 cell.
+        m.resizeNote(id: short.id, toEndBeat: 1.001, resolution: .thirtySecond)
+        #expect(m.draft[0].lengthBeats == 0.125)
     }
 
     // 12. Velocity clamp (via MIDINote's 1...127).

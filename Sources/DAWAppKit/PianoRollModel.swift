@@ -5,24 +5,39 @@ import DAWCore
 
 /// Grid snap resolution for the piano roll, in beats. Values are named
 /// musically relative to the quarter-note beat: `bar` = 4 beats, `beat` = 1,
-/// `eighth` = 1/2 beat, `sixteenth` = 1/4 beat. `off` disables snapping. Labels
-/// are beginner-first ("Bar"/"Beat") for the low resolutions, musical fractions
-/// for the fine ones (docs/DESIGN-LANGUAGE.md rule 6).
+/// `eighth` = 1/2 beat, `sixteenth` = 1/4 beat, down to `sixtyFourth` = 1/16
+/// beat, with triplet variants interleaved coarsest→finest (m21-c — the
+/// `QuantizeModel.grids` ordering, so the two pickers read the same way):
+/// `eighthTriplet` = 1/3 beat, `sixteenthTriplet` = 1/6 beat. `off` disables
+/// snapping. Labels are beginner-first ("Bar"/"Beat") for the low resolutions,
+/// musical fractions for the fine ones (docs/DESIGN-LANGUAGE.md rule 6); the
+/// "T" suffix marks a triplet feel. Raw values name the cases for any future
+/// wire/persistence use — additive only, never renamed.
 public enum SnapResolution: String, CaseIterable, Sendable {
     case off
     case bar
     case beat
     case eighth
+    case eighthTriplet
     case sixteenth
+    case sixteenthTriplet
+    case thirtySecond
+    case sixtyFourth
 
-    /// Grid size in beats, or nil when snapping is off.
+    /// Grid size in beats, or nil when snapping is off. Triplets are the
+    /// 2/3-scaled values (three even notes in the straight pair's span —
+    /// the `QuantizeSettings.gridBeats` convention).
     public var beats: Double? {
         switch self {
         case .off: nil
         case .bar: 4
         case .beat: 1
         case .eighth: 0.5
+        case .eighthTriplet: 1.0 / 3.0
         case .sixteenth: 0.25
+        case .sixteenthTriplet: 1.0 / 6.0
+        case .thirtySecond: 0.125
+        case .sixtyFourth: 0.0625
         }
     }
 
@@ -33,7 +48,11 @@ public enum SnapResolution: String, CaseIterable, Sendable {
         case .bar: "Bar"
         case .beat: "Beat"
         case .eighth: "1/8"
+        case .eighthTriplet: "1/8T"
         case .sixteenth: "1/16"
+        case .sixteenthTriplet: "1/16T"
+        case .thirtySecond: "1/32"
+        case .sixtyFourth: "1/64"
         }
     }
 }
@@ -59,8 +78,12 @@ public enum NoteZone: Sendable, Equatable {
 public final class PianoRollModel {
     // MARK: Layout constants
 
-    /// Horizontal scale — no zoom this cycle (docs/DESIGN-LANGUAGE.md defers it).
-    public static let defaultPixelsPerBeat: CGFloat = 32
+    /// Default horizontal scale — the roll's historical fixed 32 pt/beat. The
+    /// LIVE scale is zoomable (m21-c): the view feeds `pixelsPerBeat` from the
+    /// persisted `PanelLayoutStore.pianoRollPPB` slot, clamped by
+    /// `PianoRollZoom` (the `ArrangeZoom` sibling — and the nonisolated home
+    /// of this constant).
+    public static let defaultPixelsPerBeat: CGFloat = PianoRollZoom.defaultPixelsPerBeat
     /// One semitone row's height.
     public static let defaultRowHeight: CGFloat = 14
     /// MIDI pitches 0...127 → 128 rows. `nonisolated` so the pitch↔y affine mapping
@@ -225,10 +248,22 @@ public final class PianoRollModel {
         return max(0, (beat / grid).rounded() * grid)
     }
 
-    /// Length a freshly-added note gets, and the floor a resize can't go below:
-    /// one grid cell, or 1 beat when snapping is off.
+    /// Length a freshly-added note gets: one grid cell, or 1 beat when snapping
+    /// is off. This is the ADD default only — the resize floor is
+    /// `minResizeLength` (m21-c untangled the two: the old shared value made a
+    /// snap-off resize bottom out at a full beat, so an AI-authored 1/64 note
+    /// was viewable but not editable).
     public func defaultLength(for resolution: SnapResolution) -> Double {
         resolution.beats ?? 1.0
+    }
+
+    /// The floor a resize can't go below: ONE grid step of the current snap, or
+    /// the store's own `MIDINote.minLengthBeats` when snapping is off — the
+    /// honest floor (m21-c): the store accepts far shorter notes than the old
+    /// `defaultLength` floor implied, so short AI-authored notes must stay
+    /// resizable, not merely viewable.
+    public func minResizeLength(for resolution: SnapResolution) -> Double {
+        resolution.beats ?? MIDINote.minLengthBeats
     }
 
     // MARK: - Hit testing
@@ -292,12 +327,13 @@ public final class PianoRollModel {
     }
 
     /// Resizes a note's right edge to a snapped end beat. Length can't fall
-    /// below one grid cell (`defaultLength`); the start is untouched.
+    /// below one grid step of the current snap (`minResizeLength` — with snap
+    /// off, the store's `MIDINote.minLengthBeats`); the start is untouched.
     public func resizeNote(id: UUID, toEndBeat endBeat: Double, resolution: SnapResolution) {
         guard let index = draft.firstIndex(where: { $0.id == id }) else { return }
         let note = draft[index]
         let snappedEnd = snap(beat: endBeat, resolution: resolution)
-        let minLength = defaultLength(for: resolution)
+        let minLength = minResizeLength(for: resolution)
         let length = max(minLength, snappedEnd - note.startBeat)
         draft[index] = MIDINote(
             id: id, pitch: note.pitch, velocity: note.velocity,

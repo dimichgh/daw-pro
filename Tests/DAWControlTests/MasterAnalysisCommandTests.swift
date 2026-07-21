@@ -23,7 +23,7 @@ struct MasterAnalysisCommandTests {
         #expect(CommandRouter.allCommands.contains("mixer.masterAnalysis"))
     }
 
-    @Test("headless: wire shape is {bands[24], levelDB, peakDB, centroidHz, flux}, all at floors")
+    @Test("headless: wire shape is {bands[24], levelDB, peakDB, centroidHz, flux, correlation, width, balance}, all at floors")
     func headlessFloorShape() async throws {
         let (router, _) = makeRouter()
         let response = await router.handle(ControlRequest(
@@ -43,6 +43,12 @@ struct MasterAnalysisCommandTests {
                 == Double(MasterAnalysisSnapshot.floorDB))
         #expect(response.result?["centroidHz"]?.doubleValue == 0)
         #expect(response.result?["flux"]?.doubleValue == 0)
+        // m22-d additive stereo keys, at their DOCUMENTED floors:
+        // correlation +1 (silence holds nothing out of phase — never a fake
+        // 0), width 0 (mono), balance 0 (centered).
+        #expect(response.result?["correlation"]?.doubleValue == 1)
+        #expect(response.result?["width"]?.doubleValue == 0)
+        #expect(response.result?["balance"]?.doubleValue == 0)
     }
 
     @Test("an engine's snapshot threads through the store onto the wire")
@@ -53,7 +59,8 @@ struct MasterAnalysisCommandTests {
         bands[12] = -6.5
         engine.analysis = MasterAnalysisSnapshot(
             bands: bands, levelDB: -12.25, peakDB: -6.5,
-            centroidHz: 1_024, flux: 0.4375)
+            centroidHz: 1_024, flux: 0.4375,
+            correlation: -0.5, width: 0.75, balance: 0.125)
         store.engine = engine
 
         let response = await router.handle(ControlRequest(
@@ -66,6 +73,29 @@ struct MasterAnalysisCommandTests {
         #expect(response.result?["peakDB"]?.doubleValue == -6.5)
         #expect(response.result?["centroidHz"]?.doubleValue == 1_024)
         #expect(response.result?["flux"]?.doubleValue == 0.4375)
+        // m22-d additive stereo keys ride the SAME response.
+        #expect(response.result?["correlation"]?.doubleValue == -0.5)
+        #expect(response.result?["width"]?.doubleValue == 0.75)
+        #expect(response.result?["balance"]?.doubleValue == 0.125)
+    }
+
+    @Test("pre-m22-d call sites (no stereo args) publish the stereo floors — additive default")
+    func defaultedStereoFieldsReadFloors() async throws {
+        let (router, store) = makeRouter()
+        let engine = FakeAnalysisEngine()
+        // The OLD five-field constructor shape: new fields default to the
+        // stereo floors, so an engine predating m22-d stays wire-honest.
+        engine.analysis = MasterAnalysisSnapshot(
+            bands: [Float](repeating: -40, count: MasterAnalysisSnapshot.bandCount),
+            levelDB: -12, peakDB: -6, centroidHz: 500, flux: 0.5)
+        store.engine = engine
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "mixer.masterAnalysis"))
+        #expect(response.ok)
+        #expect(response.result?["correlation"]?.doubleValue == 1)
+        #expect(response.result?["width"]?.doubleValue == 0)
+        #expect(response.result?["balance"]?.doubleValue == 0)
     }
 }
 

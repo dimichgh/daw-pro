@@ -452,6 +452,21 @@ public enum CopilotToolCatalog {
             ], required: ["trackId", "clipId", "newStartBeat", "newLengthBeats"])
         ),
         CopilotTool(
+            command: "clip.fitToContent",
+            description: "Snap a clip's length to exactly match its content in one call — a MIDI clip ends at its last note, an audio clip at the end of its source recording. Prefer this over clip.trim when the goal is \"make the clip as long as what's inside it\" (no length math needed); use clip.trim to cut to an arbitrary window. The clip's start never moves. Returns the updated clip plus a changed flag (false when it already fit exactly).",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track that owns the clip, from project.snapshot.")),
+                ("clipId", stringSchema("Id of the clip to fit, from project.snapshot.")),
+            ], required: ["trackId", "clipId"])
+        ),
+        CopilotTool(
+            command: "clip.analyzeAudio",
+            description: "Before composing or arranging over an imported song, call this FIRST to measure its key, tempo, and spectral balance instead of guessing. Read-only and cached: key.tonal:false and a null tempo.bpm are honest answers, not failures (trust them over a shaky guess), and a stretched/pitched clip also gets a derived playback block for what it actually sounds like now. Audio clips only.",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the AUDIO clip to analyze, from project.snapshot.")),
+            ], required: ["clipId"])
+        ),
+        CopilotTool(
             command: "clip.split",
             description: "Cut a clip into two independent clips at a timeline beat that must fall STRICTLY inside the clip; the left half keeps the original clip's id.",
             schema: schemaObject([
@@ -600,7 +615,7 @@ public enum CopilotToolCatalog {
             ], required: ["trackId", "groupId"])
         ),
 
-        // MARK: mixer (1)
+        // MARK: mixer (2)
 
         CopilotTool(
             command: "mixer.setMasterVolume",
@@ -610,6 +625,14 @@ public enum CopilotToolCatalog {
                     "Linear master gain, 0-2, where 1 = unity gain (0 dB). This is linear gain, not decibels.",
                     minimum: 0, maximum: 2)),
             ], required: ["volume"])
+        ),
+        CopilotTool(
+            command: "mixer.liveLoudness",
+            description: "Read the LIVE loudness meter on the master output: momentary (400 ms) and short-term (3 s) LUFS, their maxima, running gated integrated LUFS, loudness range (LRA, LU), true peak (dBTP), DC offset, and crest factor — everything measured on what is actually playing right now, after the master fader. Missing fields mean not enough audio has been analyzed yet (momentary needs 0.4 s, short-term 3 s) — that absence is the honest answer, never zero. The measurement keeps running across transport stop/start; pass reset:true to start it over (e.g. right before playing a section you want measured on its own). For a mastering-grade verdict on the FINISHED mix, render.measureLoudness on a bounce is the ground truth; this meter is for watching loudness while the session plays.",
+            schema: schemaObject([
+                ("reset", booleanSchema(
+                    "Optional, default false. true = restart the running measurement (integrated/LRA/peaks) and return the fresh, empty snapshot.")),
+            ])
         ),
 
         // MARK: fx (5, m13-d)
@@ -660,6 +683,34 @@ public enum CopilotToolCatalog {
                 ("effectId", stringSchema("Id of the compressor or gate effect to key, from fx.add's result or project.snapshot.")),
                 ("sourceTrackId", stringSchema("Id of the audio track to key FROM (e.g. the kick). Omit or pass null to clear the key.")),
             ], required: ["trackId", "effectId"])
+        ),
+
+        // MARK: hosted-AU parameters (2) — m21-b2: the surface m21-b built,
+        // taught here so the in-app copilot can finally reach third-party
+        // plugin knobs (the user's original "no access to plugin values" gap).
+
+        CopilotTool(
+            command: "au.describeParams",
+            description: "List the live parameters of a HOSTED third-party Audio Unit (an AU instrument or an AU insert effect) — name, unit, range, and current value for every knob the plugin publishes. This is how you read and then adjust a plugin like Dexed or Surge: describe first, then au.setParam by address. Pass trackId alone for the track's AU instrument, or trackId + effectId for an AU insert. Addresses are opaque per-instance decimal strings — never guess one and never reuse one across instances; always take them from this call's result. Big synths page: if `truncated` is true, call again with `offset` to walk the rest. A healthy plugin that keeps its state private answers hasParameterTree:false with no parameters — that is not an error; tell the user to open the plugin's own window (plugin.openUI) instead. Built-in effects use fx.describe/fx.setParam, and the built-in Poly Synth uses track.setInstrument — this command is only for hosted Audio Units.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track hosting the AU, from project.snapshot. Omit effectId to target the track's AU instrument.")),
+                ("effectId", stringSchema("Id of an AU insert effect on that track, from fx.add's result or project.snapshot. Omit for the track's AU instrument.")),
+                ("offset", integerSchema("Paging start index into the parameter list (default 0). Use with `truncated` to walk large trees.", minimum: 0)),
+                ("maxParams", integerSchema("Maximum parameters per page (default 512).", minimum: 1, maximum: 4096)),
+                ("addresses", arraySchema(
+                    "Exact-get filter: return only these parameter addresses (decimal strings from a previous describe). Mutually exclusive with offset/maxParams; unknown addresses are reported back, not errored.",
+                    items: stringSchema("A parameter address string from a previous au.describeParams result."))),
+            ], required: ["trackId"])
+        ),
+        CopilotTool(
+            command: "au.setParam",
+            description: "Set one parameter of a hosted third-party Audio Unit by address — the way to turn a plugin's knob (a synth's filter cutoff, a hosted delay's time). Call au.describeParams first and use the exact `address` string it returned for this instance. Out-of-range values clamp to the parameter's range, and the response echoes the value the plugin ACTUALLY accepted (some plugins quantize) — trust the echo, not what you sent. Applies live without interrupting playback. Not undoable (matches edits made in the plugin's own window); the value persists with the project via the plugin's saved state.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track hosting the AU, from project.snapshot. Omit effectId to target the track's AU instrument.")),
+                ("effectId", stringSchema("Id of an AU insert effect on that track. Omit for the track's AU instrument.")),
+                ("address", stringSchema("The parameter's address — the exact decimal string from au.describeParams for THIS instance. Never guessed, never reused across instances.")),
+                ("value", numberSchema("New value; out-of-range values clamp to the parameter's [minValue, maxValue] from au.describeParams.")),
+            ], required: ["trackId", "address", "value"])
         ),
 
         // MARK: render (2)

@@ -24,7 +24,8 @@ import Foundation
 /// All buffers (delay lines, deque) are preallocated in `prepare` on the
 /// main actor. Render-path contract: `process()`/`reset()` allocate nothing,
 /// take no locks, log nothing, touch no ObjC.
-final class LimiterEffect: EffectRendering, @unchecked Sendable {
+final class LimiterEffect: EffectRendering, GainReductionReporting,
+                           @unchecked Sendable {
     private static let maxChannels = 8
 
     /// Immutable box crossing main actor → render thread. POD payload.
@@ -61,6 +62,17 @@ final class LimiterEffect: EffectRendering, @unchecked Sendable {
     private var ceilingLinear: Float = 0.891250938  // −1 dB
     private var releaseCoeff: Float = 0
     private var envelope: Float = 1
+    /// GR meter (m22-e): held MINIMUM linear gain (1 = untouched). The
+    /// envelope lives in the linear domain here, so the −20 dB/s release is
+    /// a per-sample MULTIPLY by `grRisePerSample` (multiplicative in linear
+    /// ≡ linear in dB — the same peakDB ballistic as the compressor's
+    /// subtraction). Render-thread-only; published via `grSlot` as positive
+    /// dB, ONE log10 per quantum (never per sample).
+    private var grHeldLinear: Float = 1
+    private var grRisePerSample: Float = 1
+    /// Render → control-plane publish slot (`Float.bitPattern`), one atomic
+    /// store per quantum. See `GainReductionMeter`.
+    private let grSlot: UnsafeMutablePointer<daw_atomic_u32>
     /// Automation overlay (M4 vii-c) — render-thread-only knob/lane split.
     private var overlay: AutomationParamOverlay<LimiterParams>
 
@@ -72,6 +84,8 @@ final class LimiterEffect: EffectRendering, @unchecked Sendable {
     init(params: LimiterParams = LimiterParams()) {
         paramsSlot = .allocate(capacity: 1)
         daw_atomic_ptr_init(paramsSlot)
+        grSlot = .allocate(capacity: 1)
+        daw_atomic_u32_store(grSlot, Float(0).bitPattern)
         lastAppliedParams = params
         overlay = AutomationParamOverlay(base: params)
         let snapshot = ParamSnapshot(generation: 0, params: params)
@@ -84,10 +98,17 @@ final class LimiterEffect: EffectRendering, @unchecked Sendable {
             Unmanaged<ParamSnapshot>.fromOpaque(raw).release()
         }
         paramsSlot.deallocate()
+        grSlot.deallocate()
         delayLine?.deallocate()
         dequeValues?.deallocate()
         dequePositions?.deallocate()
     }
+
+    // MARK: - GainReductionReporting (m22-e)
+
+    /// Held-peak gain reduction, POSITIVE dB (0 = untouched), −20 dB/s
+    /// release. One atomic load — safe from any thread.
+    var gainReductionDb: Float { Float(bitPattern: daw_atomic_u32_load(grSlot)) }
 
     // MARK: - Main-actor surface
 
@@ -112,6 +133,7 @@ final class LimiterEffect: EffectRendering, @unchecked Sendable {
     func prepare(sampleRate: Double, maxFramesPerQuantum: Int, channelCount: Int) {
         self.sampleRate = sampleRate
         preparedChannels = min(channelCount, Self.maxChannels)
+        grRisePerSample = GainReductionMeter.risePerSample(sampleRate: sampleRate)
         delaySamples = max(1, Int((LimiterParams.lookaheadSeconds * sampleRate).rounded()))
 
         // (Re)allocate the delay lines and deque — main actor, pre-render.
@@ -151,6 +173,8 @@ final class LimiterEffect: EffectRendering, @unchecked Sendable {
         dequeTail = 0
         sampleCounter = 0
         envelope = 1
+        grHeldLinear = 1
+        GainReductionMeter.publish(grSlot, db: 0)  // atomic store — RT-safe
     }
 
     /// Adopts a newly published main-actor snapshot (borrowed — retire bin
@@ -212,6 +236,8 @@ final class LimiterEffect: EffectRendering, @unchecked Sendable {
 
         let window = Int64(delaySamples)  // window spans samples n−D … n
         var env = envelope
+        var grHeld = grHeldLinear
+        let grRise = grRisePerSample
         var writeIndex = delayWriteIndex
         var n = sampleCounter
         for frame in 0..<minFrames {
@@ -240,6 +266,12 @@ final class LimiterEffect: EffectRendering, @unchecked Sendable {
             } else {
                 env = target + (env - target) * releaseCoeff
             }
+            // GR meter (m22-e): held minimum of the applied gain — instant
+            // attack downward (a one-quantum clamp always registers), then a
+            // multiplicative +20 dB/s rise back toward unity. One multiply +
+            // two mins per sample; the dB conversion runs once per quantum.
+            let grRisen = grHeld * grRise
+            grHeld = min(env, grRisen < 1 ? grRisen : 1)
 
             // Swap through the delay line and apply the gain to the DELAYED
             // sample (which the window still covers → |out| ≤ ceiling).
@@ -255,7 +287,13 @@ final class LimiterEffect: EffectRendering, @unchecked Sendable {
             n += 1
         }
         envelope = env
+        grHeldLinear = grHeld
         delayWriteIndex = writeIndex
         sampleCounter = n
+        // Publish positive dB of reduction: pure libm log10 once per
+        // quantum, floored at 10^(−80/20) so the value caps at 80 dB.
+        GainReductionMeter.publish(
+            grSlot,
+            db: -20.0 * log10f(max(grHeld, GainReductionMeter.floorLinear)))
     }
 }

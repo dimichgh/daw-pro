@@ -46,6 +46,8 @@ public final class PanelLayoutStore {
     /// app-sticky preference mechanism as the other dimensions (never project
     /// data, never undoable, never in the wire snapshot).
     public static let arrangePPBKey = "arrangePPB"
+    /// Piano-roll horizontal zoom (m21-c) — the `arrangePPB` sibling slot.
+    public static let pianoRollPPBKey = "pianoRollPPB"
 
     // MARK: - Defaults (today's hardcoded values — the pre-m10-d look)
 
@@ -57,6 +59,8 @@ public final class PanelLayoutStore {
     public static let defaultRowHeight: CGFloat = 34
     /// Arrange pixels-per-beat (m17-b) — the historical fixed 16 pt/beat scale.
     public static let defaultArrangePPB: CGFloat = ArrangeZoom.defaultPixelsPerBeat
+    /// Piano-roll pixels-per-beat (m21-c) — the historical fixed 32 pt/beat.
+    public static let defaultPianoRollPPB: CGFloat = PianoRollZoom.defaultPixelsPerBeat
 
     // MARK: - Clamp ranges
     //
@@ -85,6 +89,8 @@ public final class PanelLayoutStore {
     public static let rowHeightRange: ClosedRange<CGFloat> = 24...64
     /// Arrange zoom bounds (m17-b) — one source of truth in `ArrangeZoom`.
     public static let arrangePPBRange: ClosedRange<CGFloat> = ArrangeZoom.pixelsPerBeatRange
+    /// Piano-roll zoom bounds (m21-c) — one source of truth in `PianoRollZoom`.
+    public static let pianoRollPPBRange: ClosedRange<CGFloat> = PianoRollZoom.pixelsPerBeatRange
 
     // MARK: - Live values (observed)
 
@@ -94,6 +100,10 @@ public final class PanelLayoutStore {
     /// Arrange pixels-per-beat (m17-b) — read by every beat↔x mapping surface in
     /// the arrange workspace (ruler block, lanes, playhead, clip gestures…).
     public private(set) var arrangePPB: CGFloat
+    /// Piano-roll pixels-per-beat (m21-c) — the roll's edit models re-read it,
+    /// so all three bands (note grid, velocity lane, controller strip) rescale
+    /// off the ONE value.
+    public private(set) var pianoRollPPB: CGFloat
 
     @ObservationIgnored private let backing: PanelLayoutBacking
 
@@ -111,6 +121,8 @@ public final class PanelLayoutStore {
                                      default: Self.defaultRowHeight, range: Self.rowHeightRange)
         self.arrangePPB = Self.loaded(backing, Self.arrangePPBKey,
                                       default: Self.defaultArrangePPB, range: Self.arrangePPBRange)
+        self.pianoRollPPB = Self.loaded(backing, Self.pianoRollPPBKey,
+                                        default: Self.defaultPianoRollPPB, range: Self.pianoRollPPBRange)
     }
 
     private static func loaded(_ backing: PanelLayoutBacking, _ key: String,
@@ -143,12 +155,21 @@ public final class PanelLayoutStore {
         backing.storeValue(Double(arrangePPB), forKey: Self.arrangePPBKey)
     }
 
+    /// Sets the piano-roll horizontal zoom (m21-c). Clamped like every
+    /// dimension; the roll's plain SwiftUI scroller keeps its own offset, so
+    /// no anchor recompute rides along (unlike `setArrangePPB`'s callers).
+    public func setPianoRollPPB(_ value: CGFloat) {
+        pianoRollPPB = value.clamped(to: Self.pianoRollPPBRange)
+        backing.storeValue(Double(pianoRollPPB), forKey: Self.pianoRollPPBKey)
+    }
+
     /// Restores every dimension to its default (and persists the reset).
     public func reset() {
         setSidebarWidth(Self.defaultSidebarWidth)
         setEditorFraction(Self.defaultEditorFraction)
         setRowHeight(Self.defaultRowHeight)
         setArrangePPB(Self.defaultArrangePPB)
+        setPianoRollPPB(Self.defaultPianoRollPPB)
     }
 }
 

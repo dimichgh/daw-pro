@@ -1603,17 +1603,29 @@ const fxKindSchema = z
     "audioUnit",
   ])
   .describe(
-    "Effect kind. `gain` is a simple linear gain stage. `eq` is a 4-band parametric " +
-      "equalizer (low shelf, two peaking/bell bands, high shelf) — call fx_describe to see " +
-      "its exact parameter names, e.g. `peak1Freq`/`peak1GainDb`/`peak1Q` for the first " +
-      "peaking band (the second peaking band follows the same naming pattern). " +
+    "Effect kind. `gain` is a simple linear gain stage. `eq` is a parametric " +
+      "equalizer (low shelf, two peaking/bell bands, high shelf, plus optional high-pass " +
+      "and low-pass filters at 12 or 24 dB/oct, shelf Q, and per-band bypass) — call " +
+      "fx_describe to see its exact parameter names and each one's teaching `note`, e.g. " +
+      "`peak1Freq`/`peak1GainDb`/`peak1Q` for the first peaking band (the second peaking " +
+      "band follows the same naming pattern), `highPassFreq`/`highPassSlopeDbPerOct`/" +
+      "`highPassEnabled` for the high-pass (off until you set its frequency or enable it). " +
       "`compressor` is a soft-knee, stereo-linked dynamics processor: `thresholdDb`, " +
       "`ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`. `limiter` is a lookahead " +
       "brick-wall limiter: `ceilingDb`, `releaseMs` — it adds 5 ms of processing latency, " +
       "reported per-effect as `latencySamples` in project_snapshot's `effects` array. " +
+      "The dynamics kinds (compressor/limiter/gate) also report a live `gainReductionDb` " +
+      "meter there (positive dB, held-peak, −20 dB/s release) — poll project_snapshot " +
+      "during playback to verify a compressor is actually working. " +
       "`reverb` is a Freeverb-style room simulation: `roomSize`, `damping`, `mix`, " +
       "`preDelayMs`, `width`. `delay` is a stereo echo: `timeMs`, `feedback`, `mix`, " +
-      "`pingPong` (0 or 1 — 1 alternates repeats left/right), `highCutHz`. `saturator` " +
+      "`pingPong` (0 or 1 — 1 alternates repeats left/right), `highCutHz`, plus tempo " +
+      "sync — `sync` (0 or 1; 1 derives the effective time from the project tempo, " +
+      "tracking tempo changes, while `timeMs` stays stored as the unsync fallback) and " +
+      "`division` (the synced note length as its duration in BEATS, snapped to the " +
+      "nearest of 1/1…1/32 straight/dotted/triplet — e.g. 1 = 1/4, 0.75 = 1/8 dotted, " +
+      "0.333 = 1/8 triplet; the snapshot echoes a human `divisionLabel` like \"1/8d\"). " +
+      "`saturator` " +
       "is a tanh-based drive/color stage: `driveDb`, `mix`, `outputDb`. `gate` is a " +
       "noise gate: `thresholdDb`, `attackMs`, `holdMs`, `releaseMs`. `chorus` is a " +
       "2-voice modulated thickener: `rateHz`, `depthMs`, `mix`. `audioUnit` hosts an " +
@@ -1837,6 +1849,147 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("plugin.listOpenUIs"))
 );
 
+// ---------------------------------------------------------------------------
+// Hosted Audio Unit parameters (design-au-parameter-surface) — read/write the
+// live AUParameterTree of a hosted AU instrument or effect, for turning a
+// plugin's knobs without opening its window.
+// ---------------------------------------------------------------------------
+
+const auTrackIdSchema = z
+  .string()
+  .min(1)
+  .describe(
+    "Id of the track hosting the Audio Unit, from project_snapshot — targets its AU " +
+      "INSTRUMENT (omit effectId) or one of its AU insert effects (pass effectId). Not " +
+      "\"master\": the master chain hosts built-in effects only, never Audio Units."
+  );
+
+const auEffectIdSchema = z
+  .string()
+  .min(1)
+  .optional()
+  .describe(
+    "Id of the AU insert effect on that track, from fx_add's result or " +
+      "project_snapshot's per-track `effects`. Omit to target the track's own AU " +
+      "INSTRUMENT instead."
+  );
+
+server.registerTool(
+  "au_describe_params",
+  {
+    title: "Read a hosted Audio Unit's live parameters",
+    description:
+      "Read the live parameter tree of a hosted Audio Unit instrument or effect — " +
+      "the FIRST step of the describe-then-set workflow: call this to discover a " +
+      "plugin's parameters, then pass one of the returned `address` strings to " +
+      "au_set_param to change it. Targets a track's AU INSTRUMENT (omit effectId) or " +
+      "one of its AU insert effects (pass effectId, from fx_add's result or " +
+      "project_snapshot). Every `address` is an OPAQUE, per-instance decimal string " +
+      "(a UInt64 as text — JSON numbers lose precision above 2^53): copy it VERBATIM " +
+      "from this tool's own output, never guess one, and never reuse one captured " +
+      "from a different plugin instance (removing and re-adding the same AU can " +
+      "renumber its whole tree). Large trees page: by default this returns up to 512 " +
+      "parameters starting at `offset` 0 — check the response's `truncated` flag and " +
+      "`totalCount` and re-call with a higher `offset` to walk the rest, or pass " +
+      "`addresses` as an exact-get filter instead (mutually exclusive with " +
+      "offset/maxParams; misses land in the response's `unknownAddresses`, never an " +
+      "error). `hasParameterTree:false` (with `totalCount:0`) is a SUCCESSFUL answer " +
+      "for an AU that simply publishes no parameter tree (an opaque-state plugin, " +
+      "healthy but nothing to page or set here) — use plugin_open_ui to edit it " +
+      "visually instead. Returns {trackId, effectId?, componentName, " +
+      "hasParameterTree, totalCount, offset, truncated, parameters: [{address, " +
+      "identifier, displayName, keyPath, unit, unitName, minValue, maxValue, value, " +
+      "writable, readable, valueStrings}], unknownAddresses}.",
+    inputSchema: {
+      trackId: auTrackIdSchema,
+      effectId: auEffectIdSchema,
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe(
+          "Zero-based index into the AU's flat parameter list to start this page " +
+            "from, for paging through a large tree. Default 0. Mutually exclusive " +
+            "with `addresses`."
+        ),
+      maxParams: z
+        .number()
+        .int()
+        .min(1)
+        .max(4096)
+        .optional()
+        .describe(
+          "Max number of parameters to return in this page. Default 512, silently " +
+            "clamped into 1-4096. Compare against the response's `totalCount` and " +
+            "`truncated` to know whether to page further. Mutually exclusive with " +
+            "`addresses`."
+        ),
+      addresses: z
+        .array(z.string().min(1))
+        .optional()
+        .describe(
+          "Exact-get filter: return only these specific parameter addresses " +
+            "(decimal strings from a prior au_describe_params call) instead of " +
+            "paging the whole tree. Mutually exclusive with offset/maxParams. Any " +
+            "address not found in the AU's tree is reported in the response's " +
+            "`unknownAddresses` array rather than erroring."
+        ),
+    },
+  },
+  async ({ trackId, effectId, offset, maxParams, addresses }) =>
+    toToolResult(() =>
+      bridge.send("au.describeParams", { trackId, effectId, offset, maxParams, addresses })
+    )
+);
+
+registerTool(
+  "au_set_param",
+  {
+    title: "Turn a hosted Audio Unit's knob",
+    description:
+      "Set ONE parameter of a hosted Audio Unit instrument or effect by its " +
+      "`address` (from au_describe_params — call that first; addresses are opaque, " +
+      "per-instance decimal strings that must never be guessed or reused across a " +
+      "different plugin instance). Targets a track's AU INSTRUMENT (omit effectId) " +
+      "or one of its AU insert effects (pass effectId). This is how you turn a " +
+      "hosted plugin's knob without opening its window: the edit applies LIVE, " +
+      "audible immediately, never interrupting or glitching playback. Out-of-range " +
+      "`value`s clamp SILENTLY to the parameter's [minValue, maxValue] (the " +
+      "fx_set_param precedent) rather than erroring — and because some AUs quantize " +
+      "or step their values, the response's `parameter.value` is always the " +
+      "plugin's ACTUAL post-set READ-BACK, not an echo of what you asked for, so " +
+      "treat it as the truth. Setting a read-only parameter, an unknown address, or " +
+      "a non-finite value is a readable error naming the problem; an AU with no " +
+      "parameter tree at all (`hasParameterTree:false` from au_describe_params) " +
+      "can't be set this way — use plugin_open_ui instead. Deliberately no undo " +
+      "step (parity with edits made in the plugin's own window) — the value " +
+      "persists via the project's normal save. Returns {trackId, effectId?, " +
+      "parameter: {…the refreshed parameter, same shape as au_describe_params…}}.",
+    inputSchema: {
+      trackId: auTrackIdSchema,
+      effectId: auEffectIdSchema,
+      address: z
+        .string()
+        .min(1)
+        .describe(
+          "The parameter's address, EXACTLY as returned by au_describe_params's " +
+            "`address` field (a decimal-string UInt64). Opaque and per-instance — " +
+            "never guess one or reuse one captured from a different plugin instance."
+        ),
+      value: z
+        .number()
+        .describe(
+          "New value for the parameter. Out-of-range values clamp silently to the " +
+            "parameter's [minValue, maxValue] (see au_describe_params); NaN/Infinity " +
+            "are rejected with a readable error."
+        ),
+    },
+  },
+  async ({ trackId, effectId, address, value }) =>
+    toToolResult(() => bridge.send("au.setParam", { trackId, effectId, address, value }))
+);
+
 registerTool(
   "fx_remove",
   {
@@ -2010,13 +2163,20 @@ server.registerTool(
       "Look up the parameter schema for one or every available effect kind — the " +
       "reference for fx_add's `params` and fx_set_param's `name`/`value`. Returns, per " +
       "kind, its parameter list as `{name, min, max, default, unit}` (`unit` is a short " +
-      "human label, e.g. \"linear gain\", \"dB\", \"Hz\", \"ms\", \"seconds\"). Omit `kind` " +
+      "human label, e.g. \"linear gain\", \"dB\", \"Hz\", \"ms\", \"seconds\"), plus a " +
+      "teaching `note` on parameters whose bare range hides semantics (the eq's " +
+      "nil-means-off high/low-pass, 12/24 slope snapping, 0/1 per-band bypass). Omit `kind` " +
       "to list every available kind at once. Available kinds: `gain` (simple linear " +
-      "gain stage), `eq` (4-band parametric — low shelf, two peaking bands, high shelf), " +
+      "gain stage), `eq` (parametric — low shelf, two peaking bands, high shelf, plus " +
+      "optional high/low-pass filters, shelf Q, and per-band `*Enabled` bypass), " +
       "`compressor` (soft-knee, stereo-linked dynamics), `limiter` (lookahead " +
       "brick-wall, adds 5 ms latency — see project_snapshot's per-effect `latencySamples`), " +
       "`reverb` (Freeverb-style room — roomSize/damping/mix/preDelayMs/width), `delay` " +
-      "(stereo echo — timeMs/feedback/mix/pingPong/highCutHz), `saturator` (tanh drive " +
+      "(stereo echo — timeMs/feedback/mix/pingPong/highCutHz, plus m22-f tempo sync: " +
+      "`sync` 0/1 and `division` in beats, snapped to 1/1…1/32 straight/dotted/triplet " +
+      "— their `note`s teach the exact semantics; when synced the effective time is " +
+      "division × 60000 / tempo BPM and follows tempo changes, `timeMs` staying the " +
+      "unsync fallback), `saturator` (tanh drive " +
       "color — driveDb/mix/outputDb), `gate` (noise gate — thresholdDb/attackMs/holdMs/" +
       "releaseMs), and `chorus` (2-voice modulated thickener — rateHz/depthMs/mix).",
     inputSchema: {
@@ -2317,6 +2477,31 @@ registerTool(
   },
   async ({ trackId, clipId, newStartBeat, newLengthBeats }) =>
     toToolResult(() => bridge.send("clip.trim", { trackId, clipId, newStartBeat, newLengthBeats }))
+);
+
+registerTool(
+  "clip_fit_to_content",
+  {
+    title: "Fit a clip's length to its content",
+    description:
+      "Snap a clip's length to exactly match its content in ONE call — no length " +
+      "math needed. A MIDI clip's trailing edge moves to the END OF ITS LAST NOTE " +
+      "(clip-relative); an audio clip's to the end of its source recording (the " +
+      "file's remaining duration from the clip's current playback offset, tempo- " +
+      "and stretch-aware — never longer than the source). The clip's START never " +
+      "moves. Prefer this over clip_trim when the goal is \"make the clip the size " +
+      "of what's inside it\" (e.g. an AI-authored clip with an odd length); use " +
+      "clip_trim to cut to an arbitrary window. An empty MIDI clip is a safe no-op. " +
+      "Comp/take-group members are rejected readably. Returns the updated clip plus " +
+      "a `changed` flag — false when the clip already fit its content exactly " +
+      "(nothing was edited, so there is no undo step).",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the track that owns the clip, from project_snapshot."),
+      clipId: z.string().uuid().describe("Id of the clip to fit, from project_snapshot."),
+    },
+  },
+  async ({ trackId, clipId }) =>
+    toToolResult(() => bridge.send("clip.fitToContent", { trackId, clipId }))
 );
 
 registerTool(
@@ -2800,6 +2985,49 @@ server.registerTool(
   },
   async ({ clipId, sensitivity }) =>
     toToolResult(() => bridge.send("clip.detectTransients", { clipId, sensitivity }))
+);
+
+server.registerTool(
+  "clip_analyze_audio",
+  {
+    title: "Analyze an audio clip's key, tempo, and spectral balance",
+    description:
+      "THE FIRST MOVE after importing a full song, before composing or arranging " +
+      "anything to match it: measure the imported audio clip's key, tempo, and " +
+      "spectral balance instead of guessing. Read-only — analyzes the clip's CURRENT " +
+      "SOURCE WINDOW (the file region the clip currently plays), content-cached by " +
+      "(file, window), so a repeat call on the same clip is instant. Returns " +
+      "`analysis.key` {tonic, mode, confidence 0..1, tonal, alternatives (up to 3)} " +
+      "from a chroma + Krumhansl-Kessler correlation — honestly probabilistic: about " +
+      "70% exact on real commercial mixes, about 90% within the top-3 alternatives, so " +
+      "treat a modest confidence or a runner-up in `alternatives` as a real answer, not " +
+      "noise. `tonal:false` means the material read as percussion-only or atonal — do " +
+      "NOT trust `tonic`/`mode` when that's set, even though a ranked guess is still " +
+      "returned. `analysis.tempo` {bpm, confidence, steady, beatOffsetSeconds, " +
+      "alternates} folds the estimate into the practical 70-180 BPM range (a true 60 " +
+      "BPM pulse reports bpm:120 with 60 listed in `alternates` — treat such a pair as " +
+      "one tempo at two framings; half/double readings are included the same way). " +
+      "`bpm` is `null` when there is no periodic evidence or the analyzed window is " +
+      "under 6 seconds — that null IS the honest answer (nothing to lock a project " +
+      "tempo to), not a failed call. `steady:false` means the pulse drifts (rubato, " +
+      "free time, or a tempo change partway through), so no single fixed project tempo " +
+      "will track the whole clip. `analysis.spectral` gives the 24-band (40 Hz-16 kHz) " +
+      "balance plus a `centroidHz` brightness figure and a 6-band verbal `summary` " +
+      "(sub/bass/lowMid/mid/highMid/air, all dB) for quick mix-matching. " +
+      "`analysis.samplePeakDb`/`rmsDb`/`durationSeconds` round out the read (this is " +
+      "sample peak and plain RMS, NOT LUFS — use render_measure_loudness for gated " +
+      "loudness). Every measurement is in the SOURCE file's own domain, from BEFORE " +
+      "this clip's stretch/pitch; when the clip is time-stretched or pitch-shifted a " +
+      "`playback` block is added with the derived on-timeline `bpm`/`keyTonic`/" +
+      "`keyMode` (omitted entirely for an untouched clip) — read `playback` for what " +
+      "the clip actually sounds like now on the timeline, `analysis` for what the " +
+      "recording itself contains. AUDIO CLIPS ONLY — a MIDI clip is rejected readably " +
+      "(read its notes directly for key/timing instead).",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip to analyze, from project_snapshot."),
+    },
+  },
+  async ({ clipId }) => toToolResult(() => bridge.send("clip.analyzeAudio", { clipId }))
 );
 
 registerTool(
@@ -3656,7 +3884,8 @@ server.registerTool(
     description:
       "Read the latest real-time analysis snapshot of the WHOLE mix, measured on the master " +
       "bus AFTER the master fader — what the listener hears is exactly what is analyzed. " +
-      "No params. Returns `{bands, levelDB, peakDB, centroidHz, flux}`: `bands` is 24 " +
+      "No params. Returns `{bands, levelDB, peakDB, centroidHz, flux, correlation, width, " +
+      "balance}`: `bands` is 24 " +
       "log-spaced frequency bands from 40 Hz to 16 kHz, each an energy value in dB with a " +
       "floor of -80 (band 0 is the lowest sub-bass, band 23 the highest treble — useful to " +
       "judge tonal balance, e.g. too much low end vs. not enough air). `levelDB` is the " +
@@ -3666,15 +3895,281 @@ server.registerTool(
       "is the spectral centroid in Hz — perceived brightness (higher = brighter/harsher, " +
       "lower = darker/warmer; 0 when silent). `flux` is normalized spectral flux 0-1 — how " +
       "much the spectrum is MOVING between frames (0 = silence or a steady drone, higher = " +
-      "busy, percussive, changing material). The snapshot refreshes at roughly 30-60 Hz " +
+      "busy, percussive, changing material). The STEREO IMAGE trio (~300 ms integration) " +
+      "is how you catch phase and mono problems: `correlation` is the L/R correlation " +
+      "coefficient -1..+1 — +1 means the channels agree (mono-SAFE), around 0 means wide/" +
+      "decorrelated content, and NEGATIVE values are a red flag: anti-phase energy that " +
+      "will partially or fully CANCEL when the mix is played in mono (club PA, phone " +
+      "speaker, broadcast). If a stereo widener or a flipped-polarity mic drives " +
+      "correlation toward -1, the mix collapses in mono — fix the source, don't ship it. " +
+      "`width` is 0..1 side-vs-mid energy (0 = pure mono, 0.5 = uncorrelated or a hard-" +
+      "panned single channel, 1 = pure anti-phase — width near 1 with negative correlation " +
+      "means almost NO mono-compatible content). `balance` is the L/R energy balance " +
+      "-1..+1 (-1 = everything left, 0 = centered, +1 = everything right — sustained " +
+      "readings far from 0 mean the mix leans to one side). Silence/stopped/mono sessions " +
+      "read the stereo floors: correlation +1 (nothing out of phase — honest 'no phase " +
+      "problem', never a fake 0), width 0, balance 0; a dead channel (hard-panned mono " +
+      "source) also reads correlation +1 because mono-summing it cancels nothing. The " +
+      "snapshot refreshes at roughly 30-60 Hz " +
       "while the engine runs; poll it repeatedly (e.g. once a second during playback) to " +
       "watch the mix evolve. When the transport is stopped or the session is silent, every " +
-      "value decays to its floor (-80 dB bands/levels, centroid 0, flux 0) — never an " +
+      "value decays to its floor (-80 dB bands/levels, centroid 0, flux 0, correlation +1, " +
+      "width 0, balance 0) — never an " +
       "error, and every field is always a finite number. Feeds the app's session vibe " +
-      "meter; as an agent, use it to sanity-check a mix's energy and tonal balance while " +
-      "it plays without rendering anything to disk.",
+      "meter; as an agent, use it to sanity-check a mix's energy, tonal balance, and mono " +
+      "compatibility while it plays without rendering anything to disk.",
   },
   async () => toToolResult(() => bridge.send("mixer.masterAnalysis"))
+);
+
+server.registerTool(
+  "mixer_live_loudness",
+  {
+    title: "Read the live loudness meter on the master output",
+    description:
+      "Read the LIVE loudness meter running on the master output — streaming BS.1770-4 " +
+      "loudness of whatever is actually playing right now, measured AFTER the master fader " +
+      "(what the listener hears is what is metered). Returns `{momentaryLufs, shortTermLufs, " +
+      "maxMomentaryLufs, maxShortTermLufs, integratedLufs, loudnessRangeLu, truePeakDbtp, " +
+      "dcOffset, crestFactorDb, secondsAnalyzed}`. `momentaryLufs` is the current 400 ms " +
+      "loudness (EBU 3341 'M'), `shortTermLufs` the current 3 s loudness ('S'), with their " +
+      "since-reset maxima alongside; `integratedLufs` is the RUNNING gated integrated " +
+      "loudness ('I', re-gated over the whole program so far — compare to -14 LUFS " +
+      "streaming / -23 LUFS broadcast targets); `loudnessRangeLu` is the running EBU 3342 " +
+      "loudness range (LRA, LU — how dynamic the program is; statistically thin under ~1 " +
+      "minute, so read it with `secondsAnalyzed`); `truePeakDbtp` is the running 4x " +
+      "oversampled true peak in dBTP (keep under -1 for streaming); `dcOffset` (signed " +
+      "linear mean, ~0 is healthy) and `crestFactorDb` (sample-peak-to-RMS, low = heavily " +
+      "limited) ride along. HONESTY: a missing field means NOT ENOUGH AUDIO ANALYZED YET " +
+      "(momentary needs 0.4 s, short-term 3 s, integrated/LRA gated evidence above -70 " +
+      "LUFS) — treat absence as 'no evidence', never as zero. The measurement is " +
+      "transport-independent: it keeps accumulating across stop/start like a hardware " +
+      "meter left running; pass `reset: true` to restart it (the response is then the " +
+      "fresh, empty snapshot) — e.g. reset, play the chorus, read again to measure just " +
+      "the chorus. Poll it (e.g. once a second) during playback. NOT a substitute for " +
+      "render_measure_loudness: that renders offline and is the mastering-grade ground " +
+      "truth for a finished mix/bounce; this meter tells you what the live session is " +
+      "doing while it plays. Errors with 'audio engine not available' when no live audio " +
+      "engine is attached (headless session).",
+    inputSchema: {
+      reset: z
+        .boolean()
+        .optional()
+        .describe(
+          "Optional, default false. true = restart the running measurement (integrated/" +
+            "LRA/maxima/true peak/DC/crest all start over) and return the fresh snapshot; " +
+            "false/omitted = plain read."
+        ),
+    },
+  },
+  async ({ reset }) => toToolResult(() => bridge.send("mixer.liveLoudness", { reset }))
+);
+
+// ---------------------------------------------------------------------------
+// Reference track (m22-g) — compare the mix against a finished song
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "reference_import",
+  {
+    title: "Import a reference track to compare the mix against",
+    description:
+      "Import an audio file as the project's REFERENCE TRACK — a finished song you trust, " +
+      "to compare the mix against. The file is COPIED (never moved) into the app's " +
+      "References library, and a one-time analysis runs immediately: loudness (integrated / " +
+      "max momentary / max short-term LUFS, true peak dBTP, loudness range LU — the same " +
+      "BS.1770 math as render_measure_loudness), a 24-band average spectrum (40 Hz-16 kHz, " +
+      "dB, floor -80), and whole-file stereo image (correlation -1..+1, width 0..1, balance " +
+      "-1..+1). The reference lives in a dedicated project slot — it is NOT a track, never " +
+      "plays in bounces/stems/mixdowns, and travels with the saved .dawproj. A project holds " +
+      "ONE reference: importing over an existing slot REPLACES it in a single undoable edit " +
+      "(one undo restores the previous reference, analysis included). Returns the slot " +
+      "verbatim: `{id, name, path, offsetSeconds, trimDb, analysis?}` — `analysis` is " +
+      "omitted (plus a `warnings` array naming the cause) when analysis failed; the slot " +
+      "still lands and reference_analyze retries. Errors readably when the file is missing " +
+      "or not audio. After importing, play a representative section of your mix and call " +
+      "reference_status to see the level-match preview.",
+    inputSchema: {
+      path: z
+        .string()
+        .describe(
+          "Required. Absolute filesystem path of the audio file to import (WAV/AIFF/MP3/M4A " +
+            "— anything CoreAudio reads); ~ expands. The file is copied, never moved."
+        ),
+      name: z
+        .string()
+        .optional()
+        .describe(
+          "Optional display name for the reference (shown in the UI and status). Defaults " +
+            "to the file's basename without extension."
+        ),
+    },
+  },
+  async ({ path, name }) => toToolResult(() => bridge.send("reference.import", { path, name }))
+);
+
+registerTool(
+  "reference_remove",
+  {
+    title: "Remove the reference track",
+    description:
+      "Remove the project's reference track slot in one undoable edit (undo restores the " +
+      "slot with its analysis). The imported audio copy stays on disk — only the project's " +
+      "slot is cleared. Returns `{removed: true, name}`. Errors with the teaching message " +
+      "'no reference track is loaded — import one with reference.import' when the project " +
+      "has no reference.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("reference.remove"))
+);
+
+registerTool(
+  "reference_status",
+  {
+    title: "Read the reference-track slot and level-match preview",
+    description:
+      "Read the project's reference-track state — read-only, never errors. Returns " +
+      "`{reference?, monitoring, wouldMatchGainDb?}`: `reference` is the slot verbatim " +
+      "(`{id, name, path, offsetSeconds, trimDb, analysis?}`, with the stored one-time " +
+      "analysis — loudness/spectrum/stereo — inside) and is OMITTED when no reference is " +
+      "loaded; `monitoring` is the transient A/B monitor state (false until the monitor " +
+      "lane ships; never persisted); `wouldMatchGainDb` previews the level-match law — the " +
+      "gain in dB that would be applied to the reference so it auditions at the MIX's " +
+      "loudness (mix live integrated LUFS, or the -14 LUFS streaming target when the mix " +
+      "has no reading yet, minus the reference's integrated, plus the user trim, clamped so " +
+      "the reference's true peak never exceeds -1 dBTP) — present only when the slot " +
+      "carries a computable analysis. Call this first in any compare workflow: is a " +
+      "reference loaded and analyzed?",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("reference.status"))
+);
+
+registerTool(
+  "reference_analyze",
+  {
+    title: "Re-run the reference track's one-time analysis",
+    description:
+      "Re-run the one-time analysis of the project's reference track and store the fresh " +
+      "result in the slot (one undoable edit). Use it when an import landed without " +
+      "analysis (see the import response's `warnings`), after restoring a missing file, or " +
+      "when a newer app version bumped `analyzerVersion`. Returns the fresh analysis " +
+      "verbatim: `{integratedLufs?, maxMomentaryLufs?, maxShortTermLufs?, truePeakDbtp?, " +
+      "loudnessRangeLu?, bandsDb, correlation, width, balance, durationSeconds, " +
+      "sampleRateHz, analyzerVersion}` — `bandsDb` is the 24-band average spectrum " +
+      "(40 Hz-16 kHz, dB, floor -80); nil loudness fields are OMITTED and mean the program " +
+      "is gated-silent or too short (honest absence, never 0). Errors readably: no " +
+      "reference loaded (import one with reference_import), the audio file missing from " +
+      "disk (names the path), or no audio engine attached (an analysis is never fabricated).",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("reference.analyze"))
+);
+
+registerTool(
+  "reference_set_monitor",
+  {
+    title: "A/B the mix against the reference, level-matched",
+    description:
+      "Toggle the reference A/B monitor. on=true mutes the MIX at the speakers (post-master-" +
+      "chain gate) and auditions the REFERENCE level-matched instead: the match gain is " +
+      "computed ONCE at toggle-on — mix live integrated LUFS (or the -14 LUFS streaming " +
+      "target when the mix has no reading yet) minus the reference's integrated, plus the " +
+      "user trim, clamped so the reference's true peak never exceeds -1 dBTP — and " +
+      "snapshotted for the whole audition (louder-sounds-better bias removed; toggle again " +
+      "to re-match against a newer mix reading). The reference follows the timeline " +
+      "(offset-mapped, latency-aligned); toggling mid-play re-anchors the reference player " +
+      "only — the transport and the mix keep rolling. Master meters and mixer_live_loudness " +
+      "KEEP reading the MIX while auditioning (the meter tap sits upstream of the gate). " +
+      "on=false returns to the mix (idempotent, never errors). Transient state: never " +
+      "saved, never undoable, off project_snapshot. Returns `{monitoring, matchGainDb?, " +
+      "matchBasis? ('liveIntegrated'|'fallbackTarget'), mixIntegratedLufs?, " +
+      "referenceIntegratedLufs?, ceilingLimited?}` — match fields only while on; " +
+      "ceilingLimited=true means the gain was reduced to protect the -1 dBTP ceiling. " +
+      "Errors readably: no reference (import with reference_import), not analyzed (run " +
+      "reference_analyze), gated-silent reference (cannot be level-matched), audio file " +
+      "missing (names the path), or no audio engine (a monitor is never faked).",
+    inputSchema: {
+      on: z
+        .boolean()
+        .describe(
+          "Required. true = audition the reference (mix mutes, level-matched); false = " +
+            "back to the mix."
+        ),
+    },
+  },
+  async ({ on }) => toToolResult(() => bridge.send("reference.setMonitor", { on }))
+);
+
+registerTool(
+  "reference_set_offset",
+  {
+    title: "Set the reference track's timeline offset",
+    description:
+      "Set the reference's timeline offset in seconds: reference file time = timeline " +
+      "seconds + offsetSeconds. Use it to line the reference's chorus/drop up with yours " +
+      "(e.g. your chorus at 60 s, the reference's at 45 s -> offset -15). Negative offsets " +
+      "defer the reference's start until file time reaches 0. One coalesced undoable edit; " +
+      "while monitoring during playback the reference player re-anchors at the newly " +
+      "mapped position immediately (player-local — the transport never moves). Returns the " +
+      "slot verbatim `{id, name, path, offsetSeconds, trimDb, analysis?}`. Errors with the " +
+      "teaching message when no reference is loaded.",
+    inputSchema: {
+      seconds: z
+        .number()
+        .describe(
+          "Required. Offset in seconds (any sign). Reference file time = timeline seconds " +
+            "+ this value."
+        ),
+    },
+  },
+  async ({ seconds }) => toToolResult(() => bridge.send("reference.setOffset", { seconds }))
+);
+
+registerTool(
+  "reference_set_trim",
+  {
+    title: "Trim the reference's audition level",
+    description:
+      "Set the user trim in dB (clamped to ±24) applied ON TOP of the automatic level " +
+      "match when auditioning the reference. One coalesced undoable edit. While monitoring, " +
+      "the match law recomputes against the SNAPSHOTTED toggle-on basis (the gain never " +
+      "chases the evolving live reading) and only the gain re-applies — no dropout, no " +
+      "re-anchor; the -1 dBTP true-peak ceiling still clamps. Returns the slot verbatim " +
+      "(trimDb reveals the clamp) plus `{matchGainDb}` — the re-applied total gain — when " +
+      "monitoring. Errors with the teaching message when no reference is loaded.",
+    inputSchema: {
+      db: z
+        .number()
+        .describe("Required. Trim in dB, clamped to -24..+24. 0 = pure level match."),
+    },
+  },
+  async ({ db }) => toToolResult(() => bridge.send("reference.setTrim", { db }))
+);
+
+registerTool(
+  "reference_compare",
+  {
+    title: "Compare the mix's live numbers against the reference",
+    description:
+      "Compare the CURRENT MIX against the reference's stored whole-file analysis. Returns " +
+      "`{mix, reference, delta}`: mix = `{integratedLufs?, maxTruePeakDbtp?, " +
+      "loudnessRangeLu?, width?, correlation?, bandsDb?}` from the live master meters " +
+      "(loudness fields are the running gated measurement; bandsDb/width/correlation are " +
+      "the RECENT LIVE ballistic reading, NOT a whole-song average — call during steady " +
+      "playback of a representative section); reference = the stored analysis verbatim; " +
+      "delta = reference − mix per field (`{lufs?, truePeakDb?, lra?, width?, " +
+      "correlation?, bandsDb?}`), each omitted when either side lacks evidence — honest " +
+      "nils, never fabricated zeros. Reading deltas: delta.lufs +2.1 means your mix is " +
+      "2.1 LU QUIETER than the reference; positive low-band bandsDb deltas mean the " +
+      "reference carries more low-end energy. Workflow: reference_status -> play a " +
+      "representative section -> reference_compare -> suggest concrete moves (EQ bands, " +
+      "the built-in limiter for loudness) -> offer reference_set_monitor so the human " +
+      "hears the A/B level-matched. Errors readably: no reference, not analyzed, or no " +
+      "live meter (headless engine) — deltas are never faked from floor values.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("reference.compare"))
 );
 
 server.registerTool(
@@ -4741,9 +5236,18 @@ server.registerTool(
       "(its post-fader sends into other buses, each `{id, busId, level}` — see " +
       "track_add_send/track_set_send/track_remove_send). Each track/bus also " +
       "carries its `effects` insert chain: a PRE-FADER, ORDERED array (array " +
-      "order = processing order) of `{id, kind, bypassed, params, latencySamples}` " +
+      "order = processing order) of `{id, kind, bypassed, params, latencySamples, " +
+      "gainReductionDb?}` " +
       "(`latencySamples` is the processing delay that effect adds, in samples — 0 for " +
-      "most kinds; `limiter`'s lookahead adds some), capped at " +
+      "most kinds; `limiter`'s lookahead adds some). `gainReductionDb` (m22-e) is the " +
+      "LIVE gain-reduction meter of the built-in dynamics kinds — compressor, limiter, " +
+      "gate — in POSITIVE dB of reduction (0 = currently untouched; a fully closed gate " +
+      "caps at 80): held-peak with a −20 dB/s release, so a poll can't miss a brief " +
+      "clamp. Poll this snapshot while audio plays to SEE how hard a compressor is " +
+      "working (e.g. aim ~3-6 dB on a vocal); the key is ABSENT on kinds that don't " +
+      "measure gain reduction, on bypassed-and-idle chains running headless, and on " +
+      "hosted AU effects — never fabricated. The same field rides `masterEffects` " +
+      "entries and every fx_* mutation result. Chains are capped at " +
       "16 entries — see fx_add/fx_remove/fx_reorder/fx_set_bypass/fx_set_param " +
       "to edit it and fx_describe for each kind's parameter names/ranges/units. " +
       "May also include `masterAutomation` (m15-c): the whole-mix master VOLUME " +

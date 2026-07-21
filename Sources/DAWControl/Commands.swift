@@ -290,6 +290,19 @@ public final class CommandRouter {
         "vc.convertVocals",
         "vc.trainVoice",
         "vc.listVoices",
+        "au.describeParams",
+        "au.setParam",
+        "clip.fitToContent",
+        "clip.analyzeAudio",
+        "mixer.liveLoudness",
+        "reference.import",
+        "reference.remove",
+        "reference.status",
+        "reference.analyze",
+        "reference.setMonitor",
+        "reference.setOffset",
+        "reference.setTrim",
+        "reference.compare",
     ]
 
     public init(
@@ -1072,7 +1085,9 @@ public final class CommandRouter {
             // params: kind? (omit for every kind). Returns the parameter schemas
             // from EffectParamSpec — MCP discoverability. Unknown kind lists valid
             // kinds. Wire shape: {"kinds": [{"kind", "params": [{name, min, max,
-            // default, unit}]}]}.
+            // default, unit, note?}]}]}. `note` (m22-a, additive) teaches the
+            // semantics a bare range can't: the EQ's nil-means-off HP/LP corners,
+            // 12/24 slope snapping, and 0/1 per-band bypass.
             let fxKinds: [EffectDescriptor.Kind]
             if let rawKind = params["kind"]?.stringValue {
                 guard let resolved = EffectDescriptor.Kind(rawValue: rawKind) else {
@@ -1088,13 +1103,16 @@ public final class CommandRouter {
                     .object([
                         "kind": .string(kind.rawValue),
                         "params": .array(EffectParamSpec.specs(for: kind).map { spec in
-                            .object([
+                            var paramObj: [String: JSONValue] = [
                                 "name": .string(spec.name),
                                 "min": .number(spec.range.lowerBound),
                                 "max": .number(spec.range.upperBound),
                                 "default": .number(spec.defaultValue),
                                 "unit": .string(spec.unit),
-                            ])
+                            ]
+                            // Omitted when nil (additive m22-a teaching line).
+                            if let note = spec.note { paramObj["note"] = .string(note) }
+                            return .object(paramObj)
                         }),
                     ])
                 }),
@@ -1159,7 +1177,205 @@ public final class CommandRouter {
             // engine runs); every field is finite by contract — stopped or
             // silent sessions decay to the floors, never an error. Headless
             // (no engine) reads the floor snapshot.
+            // m22-d ADDITIVE stereo-image keys on the same response (~300 ms
+            // integration, floors when stopped/silent/mono/headless):
+            // correlation (−1…+1; +1 = mono-safe, 0 = decorrelated, −1 = the
+            // mix CANCELS when summed to mono; floor +1 — silence/mono holds
+            // nothing out of phase; a dead channel, i.e. hard-panned mono,
+            // also reads +1), width (0…1 side-vs-mid energy S²/(M²+S²); 0 =
+            // mono, 0.5 = uncorrelated or hard-panned, 1 = pure anti-phase;
+            // floor 0), balance (−1…+1 L/R energy balance, −1 = all left,
+            // +1 = all right; floor 0). The goniometer's raw sample pairs
+            // deliberately do NOT ride this always-on payload — they stay on
+            // the app-side engine accessor (MasterScopeFrame).
             return .success(request.id, try JSONValue(encoding: store.masterAnalysis()))
+
+        case "mixer.liveLoudness":
+            // params: reset? (bool, default false). Live master-bus loudness
+            // (m22-c): streaming BS.1770-4 measured POST-master-fader on the
+            // same tap as mixer.masterAnalysis. Response =
+            // LiveLoudnessSnapshot verbatim: {momentaryLufs (current 400 ms),
+            // shortTermLufs (current 3 s), maxMomentaryLufs,
+            // maxShortTermLufs, integratedLufs (running gated),
+            // loudnessRangeLu (running EBU 3342 LRA), truePeakDbtp (running
+            // 4× true peak), dcOffset, crestFactorDb, secondsAnalyzed}. nil
+            // fields are OMITTED and mean NOT ENOUGH AUDIO YET (momentary
+            // needs 400 ms, short-term 3 s, integrated/LRA gated evidence;
+            // sub-−200 dB float noise — an idle engine's denormal tails —
+            // also reads as nil, never a −3000 LUFS absurdity) — honest
+            // no-evidence, never 0. Transport-independent running
+            // measurement (stop/start does not restart it); reset=true
+            // restarts THEN returns the fresh snapshot. Headless (no engine)
+            // or a fake without live metering surfaces the engineUnavailable
+            // teaching error — a live meter cannot be faked with floors.
+            try params.rejectUnknownKeys(["reset"], verb: "mixer.liveLoudness")
+            let loudnessReset = params["reset"]?.boolValue ?? false
+            return .success(request.id,
+                            try JSONValue(encoding: store.liveLoudness(reset: loudnessReset)))
+
+        case "reference.import":
+            // params: path (required — absolute path of an audio file; ~
+            // expands), name? (display name, defaults to the file's
+            // basename). Imports the file as THE project reference (m22-g):
+            // COPIES it into the app-support References/ home (import
+            // copies, never moves; a save later folds it into the bundle's
+            // media/), probes it, and runs the one-time analysis — loudness
+            // (integrated/max-momentary/max-short-term LUFS, true peak dBTP,
+            // LRA — the same BS.1770 math as render.measureLoudness), the
+            // 24-band average spectrum, and whole-file stereo
+            // width/correlation/balance. Sets the slot in ONE undoable edit,
+            // REPLACING any existing reference (one undo restores the prior
+            // slot, analysis included). Legal mid-play and mid-record.
+            // Response: the slot verbatim {id, name, path, offsetSeconds,
+            // trimDb, analysis?} — `analysis` omitted plus a `warnings`
+            // array naming the cause when analysis failed (the slot still
+            // lands; reference.analyze retries). A missing/unreadable file
+            // refuses with the importer's own message; headless import
+            // lands the slot un-analyzed with a warning.
+            try params.rejectUnknownKeys(["path", "name"], verb: "reference.import")
+            let referencePath = try params.require("path", \.stringValue)
+            let referenceName = params["name"]?.stringValue
+            let importOutcome = try await store.importReference(
+                path: referencePath, name: referenceName)
+            var importResult = try JSONValue(encoding: importOutcome.slot)
+            if !importOutcome.warnings.isEmpty, case .object(var obj) = importResult {
+                obj["warnings"] = .array(importOutcome.warnings.map { .string($0) })
+                importResult = .object(obj)
+            }
+            return .success(request.id, importResult)
+
+        case "reference.remove":
+            // No params. Clears the reference slot in ONE undoable edit
+            // ("Remove Reference" — undo restores the slot, analysis
+            // included); the imported copy stays on disk (no GC, the
+            // undo-resurrection rule). Empty slot → the referenceNotSet
+            // teaching error verbatim. Response: {removed: true, name}.
+            try params.rejectUnknownKeys([], verb: "reference.remove")
+            let removedSlot = try store.removeReference()
+            return .success(request.id, .object([
+                "removed": .bool(true),
+                "name": .string(removedSlot.name),
+            ]))
+
+        case "reference.status":
+            // No params. Read-only, never throws: {reference?, monitoring,
+            // wouldMatchGainDb?} — `reference` (the slot verbatim, with its
+            // stored analysis) omitted when no reference is loaded;
+            // `monitoring` is the transient A/B state (false until the P2
+            // monitor lane lands; never persisted, never in
+            // project.snapshot); `wouldMatchGainDb` previews the exact
+            // level-match law (mix live integrated — or the −14 LUFS
+            // fallback when the mix has no reading — minus the reference's
+            // integrated, plus trim, clamped to the −1 dBTP ceiling)
+            // whenever the slot carries a computable analysis. The live
+            // matchGainDb/matchBasis/ceilingLimited fields ride only while
+            // monitoring (P2).
+            try params.rejectUnknownKeys([], verb: "reference.status")
+            return .success(request.id, try JSONValue(encoding: store.referenceStatus()))
+
+        case "reference.analyze":
+            // No params. Re-runs the one-time reference analysis on demand
+            // (missing/failed/analyzer-version-bumped analysis) and stores
+            // the fresh result in the slot as ONE undoable edit. Refusals,
+            // verbatim: no slot → referenceNotSet; file gone from disk →
+            // referenceFileMissing (naming the path); headless / an engine
+            // without the capability → engineUnavailable (an analysis is
+            // never fabricated). Response: the fresh ReferenceAnalysis
+            // verbatim {integratedLufs?, maxMomentaryLufs?,
+            // maxShortTermLufs?, truePeakDbtp?, loudnessRangeLu?, bandsDb
+            // [24, dB, floor −80], correlation, width, balance,
+            // durationSeconds, sampleRateHz, analyzerVersion} — nil loudness
+            // fields are OMITTED and mean a gated-silent/too-short program
+            // (honest absence, never 0).
+            try params.rejectUnknownKeys([], verb: "reference.analyze")
+            return .success(request.id,
+                            try JSONValue(encoding: try await store.analyzeReference()))
+
+        case "reference.setMonitor":
+            // params: on (required bool). The A/B monitor toggle (m22-g P2):
+            // on=true gates the MIX (post-master-chain) and auditions the
+            // reference level-matched — the match gain is computed ONCE at
+            // toggle-ON from the mix's live gated integrated (or the −14
+            // LUFS fallback when the mix has no reading) minus the
+            // reference's integrated, plus trim, clamped so the reference's
+            // true peak never exceeds −1 dBTP — and SNAPSHOTTED (it never
+            // chases the evolving reading mid-audition; toggle again to
+            // re-match). The reference follows the timeline (offset-mapped,
+            // PDC-aligned); toggling mid-play re-anchors the reference
+            // player only — the transport and the mix are never interrupted.
+            // Master meters / live loudness KEEP reading the MIX while
+            // auditioning (the tap sits upstream of the gate). on=false ends
+            // the audition (idempotent, never refuses). Transient state:
+            // never persisted, never undoable, never in project.snapshot.
+            // Response: {monitoring, matchGainDb?, matchBasis?
+            // ("liveIntegrated"|"fallbackTarget"), mixIntegratedLufs?,
+            // referenceIntegratedLufs?, ceilingLimited?} — match fields only
+            // when on. Refusals verbatim (teaching errors): no slot →
+            // referenceNotSet; not analyzed → referenceNotAnalyzed;
+            // gated-silent reference → referenceSilent; file gone →
+            // referenceFileMissing; headless → engineUnavailable (a monitor
+            // is never faked).
+            try params.rejectUnknownKeys(["on"], verb: "reference.setMonitor")
+            let monitorOn = try params.require("on", \.boolValue)
+            return .success(request.id,
+                            try JSONValue(encoding: store.setReferenceMonitor(on: monitorOn)))
+
+        case "reference.setOffset":
+            // params: seconds (required number). Sets the timeline↔file
+            // offset: reference file time = timeline seconds +
+            // offsetSeconds (negative = the reference starts later than the
+            // timeline; use it to line the reference's chorus up with
+            // yours). ONE coalesced undoable edit (key reference.offset).
+            // While monitoring during playback the reference player
+            // re-anchors at the newly mapped position (player-local — the
+            // transport never moves). Response: the slot verbatim {id,
+            // name, path, offsetSeconds, trimDb, analysis?}. Empty slot →
+            // referenceNotSet verbatim.
+            try params.rejectUnknownKeys(["seconds"], verb: "reference.setOffset")
+            let offsetSeconds = try params.require("seconds", \.doubleValue)
+            return .success(request.id,
+                            try JSONValue(encoding: try store.setReferenceOffset(
+                                seconds: offsetSeconds)))
+
+        case "reference.setTrim":
+            // params: db (required number, clamped ±24). User trim on top
+            // of the level-match law. ONE coalesced undoable edit (key
+            // reference.trim). While monitoring the law recomputes against
+            // the SNAPSHOTTED toggle-ON basis (never the evolving live
+            // reading) and only the gain re-applies — no re-anchor, no
+            // dropout. Response: the slot verbatim plus {matchGainDb} (the
+            // re-applied gain) when monitoring; the slot echo's trimDb
+            // reveals the clamp. Empty slot → referenceNotSet verbatim.
+            try params.rejectUnknownKeys(["db"], verb: "reference.setTrim")
+            let trimDb = try params.require("db", \.doubleValue)
+            let trimOutcome = try store.setReferenceTrim(db: trimDb)
+            var trimResult = try JSONValue(encoding: trimOutcome.slot)
+            if let matchGainDb = trimOutcome.matchGainDb,
+               case .object(var obj) = trimResult {
+                obj["matchGainDb"] = .number(matchGainDb)
+                trimResult = .object(obj)
+            }
+            return .success(request.id, trimResult)
+
+        case "reference.compare":
+            // No params. The mix-vs-reference comparison (m22-g P2):
+            // {mix: {integratedLufs?, maxTruePeakDbtp?, loudnessRangeLu?,
+            // width?, correlation?, bandsDb?}, reference: {…the stored
+            // whole-file analysis verbatim…}, delta: {lufs?, truePeakDb?,
+            // lra?, width?, correlation?, bandsDb?}} — delta = reference −
+            // mix per field, each omitted when either side lacks evidence
+            // (honest nils, the m22-c omission law; negative delta.lufs =
+            // your mix is LOUDER than the reference). The mix loudness
+            // fields are the live running measurement (mixer.liveLoudness);
+            // mix bandsDb/width/correlation are the RECENT LIVE (ballistic)
+            // master-analyzer reading, not a whole-program average — poll
+            // during steady playback of a representative section. Refusals
+            // verbatim: no slot → referenceNotSet; not analyzed →
+            // referenceNotAnalyzed; headless / no live meter →
+            // engineUnavailable (floors would fake deltas).
+            try params.rejectUnknownKeys([], verb: "reference.compare")
+            return .success(request.id,
+                            try JSONValue(encoding: try store.referenceCompare()))
 
         case "engine.performanceStats":
             // params: reset? (bool, default false). Render-load / overrun
@@ -1445,6 +1661,26 @@ public final class CommandRouter {
                 trackId: trimTrackID, clipId: trimClipID,
                 newStartBeat: trimNewStartBeat, newLengthBeats: trimNewLengthBeats)
             return .success(request.id, try JSONValue(encoding: trimmedClip))
+
+        case "clip.fitToContent":
+            // params: trackId (required), clipId (required). Trims the clip's
+            // TRAILING edge to the end of its actual content (m21-d) — MIDI: the
+            // last note's end beat (an empty clip is an honest no-op); audio:
+            // the source file's remaining duration from the clip's current
+            // startOffsetSeconds, tempo-map- and stretch-aware. The leading edge
+            // never moves; length floors at ProjectStore.minClipLengthBeats.
+            // Comp members are rejected (clipInTakeGroup). trackNotFound/
+            // clipNotFound surface via the LocalizedError mapping. Response: the
+            // updated clip's fields PLUS a `changed` flag (false when the clip
+            // already fit its content exactly — nothing edited, no undo entry).
+            try params.rejectUnknownKeys(
+                ["trackId", "clipId"], verb: "clip.fitToContent")
+            let fitTrackID = try params.requireTrackID()
+            let fitClipID = try params.requireClipID()
+            let fitResult = try store.fitClipToContent(trackId: fitTrackID, clipId: fitClipID)
+            var fitObject = try JSONValue(encoding: fitResult.clip).objectValue ?? [:]
+            fitObject["changed"] = .bool(fitResult.changed)
+            return .success(request.id, .object(fitObject))
 
         case "clip.move":
             // params: trackId (required), clipId (required), toStartBeat
@@ -1838,6 +2074,36 @@ public final class CommandRouter {
                 "transients": try JSONValue(encoding: clipTransients),
                 "count": .number(Double(clipTransients.count)),
             ]))
+
+        case "clip.analyzeAudio":
+            // params: clipId (required). Offline key/tempo/spectral-balance/
+            // level analysis of an AUDIO clip's CURRENT SOURCE WINDOW
+            // [startOffsetSeconds, +sourceWindowSeconds) (m21-e,
+            // design-clip-analyze-audio §4-5), content-key cached by the
+            // engine on (source path, window, analyzer version) — a trim
+            // re-analyzes, a repeat call on the same window is a sidecar hit.
+            // Read-only: no edit, no undo entry, nothing persisted or
+            // snapshotted (pull-only, the detectTransients idiom). Results
+            // are SOURCE-domain (before this clip's stretch/pitch); the
+            // response echoes stretchRatio/pitchShiftSemitones and adds a
+            // derived `playback {bpm, keyTonic, keyMode}` block ONLY for a
+            // non-identity clip (omitted for stretch 1 / pitch 0). Honest
+            // uncertainty throughout: `key.confidence`/`key.tonal` are NOT a
+            // guarantee (percussion/atonal material reads tonal:false with
+            // ranked guesses still attached); `tempo.bpm` is folded into the
+            // 70-180 BPM lattice and is null when there's no periodic
+            // evidence or the window is under 6 s; `tempo.steady` says
+            // whether a single fixed project tempo can match the clip.
+            // A MIDI clip surfaces analysisRequiresAudioClip verbatim; a
+            // window under 1 s surfaces a teaching invalidClipEdit;
+            // clipNotFound/engineUnavailable via the LocalizedError mapping.
+            // Response: the store's ClipAudioAnalysisResult encoded verbatim
+            // ({analysis: {...}, stretchRatio, pitchShiftSemitones,
+            // playback?}).
+            try params.rejectUnknownKeys(["clipId"], verb: "clip.analyzeAudio")
+            let analyzeClipID = try params.requireClipID()
+            let clipAnalysis = try await store.analyzeClipAudio(clipId: analyzeClipID)
+            return .success(request.id, try JSONValue(encoding: clipAnalysis))
 
         case "clip.quantizeAudio":
             // params: trackId (required), clipId (required), gridBeats (required,
@@ -3408,6 +3674,94 @@ public final class CommandRouter {
                 "windows": .array(pluginUI.listOpenUIs().map { pluginUIWindowJSON($0) }),
             ]))
 
+        case "au.describeParams":
+            // Reads the live AUParameterTree of the hosted Audio Unit behind
+            // a track slot (design-au-parameter-surface): effectId names an
+            // .audioUnit insert on that track; OMIT it for the track's
+            // .audioUnit instrument (the plugin.openUI target model).
+            // Addresses are per-instance UInt64s carried as DECIMAL STRINGS
+            // (JSON doubles lose exactness past 2^53) — opaque, never guessed
+            // or reused across instances. Paging: offset (int ≥ 0, default 0)
+            // + maxParams (int, default 512, silently clamped into 1…4096),
+            // with totalCount + an honest truncated flag. `addresses` (array
+            // of decimal-string addresses) is an exact-get filter instead —
+            // mutually exclusive with offset/maxParams; misses land in
+            // unknownAddresses, never an error. An AU that publishes NO tree
+            // answers hasParameterTree:false, totalCount:0 — SUCCESS, never
+            // an error (opaque-state units are healthy hosts; edit them via
+            // plugin.openUI). The master chain hosts built-in effects only
+            // (design-m13d D4a), so trackId:"master" rejects readably; a
+            // not-.ready instance names its status (pending/missing/failed
+            // reason). Response: {trackId, effectId?, componentName,
+            // hasParameterTree, totalCount, offset, truncated, parameters:
+            // [{address, identifier, displayName, keyPath, unit, unitName,
+            // minValue, maxValue, value, writable, readable, valueStrings}],
+            // unknownAddresses}.
+            try params.rejectUnknownKeys(
+                ["trackId", "effectId", "offset", "maxParams", "addresses"],
+                verb: "au.describeParams")
+            let target = try Self.requireHostedAUTarget(params)
+            let addressFilter = try Self.parseAUAddressFilter(params)
+            if addressFilter != nil, params["offset"] != nil || params["maxParams"] != nil {
+                throw ControlError(
+                    "'addresses' is an exact-get filter — pass it OR offset/maxParams paging, not both")
+            }
+            let described = try store.describeAudioUnitParams(
+                trackID: target.trackID, effectID: target.effectID,
+                offset: try Self.parseAUOffset(params),
+                maxParams: try Self.parseAUMaxParams(params),
+                addresses: addressFilter)
+            var describeResult: [String: JSONValue] = [
+                "trackId": .string(target.trackID.uuidString),
+                "componentName": .string(described.componentName),
+                "hasParameterTree": .bool(described.page.hasParameterTree),
+                "totalCount": .number(Double(described.page.totalCount)),
+                "offset": .number(Double(described.page.offset)),
+                "truncated": .bool(described.page.truncated),
+                "parameters": .array(described.page.parameters.map(Self.auParameterJSON)),
+                "unknownAddresses": .array(
+                    described.page.unknownAddresses.map { .string($0) }),
+            ]
+            if let effectID = target.effectID {
+                describeResult["effectId"] = .string(effectID.uuidString)
+            }
+            return .success(request.id, .object(describeResult))
+
+        case "au.setParam":
+            // Sets ONE parameter of the hosted AU by its decimal-string
+            // address (au.describeParams lists them). params: trackId
+            // (required; "master" rejects — the master chain cannot host
+            // AUs), effectId? (omit ⇒ the track's AU instrument), address
+            // (required — the decimal STRING is canonical; an exactly-
+            // integral JSON number ≤ 2^53 is tolerated), value (required
+            // finite number — NaN/Inf reject readably). Out-of-range values
+            // clamp SILENTLY to [minValue, maxValue] (the fx.setParam
+            // precedent); the response's parameter.value is the AU's
+            // post-set READ-BACK, so quantizing/stepping units answer
+            // honestly. Deliberately NO undo step (parity with edits made in
+            // the vendor window via plugin.openUI); the value persists via
+            // save-time fullStateForDocument capture. Response: {trackId,
+            // effectId?, parameter: {…refreshed info…}}.
+            try params.rejectUnknownKeys(
+                ["trackId", "effectId", "address", "value"], verb: "au.setParam")
+            let setTarget = try Self.requireHostedAUTarget(params)
+            let address = try Self.requireAUAddress(params)
+            let value = try params.require("value", \.doubleValue)
+            guard value.isFinite else {
+                throw ControlError("'value' must be a finite number")
+            }
+            let parameter = try store.setAudioUnitParam(
+                trackID: setTarget.trackID, effectID: setTarget.effectID,
+                address: address, value: value)
+            var setResult: [String: JSONValue] = [
+                "trackId": .string(setTarget.trackID.uuidString),
+                "parameter": Self.auParameterJSON(parameter),
+            ]
+            if let effectID = setTarget.effectID {
+                setResult["effectId"] = .string(effectID.uuidString)
+            }
+            return .success(request.id, .object(setResult))
+
         case "vc.sidecarStatus":
             // No params. Health-probes the local RVC voice-conversion sidecar
             // (GET /health on 127.0.0.1:8002, loopback only — see
@@ -3748,13 +4102,16 @@ public final class CommandRouter {
     }
 
     /// Resolved wire JSON for the project master insert chain — the per-track
-    /// `effectsJSON` shape with a MASTER latency resolver (the limiter's 240 @
-    /// 48 kHz surfaces here just as it does per strip; 0 headless). Shared by
-    /// `masterFxResult` and the snapshot's top-level `masterEffects`.
+    /// `effectsJSON` shape with MASTER latency + gain-reduction resolvers
+    /// (the limiter's 240 @ 48 kHz and a master compressor's live
+    /// `gainReductionDb` surface here just as they do per strip; 0 / omitted
+    /// headless). Shared by `masterFxResult` and the snapshot's top-level
+    /// `masterEffects`.
     private func masterEffectsJSON() -> JSONValue {
-        Self.effectsJSON(store.masterEffects) { effectID in
-            store.masterEffectLatencySamples(effectID: effectID)
-        }
+        Self.effectsJSON(
+            store.masterEffects,
+            latencyFor: { store.masterEffectLatencySamples(effectID: $0) },
+            gainReductionFor: { store.masterEffectGainReductionDb(effectID: $0) })
     }
 
     // MARK: - plugin.* helpers (M3 vi-b)
@@ -3920,6 +4277,109 @@ public final class CommandRouter {
         return .instrument(trackID: trackID)
     }
 
+    // MARK: - au.* helpers (hosted-AU parameter surface)
+
+    /// Target params for the `au.*` pair: trackId (required UUID — the EXACT
+    /// string "master" rejects with a teaching error, since the master chain
+    /// is built-in-only by design-m13d D4a and can never host an AU) plus
+    /// optional effectId. KIND validation deliberately lives in ONE place —
+    /// `ProjectStore.resolveHostedAUTarget` (the requirePluginTarget taxonomy
+    /// with AU-parameters wording) — and is NOT duplicated here.
+    private static func requireHostedAUTarget(_ params: [String: JSONValue]) throws
+        -> (trackID: UUID, effectID: UUID?) {
+        if params["trackId"]?.stringValue == "master" {
+            throw ControlError(
+                "the master chain hosts built-in effects only — AU parameters apply to track inserts")
+        }
+        let trackID = try params.requireTrackID()
+        let effectID: UUID? = params["effectId"] != nil ? try params.requireEffectID() : nil
+        return (trackID, effectID)
+    }
+
+    /// `offset` (int ≥ 0, default 0). Rejects non-integers/negatives
+    /// readably; absurdly large offsets are capped in the Double domain
+    /// BEFORE the Int conversion (no trap) — they just page past the tree
+    /// and return an empty, untruncated page.
+    private static func parseAUOffset(_ params: [String: JSONValue]) throws -> Int {
+        guard let raw = params["offset"] else { return 0 }
+        guard let value = raw.doubleValue, value >= 0,
+              value == value.rounded(.towardZero) else {
+            throw ControlError("'offset' must be an integer >= 0")
+        }
+        return Int(min(value, 1_000_000_000))
+    }
+
+    /// `maxParams` (default 512) — out-of-range values silently CLAMP into
+    /// 1…4096 (the frozen paging decision); non-integers reject readably.
+    private static func parseAUMaxParams(_ params: [String: JSONValue]) throws -> Int {
+        guard let raw = params["maxParams"] else { return 512 }
+        guard let value = raw.doubleValue, value == value.rounded(.towardZero) else {
+            throw ControlError(
+                "'maxParams' must be an integer (default 512; values clamp into 1…4096)")
+        }
+        return Int(min(max(value, 1), 4_096))
+    }
+
+    /// `addresses` — the exact-get filter: an array of decimal-string
+    /// addresses from au.describeParams. Entry TYPE errors reject readably;
+    /// addresses that don't resolve are reported in `unknownAddresses` by
+    /// the engine, never an error.
+    private static func parseAUAddressFilter(_ params: [String: JSONValue]) throws -> [String]? {
+        guard let raw = params["addresses"] else { return nil }
+        guard let array = raw.arrayValue else {
+            throw ControlError(
+                "'addresses' must be an array of decimal address strings (see au.describeParams results)")
+        }
+        return try array.enumerated().map { index, entry in
+            guard let string = entry.stringValue else {
+                throw ControlError(
+                    "addresses[\(index)] must be a decimal address string from au.describeParams")
+            }
+            return string
+        }
+    }
+
+    /// `address` (required): the decimal STRING is canonical; an
+    /// exactly-integral JSON number ≤ 2^53 is tolerated (a larger double
+    /// cannot represent the address exactly, so it rejects).
+    private static func requireAUAddress(_ params: [String: JSONValue]) throws -> String {
+        guard let raw = params["address"] else {
+            throw ControlError(
+                "'address' is required — the decimal address string from au.describeParams")
+        }
+        if let string = raw.stringValue { return string }
+        if let number = raw.doubleValue,
+           number.isFinite, number >= 0, number <= 9_007_199_254_740_992,
+           number == number.rounded(.towardZero) {
+            return String(UInt64(number))
+        }
+        throw ControlError(
+            "'address' must be the decimal string form of the parameter address (see au.describeParams)")
+    }
+
+    /// Wire shape of one hosted-AU parameter (shared by `au.describeParams`
+    /// rows and the `au.setParam` echo so the shape never drifts). `unitName`
+    /// and `valueStrings` are explicit nulls when absent, per the design's
+    /// response shape.
+    private static func auParameterJSON(_ info: HostedAUParameterInfo) -> JSONValue {
+        .object([
+            "address": .string(info.address),
+            "identifier": .string(info.identifier),
+            "displayName": .string(info.displayName),
+            "keyPath": .string(info.keyPath),
+            "unit": .string(info.unit),
+            "unitName": info.unitName.map { JSONValue.string($0) } ?? .null,
+            "minValue": .number(info.minValue),
+            "maxValue": .number(info.maxValue),
+            "value": .number(info.value),
+            "writable": .bool(info.writable),
+            "readable": .bool(info.readable),
+            "valueStrings": info.valueStrings.map { strings in
+                JSONValue.array(strings.map { .string($0) })
+            } ?? .null,
+        ])
+    }
+
     /// Syntax-only target for `plugin.closeUI`: trackId (required) + optional
     /// effectId, both validated for UUID SHAPE only. No store lookup — the
     /// target may have just been removed, and idempotent close is the agent-
@@ -3985,22 +4445,31 @@ public final class CommandRouter {
     }
 
     /// Resolved wire JSON for one track's insert chain: `[{id, kind,
-    /// isBypassed, params: {name:value}, latencySamples}]`. Params are
-    /// RESOLVED (nil structs emit their defaults, the instrument-snapshot
-    /// rule). `latencySamples` is the live per-effect engine value forwarded
-    /// through the store (the `availableAudioUnits` precedent — DAWControl
-    /// itself stays engine-free): 240 @ 48 kHz for the limiter's lookahead,
-    /// 0 for the other built-ins or when running headless.
+    /// isBypassed, params: {name:value}, latencySamples, gainReductionDb?}]`.
+    /// Params are RESOLVED (nil structs emit their defaults, the
+    /// instrument-snapshot rule). `latencySamples` is the live per-effect
+    /// engine value forwarded through the store (the `availableAudioUnits`
+    /// precedent — DAWControl itself stays engine-free): 240 @ 48 kHz for
+    /// the limiter's lookahead, 0 for the other built-ins or when running
+    /// headless. `gainReductionDb` (m22-e, ADDITIVE) is the live held-peak
+    /// gain reduction of the built-in dynamics kinds — POSITIVE dB, 0 =
+    /// untouched, −20 dB/s release — riding the SAME poll path an agent
+    /// already orients from (project.snapshot + every fx mutation result);
+    /// the key is OMITTED for kinds that don't measure GR and when headless,
+    /// so its presence itself teaches which effects report it.
     private func effectsJSON(_ effects: [EffectDescriptor], trackID: UUID) -> JSONValue {
-        Self.effectsJSON(effects) { effectID in
-            store.effectLatencySamples(trackID: trackID, effectID: effectID)
-        }
+        Self.effectsJSON(
+            effects,
+            latencyFor: { store.effectLatencySamples(trackID: trackID, effectID: $0) },
+            gainReductionFor: { store.effectGainReductionDb(trackID: trackID, effectID: $0) })
     }
 
     /// Shape helper for the above; `latencyFor` supplies each effect's live
-    /// latency in samples.
+    /// latency in samples, `gainReductionFor` its live held-peak gain
+    /// reduction in positive dB (nil ⇒ key omitted — no fabricated meters).
     static func effectsJSON(_ effects: [EffectDescriptor],
-                            latencyFor: (UUID) -> Int) -> JSONValue {
+                            latencyFor: (UUID) -> Int,
+                            gainReductionFor: (UUID) -> Double? = { _ in nil }) -> JSONValue {
         .array(effects.map { effect in
             var obj: [String: JSONValue] = [
                 "id": .string(effect.id.uuidString),
@@ -4013,6 +4482,11 @@ public final class CommandRouter {
             // surfaces its sidechain source so snapshots stay honest.
             if let key = effect.sidechainSourceTrackID {
                 obj["sidechainSourceTrackId"] = .string(key.uuidString)
+            }
+            // Omitted when nil (m22-e): only live dynamics instances carry a
+            // gain-reduction reading.
+            if let gainReduction = gainReductionFor(effect.id) {
+                obj["gainReductionDb"] = .number(gainReduction)
             }
             return .object(obj)
         })
@@ -4038,6 +4512,22 @@ public final class CommandRouter {
                 "peak2Q": .number(eq.peak2Q),
                 "highShelfFreq": .number(eq.highShelfFreq),
                 "highShelfGainDb": .number(eq.highShelfGainDb),
+                // m22-a EQ v2 — RESOLVED like everything else (nil semantics
+                // live in EQParams' resolved accessors): an off HP/LP reads
+                // enabled 0 with its corner parked at the range edge; the
+                // `*Enabled` binaries ride as 0/1 numbers (pingPong precedent).
+                "highPassFreq": .number(eq.resolvedHighPassFreq),
+                "highPassSlopeDbPerOct": .number(Double(eq.resolvedHighPassSlope)),
+                "highPassEnabled": .number(eq.resolvedHighPassEnabled ? 1 : 0),
+                "lowShelfQ": .number(eq.resolvedLowShelfQ),
+                "lowShelfEnabled": .number(eq.resolvedLowShelfEnabled ? 1 : 0),
+                "peak1Enabled": .number(eq.resolvedPeak1Enabled ? 1 : 0),
+                "peak2Enabled": .number(eq.resolvedPeak2Enabled ? 1 : 0),
+                "highShelfQ": .number(eq.resolvedHighShelfQ),
+                "highShelfEnabled": .number(eq.resolvedHighShelfEnabled ? 1 : 0),
+                "lowPassFreq": .number(eq.resolvedLowPassFreq),
+                "lowPassSlopeDbPerOct": .number(Double(eq.resolvedLowPassSlope)),
+                "lowPassEnabled": .number(eq.resolvedLowPassEnabled ? 1 : 0),
             ])
         case .compressor:
             let comp = effect.resolvedCompressor
@@ -4072,6 +4562,14 @@ public final class CommandRouter {
                 "mix": .number(delay.mix),
                 "pingPong": .number(delay.pingPong),
                 "highCutHz": .number(delay.highCutHz),
+                // m22-f tempo sync — RESOLVED like the EQ v2 fields (nil
+                // semantics live in DelayParams' resolved accessors): sync
+                // rides as 0/1, division as its length in beats (the
+                // fx.setParam surface), and divisionLabel as the human token
+                // ("1/8d") so agents never reverse-map beats by hand.
+                "sync": .number(delay.resolvedSync ? 1 : 0),
+                "division": .number(delay.resolvedDivision.beats),
+                "divisionLabel": .string(delay.resolvedDivision.rawValue),
             ])
         case .saturator:
             let saturator = effect.resolvedSaturator
@@ -5079,8 +5577,11 @@ public final class CommandRouter {
     /// Encodes the whole snapshot for the wire, replacing each instrument track's
     /// `instrument` with its resolved wire form so sampler zones carry `path`
     /// (a filesystem path string) instead of the model's URL, and attaching every
-    /// track's RESOLVED insert chain (`{id, kind, isBypassed, params, latencySamples}`).
-    /// Audio/bus tracks keep their (omitted) instrument.
+    /// track's RESOLVED insert chain (`{id, kind, isBypassed, params,
+    /// latencySamples, gainReductionDb?}` — the m22-e GR meter rides here, and
+    /// on `masterEffects`, because this snapshot IS the poll path that already
+    /// carries per-strip meter state). Audio/bus tracks keep their (omitted)
+    /// instrument.
     private func snapshotJSON() throws -> JSONValue {
         let snapshot = store.snapshot()
         let encoded = try JSONValue(encoding: snapshot)

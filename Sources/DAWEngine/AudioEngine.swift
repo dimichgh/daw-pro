@@ -52,6 +52,11 @@ public final class AudioEngine: AudioEngineControlling {
     /// `stretchCache`. Analysis runs in the cache's detached task; nothing
     /// here touches the render thread or the live graph.
     var transientCache = TransientCache()
+    /// Offline audio-content analysis cache (m21-e). `var` internal so tests
+    /// can point it at a temp directory before use — the `transientCache`
+    /// seam exactly. Analysis runs in the cache's detached task; nothing
+    /// here touches the render thread or the live graph.
+    var audioAnalysisCache = AudioAnalysisCache()
     private let tonePlayer = AVAudioPlayerNode()
     private var toneBuffer: AVAudioPCMBuffer?
     private var meterTapInstalled = false
@@ -63,6 +68,11 @@ public final class AudioEngine: AudioEngineControlling {
     /// the limiter working). Tracked so shutdown/rebuild remove the tap from
     /// the node that actually carries it.
     private var meterTapNode: AVAudioNode?
+    /// Test seam (m22-g P2, the meter-reads-mix pin): the node the master
+    /// tap actually rides. With the monitor lane present this MUST stay the
+    /// chain host — UPSTREAM of `mixMonitorGate` — so meters/loudness keep
+    /// reading the MIX while the reference auditions (design D8/§5.5).
+    var meterTapNodeForTesting: AVAudioNode? { meterTapNode }
     /// Armed debug master-bus capture (m14-d C5 live gate; nil = none) — see
     /// `startDebugMasterCapture(toPath:)`.
     private var debugCapture: DebugMasterCapture?
@@ -76,6 +86,24 @@ public final class AudioEngine: AudioEngineControlling {
     /// Main-actor cache of the latest analysis snapshot, refreshed at tap
     /// rate while the engine runs and polled by `masterAnalysis()`.
     private var latestMasterAnalysis: MasterAnalysisSnapshot = .floor
+    /// Main-actor cache of the latest goniometer frame (m22-d), refreshed
+    /// at tap rate beside the analysis snapshot and polled by
+    /// `masterScopeFrame()` — the app-only scope seam (raw pairs stay off
+    /// the always-on wire payload by design; see `MasterScopeFrame`).
+    private var latestMasterScope: MasterScopeFrame = .empty
+    /// Live loudness analyzer (m22-c) — rides the SAME meter tap (one tap
+    /// per bus), always armed like `masterAnalyzer`. Reused across tap
+    /// reinstalls while the live format holds (the running measurement
+    /// survives an engine rebuild); replaced when rate/channels change.
+    /// Reset is an atomic handshake consumed ON the tap queue — see
+    /// `LiveLoudnessAnalyzer`.
+    private var liveLoudnessAnalyzer: LiveLoudnessAnalyzer?
+    /// Main-actor cache of the latest live-loudness snapshot, polled by
+    /// `liveLoudness(reset:)`. Generation-guarded: publishes tagged with a
+    /// stale generation (a tap callback in flight across a reset) are
+    /// dropped, so pre-reset values can never resurface.
+    private var latestLiveLoudness: LiveLoudnessSnapshot = .empty
+    private var liveLoudnessGeneration: UInt64 = 0
     private var configObserver: (any NSObjectProtocol)?
     /// Render-load telemetry (M9 perf-b): ONE context per engine, wired into
     /// the live graph's nodes at creation and handed to every
@@ -299,11 +327,63 @@ public final class AudioEngine: AudioEngineControlling {
     /// `lastMasterEffects` for the rebuild republish.
     private var lastMasterAutomation: [AutomationLane] = []
 
+    // MARK: Reference monitor state (m22-g P2 — cached like the metronome)
+
+    /// The project's reference slot, cached from `referenceChanged` pushes
+    /// (the `lastMasterEffects` twin) — the scheduling inputs (path /
+    /// offsetSeconds) live here; the transient monitor flag below is
+    /// engine-local and survives `rebuildEngine` like every cache.
+    private var referenceSlot: ReferenceSlot?
+    /// Transient A/B monitor state (design D4): true between
+    /// `setReferenceMonitor(on: true)` and its off/slot-removal end. The
+    /// STORE owns the user-facing state; this mirror drives scheduling.
+    private var referenceMonitoring = false
+    /// The store-computed level-match gain (dB), cached so a rebuild's
+    /// fresh lane re-applies it (`applyReferenceMonitorNodeState`).
+    private var referenceMatchGainDb: Double = 0
+    /// Control-plane file handle for the reference player, opened at
+    /// monitor-ON and invalidated when the slot's path changes. AVAudioFile
+    /// reads happen inside the player's own machinery — never on the render
+    /// thread from our code.
+    private var referenceAudioFile: AVAudioFile?
+    /// Test seam (m22-g P2): the last reference schedule's control-plane
+    /// arithmetic — mapped file start, deferred-start delay, and the D7
+    /// PDC alignment delay — so re-anchor/latency tests read the exact
+    /// quantities without audio capture (the `clickMeterMapForTesting`
+    /// idiom).
+    private(set) var lastReferenceScheduleForTesting:
+        (fileStartSeconds: Double, playerDelaySeconds: Double,
+         latencySeconds: Double)?
+    /// Test seam (m22-g P2): the engine-local monitor mirror.
+    var referenceMonitoringForTesting: Bool { referenceMonitoring }
+    /// Test seam (m22-g P2): the graph's m19-f-style reference ledger.
+    var referenceScheduledForTesting: Bool { graph.referenceScheduled }
+
     /// Last domain track list, cached because engine.start() (re)initializes
     /// mixer input-bus parameters — a pan set before the first start is
     /// discarded (measured offline: pre-start pan -1 rendered dead center).
     /// Every start path re-applies parameters from this.
     private var lastTracks: [Track] = []
+
+    /// The tempo tempo-synced delays derive their effective time from
+    /// (m22-f): adopted from EVERY transport-carrying intent via
+    /// `cacheTransportFlags` — `setTempo` is the store's tempo-change push,
+    /// and the load funnel's trailing `loopChanged` heals the announce-first
+    /// ordering at project open. `lastTracks`/`lastMasterEffects` hold
+    /// RESOLVED descriptors (synced delay `timeMs` = derived ms — idempotent
+    /// under re-resolution, see `DelayTempoSync`), so rebuilds and restarts
+    /// republish the right time with zero extra machinery. Multi-segment
+    /// maps read the tempo at the last-known playhead AT ADOPTION TIME —
+    /// crossing a segment boundary mid-roll retunes at the next control-
+    /// plane intent, never on the render thread (v1 contract).
+    private var delaySyncTempoBPM: Double = 120
+
+    /// Test seam (m22-f): the resolved track list, readable so the
+    /// control-plane recompute pin can prove a tempo change re-derives a
+    /// synced delay's effective time (the `clickMeterMapForTesting` idiom).
+    var lastTracksForTesting: [Track] { lastTracks }
+    /// Test seam (m22-f): the resolved master chain, same rationale.
+    var lastMasterEffectsForTesting: [EffectDescriptor] { lastMasterEffects }
 
     /// Lead time between "now" and the shared player start anchor: long enough
     /// to cover a render quantum + scheduling jitter, short enough to feel
@@ -366,6 +446,12 @@ public final class AudioEngine: AudioEngineControlling {
         // The SAME context survives every rebuild, so lifetime counters (the
         // watchdog heartbeat) stay monotonic across engine replacement.
         graph.performance = performance
+        // Reference monitor lane (m22-g P2, design D3): ONLY the live
+        // engine flips this — set here, before the graph's first
+        // `ensureMasterSandwich`, so live graphs (init AND rebuild) carry
+        // the lane while `OfflineRenderer`'s own graphs keep the flag's
+        // fail-safe false default and stay lane-free by construction.
+        graph.referenceLaneEnabled = true
         // Master chain (m13-d): a fresh (rebuilt) graph republishes the
         // cached descriptors — the masterVolume re-apply twin; the rebuild's
         // parameter passes then sync them into the fresh chain host.
@@ -563,6 +649,9 @@ public final class AudioEngine: AudioEngineControlling {
                 // stopped (master volume, track pan/volume/mute/solo) must stick.
                 mixer.outputVolume = Float(masterVolume)
                 graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+                // m22-g P2: an audition surviving into this start re-lands
+                // its gate/gain (the masterVolume re-apply twin).
+                applyReferenceMonitorNodeState()
                 // M9 crash-c: a successful start re-arms a given-up watchdog (the
                 // only exit from `.failed`) and starts the check loop (idempotent).
                 watchdog.reset()
@@ -603,9 +692,12 @@ public final class AudioEngine: AudioEngineControlling {
         meteringHandler?(.silence)
         // Tap removed + engine stopped: safe to reset the analyzer (its
         // threading contract), and the published snapshot floors like the
-        // meter silence push above.
+        // meter silence push above. Live loudness (m22-c) restarts too — a
+        // shutdown ends the measured program (transport stop does NOT).
         masterAnalyzer?.reset()
         latestMasterAnalysis = .floor
+        latestMasterScope = .empty
+        resetLiveLoudness()
     }
 
     // MARK: - Transport intents
@@ -693,6 +785,10 @@ public final class AudioEngine: AudioEngineControlling {
     }
 
     public func tracksDidChange(_ tracks: [Track]) {
+        // m22-f: resolve tempo-synced delays at the intake seam — everything
+        // downstream (reconcile, parameter passes, rebuilds) sees a final
+        // timeMs and the render thread never meets a tempo.
+        let tracks = DelayTempoSync.resolved(tracks: tracks, tempoBPM: delaySyncTempoBPM)
         lastTracks = tracks
         // m16-a Leg 1: reconcile + rebuild under the exception barrier — the
         // audit's storm-flavored raises (a player attached-but-not-yet-
@@ -840,6 +936,11 @@ public final class AudioEngine: AudioEngineControlling {
         engine.stop()
         isRunning = false
         masterAnalyzer?.reset()
+        // Live loudness (m22-c): a rebuild is a session discontinuity (the
+        // device/format may change under us) — restart the measured program
+        // rather than stitching across it. The analyzer object itself is
+        // reused by the fresh tap when the format holds.
+        resetLiveLoudness()
         engine = AVAudioEngine()  // old engine's last reference dies here
         graph = PlaybackGraph(engine: engine, graphRate: Self.currentDeviceRate(of: engine))
         wireGraphHooks()
@@ -858,6 +959,10 @@ public final class AudioEngine: AudioEngineControlling {
         graph.reconcile(tracks: lastTracks)
         mixer.outputVolume = Float(masterVolume)
         graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+        // m22-g P2: the fresh graph's lane is born gate-open/unity — an
+        // audition surviving the rebuild re-closes the gate + match gain
+        // here; the resume path below re-schedules the player.
+        applyReferenceMonitorNodeState()
         // m16-h Leg 1: DEFER the hardware start unless something needs a
         // running engine RIGHT NOW. On this OS a strip sandwich born on a
         // RUNNING engine hosts permanently unstartable players (the deep
@@ -1153,6 +1258,29 @@ public final class AudioEngine: AudioEngineControlling {
         try await transientCache.markers(source: url, sensitivity: sensitivity)
     }
 
+    /// Offline audio-content analysis (m21-e): key / tempo / spectral
+    /// balance / levels over the file's source window, content-key cached
+    /// per (file, window). The cache runs the analyzer in a detached task —
+    /// zero render-thread involvement, zero live-graph involvement.
+    public func analyzeAudioContent(inFileAt url: URL, windowStartSeconds: Double,
+                                    windowDurationSeconds: Double) async throws -> AudioContentAnalysis {
+        try await audioAnalysisCache.analysis(
+            source: url, windowStartSeconds: windowStartSeconds,
+            windowDurationSeconds: windowDurationSeconds)
+    }
+
+    /// Offline whole-file reference analysis (m22-g): loudness through the
+    /// ONE `Loudness.Stream` home, the shared 24-band fold, and whole-file
+    /// stereo aggregates, streamed in bounded chunks on a detached task —
+    /// zero render-thread involvement, zero live-graph involvement. No
+    /// cache: the result persists in the project's reference slot and
+    /// re-analysis is a rare explicit verb (design-m22g §4.2).
+    public func analyzeReferenceFile(at url: URL) async throws -> ReferenceAnalysis {
+        try await Task.detached(priority: .userInitiated) {
+            try ReferenceAnalyzer.analyze(fileAt: url)
+        }.value
+    }
+
     /// Total fixed insert-chain latency for one track's strip, in samples at
     /// the graph rate (non-bypassed effects only) — the M4 (viii) PDC hook.
     public func insertChainLatencySamples(forTrack id: UUID) -> Int {
@@ -1171,6 +1299,23 @@ public final class AudioEngine: AudioEngineControlling {
     /// feeding the wire snapshot's `masterEffects[].latencySamples`.
     public func masterEffectLatencySamples(effectID: UUID) -> Int {
         graph.masterEffectLatencySamples(forEffect: effectID)
+    }
+
+    /// Current held-peak gain reduction of ONE live insert-effect instance
+    /// (m22-e): POSITIVE dB of reduction, 0 = untouched, −20 dB/s held-peak
+    /// release (the peakDB convention). nil = the effect doesn't measure GR
+    /// (non-dynamics kinds, hosted AUs, unknown ids) — feeds the additive
+    /// per-effect `gainReductionDb` on the control snapshot, which omits the
+    /// field rather than fabricating one. Control-plane read: one atomic
+    /// load; the render thread is never involved.
+    public func effectGainReductionDb(trackID: UUID, effectID: UUID) -> Double? {
+        graph.effectGainReductionDb(forTrack: trackID, effectID: effectID)
+    }
+
+    /// The `effectGainReductionDb` twin on the post-fader MASTER chain
+    /// (m22-e), feeding the wire snapshot's `masterEffects[].gainReductionDb`.
+    public func masterEffectGainReductionDb(effectID: UUID) -> Double? {
+        graph.masterEffectGainReductionDb(forEffect: effectID)
     }
 
     /// The latest PDC recompute report (M4 viii-c) — rebuilt by the graph at
@@ -1196,6 +1341,8 @@ public final class AudioEngine: AudioEngineControlling {
     /// master chain host; never topology, never a rebuild, never a
     /// transport interruption (the live-add gate BY CONSTRUCTION).
     public func masterEffectsChanged(_ effects: [EffectDescriptor]) {
+        // m22-f: the master-chain twin of the tracksDidChange intake resolve.
+        let effects = DelayTempoSync.resolved(effects: effects, tempoBPM: delaySyncTempoBPM)
         lastMasterEffects = effects
         graph.masterEffects = effects
         graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
@@ -1382,6 +1529,163 @@ public final class AudioEngine: AudioEngineControlling {
         auRegistry.effectState(forEffect: id)
     }
 
+    // MARK: - Hosted-AU parameter surface (design-au-parameter-surface, CONTROL-PLANE ONLY)
+
+    /// One page of the live `AUParameterTree` of a hosted AU. nil ⇒ no
+    /// `.ready` instance (the store adds pending/missing/failed detail);
+    /// a nil TREE on a healthy AU is SUCCESS (`hasParameterTree: false`) —
+    /// opaque-state units are healthy hosts that simply don't publish.
+    /// Main-actor only, and the render thread is never involved — parameter
+    /// delivery to the DSP side is the AU's own RT-safe mechanism. There is
+    /// deliberately NO `dlsBankQueue` hop: the m18-d/m19-j law covers
+    /// LoadInstrument/initialize/dispose, not parameter access. Every tree
+    /// touch runs inside the C8 barrier — a v2 bridge's ObjC property surface
+    /// can raise inside vendor code. `allParameters` materializes the whole
+    /// array even when paging — accepted v1 cost (a few ms for
+    /// thousand-param synths, control plane only).
+    public func describeHostedAUParameters(_ target: HostedAUTarget, offset: Int,
+                                           maxParams: Int, addresses: [String]?) throws
+        -> HostedAUParameterPage? {
+        guard let au = hostedAudioUnit(for: target) else { return nil }
+        return try withObjCExceptionBarrier("AU parameter read") { () -> HostedAUParameterPage in
+            guard let tree = au.parameterTree else {
+                return HostedAUParameterPage(hasParameterTree: false, totalCount: 0,
+                                             offset: 0, truncated: false, parameters: [])
+            }
+            let all = tree.allParameters
+            if let addresses {
+                // Exact-get filter: misses (and unparseable entries) are
+                // REPORTED, never an error — describe stays lenient; set is
+                // the strict side.
+                var hits: [HostedAUParameterInfo] = []
+                var unknown: [String] = []
+                for address in addresses {
+                    if let parsed = UInt64(address),
+                       let parameter = tree.parameter(withAddress: parsed) {
+                        hits.append(Self.hostedParameterInfo(parameter))
+                    } else {
+                        unknown.append(address)
+                    }
+                }
+                return HostedAUParameterPage(hasParameterTree: true, totalCount: all.count,
+                                             offset: 0, truncated: false,
+                                             parameters: hits, unknownAddresses: unknown)
+            }
+            // Defensive clamp (the wire clamps too): offset ≥ 0, maxParams 1…4096.
+            let start = min(max(offset, 0), all.count)
+            let end = min(start + min(max(maxParams, 1), 4_096), all.count)
+            let page = all[start..<end].map(Self.hostedParameterInfo)
+            return HostedAUParameterPage(hasParameterTree: true, totalCount: all.count,
+                                         offset: start,
+                                         truncated: start + page.count < all.count,
+                                         parameters: page)
+        }
+    }
+
+    /// Set one parameter by decimal-string address: parse → live tree lookup
+    /// → writable check → SILENT host-side clamp to [minValue, maxValue]
+    /// (fx.setParam precedent) → write (`parameter.value =` is
+    /// Apple-contracted safe from any thread, marshalled to the AU without
+    /// blocking the render thread) → READ-BACK echo, so quantizing/stepping
+    /// units answer with the truth. Same barrier/no-queue-hop contract as
+    /// the describe above.
+    @discardableResult
+    public func setHostedAUParameter(_ target: HostedAUTarget, address: String,
+                                     value: Double) throws -> HostedAUParameterInfo {
+        guard let au = hostedAudioUnit(for: target) else {
+            throw HostedAUParameterError.noHostedAU
+        }
+        guard value.isFinite else { throw HostedAUParameterError.nonFiniteValue }
+        guard let parsed = UInt64(address) else {
+            throw HostedAUParameterError.invalidAddress(address)
+        }
+        return try withObjCExceptionBarrier("AU parameter write") { () -> HostedAUParameterInfo in
+            guard let tree = au.parameterTree else {
+                throw HostedAUParameterError.noParameterTree
+            }
+            guard let parameter = tree.parameter(withAddress: parsed) else {
+                throw HostedAUParameterError.unknownAddress(address)
+            }
+            guard parameter.flags.contains(.flag_IsWritable) else {
+                throw HostedAUParameterError.notWritable(parameter.identifier)
+            }
+            let clamped = min(max(value, Double(parameter.minValue)),
+                              Double(parameter.maxValue))
+            parameter.value = AUValue(clamped)
+            return Self.hostedParameterInfo(parameter)   // post-set read-back echo
+        }
+    }
+
+    /// The live AU for a parameter-surface target — a FRESH registry resolve
+    /// on every call (no retained tree references), so release/re-prepare
+    /// races collapse to `.noHostedAU`/status errors. Nothing new hooks on
+    /// `hostedAUReleased`.
+    private func hostedAudioUnit(for target: HostedAUTarget) -> AUAudioUnit? {
+        switch target {
+        case .instrument(let trackID):
+            return auRegistry.preparedInstrument(forTrack: trackID)?.auAudioUnit
+        case .effect(let effectID):
+            return auRegistry.preparedEffect(forEffect: effectID)?.auAudioUnit
+        }
+    }
+
+    /// One `AUParameter` → the Foundation-only DTO. `value` is read HERE, at
+    /// build time — describe re-reads on every call (the honest poll
+    /// contract) and set's echo is the post-write truth.
+    private static func hostedParameterInfo(_ parameter: AUParameter) -> HostedAUParameterInfo {
+        let unit = parameter.unit
+        return HostedAUParameterInfo(
+            address: String(parameter.address),
+            identifier: parameter.identifier,
+            displayName: parameter.displayName,
+            keyPath: parameter.keyPath,
+            unit: Self.parameterUnitLabel(unit),
+            unitName: unit == .customUnit ? parameter.unitName : nil,
+            minValue: Double(parameter.minValue),
+            maxValue: Double(parameter.maxValue),
+            value: Double(parameter.value),
+            writable: parameter.flags.contains(.flag_IsWritable),
+            readable: parameter.flags.contains(.flag_IsReadable),
+            valueStrings: unit == .indexed ? parameter.valueStrings : nil)
+    }
+
+    /// `AudioUnitParameterUnit` → the stable wire label
+    /// (design-au-parameter-surface §3); unknown future cases degrade
+    /// honestly to "unknown(rawValue)".
+    private static func parameterUnitLabel(_ unit: AudioUnitParameterUnit) -> String {
+        switch unit {
+        case .generic: return "generic"
+        case .indexed: return "indexed"
+        case .boolean: return "boolean"
+        case .percent: return "percent"
+        case .seconds: return "seconds"
+        case .sampleFrames: return "sampleFrames"
+        case .phase: return "phase"
+        case .rate: return "rate"
+        case .hertz: return "hertz"
+        case .cents: return "cents"
+        case .relativeSemiTones: return "relativeSemiTones"
+        case .midiNoteNumber: return "midiNoteNumber"
+        case .midiController: return "midiController"
+        case .decibels: return "decibels"
+        case .linearGain: return "linearGain"
+        case .degrees: return "degrees"
+        case .equalPowerCrossfade: return "equalPowerCrossfade"
+        case .mixerFaderCurve1: return "mixerFaderCurve1"
+        case .pan: return "pan"
+        case .meters: return "meters"
+        case .absoluteCents: return "absoluteCents"
+        case .octaves: return "octaves"
+        case .BPM: return "bpm"
+        case .beats: return "beats"
+        case .milliseconds: return "milliseconds"
+        case .ratio: return "ratio"
+        case .customUnit: return "customUnit"
+        case .midi2Controller: return "midi2Controller"
+        @unknown default: return "unknown(\(unit.rawValue))"
+        }
+    }
+
     public func loopChanged(_ transport: TransportState) {
         let scheduledLoop = loopContext
         cacheTransportFlags(from: transport)
@@ -1463,6 +1767,193 @@ public final class AudioEngine: AudioEngineControlling {
         metronome.start(at: AVAudioTime(
             hostTime: mach_absolute_time()
                 &+ AVAudioTime.hostTime(forSeconds: Self.startLeadSeconds)))
+    }
+
+    // MARK: - Reference A/B monitor (m22-g P2, design §5.4/§5.6/D7)
+
+    /// The timeline→file mapping law (design D6): reference file time =
+    /// timeline seconds + offsetSeconds, timeline seconds = the tempo-map
+    /// integral from beat 0 (the m22-f control-plane tempo law — the render
+    /// thread never does tempo math). Static + pure so the tempo-change
+    /// mapping pin reads it directly.
+    static func referenceFileSeconds(atBeat beat: Double, tempoMap: TempoMap,
+                                     offsetSeconds: Double) -> Double {
+        tempoMap.seconds(from: 0, to: beat) + offsetSeconds
+    }
+
+    /// Reference slot push (the `masterEffectsChanged` twin): cache for
+    /// scheduling; an offset change while auditioning during playback
+    /// re-anchors the reference player LOCALLY (the metronome
+    /// enable-mid-play mechanism — transport, clip players, and schedules
+    /// untouched). Slot removal ends any audition (defense in depth — the
+    /// store's monitor-off runs first on every production path).
+    public func referenceChanged(_ slot: ReferenceSlot?) {
+        let previous = referenceSlot
+        referenceSlot = slot
+        if slot?.sourcePath != previous?.sourcePath {
+            referenceAudioFile = nil
+        }
+        guard let slot else {
+            if referenceMonitoring { disengageReferenceMonitor() }
+            return
+        }
+        // Slot IDENTITY changed under an audition (project boundary /
+        // replace defense in depth — the store's monitor-off runs first on
+        // every production path): a different reference must never keep the
+        // old audition's gate/schedule.
+        if referenceMonitoring, let previous, previous.id != slot.id {
+            disengageReferenceMonitor()
+            return
+        }
+        if referenceMonitoring, currentAnchor != nil,
+           slot.offsetSeconds != previous?.offsetSeconds {
+            // m16-a Leg 1: the player-local re-anchor reaches play(at:) —
+            // the same barrier family as the metronome toggle.
+            withGuardedEngineIntent("reference offset re-anchor") {
+                reanchorReferenceMidPlay()
+            }
+        }
+    }
+
+    /// A/B monitor toggle (design D4): ON gates the mix post-chain and
+    /// arms/schedules the reference player with the STORE-computed match
+    /// gain; mid-play it re-anchors player-locally at the current mapped
+    /// position (the metronome enable-mid-play mechanism), stopped it arms
+    /// for the next transport start. OFF = player-local stop + un-gate.
+    /// Never topology, never a transport interruption.
+    public func setReferenceMonitor(on: Bool, matchGainDb: Double) throws {
+        guard on else {
+            disengageReferenceMonitor()
+            return
+        }
+        guard let slot = referenceSlot else { throw ProjectError.referenceNotSet }
+        // Lane on demand: `ensureMasterSandwich` is idempotent/attach-only
+        // and pre-start-safe (the prepare() precedent) — a monitor armed
+        // before the first reconcile still finds its nodes.
+        graph.ensureMasterSandwich()
+        guard graph.referencePlayer != nil else {
+            throw ProjectError.engineUnavailable
+        }
+        let file = try openReferenceFile(slot: slot)
+        referenceMatchGainDb = matchGainDb
+        referenceMonitoring = true
+        graph.setReferenceMonitorGain(linear: pow(10, matchGainDb / 20))
+        if currentAnchor != nil {
+            withGuardedEngineIntent("reference monitor toggle") {
+                reanchorReferenceMidPlay(file: file)
+            }
+        }
+        // Gate last: the mix hands off once the reference is armed. While
+        // stopped both sides are silent — the gate is just pre-set state
+        // the next transport start plays into.
+        graph.setMixMonitorGate(open: false)
+    }
+
+    /// Match-gain-only re-apply (a trim edit while monitoring): one
+    /// node-volume write, never a re-anchor (design §3.4).
+    public func referenceMatchGainChanged(matchGainDb: Double) {
+        referenceMatchGainDb = matchGainDb
+        guard referenceMonitoring else { return }
+        graph.setReferenceMonitorGain(linear: pow(10, matchGainDb / 20))
+    }
+
+    /// Monitor OFF, shared by the toggle, slot removal, and defense paths:
+    /// player-local stop (ledger-gated), mix un-gates. Idempotent.
+    private func disengageReferenceMonitor() {
+        graph.stopReference()
+        graph.setMixMonitorGate(open: true)
+        referenceMonitoring = false
+    }
+
+    /// Re-applies the monitor's node state onto the CURRENT graph — the
+    /// masterVolume re-apply twin for rebuild/recovery paths: a fresh lane
+    /// is born gate-open at unity gain, so an audition surviving a rebuild
+    /// must re-close the gate and re-land the match gain (the player is
+    /// re-scheduled by the resume path's `startPlayers`).
+    private func applyReferenceMonitorNodeState() {
+        guard referenceMonitoring else { return }
+        graph.setMixMonitorGate(open: false)
+        graph.setReferenceMonitorGain(linear: pow(10, referenceMatchGainDb / 20))
+    }
+
+    /// Opens (or reuses) the control-plane file handle for the slot.
+    /// Failure surfaces the `referenceFileMissing` teaching error verbatim.
+    private func openReferenceFile(slot: ReferenceSlot) throws -> AVAudioFile {
+        if let file = referenceAudioFile, file.url.path == slot.sourcePath {
+            return file
+        }
+        do {
+            let file = try AVAudioFile(
+                forReading: URL(fileURLWithPath: slot.sourcePath))
+            referenceAudioFile = file
+            return file
+        } catch {
+            throw ProjectError.referenceFileMissing(slot.sourcePath)
+        }
+    }
+
+    /// The reference side of one transport (re)start — called from
+    /// `startPlayers` beside `startMetronome`, against the SAME clip-player
+    /// anchor (count-in delays inherit for free). No-op unless monitoring
+    /// (the m19-f schedule-gated ledger keeps the idle lane cost-free).
+    private func startReferenceWithRoll(fromBeat beats: Double,
+                                        tempoMap: TempoMap,
+                                        anchorHost: UInt64) {
+        guard referenceMonitoring, let slot = referenceSlot,
+              let file = try? openReferenceFile(slot: slot) else { return }
+        scheduleAndStartReference(atBeat: beats, tempoMap: tempoMap,
+                                  slot: slot, file: file,
+                                  anchorHostTime: anchorHost)
+    }
+
+    /// Mid-play toggle / offset re-anchor — the `metronomeChangedBody`
+    /// mechanism verbatim: player-local stop, then schedule from the beat
+    /// the transport will occupy at "now + startLeadSeconds" (MODULAR under
+    /// an active loop, so every toggle-ON lands at the correct mapped
+    /// position; the running audition then free-runs across wraps — the
+    /// design's v1 loop honesty).
+    private func reanchorReferenceMidPlay(file: AVAudioFile? = nil) {
+        graph.stopReference()
+        guard referenceMonitoring, let anchor = currentAnchor,
+              let slot = referenceSlot,
+              let file = file ?? (try? openReferenceFile(slot: slot)) else { return }
+        let elapsed = elapsedSeconds(anchor: anchor)
+        let anchorBeat = beat(forElapsedSeconds: elapsed + Self.startLeadSeconds,
+                              anchor: anchor)
+        scheduleAndStartReference(
+            atBeat: anchorBeat, tempoMap: anchor.tempoMap, slot: slot, file: file,
+            anchorHostTime: mach_absolute_time()
+                &+ AVAudioTime.hostTime(forSeconds: Self.startLeadSeconds))
+    }
+
+    /// Shared schedule+start: maps the anchor beat through the D6 law,
+    /// splits negative file time into a deferred player-relative start, and
+    /// DELAYS the player anchor by `outputLatencySamples` (D7: the mix
+    /// reaches the ear T+B+master late — report-only PDC arithmetic on the
+    /// control plane; the zero-latency lane starts later by exactly that,
+    /// so A and B present the same musical moment).
+    private func scheduleAndStartReference(
+        atBeat beat: Double, tempoMap: TempoMap, slot: ReferenceSlot,
+        file: AVAudioFile, anchorHostTime: UInt64
+    ) {
+        let graphRate = graph.graphSampleRate
+        let latencySeconds = graphRate > 0
+            ? Double(graph.pdcReport?.outputLatencySamples ?? 0) / graphRate
+            : 0
+        let fileTime = Self.referenceFileSeconds(
+            atBeat: beat, tempoMap: tempoMap, offsetSeconds: slot.offsetSeconds)
+        let fileStart = max(0, fileTime)
+        let playerDelay = max(0, -fileTime)
+        lastReferenceScheduleForTesting =
+            (fileStart, playerDelay, latencySeconds)
+        guard graph.scheduleReference(file: file, fileStartSeconds: fileStart,
+                                      playerDelaySeconds: playerDelay) else {
+            // Mapped past EOF: honest silence — the player stays idle.
+            return
+        }
+        graph.startReference(at: AVAudioTime(
+            hostTime: anchorHostTime
+                &+ AVAudioTime.hostTime(forSeconds: latencySeconds)))
     }
 
     // MARK: - Recording
@@ -1784,6 +2275,34 @@ public final class AudioEngine: AudioEngineControlling {
         // to the old constant-map arithmetic (the null-era gate).
         clickMeterMap = transport.meterMap
         countInBars = transport.countInBars
+        adoptDelayTempo(from: transport)
+    }
+
+    /// m22-f: the tempo-synced-delay recompute — the CONTROL-PLANE half of
+    /// delay tempo sync (the sidechain re-push precedent: model/tempo state
+    /// re-enters the engine through the normal parameter funnel, never a
+    /// render-thread lookup). Runs from every transport-carrying intent
+    /// (`cacheTransportFlags`); a tempo change arrives via the store's
+    /// existing `engine.setTempo` push. When the effective tempo actually
+    /// moved AND a synced delay exists, the cached descriptors re-resolve
+    /// and ONE parameter pass republishes them — the `masterEffectsChanged`
+    /// funnel verbatim, atomic snapshot publish only, never topology.
+    private func adoptDelayTempo(from transport: TransportState) {
+        let bpm = transport.tempoMap.bpm(atBeat: lastKnownBeats)
+        guard bpm != delaySyncTempoBPM else { return }
+        delaySyncTempoBPM = bpm
+        let tracksSynced = DelayTempoSync.containsSyncedDelay(tracks: lastTracks)
+        let masterSynced = DelayTempoSync.containsSyncedDelay(effects: lastMasterEffects)
+        guard tracksSynced || masterSynced else { return }
+        if tracksSynced {
+            lastTracks = DelayTempoSync.resolved(tracks: lastTracks, tempoBPM: bpm)
+        }
+        if masterSynced {
+            lastMasterEffects = DelayTempoSync.resolved(effects: lastMasterEffects,
+                                                        tempoBPM: bpm)
+            graph.masterEffects = lastMasterEffects
+        }
+        graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
     }
 
     // MARK: - Playback internals
@@ -1913,6 +2432,10 @@ public final class AudioEngine: AudioEngineControlling {
             startMetronome(fromBeat: beats, tempoMap: tempoMap,
                            countIn: countIn,
                            at: AVAudioTime(hostTime: clickAnchorHost))
+            // m22-g P2: the reference joins the same pass, against the CLIP
+            // anchor (count-in inherits; D7 latency lands inside).
+            startReferenceWithRoll(fromBeat: beats, tempoMap: tempoMap,
+                                   anchorHost: anchorHost)
         } else {
             // No render clock yet (first callback pending): host-clock anchor
             // and host-clock playhead.
@@ -1930,6 +2453,9 @@ public final class AudioEngine: AudioEngineControlling {
             startMetronome(fromBeat: beats, tempoMap: tempoMap,
                            countIn: countIn,
                            at: AVAudioTime(hostTime: clickAnchorHost))
+            // m22-g P2: same hook as the render-clock branch.
+            startReferenceWithRoll(fromBeat: beats, tempoMap: tempoMap,
+                                   anchorHost: anchorHost)
         }
     }
 
@@ -2165,6 +2691,9 @@ public final class AudioEngine: AudioEngineControlling {
             // A fresh start re-initializes mixer parameters — restore the mix.
             engine.mainMixerNode.outputVolume = Float(masterVolume)
             graph.applyParameters(tracks: lastTracks)
+            // m22-g P2: gate/gain re-land with the mix parameters; the
+            // startPlayers below re-schedules the reference when monitoring.
+            applyReferenceMonitorNodeState()
             startPlayers(fromBeat: beats, tempoMap: anchor.tempoMap)
         } catch {
             playheadTask?.cancel()
@@ -2302,6 +2831,22 @@ public final class AudioEngine: AudioEngineControlling {
         // (main actor, init time); the tap closure only feeds it.
         let analyzer = masterAnalyzer ?? MasterMixAnalyzer(sampleRate: format.sampleRate)
         masterAnalyzer = analyzer
+        // Live loudness (m22-c) shares the tap too. Reuse while the format
+        // holds (running integrated/LRA survive a rebuild); a format change
+        // invalidates the DSP geometry, so build fresh.
+        let liveLoudness: LiveLoudnessAnalyzer
+        if let existing = liveLoudnessAnalyzer,
+           existing.matches(sampleRate: format.sampleRate,
+                            channelCount: Int(format.channelCount)) {
+            liveLoudness = existing
+        } else {
+            liveLoudness = LiveLoudnessAnalyzer(
+                sampleRate: format.sampleRate,
+                channelCount: Int(format.channelCount))
+            liveLoudnessAnalyzer = liveLoudness
+            latestLiveLoudness = .empty
+            liveLoudnessGeneration = 0
+        }
         // @Sendable is load-bearing: without it this closure (formed in a
         // @MainActor context) inherits main-actor isolation and the Swift
         // runtime traps when AVFAudio invokes it on its tap queue.
@@ -2335,9 +2880,23 @@ public final class AudioEngine: AudioEngineControlling {
                 channelCount: Int(buffer.format.channelCount),
                 frameCount: frames)
             let analysis = analyzer.snapshot()
+            // Goniometer frame (m22-d): same value-hop as the snapshot —
+            // the ring is tap-queue-owned; only the copied VALUE crosses.
+            let scope = analyzer.scopeFrame()
+            // Live loudness (m22-c): same feed, same value-hop. The tuple's
+            // generation tag gates the main-actor write (reset race safety).
+            let loudness = liveLoudness.processAndSnapshot(
+                channels: channels,
+                channelCount: Int(buffer.format.channelCount),
+                frameCount: frames)
             Task { @MainActor [weak self] in
-                self?.meteringHandler?(frame)
-                self?.latestMasterAnalysis = analysis
+                guard let self else { return }
+                self.meteringHandler?(frame)
+                self.latestMasterAnalysis = analysis
+                self.latestMasterScope = scope
+                if loudness.generation == self.liveLoudnessGeneration {
+                    self.latestLiveLoudness = loudness.snapshot
+                }
             }
         }
         meterTapInstalled = true
@@ -2348,6 +2907,46 @@ public final class AudioEngine: AudioEngineControlling {
     /// meters. `.floor` until the tap has run (and again after `shutdown`).
     public func masterAnalysis() -> MasterAnalysisSnapshot {
         latestMasterAnalysis
+    }
+
+    /// Latest goniometer frame (m22-d) — poll-based like `masterAnalysis()`.
+    /// `.empty` until the tap has run (and again after `shutdown`).
+    public func masterScopeFrame() -> MasterScopeFrame {
+        latestMasterScope
+    }
+
+    /// Latest live master-bus loudness snapshot (m22-c) — poll-based like
+    /// `masterAnalysis()`. `.empty` until the tap has delivered (a real
+    /// engine that has not analyzed anything yet is honest evidence-free
+    /// data — unlike a FAKE engine, which reports nil via the protocol
+    /// default and becomes the wire's engineUnavailable teaching error).
+    /// `reset: true` restarts the running measurement THEN returns the
+    /// fresh snapshot: the analyzer resets on its own tap queue via the
+    /// atomic handshake, the cache empties immediately, and the generation
+    /// bump drops any in-flight pre-reset publish.
+    public func liveLoudness(reset: Bool) -> LiveLoudnessSnapshot? {
+        if reset { resetLiveLoudness() }
+        return latestLiveLoudness
+    }
+
+    /// Restart the live-loudness measurement (manual reset, engine
+    /// teardown, rebuild). Safe with a live tap: the stream resets on the
+    /// tap queue at the next delivery; stale publishes are dropped by the
+    /// generation guard.
+    private func resetLiveLoudness() {
+        if let analyzer = liveLoudnessAnalyzer {
+            liveLoudnessGeneration = analyzer.requestReset()
+        }
+        latestLiveLoudness = .empty
+    }
+
+    /// The live output format's sample rate (m22-b §3.4) — read from the
+    /// SAME node the meter tap measures (`installMeterTap`'s
+    /// `outputFormat(forBus: 0)` query), falling back to the main mixer
+    /// before the tap exists and to 48 kHz before the output is configured.
+    public func renderSampleRateHz() -> Double {
+        let rate = (meterTapNode ?? engine.mainMixerNode).outputFormat(forBus: 0).sampleRate
+        return rate > 0 ? rate : 48_000
     }
 
     // MARK: - Debug master-bus capture (m14-d C5 live gate; app `debug.*` tier)

@@ -22,6 +22,7 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__clip_quantize_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_humanize,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_detect_transients,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_analyze_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__groove_extract,
   mcp__plugin_daw-pro-music-team_daw-pro__groove_list,
   mcp__plugin_daw-pro-music-team_daw-pro__groove_remove,
@@ -76,6 +77,11 @@ there.
   clip. `groove_extract`/`groove_list`/`groove_remove` capture and manage
   reusable groove templates (plus built-in MPC swing presets) to quantize
   other clips toward.
+- **Analyze imported audio.** Before writing anything against an imported
+  song, call `clip_analyze_audio` first — it reads the clip's key, tempo,
+  and spectral balance so new material is written IN the detected key/tempo
+  instead of guessed; treat a low confidence, `tonal: false`, or a null
+  `bpm` as an honest answer, not a failed call.
 - **AI song generation (local, offline, no API key).** Check
   `ai_sidecar_status` first (and `ai_sidecar_start` if it isn't healthy) —
   a slow model load reports `state: "starting"`, not an error; just poll

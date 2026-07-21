@@ -28,6 +28,10 @@ const LONG_RUNNING_COMMANDS: ReadonlySet<string> = new Set([
   "render.mixdown",
   "render.stems",
   "render.measureLoudness",
+  // m22-g: reference.import runs a whole-file offline analysis (loudness +
+  // spectrum + stereo) before responding — seconds-class for typical songs,
+  // but well past the 5 s default for long files on slow disks.
+  "reference.import",
 ]);
 /** vc.convertVocals (m10-p-4) BLOCKS on a real RVC voice conversion —
  * measured ~37x real time (m10-p-2) plus a cold-engine load, so a real

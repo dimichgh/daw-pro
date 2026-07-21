@@ -71,6 +71,19 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
     /// Transient decode fact, NOT coded (no CodingKey): how many chat
     /// elements failed to decode. The open path surfaces it as a warning (L6).
     public var copilotChatsDroppedOnLoad: Int = 0
+    /// Reference-track slot (m22-g). Additive and optional; nil when the
+    /// project has no reference (omit-when-nil — the `masterEffects` rule,
+    /// no schemaVersion bump, pre-m22-g saves re-encode byte-identical).
+    /// Persists as a mirror DTO so the file rides as a bundle-relative
+    /// `media/…` ref (the clip precedent). Decoded TOLERANTLY: a
+    /// corrupt/unknown-shape value decodes to nil plus a load warning
+    /// (`referenceDroppedOnLoad`, the `copilotChats` lossy precedent) — it
+    /// never fails the open.
+    public var reference: ReferenceDocument?
+    /// Transient decode fact, NOT coded (no CodingKey): true when a present
+    /// `reference` value failed to decode and was dropped. The open path
+    /// surfaces it as a warning.
+    public var referenceDroppedOnLoad: Bool = false
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, savedAt, name, masterVolume, transport, tracks, grooveTemplates, markers
@@ -78,6 +91,7 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         case masterEffects
         case masterAutomation
         case copilotChats
+        case reference
     }
 
     /// Builds a document from runtime state. `mediaRefs` maps each clip id to
@@ -95,7 +109,8 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         tempoMapRevision: UInt64 = 0,
         masterEffects: [EffectDescriptor] = [],
         masterAutomation: [AutomationLane] = [],
-        copilotChats: [CopilotChatDocument] = []
+        copilotChats: [CopilotChatDocument] = [],
+        reference: ReferenceSlot? = nil
     ) {
         self.schemaVersion = ProjectBundle.currentSchemaVersion
         self.savedAt = Date()
@@ -133,6 +148,14 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         // key is omitted and a pre-chat project stays byte-identical (the
         // grooveTemplates rule, no schemaVersion bump).
         self.copilotChats = copilotChats.isEmpty ? nil : copilotChats
+        // Reference slot (m22-g): no slot persists as nil → the key is
+        // omitted and a pre-reference project stays byte-identical. The
+        // media ref comes from planMedia keyed by the slot id; a missing
+        // source keeps the ABSOLUTE path (the slot must still name its file
+        // so a later restore heals it — the missing-file-at-load contract).
+        self.reference = reference.map { slot in
+            ReferenceDocument(from: slot, media: (mediaRefs[slot.id] ?? nil) ?? slot.sourcePath)
+        }
     }
 
     public init(from decoder: any Decoder) throws {
@@ -172,6 +195,18 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         let lossyChats = try c.decodeIfPresent(LossyArray<CopilotChatDocument>.self, forKey: .copilotChats)
         copilotChats = lossyChats?.elements
         copilotChatsDroppedOnLoad = lossyChats?.droppedCount ?? 0
+        // Additive optional (m22-g): a pre-reference project has no key →
+        // nil. TOLERANT: a present-but-corrupt value (wrong type, missing
+        // id, hand-edited junk) decodes to nil + the dropped flag instead of
+        // failing the whole open (the copilotChats lossy precedent).
+        if c.contains(.reference) {
+            if let decoded = try? c.decode(ReferenceDocument.self, forKey: .reference) {
+                reference = decoded
+            } else {
+                reference = nil
+                referenceDroppedOnLoad = true
+            }
+        }
     }
 
     /// Restores runtime state, resolving each clip's media reference against
@@ -185,7 +220,7 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         bundleURL: URL
     ) -> (tracks: [Track], transport: TransportState, masterVolume: Double,
           masterEffects: [EffectDescriptor], masterAutomation: [AutomationLane],
-          warnings: [String]) {
+          reference: ReferenceSlot?, warnings: [String]) {
         var warnings: [String] = []
         // Valid routing destinations are exactly the bus tracks in this document.
         let busIDs = Set(tracks.filter { $0.kind == .bus }.map(\.id))
@@ -344,8 +379,38 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
             }
             runtimeMasterAutomation.append(lane)
         }
+        // Reference slot (m22-g): resolve its media ref like a clip's. A
+        // missing FILE keeps the slot (and its persisted analysis) pointed
+        // at the resolved path — reference.analyze / setMonitor refuse with
+        // the referenceFileMissing teaching error, never a silent drop. A
+        // slot with NO resolvable path (null/invalid ref) IS dropped with a
+        // warning (a pathless slot names nothing). A hand-edited analysis
+        // with the wrong band count SANITIZES to nil-analysis + a warning
+        // (the m13-d hand-edited-load precedent).
+        var runtimeReference: ReferenceSlot?
+        if let rd = reference {
+            let (url, warning) = Self.resolveMedia(
+                rd.media, label: "reference '\(rd.name)'", bundleURL: bundleURL)
+            if let warning { warnings.append(warning) }
+            if let url {
+                var analysis = rd.analysis
+                if let a = analysis, a.bandsDb.count != MasterAnalysisSnapshot.bandCount {
+                    warnings.append(
+                        "reference '\(rd.name)' analysis has \(a.bandsDb.count) spectrum bands "
+                        + "(expected \(MasterAnalysisSnapshot.bandCount)) — analysis dropped; "
+                        + "re-run reference.analyze")
+                    analysis = nil
+                }
+                runtimeReference = ReferenceSlot(
+                    id: rd.id, name: rd.name, sourcePath: url.path,
+                    offsetSeconds: rd.offsetSeconds, trimDb: rd.trimDb,
+                    analysis: analysis)
+            } else if rd.media == nil {
+                warnings.append("reference '\(rd.name)' has no media reference — slot dropped")
+            }
+        }
         return (runtimeTracks, runtimeTransport, masterVolume, runtimeMasterEffects,
-                runtimeMasterAutomation, warnings)
+                runtimeMasterAutomation, runtimeReference, warnings)
     }
 
     /// Resolves one persisted media reference to a runtime URL. Returns the URL
@@ -1189,5 +1254,56 @@ public struct TakeLaneDocument: Codable, Sendable, Equatable {
         id = try c.decode(UUID.self, forKey: .id)  // identity required — a missing id is a damaged file
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Take"
         clip = try c.decode(ClipDocument.self, forKey: .clip)
+    }
+}
+
+/// Persistable reference-slot facts (m22-g) — mirrors `ReferenceSlot`, but
+/// `media` rides as a bundle-relative `media/<name>` ref (self-contained
+/// bundle), an absolute path (recovery bundles / missing-at-save sources),
+/// or null — the `ClipDocument.media` mechanism verbatim. `analysis` reuses
+/// `ReferenceAnalysis` directly (no media, its Codable IS the disk shape —
+/// the `automation`/`markers` rule). `id` is required (identity); the rest
+/// are additive-optional with the model defaults.
+public struct ReferenceDocument: Codable, Sendable, Equatable {
+    public var id: UUID
+    public var name: String
+    public var media: String?
+    public var offsetSeconds: Double
+    public var trimDb: Double
+    public var analysis: ReferenceAnalysis?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, media, offsetSeconds, trimDb, analysis
+    }
+
+    init(from slot: ReferenceSlot, media: String?) {
+        id = slot.id
+        name = slot.name
+        self.media = media
+        offsetSeconds = slot.offsetSeconds
+        trimDb = slot.trimDb
+        analysis = slot.analysis
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)  // identity required — a missing id is a damaged file
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Reference"
+        media = try c.decodeIfPresent(String.self, forKey: .media)
+        offsetSeconds = try c.decodeIfPresent(Double.self, forKey: .offsetSeconds) ?? 0
+        trimDb = try c.decodeIfPresent(Double.self, forKey: .trimDb) ?? 0
+        analysis = try c.decodeIfPresent(ReferenceAnalysis.self, forKey: .analysis)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        // Explicit `null` when absent (schema shape), matching ClipDocument.
+        try c.encode(media, forKey: .media)
+        try c.encode(offsetSeconds, forKey: .offsetSeconds)
+        try c.encode(trimDb, forKey: .trimDb)
+        // Omitted when nil (not yet analyzed) — the EffectDocument param rule.
+        try c.encodeIfPresent(analysis, forKey: .analysis)
     }
 }

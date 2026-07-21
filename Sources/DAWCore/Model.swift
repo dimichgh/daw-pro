@@ -1775,6 +1775,14 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
     /// clean session's snapshot stays byte-identical (the `masterAutomation`
     /// rule).
     public var engineNotices: [EngineNotice]?
+    /// Reference-track slot (m22-g), mirrored from `ProjectStore.reference`
+    /// — the snapshot leg of the m12-f three-surface mirror-DTO discipline
+    /// (store + snapshot + disk DTO land together, never drift). Additive
+    /// and optional; nil (key omitted) when no reference is loaded, so a
+    /// pre-m22-g snapshot stays byte-identical. Carries the SLOT ONLY —
+    /// the transient A/B monitor state is never snapshotted (the
+    /// transient-state law; read it via `reference.status`).
+    public var reference: ReferenceSlot?
 
     public init(
         name: String,
@@ -1796,7 +1804,8 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         redoLabel: String? = nil,
         midiInputs: [MIDIInputDevice]? = nil,
         midiEventCount: Int? = nil,
-        engineNotices: [EngineNotice]? = nil
+        engineNotices: [EngineNotice]? = nil,
+        reference: ReferenceSlot? = nil
     ) {
         self.name = name
         self.transport = transport
@@ -1829,6 +1838,8 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         // Empty notices ring → nil so the encoder omits the key (a clean
         // session's snapshot stays byte-identical — the masterAutomation rule).
         self.engineNotices = (engineNotices?.isEmpty ?? true) ? nil : engineNotices
+        // No reference → key omitted (pre-m22-g snapshots stay byte-identical).
+        self.reference = reference
     }
 }
 
@@ -1900,20 +1911,93 @@ public struct MasterAnalysisSnapshot: Codable, Sendable, Equatable {
     /// Normalized spectral flux 0–1 ("energy movement" between frames);
     /// 0 when silent or steady-state.
     public var flux: Float
+    /// L/R correlation coefficient −1…+1 (m22-d): +1 = identical channels
+    /// (mono-safe), 0 = fully decorrelated, −1 = perfectly inverted (the mix
+    /// CANCELS when summed to mono). ~300 ms integration. FLOOR is +1.0 —
+    /// silence, mono, and 1-channel sessions contain nothing out of phase,
+    /// so "no evidence of a phase problem" honestly reads +1, never 0
+    /// (0 would claim decorrelation that isn't there). A dead channel
+    /// (hard-panned mono source) also reads +1: mono-summing it loses no
+    /// content to cancellation, which is the question this meter answers.
+    public var correlation: Float
+    /// Stereo width 0…1 (m22-d): side energy over total mid+side energy,
+    /// S²/(M²+S²). 0 = pure mono, 0.5 = uncorrelated (or a hard-panned
+    /// single channel), 1 = pure anti-phase (all side, no mid). Floor 0.
+    public var width: Float
+    /// L/R energy balance −1…+1 (m22-d): (R²−L²)/(L²+R²) — the normalized
+    /// mid·side cross-term expressed in pan-knob direction. −1 = all left,
+    /// 0 = balanced, +1 = all right. Floor 0 (a silent image is centered).
+    public var balance: Float
 
+    /// New m22-d params default to the stereo floors so pre-m22-d call
+    /// sites compile unchanged (additive-fields law).
     public init(bands: [Float], levelDB: Float, peakDB: Float,
-                centroidHz: Float, flux: Float) {
+                centroidHz: Float, flux: Float,
+                correlation: Float = 1, width: Float = 0, balance: Float = 0) {
         self.bands = bands
         self.levelDB = levelDB
         self.peakDB = peakDB
         self.centroidHz = centroidHz
         self.flux = flux
+        self.correlation = correlation
+        self.width = width
+        self.balance = balance
     }
 
-    /// The all-floors snapshot: what stopped/silent/engine-less sessions read.
+    /// Additive-decode compatibility (m22-d): JSON produced before the
+    /// stereo fields existed decodes to the stereo floors instead of
+    /// throwing. Encoding stays synthesized — the new keys ALWAYS ride the
+    /// wire alongside the byte-stable original fields.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        bands = try container.decode([Float].self, forKey: .bands)
+        levelDB = try container.decode(Float.self, forKey: .levelDB)
+        peakDB = try container.decode(Float.self, forKey: .peakDB)
+        centroidHz = try container.decode(Float.self, forKey: .centroidHz)
+        flux = try container.decode(Float.self, forKey: .flux)
+        correlation = try container.decodeIfPresent(Float.self, forKey: .correlation) ?? 1
+        width = try container.decodeIfPresent(Float.self, forKey: .width) ?? 0
+        balance = try container.decodeIfPresent(Float.self, forKey: .balance) ?? 0
+    }
+
+    /// The all-floors snapshot: what stopped/silent/engine-less sessions
+    /// read. Stereo floors are correlation +1 (nothing out of phase — see
+    /// `correlation`), width 0 (mono), balance 0 (centered).
     public static let floor = MasterAnalysisSnapshot(
         bands: [Float](repeating: floorDB, count: bandCount),
-        levelDB: floorDB, peakDB: floorDB, centroidHz: 0, flux: 0)
+        levelDB: floorDB, peakDB: floorDB, centroidHz: 0, flux: 0,
+        correlation: 1, width: 0, balance: 0)
+}
+
+/// One goniometer/vectorscope frame (m22-d): the most recent DECIMATED L/R
+/// sample pairs from the master tap, oldest → newest, for the phase-scope
+/// view. Deliberately NOT part of `MasterAnalysisSnapshot` and NOT on the
+/// always-on `mixer.masterAnalysis` wire payload (512 floats at poll rate
+/// would bloat it) — the app polls it in-process through
+/// `AudioEngineProtocol.masterScopeFrame()` / `ProjectStore.masterScopeFrame()`
+/// (the engine-side-accessor choice; a debug-tier wire command can be added
+/// later if captures need one). Every sample is finite by contract; slots
+/// the ring has not filled yet read 0 (the scope's center point).
+public struct MasterScopeFrame: Codable, Sendable, Equatable {
+    /// Ring capacity: 256 pairs. At the analyzer's fixed ×8 decimation this
+    /// spans ~43 ms at 48 kHz — a few cycles of anything above ~50 Hz.
+    public static let pairCount = 256
+
+    /// Left-channel samples, oldest → newest, `pairCount` entries.
+    public var left: [Float]
+    /// Right-channel samples, oldest → newest, `pairCount` entries
+    /// (== `left` for mono/1-channel sessions).
+    public var right: [Float]
+
+    public init(left: [Float], right: [Float]) {
+        self.left = left
+        self.right = right
+    }
+
+    /// The all-zero frame: fresh engines, fakes, headless sessions.
+    public static let empty = MasterScopeFrame(
+        left: [Float](repeating: 0, count: pairCount),
+        right: [Float](repeating: 0, count: pairCount))
 }
 
 /// Engine render-performance telemetry (M9 perf-b): render-load / overrun

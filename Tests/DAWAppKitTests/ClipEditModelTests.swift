@@ -40,6 +40,8 @@ struct ClipEditModelTests {
         case .beat: grid = 1
         case .half: grid = 0.5
         case .quarter: grid = 0.25
+        case .eighth: grid = 0.125
+        case .sixteenth: grid = 0.0625
         }
         guard let g = grid, g > 0 else { return max(0, beat) }
         return max(0, (beat / g).rounded() * g)
@@ -55,6 +57,12 @@ struct ClipEditModelTests {
         #expect(ClipSnap.beat.gridBeats(beatsPerBar: 4) == 1)
         #expect(ClipSnap.half.gridBeats(beatsPerBar: 4) == 0.5)
         #expect(ClipSnap.quarter.gridBeats(beatsPerBar: 4) == 0.25)
+        // m21-d fine divisions: 1/8 and 1/16 of a BEAT, meter-agnostic like the
+        // other fine grids — the meter only ever moves `bar`.
+        #expect(ClipSnap.eighth.gridBeats(beatsPerBar: 4) == 0.125)
+        #expect(ClipSnap.sixteenth.gridBeats(beatsPerBar: 4) == 0.0625)
+        #expect(ClipSnap.eighth.gridBeats(beatsPerBar: 3) == 0.125)
+        #expect(ClipSnap.sixteenth.gridBeats(beatsPerBar: 7) == 0.0625)
     }
 
     @Test("snap labels are beginner-first / plain fractions")
@@ -64,6 +72,8 @@ struct ClipEditModelTests {
         #expect(ClipSnap.beat.label == "Beat")
         #expect(ClipSnap.half.label == "1/2")
         #expect(ClipSnap.quarter.label == "1/4")
+        #expect(ClipSnap.eighth.label == "1/8")
+        #expect(ClipSnap.sixteenth.label == "1/16")
     }
 
     @Test("snap rounds to nearest grid line, floors at 0, and off passes through")
@@ -76,6 +86,13 @@ struct ClipEditModelTests {
         #expect(ClipSnap.off.snap(beat: 2.37, beatsPerBar: 4) == 2.37)
         #expect(ClipSnap.beat.snap(beat: -3, beatsPerBar: 4) == 0)    // floored
         #expect(ClipSnap.off.snap(beat: -3, beatsPerBar: 4) == 0)
+        // m21-d fine grids reach lengths the quarter grid can't: 1.125 is ON the
+        // 1/8 grid (passes through), and rounds to the nearest 1/16 line.
+        #expect(ClipSnap.eighth.snap(beat: 1.125, beatsPerBar: 4) == 1.125)
+        #expect(ClipSnap.eighth.snap(beat: 1.19, beatsPerBar: 4) == 1.25)
+        #expect(ClipSnap.sixteenth.snap(beat: 1.19, beatsPerBar: 4) == 1.1875)
+        #expect(ClipSnap.sixteenth.snap(beat: 0.04, beatsPerBar: 4) == 0.0625)
+        #expect(ClipSnap.sixteenth.snap(beat: -1, beatsPerBar: 4) == 0)   // floored
     }
 
     @Test("effective snap locks to Bar in Simple, honors the picker in Pro (sp-c)")
@@ -89,6 +106,11 @@ struct ClipEditModelTests {
         for picked in ClipSnap.allCases {
             #expect(ClipSnap.effective(density: .simple, picked: picked) == .bar)
         }
+        // m21-d: the new fine divisions obey the exact same lock (explicit pins
+        // on top of the allCases sweep so a case rename can't silently skip them).
+        #expect(ClipSnap.effective(density: .simple, picked: .eighth) == .bar)
+        #expect(ClipSnap.effective(density: .simple, picked: .sixteenth) == .bar)
+        #expect(ClipSnap.effective(density: .pro, picked: .sixteenth) == .sixteenth)
     }
 
     // MARK: - Geometry

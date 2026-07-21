@@ -44,7 +44,7 @@ struct CopilotCatalogTests {
         #expect(Set(commands).count == commands.count)
     }
 
-    @Test("catalog carries the m16-b2 controller-lane verb; count now 56")
+    @Test("catalog carries the m22-c live-loudness verb; count now 61")
     func catalogCountPin() {
         // m12-g seeded the fx section with fx.setSidechain alone (47). m13-d
         // added fx.add / fx.remove / fx.setParam / fx.setBypass — each teaching
@@ -53,8 +53,18 @@ struct CopilotCatalogTests {
         // clip.duplicate + arrange.insertBars + arrange.deleteBars took it
         // 52 → 55. m16-b2's clip.setControllerLane took it 55 → 56 (the paired
         // clip.removeControllerLane is wire+MCP only, not a Copilot catalog row).
+        // au.describeParams/au.setParam took it 56 → 58. m21-d's
+        // clip.fitToContent took it 58 → 59. m21-e's clip.analyzeAudio took it
+        // 59 → 60. m22-c's mixer.liveLoudness (the m21-b2 law: new
+        // capabilities must be visible to the in-app copilot) took it 60 → 61.
         // A silent add/drop fails here.
-        #expect(CopilotToolCatalog.v1.count == 56)
+        #expect(CopilotToolCatalog.v1.count == 61)
+        #expect(CopilotToolCatalog.tool(command: "mixer.liveLoudness") != nil,
+                "mixer.liveLoudness missing from the catalog")
+        #expect(CopilotToolCatalog.tool(command: "clip.analyzeAudio") != nil,
+                "clip.analyzeAudio missing from the catalog")
+        #expect(CopilotToolCatalog.tool(command: "clip.fitToContent") != nil,
+                "clip.fitToContent missing from the catalog")
         for command in ["fx.add", "fx.remove", "fx.setParam", "fx.setBypass", "fx.setSidechain"] {
             #expect(CopilotToolCatalog.tool(command: command) != nil, "\(command) missing from the catalog")
         }

@@ -23,7 +23,8 @@ import Foundation
 /// derived constants recompute only on generation change. Render-path
 /// contract: `process()`/`reset()` allocate nothing, take no locks, log
 /// nothing, touch no ObjC. The detector level is denormal-flushed on silence.
-final class GateEffect: KeyableEffectRendering, @unchecked Sendable {
+final class GateEffect: KeyableEffectRendering, GainReductionReporting,
+                        @unchecked Sendable {
     private static let maxChannels = 8
 
     /// Immutable box crossing main actor → render thread. POD payload.
@@ -53,6 +54,16 @@ final class GateEffect: KeyableEffectRendering, @unchecked Sendable {
     private var detectorLevel: Float = 0
     private var detectorDecay: Float = 0
     private var preparedChannels = 2
+    /// GR meter (m22-e): held MINIMUM linear gate gain (the LimiterEffect
+    /// idiom — multiplicative +20 dB/s rise ≡ −20 dB/s dB-domain release).
+    /// The gate's exact 0 gain is floored at 10^(−80/20) at fold-in time, so
+    /// a closed gate reads EXACTLY the 80 dB "full-range attenuation" cap.
+    /// Render-thread-only; published via `grSlot` once per quantum.
+    private var grHeldLinear: Float = 1
+    private var grRisePerSample: Float = 1
+    /// Render → control-plane publish slot (`Float.bitPattern`), one atomic
+    /// store per quantum. See `GainReductionMeter`.
+    private let grSlot: UnsafeMutablePointer<daw_atomic_u32>
     /// Automation overlay (M4 vii-c) — render-thread-only knob/lane split.
     private var overlay: AutomationParamOverlay<GateParams>
 
@@ -64,6 +75,8 @@ final class GateEffect: KeyableEffectRendering, @unchecked Sendable {
     init(params: GateParams = GateParams()) {
         paramsSlot = .allocate(capacity: 1)
         daw_atomic_ptr_init(paramsSlot)
+        grSlot = .allocate(capacity: 1)
+        daw_atomic_u32_store(grSlot, Float(0).bitPattern)
         lastAppliedParams = params
         overlay = AutomationParamOverlay(base: params)
         let snapshot = ParamSnapshot(generation: 0, params: params)
@@ -76,7 +89,15 @@ final class GateEffect: KeyableEffectRendering, @unchecked Sendable {
             Unmanaged<ParamSnapshot>.fromOpaque(raw).release()
         }
         paramsSlot.deallocate()
+        grSlot.deallocate()
     }
+
+    // MARK: - GainReductionReporting (m22-e)
+
+    /// Held-peak gain reduction, POSITIVE dB (0 = untouched; a fully closed
+    /// gate reads the 80 dB full-range cap), −20 dB/s release. One atomic
+    /// load — safe from any thread.
+    var gainReductionDb: Float { Float(bitPattern: daw_atomic_u32_load(grSlot)) }
 
     // MARK: - Main-actor surface
 
@@ -105,16 +126,23 @@ final class GateEffect: KeyableEffectRendering, @unchecked Sendable {
         gain = 0
         holdRemaining = 0
         detectorLevel = 0
+        grHeldLinear = 1
+        grRisePerSample = GainReductionMeter.risePerSample(sampleRate: sampleRate)
+        GainReductionMeter.publish(grSlot, db: 0)
         lastGeneration = .max  // re-derive at the new rate
     }
 
     var latencySamples: Int { 0 }
 
     /// Closes the gate and clears the detector (stop-time cut / un-bypass).
+    /// The GR meter re-arms at 0 (atomic store — render-thread safe): a
+    /// freshly reset unit never wakes up showing a stale reading.
     func reset() {
         gain = 0
         holdRemaining = 0
         detectorLevel = 0
+        grHeldLinear = 1
+        GainReductionMeter.publish(grSlot, db: 0)
     }
 
     /// Adopts a newly published main-actor snapshot (borrowed — retire bin
@@ -205,6 +233,8 @@ final class GateEffect: KeyableEffectRendering, @unchecked Sendable {
         var g = gain
         var hold = holdRemaining
         var level = detectorLevel
+        var grHeld = grHeldLinear
+        let grRise = grRisePerSample
         for frame in 0..<minFrames {
             // Stereo-linked peak detector: instant attack, fixed 5 ms decay.
             // Keyed: the detector listens to the KEY signal (frames beyond
@@ -246,6 +276,15 @@ final class GateEffect: KeyableEffectRendering, @unchecked Sendable {
                 g = max(0, g - releaseStep)
             }
 
+            // GR meter (m22-e): fold BEFORE the passthrough skip so an open
+            // gate's meter still releases toward 0. Instant attack to the
+            // applied gain (floored at 10^(−80/20) — closed reads exactly
+            // 80 dB), +20 dB/s multiplicative rise. Two mins + one max +
+            // one multiply per sample; dB conversion once per quantum.
+            let grRisen = grHeld * grRise
+            grHeld = min(max(g, GainReductionMeter.floorLinear),
+                         grRisen < 1 ? grRisen : 1)
+
             // Fully open: bit-exact passthrough (no multiply at all).
             if g == 1 { continue }
             for channel in 0..<channelCount {
@@ -255,5 +294,10 @@ final class GateEffect: KeyableEffectRendering, @unchecked Sendable {
         gain = g
         holdRemaining = hold
         detectorLevel = level
+        grHeldLinear = grHeld
+        // Publish positive dB of reduction: pure libm log10 once per quantum.
+        GainReductionMeter.publish(
+            grSlot,
+            db: -20.0 * log10f(max(grHeld, GainReductionMeter.floorLinear)))
     }
 }

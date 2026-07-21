@@ -68,10 +68,20 @@ import DAWCore
         #expect(QuantizeModel.grids.first { $0.label == "1/8" }?.beats == 0.5)
         #expect(QuantizeModel.grids.first { $0.label == "1/16" }?.beats == 0.25)
         #expect(QuantizeModel.grids.first { $0.label == "1/32" }?.beats == 0.125)
+        // m21-c: the quantize catalog covers every piano-roll snap division, so
+        // the two grids never diverge — 1/64 landed with the finer snaps.
+        #expect(QuantizeModel.grids.first { $0.label == "1/64" }?.beats == 0.0625)
         let triplet8 = QuantizeModel.grids.first { $0.label == "1/8 triplet" }?.beats ?? 0
         #expect(abs(triplet8 - 1.0 / 3.0) < 1e-12)
         // The default grid is 1/16.
         #expect(QuantizeModel.grids[QuantizeModel.defaultGridIndex].label == "1/16")
+        // Every snappable piano-roll division has a same-beats quantize grid
+        // (Bar/Beat quantize rides 1/4 · strength — the coarse musical moves).
+        for snap in SnapResolution.allCases {
+            guard let beats = snap.beats, beats <= 1 else { continue }
+            #expect(QuantizeModel.grids.contains { abs($0.beats - beats) < 1e-9 },
+                    "no quantize grid matches snap \(snap.rawValue) (\(beats) beats)")
+        }
     }
 
     @Test("gridLabel names catalog beats and falls back for an off-catalog value")

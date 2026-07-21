@@ -64,8 +64,8 @@ struct EffectEditorModelTests {
         let store = ProjectStore()
         let track = store.addTrack(kind: .audio)
         let model = Self.makeStoreBacked(store)
-        // ≥3 kinds explicitly, then the full sweep.
-        for (kind, count) in [(EffectDescriptor.Kind.eq, 10), (.compressor, 6), (.limiter, 2)] {
+        // ≥3 kinds explicitly, then the full sweep (eq = 10 legacy + 12 m22-a).
+        for (kind, count) in [(EffectDescriptor.Kind.eq, 22), (.compressor, 6), (.limiter, 2)] {
             let fx = try! store.addEffect(toTrack: track.id, kind: kind)
             model.prepare(trackID: track.id, effectID: fx.id, targetLabel: "on Test")
             #expect(model.specs.count == count, "\(kind) row count")
@@ -359,10 +359,12 @@ struct EffectEditorModelTests {
         }
         #expect(matches(layout(.gain), [("", ["gainLinear"])]))
         #expect(matches(layout(.eq), [
-            ("LOW SHELF", ["lowShelfFreq", "lowShelfGainDb"]),
-            ("PEAK 1", ["peak1Freq", "peak1GainDb", "peak1Q"]),
-            ("PEAK 2", ["peak2Freq", "peak2GainDb", "peak2Q"]),
-            ("HIGH SHELF", ["highShelfFreq", "highShelfGainDb"]),
+            ("HIGH PASS", ["highPassFreq", "highPassSlopeDbPerOct", "highPassEnabled"]),
+            ("LOW SHELF", ["lowShelfFreq", "lowShelfGainDb", "lowShelfQ", "lowShelfEnabled"]),
+            ("PEAK 1", ["peak1Freq", "peak1GainDb", "peak1Q", "peak1Enabled"]),
+            ("PEAK 2", ["peak2Freq", "peak2GainDb", "peak2Q", "peak2Enabled"]),
+            ("HIGH SHELF", ["highShelfFreq", "highShelfGainDb", "highShelfQ", "highShelfEnabled"]),
+            ("LOW PASS", ["lowPassFreq", "lowPassSlopeDbPerOct", "lowPassEnabled"]),
         ]))
         #expect(matches(layout(.compressor), [
             ("TRIGGER", ["thresholdDb", "ratio", "kneeDb"]),
@@ -379,7 +381,8 @@ struct EffectEditorModelTests {
             ("OUTPUT", ["mix"]),
         ]))
         #expect(matches(layout(.delay), [
-            ("TIME", ["timeMs"]),
+            // m22-f: SYNC + DIVISION join TIME (knob · toggle · menu picker).
+            ("TIME", ["timeMs", "sync", "division"]),
             ("REPEATS", ["feedback", "pingPong", "highCutHz"]),
             ("OUTPUT", ["mix"]),
         ]))
@@ -397,8 +400,9 @@ struct EffectEditorModelTests {
         ]))
         // EQ band knobs read short — the band prefix lives in the header.
         let eq = EffectEditorModel.groups(for: .eq)
-        #expect(eq[0].items.map(\.label) == ["Freq", "Gain"])
-        #expect(eq[1].items.map(\.label) == ["Freq", "Gain", "Q"])
+        #expect(eq[0].items.map(\.label) == ["Freq", "Slope", "On"])
+        #expect(eq[1].items.map(\.label) == ["Freq", "Gain", "Q", "On"])
+        #expect(eq[2].items.map(\.label) == ["Freq", "Gain", "Q", "On"])
     }
 
     @Test("an OUTPUT group, where present, is always the LAST section")
@@ -441,13 +445,16 @@ struct EffectEditorModelTests {
         #expect(EffectEditorModel.knobFillAnchor(for: eqGain) == 0.5)
     }
 
-    // MARK: - pingPong toggle
+    // MARK: - pingPong + *Enabled toggles
 
-    @Test("pingPong is the one toggle param; threshold and writes are binary")
+    @Test("pingPong and the EQ *Enabled binaries are the toggle params")
     func pingPongToggle() {
         for kind in Self.builtInKinds {
             for spec in EffectParamSpec.specs(for: kind) {
-                #expect(EffectEditorModel.isToggleParam(spec) == (spec.name == "pingPong"),
+                // m22-f adds the delay's tempo `sync` to the binary family.
+                let expected = spec.name == "pingPong" || spec.name == "sync"
+                    || spec.name.hasSuffix("Enabled")
+                #expect(EffectEditorModel.isToggleParam(spec) == expected,
                         "\(kind).\(spec.name)")
             }
         }
@@ -497,6 +504,66 @@ struct EffectEditorModelTests {
         #expect(model.value(for: mix) == mix.defaultValue)
     }
 
+    // MARK: - m22-a EQ v2: slope chips + the HP/LP enable semantics
+
+    @Test("HP/LP slopes are two-state chip params reading 12 or 24 dB/oct")
+    func slopeChips() {
+        for kind in Self.builtInKinds {
+            for spec in EffectParamSpec.specs(for: kind) {
+                #expect(EffectEditorModel.isSlopeParam(spec)
+                        == spec.name.hasSuffix("SlopeDbPerOct"), "\(kind).\(spec.name)")
+            }
+        }
+        let spec = EffectParamSpec.specs(for: .eq).first { $0.name == "highPassSlopeDbPerOct" }!
+        // A slope is neither a toggle nor a percent nor a cyan level readout.
+        #expect(!EffectEditorModel.isToggleParam(spec))
+        #expect(!EffectEditorModel.isPercentParam(spec))
+        #expect(!EffectEditorModel.isLevelParam(spec))
+        // Chip read side mirrors EQParams.snapSlope (< 18 → 12, else 24).
+        #expect(!EffectEditorModel.slopeIs24(12))
+        #expect(!EffectEditorModel.slopeIs24(17.9))
+        #expect(EffectEditorModel.slopeIs24(18))
+        #expect(EffectEditorModel.slopeIs24(24))
+        #expect(EffectEditorModel.readout(value: 12, spec: spec) == ("12", "dB/oct"))
+        #expect(EffectEditorModel.readout(value: 24, spec: spec) == ("24", "dB/oct"))
+        // Through a REAL store the model layer snaps mid values — the fact
+        // that justifies the chip rendering.
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .audio)
+        let fx = try! store.addEffect(toTrack: track.id, kind: .eq)
+        let model = Self.makeStoreBacked(store)
+        model.prepare(trackID: track.id, effectID: fx.id, targetLabel: "on Test")
+        model.set(name: "highPassSlopeDbPerOct", value: 20)
+        #expect(model.value(for: spec) == 24, "the model layer snaps to 12/24")
+        model.set(name: "highPassSlopeDbPerOct", value: 13)
+        #expect(model.value(for: spec) == 12)
+    }
+
+    @Test("the EQ On toggles read resolved state; enabling HP materializes a corner")
+    func eqEnableToggles() {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .audio)
+        let fx = try! store.addEffect(toTrack: track.id, kind: .eq)
+        let model = Self.makeStoreBacked(store)
+        model.prepare(trackID: track.id, effectID: fx.id, targetLabel: "on Test")
+        let specs = EffectParamSpec.specs(for: .eq)
+        let hpOn = specs.first { $0.name == "highPassEnabled" }!
+        let hpFreq = specs.first { $0.name == "highPassFreq" }!
+        // Fresh EQ: HP reads OFF (freq nil), band toggles read ON.
+        #expect(model.value(for: hpOn) == 0)
+        #expect(model.value(for: specs.first { $0.name == "peak1Enabled" }!) == 1)
+        // Toggling HP on from the card materializes the 20 Hz spec default.
+        model.set(name: "highPassEnabled", value: 1)
+        #expect(model.value(for: hpOn) == 1)
+        #expect(model.value(for: hpFreq) == 20)
+        #expect(store.tracks[0].effects[0].resolvedEQ.highPassFreq == 20)
+        // Off keeps the corner (bypass, not reset).
+        model.set(name: "highPassFreq", value: 300)
+        model.set(name: "highPassEnabled", value: 0)
+        #expect(model.value(for: hpOn) == 0)
+        #expect(model.value(for: hpFreq) == 300)
+    }
+
     @Test("reset-to-default applies the spec default through the same path")
     func resetToDefault() {
         let store = ProjectStore()
@@ -508,5 +575,69 @@ struct EffectEditorModelTests {
         #expect(model.value(for: ceiling) == -6)
         model.resetToDefault(ceiling)
         #expect(model.value(for: ceiling) == ceiling.defaultValue)
+    }
+
+    // MARK: - Delay tempo sync (m22-f)
+
+    @Test("sync renders as a toggle, division as a picker; readout speaks tokens")
+    func delaySyncControlClassification() {
+        let specs = EffectParamSpec.specs(for: .delay)
+        let sync = specs.first { $0.name == "sync" }!
+        let division = specs.first { $0.name == "division" }!
+        #expect(EffectEditorModel.isToggleParam(sync))
+        #expect(!EffectEditorModel.isToggleParam(division))
+        #expect(EffectEditorModel.isDivisionParam(division))
+        #expect(!EffectEditorModel.isDivisionParam(sync))
+        // The readout shows the note token at (and near) legal values —
+        // deterministic strings, the m22-a slope-chip precedent.
+        #expect(EffectEditorModel.readout(value: 1, spec: division) == ("1/4", ""))
+        #expect(EffectEditorModel.readout(value: 0.75, spec: division) == ("1/8d", ""))
+        #expect(EffectEditorModel.readout(value: 0.7, spec: division) == ("1/4t", ""))
+        #expect(EffectEditorModel.readout(value: 1, spec: sync) == ("ON", ""))
+    }
+
+    @Test("the synced card derives TIME from the injected tempo; unsynced yields nil")
+    func delaySyncDerivedTime() {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .audio)
+        let fx = try! store.addEffect(toTrack: track.id, kind: .delay)
+        let model = Self.makeStoreBacked(store)   // default tempo closure = 120
+        model.prepare(trackID: track.id, effectID: fx.id, targetLabel: "on Test")
+
+        // Free-running: no derived time, the knob owns TIME.
+        #expect(!model.delaySyncActive)
+        #expect(model.syncedDelayTimeMs == nil)
+        #expect(model.delayDivision == .quarter)
+
+        // SYNC on: 1/4 @ 120 = 500 ms; the division picker drives the rest.
+        model.set(name: "sync", value: 1)
+        #expect(model.delaySyncActive)
+        #expect(model.syncedDelayTimeMs == 500)
+        model.setDelayDivision(.eighthDotted)
+        #expect(model.delayDivision == .eighthDotted)
+        #expect(model.syncedDelayTimeMs == 375)
+        // The picker write went through the SAME store path the wire uses.
+        #expect(store.tracks[0].effects[0].resolvedDelay.division == .eighthDotted)
+        // …and the stored ms fallback never moved.
+        #expect(store.tracks[0].effects[0].resolvedDelay.timeMs == 350)
+
+        // A different injected tempo moves the readout (the live-read seam):
+        // 1/8d @ 90 = 500 ms.
+        let at90 = EffectEditorModel(
+            descriptor: { trackID, effectID in
+                guard trackID == track.id else { return nil }
+                return store.tracks[0].effects.first { $0.id == effectID }
+            },
+            apply: { _, _, _, _ in },
+            setBypassed: { _, _, _ in },
+            tempoBPM: { 90 })
+        at90.prepare(trackID: track.id, effectID: fx.id, targetLabel: "on Test")
+        #expect(at90.syncedDelayTimeMs == 500)
+
+        // Non-delay kinds never report sync-active.
+        let eq = try! store.addEffect(toTrack: track.id, kind: .eq)
+        model.prepare(trackID: track.id, effectID: eq.id, targetLabel: "on Test")
+        #expect(!model.delaySyncActive)
+        #expect(model.syncedDelayTimeMs == nil)
     }
 }

@@ -75,6 +75,10 @@ public enum ProjectError: Error, LocalizedError {
     case quantizeRequiresMIDIClip(UUID)
     // Transient detection (M5 iii-e).
     case transientsRequireAudioClip(UUID)
+    // Imported-audio content analysis (m21-e): clip.analyzeAudio resolves its
+    // clipId to that clip's backing audio file — MIDI clips have notes an
+    // agent can read directly.
+    case analysisRequiresAudioClip(UUID)
     // Audio quantize (M5 iii-f).
     case quantizeRequiresAudioClip(UUID)
     case audioQuantizeStretchUnsupported(UUID)
@@ -138,6 +142,21 @@ public enum ProjectError: Error, LocalizedError {
     // unreachable via any current store mutation, an audio clip with no
     // backing file) has none to convert.
     case voiceConversionRequiresAudioClip(UUID)
+    // Hosted-AU parameter surface (au.describeParams/au.setParam,
+    // design-au-parameter-surface §4): target-kind rejections (built-in
+    // kinds, the `.soundBank` redirect) and the not-ready status naming —
+    // messages built at throw time (the invalidClipEdit ready-to-show
+    // precedent; the wording mirrors requirePluginTarget / the plugin-window
+    // open-failure).
+    case notAnAudioUnitParamTarget(String)
+    case audioUnitNotReady(String)
+    // Reference track (m22-g, design-m22g-reference-tracks §5.6/§6): each
+    // teaching error names the fixing verb. All four land with P1;
+    // referenceNotAnalyzed/referenceSilent are thrown by P2's setMonitor.
+    case referenceNotSet
+    case referenceNotAnalyzed
+    case referenceSilent
+    case referenceFileMissing(String)
 
     public var errorDescription: String? {
         switch self {
@@ -297,6 +316,10 @@ public enum ProjectError: Error, LocalizedError {
             // Exact wording is contract (control protocol + MCP surface it
             // verbatim). MIDI notes already carry their onsets.
             return "clip \(id.uuidString) is a MIDI clip — clip.detectTransients applies only to audio clips (MIDI notes already carry their onsets)"
+        case .analysisRequiresAudioClip(let id):
+            // Exact wording is contract (control protocol + MCP surface it
+            // verbatim, design-clip-analyze-audio §4).
+            return "clip \(id.uuidString) is a MIDI clip — clip.analyzeAudio applies only to audio clips (read MIDI notes directly for key and timing)"
         case .quantizeRequiresAudioClip(let id):
             // Exact wording is contract (control protocol + MCP surface it
             // verbatim). MIDI quantize is the separate clip.quantize (M5 iii-d).
@@ -425,6 +448,27 @@ public enum ProjectError: Error, LocalizedError {
         case .voiceConversionRequiresAudioClip(let id):
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "clip \(id.uuidString) is a MIDI clip — vc.convertVocals converts an audio clip's backing recording only (pass 'path' instead, or point clipId at a real audio clip)"
+        case .notAnAudioUnitParamTarget(let message):
+            // The store builds the message at throw time (which kind, which
+            // redirect); surfaced verbatim — the invalidClipEdit precedent.
+            return message
+        case .audioUnitNotReady(let message):
+            // Built at throw time from the engine's lifecycle status
+            // (pending/missing/failed reason — the plugin-window open-failure
+            // wording); surfaced verbatim.
+            return message
+        case .referenceNotSet:
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "no reference track is loaded — import one with reference.import"
+        case .referenceNotAnalyzed:
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "the reference has not been analyzed yet — run reference.analyze first"
+        case .referenceSilent:
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "the reference program is gated-silent below the -70 LUFS gate and cannot be level-matched — import a reference with audible program (reference.import)"
+        case .referenceFileMissing(let path):
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "the reference audio file is missing (\(path)) — restore it, or import it again with reference.import"
         }
     }
 }

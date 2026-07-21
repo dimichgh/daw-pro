@@ -42,9 +42,15 @@ and `NSMicrophoneUsageDescription`. Version fields are placeholders
 (`__SHORT_VERSION__`, `__BUNDLE_VERSION__`) substituted at bundle time — do not
 hand-edit the copy that lands in the bundle; re-run `bundle.sh`.
 
-**No icon** is shipped: the UI-asset pipeline (glass-b) is credential-blocked, so
-there is no `CFBundleIconFile`. This is a deliberate, labeled gap, not something to
-fill by hand-drawing.
+**Icon** (glass-b, 2026-07-19): `CFBundleIconFile` is `AppIcon`; bundle.sh copies
+the committed `Sources/DAWApp/Resources/AppIcon.icns` (built via `iconutil` from
+the GPT-Image master) into `Contents/Resources/`.
+
+**SwiftPM resource bundle** (glass-d): the DAWApp target declares runtime-loaded
+resources (the onboarding hero PNGs), which the build emits as
+`daw-pro_DAWApp.bundle` beside the binary; bundle.sh copies that bundle into
+`Contents/Resources/`, where `OnboardingHeroArt.load` looks first (never the
+bundle root — a stray top-level item would break the codesign seal).
 
 ### Bundle identifier and the UserDefaults domain
 

@@ -107,6 +107,10 @@ struct TimelineLanesView: View {
     /// Clip edits — each wired to one of the five `ProjectStore` clip methods.
     var onMoveClip: (_ trackID: UUID, _ clip: Clip, _ toStartBeat: Double) -> Void = { _, _, _ in }
     var onTrimClip: (_ trackID: UUID, _ clip: Clip, _ newStart: Double, _ newLength: Double) -> Void = { _, _, _, _ in }
+    /// Fits a clip's length to its content (m21-d, Pro clip menu; wired to
+    /// `ProjectStore.fitClipToContent` — MIDI: last note end, audio: remaining
+    /// source duration).
+    var onFitClipToContent: (_ trackID: UUID, _ clip: Clip) -> Void = { _, _ in }
     var onSplitClip: (_ trackID: UUID, _ clip: Clip, _ atBeat: Double) -> Void = { _, _, _ in }
     var onSetClipFades: (_ trackID: UUID, _ clip: Clip, _ fadeIn: Double, _ fadeOut: Double,
                          _ inCurve: FadeCurve, _ outCurve: FadeCurve) -> Void = { _, _, _, _, _, _ in }
@@ -823,6 +827,7 @@ struct TimelineLanesView: View {
                     onSelect: { onSelectClip(clip) },
                     onMove: { onMoveClip(track.id, clip, $0) },
                     onTrim: { onTrimClip(track.id, clip, $0, $1) },
+                    onFitToContent: { onFitClipToContent(track.id, clip) },
                     onSplit: { onSplitClip(track.id, clip, $0) },
                     onSetFades: { onSetClipFades(track.id, clip, $0, $1, $2, $3) },
                     onSetGain: { onSetClipGain(track.id, clip, $0) },
@@ -1746,6 +1751,9 @@ private struct ClipBlock: View {
     var onSelect: () -> Void
     var onMove: (_ toStartBeat: Double) -> Void
     var onTrim: (_ newStart: Double, _ newLength: Double) -> Void
+    /// Fits the clip's length to its content (m21-d, Pro context menu — MIDI:
+    /// last note end, audio: remaining source). One store call, no gesture math.
+    var onFitToContent: () -> Void = {}
     var onSplit: (_ atBeat: Double) -> Void
     var onSetFades: (_ fadeIn: Double, _ fadeOut: Double, _ inCurve: FadeCurve, _ outCurve: FadeCurve) -> Void
     var onSetGain: (_ gainDb: Double) -> Void
@@ -2643,6 +2651,10 @@ private struct ClipBlock: View {
                     onSplit(beat)
                 }
             }
+            // Fit to Content (m21-d): one gesture to make the clip exactly as
+            // long as its material — MIDI ends at the last note, audio at the
+            // end of its source recording. Both kinds, Pro-only (sp-c).
+            Button("Fit to Content") { onFitToContent() }
             Button("Reset Gain") { onSetGain(0) }
                 .disabled(clip.gainDb == 0)
             // Gain envelope (m13-e): audio clips only — the breakpoint line rides

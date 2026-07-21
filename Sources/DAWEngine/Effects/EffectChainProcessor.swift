@@ -37,6 +37,10 @@ final class ChainEffectUnit: @unchecked Sendable {
     /// runtime's conformance lookup can allocate/lock on first use). nil for
     /// non-keyable kinds; the walk then always takes the plain path.
     let keyableInstance: (any KeyableEffectRendering)?
+    /// The instance's gain-reduction face (m22-e), cast ONCE at creation for
+    /// the same reason. nil for kinds that don't measure GR — the control
+    /// plane then reports nothing rather than fabricating a 0.
+    let gainReducingInstance: (any GainReductionReporting)?
     /// 1 = skip this unit in the walk. Heap-allocated for a stable address.
     let bypassFlag: UnsafeMutablePointer<daw_atomic_u32>
     /// COUNTDOWN of `instance.reset()` passes, consumed one per walk (m15-f).
@@ -75,6 +79,7 @@ final class ChainEffectUnit: @unchecked Sendable {
         self.kind = kind
         self.instance = instance
         self.keyableInstance = instance as? any KeyableEffectRendering
+        self.gainReducingInstance = instance as? any GainReductionReporting
         bypassFlag = .allocate(capacity: 1)
         daw_atomic_u32_store(bypassFlag, isBypassed ? 1 : 0)
         resetFlag = .allocate(capacity: 1)
@@ -487,6 +492,20 @@ final class EffectChainState {
     /// `latencySamples` on the control snapshot.
     func latencySamples(forEffect id: UUID) -> Int {
         units[id]?.instance.latencySamples ?? 0
+    }
+
+    /// Current held-peak gain reduction of ONE live effect instance (m22-e),
+    /// POSITIVE dB (0 = untouched, −20 dB/s release — see
+    /// `GainReductionMeter`). nil = this effect doesn't measure GR (every
+    /// non-dynamics kind, hosted AUs, unknown ids) so the wire OMITS the
+    /// field instead of fabricating a number. A steadily BYPASSED unit reads
+    /// 0 — it is applying no reduction (its frozen internal value would be a
+    /// stale lie); un-bypass arms `reset()`, which also re-zeros the meter.
+    /// One atomic load per call — cheap enough for every poll.
+    func gainReductionDb(forEffect id: UUID) -> Double? {
+        guard let unit = units[id],
+              let reporting = unit.gainReducingInstance else { return nil }
+        return unit.isBypassed ? 0 : Double(reporting.gainReductionDb)
     }
 
     /// Total fixed latency of the WHOLE chain including bypassed effects —

@@ -3,13 +3,18 @@ import Testing
 import DAWCore
 @testable import DAWControl
 
-/// Minimal engine stub for the per-effect latency forwarders: everything is
-/// inert except `effectLatencySamples`, which answers from a canned table —
+/// Minimal engine stub for the per-effect latency + gain-reduction
+/// forwarders: everything is inert except `effectLatencySamples` and the
+/// m22-e `effectGainReductionDb` pair, which answer from canned tables —
 /// pins the store→router→wire plumbing while DAWControl itself stays
-/// engine-free (the real 240 @ 48 kHz is measured in DAWEngineTests).
+/// engine-free (the real measurements live in DAWEngineTests).
 @MainActor
 final class StubLatencyEngine: AudioEngineControlling {
     var latencyByEffect: [UUID: Int] = [:]
+    /// m22-e: nil (missing key) = this effect has no GR meter — the wire
+    /// must OMIT `gainReductionDb`, never fabricate a 0.
+    var gainReductionByEffect: [UUID: Double] = [:]
+    var masterGainReductionByEffect: [UUID: Double] = [:]
 
     var isRunning = false
     var meteringHandler: ((MeterFrame) -> Void)?
@@ -44,6 +49,14 @@ final class StubLatencyEngine: AudioEngineControlling {
 
     func effectLatencySamples(trackID: UUID, effectID: UUID) -> Int {
         latencyByEffect[effectID] ?? 0
+    }
+
+    func effectGainReductionDb(trackID: UUID, effectID: UUID) -> Double? {
+        gainReductionByEffect[effectID]
+    }
+
+    func masterEffectGainReductionDb(effectID: UUID) -> Double? {
+        masterGainReductionByEffect[effectID]
     }
 }
 
@@ -94,8 +107,87 @@ struct FXCommandTests {
         #expect(effects.first?["kind"]?.stringValue == "gain")
         #expect(effects.first?["isBypassed"]?.boolValue == false)
         #expect(effects.first?["params"]?["gainLinear"]?.doubleValue == 1)
-        // Headless (no engine injected): the latency forwarder reports 0.
+        // Headless (no engine injected): the latency forwarder reports 0,
+        // and the m22-e GR key is OMITTED — no engine means no live meter,
+        // and a fabricated 0 would read like a resting one.
         #expect(effects.first?["latencySamples"]?.doubleValue == 0)
+        #expect(effects.first?["gainReductionDb"] == nil)
+    }
+
+    @Test("per-effect gainReductionDb forwards the live engine value to the wire (m22-e)")
+    func effectGainReductionForwardsEngineValueToWire() async throws {
+        let (router, store) = makeRouter()
+        let engine = StubLatencyEngine()
+        store.engine = engine
+        let trackID = await addTrack(router, name: "Vox", kind: "audio")
+        let gainID = await addEffect(router, trackID: trackID)  // kind gain: no GR meter
+        let compResponse = await router.handle(ControlRequest(
+            id: "add-comp", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("compressor")]
+        ))
+        let compID = try #require(
+            UUID(uuidString: compResponse.result?["effectId"]?.stringValue ?? ""))
+        // The engine reports 4.2 dB of live held-peak reduction for the
+        // compressor and NOTHING for the gain insert (the real ballistics
+        // are measured against the live effects in DAWEngineTests).
+        engine.gainReductionByEffect = [compID: 4.2]
+
+        // fx mutation results carry the additive per-effect field…
+        let bypassResponse = await router.handle(ControlRequest(
+            id: "1", command: "fx.setBypass",
+            params: ["trackId": .string(trackID.uuidString),
+                     "effectId": .string(gainID.uuidString), "bypassed": .bool(false)]
+        ))
+        #expect(bypassResponse.ok)
+        let effects = try #require(bypassResponse.result?["effects"]?.arrayValue)
+        #expect(effects.first(where: { $0["id"]?.stringValue == compID.uuidString })?[
+            "gainReductionDb"]?.doubleValue == 4.2)
+        // …OMITTED (not 0) for kinds without a meter.
+        #expect(effects.first(where: { $0["id"]?.stringValue == gainID.uuidString })?[
+            "gainReductionDb"] == nil)
+
+        // …and so does every project.snapshot (the meter/analysis poll path
+        // agents already re-orient from).
+        let snapshot = await router.handle(ControlRequest(id: "2", command: "project.snapshot"))
+        let tracks = try #require(snapshot.result?["tracks"]?.arrayValue)
+        let vox = try #require(tracks.first(where: { $0["id"]?.stringValue == trackID.uuidString }))
+        let snapshotEffects = try #require(vox["effects"]?.arrayValue)
+        #expect(snapshotEffects.first(where: { $0["id"]?.stringValue == compID.uuidString })?[
+            "gainReductionDb"]?.doubleValue == 4.2)
+        #expect(snapshotEffects.first(where: { $0["id"]?.stringValue == gainID.uuidString })?[
+            "gainReductionDb"] == nil)
+    }
+
+    @Test("master-chain gainReductionDb rides masterEffects on results and snapshots (m22-e)")
+    func masterEffectGainReductionForwardsToWire() async throws {
+        let (router, store) = makeRouter()
+        let engine = StubLatencyEngine()
+        store.engine = engine
+        let addResponse = await router.handle(ControlRequest(
+            id: "add-master-limiter", command: "fx.add",
+            params: ["trackId": .string("master"), "kind": .string("limiter")]
+        ))
+        #expect(addResponse.ok)
+        let limiterID = try #require(
+            UUID(uuidString: addResponse.result?["effectId"]?.stringValue ?? ""))
+        engine.masterGainReductionByEffect = [limiterID: 2.5]
+
+        // Master fx mutation result (the masterFxResult shape)…
+        let bypassResponse = await router.handle(ControlRequest(
+            id: "1", command: "fx.setBypass",
+            params: ["trackId": .string("master"),
+                     "effectId": .string(limiterID.uuidString), "bypassed": .bool(false)]
+        ))
+        #expect(bypassResponse.ok)
+        let effects = try #require(bypassResponse.result?["effects"]?.arrayValue)
+        #expect(effects.first(where: { $0["id"]?.stringValue == limiterID.uuidString })?[
+            "gainReductionDb"]?.doubleValue == 2.5)
+
+        // …and the snapshot's top-level masterEffects.
+        let snapshot = await router.handle(ControlRequest(id: "2", command: "project.snapshot"))
+        let masterEffects = try #require(snapshot.result?["masterEffects"]?.arrayValue)
+        #expect(masterEffects.first(where: { $0["id"]?.stringValue == limiterID.uuidString })?[
+            "gainReductionDb"]?.doubleValue == 2.5)
     }
 
     @Test("per-effect latencySamples forwards the live engine value to the wire")
@@ -207,18 +299,27 @@ struct FXCommandTests {
             kinds.first(where: { $0["kind"]?.stringValue == kind })?["params"]?
                 .arrayValue?.compactMap { $0["name"]?.stringValue } ?? []
         }
+        // The ten legacy params stay in slots 0…9 (automation slot stability);
+        // the m22-a EQ v2 params are APPENDED.
         #expect(paramNames("eq") == [
             "lowShelfFreq", "lowShelfGainDb",
             "peak1Freq", "peak1GainDb", "peak1Q",
             "peak2Freq", "peak2GainDb", "peak2Q",
             "highShelfFreq", "highShelfGainDb",
+            "highPassFreq", "highPassSlopeDbPerOct", "highPassEnabled",
+            "lowShelfQ", "lowShelfEnabled", "peak1Enabled", "peak2Enabled",
+            "highShelfQ", "highShelfEnabled",
+            "lowPassFreq", "lowPassSlopeDbPerOct", "lowPassEnabled",
         ])
         #expect(paramNames("compressor") == [
             "thresholdDb", "ratio", "attackMs", "releaseMs", "kneeDb", "makeupDb",
         ])
         #expect(paramNames("limiter") == ["ceilingDb", "releaseMs"])
         #expect(paramNames("reverb") == ["roomSize", "damping", "mix", "preDelayMs", "width"])
-        #expect(paramNames("delay") == ["timeMs", "feedback", "mix", "pingPong", "highCutHz"])
+        // The five legacy params stay in slots 0…4 (automation slot
+        // stability); the m22-f tempo-sync params are APPENDED.
+        #expect(paramNames("delay") == ["timeMs", "feedback", "mix", "pingPong", "highCutHz",
+                                        "sync", "division"])
         #expect(paramNames("saturator") == ["driveDb", "mix", "outputDb"])
         #expect(paramNames("gate") == ["thresholdDb", "attackMs", "holdMs", "releaseMs"])
         #expect(paramNames("chorus") == ["rateHz", "depthMs", "mix"])
@@ -238,6 +339,83 @@ struct FXCommandTests {
         let ceiling = try #require(limiter["params"]?.arrayValue?.first)
         #expect(ceiling["unit"]?.stringValue == "dB")
         #expect(ceiling["default"]?.doubleValue == -1)
+
+        // m22-a: the v2 EQ params teach their hidden semantics via `note`;
+        // legacy params carry none (the key is omitted, additive shape).
+        let eqParams = try #require(eq["params"]?.arrayValue)
+        let hpFreq = try #require(eqParams.first { $0["name"]?.stringValue == "highPassFreq" })
+        #expect(hpFreq["min"]?.doubleValue == 20)
+        #expect(hpFreq["max"]?.doubleValue == 1_000)
+        #expect(hpFreq["unit"]?.stringValue == "Hz")
+        #expect(hpFreq["note"]?.stringValue?.contains("OFF") == true)
+        let hpSlope = try #require(
+            eqParams.first { $0["name"]?.stringValue == "highPassSlopeDbPerOct" })
+        #expect(hpSlope["min"]?.doubleValue == 12 && hpSlope["max"]?.doubleValue == 24)
+        #expect(hpSlope["unit"]?.stringValue == "dB/oct")
+        #expect(hpSlope["note"]?.stringValue?.contains("12 or 24") == true)
+        let lpFreq = try #require(eqParams.first { $0["name"]?.stringValue == "lowPassFreq" })
+        #expect(lpFreq["min"]?.doubleValue == 1_000 && lpFreq["max"]?.doubleValue == 20_000)
+        let shelfQ = try #require(eqParams.first { $0["name"]?.stringValue == "lowShelfQ" })
+        #expect(shelfQ["default"]?.doubleValue == 0.7071067811865476)
+        let bandOn = try #require(eqParams.first { $0["name"]?.stringValue == "peak1Enabled" })
+        #expect(bandOn["min"]?.doubleValue == 0 && bandOn["max"]?.doubleValue == 1)
+        #expect(bandOn["default"]?.doubleValue == 1)
+        #expect(bandOn["note"]?.stringValue?.contains("bypasses") == true)
+        #expect(lowShelf["note"] == nil)  // legacy params: note omitted
+    }
+
+    @Test("fx.setParam drives the EQ v2 params: activation, snap, bypass, resolved echo")
+    func fxSetParamDrivesEQv2() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Vox", kind: "audio")
+        let addResponse = await router.handle(ControlRequest(
+            id: "1", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("eq")]))
+        let effectID = try #require(addResponse.result?["effectId"]?.stringValue)
+
+        func setParam(_ name: String, _ value: Double) async -> JSONValue? {
+            let response = await router.handle(ControlRequest(
+                id: "set-\(name)", command: "fx.setParam",
+                params: ["trackId": .string(trackID.uuidString),
+                         "effectId": .string(effectID),
+                         "name": .string(name), "value": .number(value)]))
+            #expect(response.ok)
+            return response.result?["effects"]?.arrayValue?.first?["params"]
+        }
+
+        // Fresh EQ: the resolved wire params show HP/LP off at the range edges.
+        let fresh = try #require(addResponse.result?["effects"]?.arrayValue?.first?["params"])
+        #expect(fresh["highPassEnabled"]?.doubleValue == 0)
+        #expect(fresh["highPassFreq"]?.doubleValue == 20)
+        #expect(fresh["lowPassEnabled"]?.doubleValue == 0)
+        #expect(fresh["lowPassFreq"]?.doubleValue == 20_000)
+        #expect(fresh["lowShelfQ"]?.doubleValue == 0.7071067811865476)
+        #expect(fresh["peak1Enabled"]?.doubleValue == 1)
+
+        // Setting a corner ACTIVATES the filter; the echo is resolved.
+        let afterFreq = try #require(await setParam("highPassFreq", 150))
+        #expect(afterFreq["highPassFreq"]?.doubleValue == 150)
+        #expect(afterFreq["highPassEnabled"]?.doubleValue == 1)
+
+        // Slope snaps to 12/24 through the numeric wire.
+        let afterSlope = try #require(await setParam("highPassSlopeDbPerOct", 19))
+        #expect(afterSlope["highPassSlopeDbPerOct"]?.doubleValue == 24)
+
+        // Bypass keeps the corner; the resolved enabled flag reads 0.
+        let afterBypass = try #require(await setParam("highPassEnabled", 0))
+        #expect(afterBypass["highPassEnabled"]?.doubleValue == 0)
+        #expect(afterBypass["highPassFreq"]?.doubleValue == 150)
+
+        // Per-band bypass + shelf Q ride the same generic path.
+        let afterBand = try #require(await setParam("highShelfEnabled", 0))
+        #expect(afterBand["highShelfEnabled"]?.doubleValue == 0)
+        let afterQ = try #require(await setParam("highShelfQ", 1.4))
+        #expect(afterQ["highShelfQ"]?.doubleValue == 1.4)
+
+        // Out-of-range corners clamp silently (the spec-range rule).
+        let clamped = try #require(await setParam("lowPassFreq", 100))
+        #expect(clamped["lowPassFreq"]?.doubleValue == 1_000)
+        #expect(clamped["lowPassEnabled"]?.doubleValue == 1)  // setting it activated it
     }
 
     @Test("fx.add + fx.setParam work for the new kinds; unknown kind lists all nine")
@@ -363,5 +541,85 @@ struct FXCommandTests {
         let pad2 = try #require(tracks2.first(where: { $0["id"]?.stringValue == padID.uuidString }))
         let cleared = try #require(pad2["effects"]?.arrayValue?.first)
         #expect(cleared["sidechainSourceTrackId"] == nil)
+    }
+
+    // MARK: - m22-f delay tempo sync (additive params, zero new commands)
+
+    @Test("fx.describe teaches the delay's sync + division semantics (m22-f)")
+    func fxDescribeTeachesDelayTempoSync() async throws {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "fx.describe", params: ["kind": .string("delay")]))
+        #expect(response.ok)
+        let params = try #require(response.result?["kinds"]?.arrayValue?.first?["params"]?
+            .arrayValue)
+
+        let sync = try #require(params.first { $0["name"]?.stringValue == "sync" })
+        #expect(sync["min"]?.doubleValue == 0 && sync["max"]?.doubleValue == 1)
+        #expect(sync["default"]?.doubleValue == 0)
+        #expect(sync["unit"]?.stringValue == "linear")
+        #expect(sync["note"]?.stringValue?.contains("tempo") == true)
+        #expect(sync["note"]?.stringValue?.contains("Not automatable") == true)
+
+        let division = try #require(params.first { $0["name"]?.stringValue == "division" })
+        #expect(division["unit"]?.stringValue == "beats")
+        #expect(division["default"]?.doubleValue == 1)  // 1 beat = 1/4
+        // Bounds are the enum's own beat lengths: 1/32t … 1/1d.
+        #expect(division["min"]?.doubleValue == NoteDivision.thirtySecondTriplet.beats)
+        #expect(division["max"]?.doubleValue == 6)
+        let note = try #require(division["note"]?.stringValue)
+        #expect(note.contains("1/8d") && note.contains("triplet") && note.contains("dotted"))
+        #expect(note.contains("Not automatable"))
+
+        // timeMs teaches the sync interaction (the derived-time formula).
+        let timeMs = try #require(params.first { $0["name"]?.stringValue == "timeMs" })
+        #expect(timeMs["note"]?.stringValue?.contains("division × 60000") == true)
+    }
+
+    @Test("delay sync/division ride fx.add + fx.setParam; the echo resolves tokens (m22-f)")
+    func delayTempoSyncParamsRoundTripOnTheWire() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Wet", kind: "audio")
+
+        // A fresh delay reads the resolved defaults: unsynced, 1/4.
+        let added = await router.handle(ControlRequest(
+            id: "1", command: "fx.add",
+            params: ["trackId": .string(trackID.uuidString), "kind": .string("delay")]))
+        #expect(added.ok)
+        let effectID = try #require(added.result?["effectId"]?.stringValue)
+        let fresh = try #require(added.result?["effects"]?.arrayValue?.first?["params"])
+        #expect(fresh["sync"]?.doubleValue == 0)
+        #expect(fresh["division"]?.doubleValue == 1)
+        #expect(fresh["divisionLabel"]?.stringValue == "1/4")
+
+        // fx.setParam picks the new names up through the existing path.
+        _ = await router.handle(ControlRequest(
+            id: "2", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString),
+                     "effectId": .string(effectID),
+                     "name": .string("sync"), "value": .number(1)]))
+        // 0.7 beats snaps to the NEAREST division: 1/4t (0.6667), not 1/8d.
+        let snapped = await router.handle(ControlRequest(
+            id: "3", command: "fx.setParam",
+            params: ["trackId": .string(trackID.uuidString),
+                     "effectId": .string(effectID),
+                     "name": .string("division"), "value": .number(0.7)]))
+        #expect(snapped.ok)
+        let params = try #require(snapped.result?["effects"]?.arrayValue?.first?["params"])
+        #expect(params["sync"]?.doubleValue == 1)
+        #expect(params["division"]?.doubleValue == NoteDivision.quarterTriplet.beats)
+        #expect(params["divisionLabel"]?.stringValue == "1/4t")
+        // The stored fallback never moves on the wire: timeMs stays put.
+        #expect(params["timeMs"]?.doubleValue == 350)
+
+        // fx.add accepts them as initial params too (numeric-only surface).
+        let master = await router.handle(ControlRequest(
+            id: "4", command: "fx.add",
+            params: ["trackId": .string("master"), "kind": .string("delay"),
+                     "params": .object(["sync": .number(1), "division": .number(0.75)])]))
+        #expect(master.ok)
+        let masterParams = try #require(master.result?["effects"]?.arrayValue?.first?["params"])
+        #expect(masterParams["sync"]?.doubleValue == 1)
+        #expect(masterParams["divisionLabel"]?.stringValue == "1/8d")
     }
 }

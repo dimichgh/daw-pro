@@ -60,6 +60,9 @@ struct MixerChannelStrip: View {
                     },
                     onOpenEditor: { effectID in
                         model.toggleEffectEditor(trackID: track.id, effectID: effectID)
+                    },
+                    gainReductionFor: { effectID in
+                        model.gainReductionDb(trackID: track.id, effectID: effectID)
                     }
                 )
                 .explainable(.mixerInserts)
@@ -353,6 +356,11 @@ struct MixerInsertsSection: View {
     /// Toggles the effect editor card on a BUILT-IN insert (m17-a) — routed to
     /// `AppModel.toggleEffectEditor` by every host (tracks, buses, master).
     var onOpenEditor: (UUID) -> Void
+    /// The per-insert GR poll behind the dynamics chips' activity bar (m22-e)
+    /// — routed to `AppModel.gainReductionDb` by every host (the grSeed-aware
+    /// seam). This section hands it only to compressor/limiter/gate rows, so
+    /// a reverb chip never even polls.
+    var gainReductionFor: (UUID) -> Double?
 
     var body: some View {
         VStack(spacing: 4) {
@@ -386,6 +394,12 @@ struct MixerInsertsSection: View {
                         // plugin-window affordance and never open the card (v1).
                         onOpenEditor: effect.kind != .audioUnit
                             ? { onOpenEditor(effect.id) }
+                            : nil,
+                        // Dynamics kinds only (m22-e): the chip's GR activity
+                        // bar poll — every other kind stays bar-free (and
+                        // never polls).
+                        gainReduction: GainReductionMeterModel.isDynamicsKind(effect.kind)
+                            ? { gainReductionFor(effect.id) }
                             : nil
                     )
                 }
@@ -490,6 +504,9 @@ struct MixerMasterStrip: View {
                     onOpenWindow: nil,
                     onOpenEditor: { effectID in
                         model.toggleEffectEditor(trackID: nil, effectID: effectID)
+                    },
+                    gainReductionFor: { effectID in
+                        model.gainReductionDb(trackID: nil, effectID: effectID)
                     }
                 )
                 .explainable(.mixerMasterInserts)
@@ -514,6 +531,30 @@ struct MixerMasterStrip: View {
             .frame(minHeight: 180)
             .explainable(.mixerMaster)
             DbReadout(gain: store.masterVolume)
+            Divider().overlay(DAWTheme.playback.opacity(0.25))
+            MasterLoudnessReadout()
+            Divider().overlay(DAWTheme.playback.opacity(0.25))
+            // Stereo image / mono safety (m22-d): the goniometer well is Pro
+            // (the Lissajous cloud is a pro instrument; Simple keeps the
+            // fader's long throw), but the plain-language phase verdict + bar
+            // read in BOTH densities — "will it survive a phone speaker?" is
+            // beginner-relevant, the LOUDNESS block's sibling. The closures
+            // prefer the `debug.scopeSeed` override (deterministic captures)
+            // over the live engine polls — the `vibeSeed` idiom.
+            MasterStereoImageBlock(
+                showsScope: isPro,
+                scopeFrame: { model.scopeSeed?.frame ?? store.masterScopeFrame() },
+                analysis: {
+                    if let seed = model.scopeSeed {
+                        var seeded = MasterAnalysisSnapshot.floor
+                        seeded.correlation = seed.correlation
+                        seeded.width = seed.width
+                        seeded.balance = seed.balance
+                        return seeded
+                    }
+                    return store.masterAnalysis()
+                }
+            )
         }
         .padding(12)
         .frame(width: 156)
@@ -685,6 +726,95 @@ struct MasterAutomationSection: View {
         }
         .buttonStyle(.plain)
         .help("Delete the master volume automation lane")
+    }
+}
+
+/// Live loudness readout on the master strip (m22-c): momentary /
+/// short-term / running-integrated LUFS, loudness range (LU), and true
+/// peak (dBTP) — the SAME snapshot `mixer.liveLoudness` serves (UI == wire
+/// by construction; the DSP is DAWCore's shared BS.1770/EBU 3341+3342
+/// stream on the master tap). TimelineView-polled like the vibe meter, but
+/// at 5 Hz — these are numbers, not motion, and momentary itself only
+/// refreshes every 100 ms hop. While the analyzer warms up (nil = no
+/// evidence, never 0) values read as a faint "–" placeholder and the block
+/// dims — per DESIGN-LANGUAGE, SF Mono digital readouts, semantic cyan
+/// only, no new colors.
+struct MasterLoudnessReadout: View {
+    @Environment(ProjectStore.self) private var store
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.2)) { _ in
+            let snapshot = (try? store.liveLoudness()) ?? .empty
+            let warming = snapshot.momentaryLufs == nil
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4) {
+                    Text("LOUDNESS")
+                        .font(.system(size: 8, weight: .semibold))
+                        .tracking(1.2)
+                        .foregroundStyle(DAWTheme.textDim)
+                    Spacer(minLength: 0)
+                    Text("LUFS")
+                        .font(.system(size: 7, weight: .semibold))
+                        .foregroundStyle(DAWTheme.textFaint)
+                }
+                Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
+                    GridRow {
+                        label("M"); value(snapshot.momentaryLufs, warming: warming)
+                        label("S"); value(snapshot.shortTermLufs, warming: warming)
+                    }
+                    GridRow {
+                        label("I"); value(snapshot.integratedLufs, warming: warming)
+                        label("LRA"); value(snapshot.loudnessRangeLu, warming: warming)
+                    }
+                    GridRow {
+                        label("TP"); value(snapshot.truePeakDbtp, warming: warming)
+                        label(""); unit("dBTP")
+                    }
+                }
+            }
+            .opacity(warming ? 0.75 : 1)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Live loudness")
+            .accessibilityValue(accessibilityValue(snapshot))
+        }
+    }
+
+    private func label(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(DAWTheme.textDim)
+            .frame(minWidth: 14, alignment: .leading)
+    }
+
+    private func unit(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 7, weight: .semibold))
+            .foregroundStyle(DAWTheme.textFaint)
+    }
+
+    /// One SF Mono value; nil (not enough audio yet) reads as a faint dash
+    /// — absence is the honest display, never a fabricated 0/floor.
+    private func value(_ number: Double?, warming: Bool) -> some View {
+        Text(number.map { String(format: "%.1f", $0) } ?? "–")
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            .foregroundStyle(number == nil ? DAWTheme.textFaint : DAWTheme.playback)
+            .glow(DAWTheme.playback, radius: 3, intensity: number == nil ? 0 : 0.35)
+            .lineLimit(1)
+    }
+
+    private func accessibilityValue(_ snapshot: LiveLoudnessSnapshot) -> String {
+        guard let momentary = snapshot.momentaryLufs else { return "warming up" }
+        var parts = [String(format: "momentary %.1f LUFS", momentary)]
+        if let integrated = snapshot.integratedLufs {
+            parts.append(String(format: "integrated %.1f LUFS", integrated))
+        }
+        if let range = snapshot.loudnessRangeLu {
+            parts.append(String(format: "range %.1f LU", range))
+        }
+        if let truePeak = snapshot.truePeakDbtp {
+            parts.append(String(format: "true peak %.1f dBTP", truePeak))
+        }
+        return parts.joined(separator: ", ")
     }
 }
 

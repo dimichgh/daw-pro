@@ -153,7 +153,12 @@ final class DelayEffect: EffectRendering, @unchecked Sendable {
     /// RENDER-THREAD automation store (M4 vii-c). Slot order =
     /// `EffectParamSpec.specs(for: .delay)`: 0 timeMs, 1 feedback, 2 mix,
     /// 3 pingPong, 4 highCutHz. Pokes a preallocated params copy and
-    /// re-derives — no allocation, no locks.
+    /// re-derives — no allocation, no locks. The m22-f spec entries (5 sync,
+    /// 6 division) are deliberately OUTSIDE the guard: they are control-
+    /// plane-only (tempo math never runs here) and lane creation refuses
+    /// them at the store (`AutomationTarget.valueRange`); the incoming
+    /// params' `timeMs` already IS the tempo-derived effective time when
+    /// synced (`DelayTempoSync`, applied at the engine intake seams).
     func storeAutomatedParam(slot: Int, value: Double) {
         guard value.isFinite, (0...4).contains(slot) else { return }
         adoptPendingParams()

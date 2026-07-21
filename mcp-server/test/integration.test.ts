@@ -263,8 +263,19 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // ai_copilot_get_model/ai_copilot_set_model (the model-selection wire pair)
   // took it 136 -> 138. The chat-persist design's Phase C
   // (ai_copilot_chats/ai_copilot_resume_chat/ai_copilot_delete_chat/
-  // ai_copilot_rename_chat) took it 138 -> 142.
-  assert.equal(result.tools.length, 142);
+  // ai_copilot_rename_chat) took it 138 -> 142. The hosted-AU parameter
+  // surface (au_describe_params/au_set_param, design-au-parameter-surface)
+  // took it 142 -> 144. m21-d's clip_fit_to_content (fit a clip's length to
+  // its content in one call) took it 144 -> 145. m21-e's clip_analyze_audio
+  // (key/tempo/spectral-balance analysis of an imported audio clip) took it
+  // 145 -> 146. m22-c's mixer_live_loudness (streaming master-bus
+  // M/S/I/LRA/true-peak metering) took it 146 -> 147. m22-g P1's
+  // reference_import/reference_remove/reference_status/reference_analyze
+  // (the reference-track slot + one-time analysis) took it 147 -> 151.
+  // m22-g P2's reference_set_monitor/reference_set_offset/reference_set_trim/
+  // reference_compare (the level-matched A/B monitor + mix-vs-reference
+  // deltas) took it 151 -> 155.
+  assert.equal(result.tools.length, 155);
 });
 
 // ---------------------------------------------------------------------------

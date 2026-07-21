@@ -91,6 +91,10 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// The insert-/delete-bar control cluster in the header (beta m10-h) — one card
     /// for the whole time-range affordance.
     case pianoRollBarOps
+    /// The piano-roll header's zoom cluster (m21-c): the −/%/+ horizontal zoom
+    /// chip — one card summarizes the whole affordance (its ⌘ shortcuts and the
+    /// pinch gesture included, the `arrangeZoom` honest-scope precedent).
+    case pianoRollZoom
 
     // MARK: Arrange (timeline + sidebar)
     case arrangeSnap
@@ -196,6 +200,15 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// Pro-only by construction (the inserts section is Pro-gated). NOT an AI
     /// surface — no violet.
     case effectEditor
+
+    // MARK: Poly Synth editor
+    /// The built-in POLY SYNTH editor card — the TUNE affordance on the
+    /// instrument picker's Poly Synth row AND the knob panel it opens share
+    /// this ONE id (the shared-control + honest-scope rules: the sections are
+    /// a single coherent surface, so per-knob entries would fake curation).
+    /// Never offered for sound-bank or Audio Unit instruments. NOT an AI
+    /// surface — no violet.
+    case polySynthEditor
 
     // MARK: AI panels (violet affordances — Rule 3)
     case aiCopilot
@@ -379,7 +392,7 @@ public enum ExplainCatalog {
         // MARK: Piano roll
         .pianoRollSnap: ExplainEntry(
             title: "Note Snap",
-            body: "Locks where notes land onto a tidy grid — whole beats, half beats, or finer. Keep it tight while you rough parts in, then loosen it when you want a note to sit a little off the grid."),
+            body: "Locks where notes land onto a tidy grid — whole beats, half beats, or much finer, including triplet feels. Keep it tight while you rough parts in, then loosen it when you want a note to sit a little off the grid."),
         .pianoRollGrid: ExplainEntry(
             title: "Note Editor",
             body: "The grid where you draw a melody: double-click an empty spot to add a note, drag a note to move it, and drag its right edge to change how long it lasts. Higher notes sit higher up."),
@@ -391,7 +404,10 @@ public enum ExplainCatalog {
             body: "Draws performance moves that ride under the notes — the mod wheel, sustain pedal, pitch bend, and other controls. Pick a lane, then drag to draw a stepped line; each point holds until the next one."),
         .pianoRollBarOps: ExplainEntry(
             title: "Insert / Delete Bar",
-            body: "Adds or removes a whole bar at the marked spot. Insert opens an empty bar and slides the rest of the part later; delete takes that bar out and pulls everything after it back to close the gap."),
+            body: "Adds or removes a whole bar at the marked spot. Insert opens an empty bar and slides the rest of the part later; delete takes a bar out and closes the gap — it wakes up once the part is longer than one bar."),
+        .pianoRollZoom: ExplainEntry(
+            title: "Editor Zoom",
+            body: "Zooms the note grid in for detailed edits or out to see the whole part. Use the magnifier buttons, pinch on the grid, or press the zoom keys while the editor is focused; your zoom is remembered."),
 
         // MARK: Arrange (timeline + sidebar)
         .arrangeSnap: ExplainEntry(
@@ -481,7 +497,12 @@ public enum ExplainCatalog {
         // MARK: Effect editor (m17-a)
         .effectEditor: ExplainEntry(
             title: "Effect Controls",
-            body: "The knobs for one insert effect, grouped by the job they do — drag a knob up or down to shape the sound and hear every change live. Double-click a knob to reset it, and use the switch at the top to bypass the effect while you compare before and after."),
+            body: "The knobs for one insert effect, grouped by the job they do — drag up or down and hear every change live. Double-click a knob to reset it. The top switch bypasses the whole effect; in the EQ each band has its own ON switch, and the filters stay off until you turn them on."),
+
+        // MARK: Poly Synth editor
+        .polySynthEditor: ExplainEntry(
+            title: "Poly Synth Controls",
+            body: "The tuning panel for the built-in synth. Pick its basic wave shape, set how each note fades in and out, brighten or darken the tone with the filter, and set its level. Drag a knob to hear the change live; double-click resets it."),
 
         // MARK: AI panels (violet affordances — Rule 3)
         .aiCopilot: ExplainEntry(

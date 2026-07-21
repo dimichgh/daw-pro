@@ -67,7 +67,20 @@ let package = Package(
             dependencies: ["DAWCore", "DAWEngine", "DAWControl", "AIServices", "DAWAppKit"],
             // App-icon artifacts (glass-b): consumed by scripts/bundle.sh, not by
             // the SwiftPM build — excluded so the build stays zero-warning.
-            exclude: ["Resources/AppIcon-master-1024.png", "Resources/AppIcon.icns"]
+            exclude: ["Resources/AppIcon-master-1024.png", "Resources/AppIcon.icns"],
+            // Onboarding hero art (glass-d): runtime-loaded images, so unlike the
+            // icon these ARE SwiftPM resources — the build emits
+            // `daw-pro_DAWApp.bundle` next to the executable, which serves
+            // `swift run` dev builds directly; scripts/bundle.sh copies that
+            // bundle into the .app's Contents/Resources for the packaged product.
+            // (Loading goes through `OnboardingHeroArt.load`, NOT `Bundle.module`
+            // — see OnboardingTourView.swift for why.)
+            resources: [
+                .process("Resources/OnboardingWelcomeHero.png"),
+                .process("Resources/OnboardingWelcomeHero@2x.png"),
+                .process("Resources/OnboardingDoneHero.png"),
+                .process("Resources/OnboardingDoneHero@2x.png"),
+            ]
         ),
         .testTarget(name: "DAWCoreTests", dependencies: ["DAWCore"]),
         // DAWEngine is a TEST-ONLY dependency here (the DAWControl module

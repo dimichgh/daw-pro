@@ -416,8 +416,10 @@ struct FXPack2Tests {
         ])
         #expect(EffectParamSpec.specs(for: .reverb).map(\.name)
                 == ["roomSize", "damping", "mix", "preDelayMs", "width"])
+        // m22-f: sync/division APPENDED so the five legacy automation slots
+        // (0…4) never move.
         #expect(EffectParamSpec.specs(for: .delay).map(\.name)
-                == ["timeMs", "feedback", "mix", "pingPong", "highCutHz"])
+                == ["timeMs", "feedback", "mix", "pingPong", "highCutHz", "sync", "division"])
         #expect(EffectParamSpec.specs(for: .saturator).map(\.name)
                 == ["driveDb", "mix", "outputDb"])
         #expect(EffectParamSpec.specs(for: .gate).map(\.name)

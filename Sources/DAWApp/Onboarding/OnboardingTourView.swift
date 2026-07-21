@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import DAWAppKit
 
 // MARK: - Onboarding tour chrome (M8 ob-b)
@@ -14,9 +15,67 @@ import DAWAppKit
 // the neutral glass palette with a CYAN active-state accent (progress + primary CTA
 // + the coach-mark highlight ring), never `DAWTheme.ai`.
 
-/// One tour step's glass card: a progress header, the step title + beginner body,
-/// the primary CTA, and quiet skip affordances. A plain-value component (its info +
-/// three closures), so previews and the live overlay share it.
+// MARK: - Hero art (glass-d)
+
+/// The two GPT-Image hero banners for the tour's FRAMING cards — the only generated
+/// art in the product besides the app icon, per the glass-b scoping eval
+/// (`docs/research/glass-b-asset-scoping.md`): welcome and done are one-time
+/// centered framing moments over no live data; the five anchored task coach-marks
+/// stay art-free BY DECISION (art beside a live control is noise, and it inflates
+/// the measured height that drives flip-above-anchor placement).
+///
+/// RESOURCE MECHANISM (recorded decision): the PNGs are SwiftPM `resources:` on the
+/// DAWApp target, so every build emits `daw-pro_DAWApp.bundle` beside the
+/// executable — that serves `swift run` / `.build/debug` dev runs with zero extra
+/// tooling. scripts/bundle.sh copies the same bundle into the .app's
+/// `Contents/Resources/` (the standard app location, the AppIcon.icns precedent).
+/// We deliberately do NOT use the generated `Bundle.module` accessor: under plain
+/// SwiftPM (no Xcode) it looks for the bundle at `Bundle.main.bundleURL` — which in
+/// a packaged .app is the bundle ROOT, where a stray top-level item would break the
+/// codesign seal — and it `fatalError`s when missing. This loader checks the two
+/// places the bundle actually lives (Contents/Resources, then the executable's
+/// directory) and degrades to a text-only card instead of crashing.
+///
+/// Images are cached in `static let`s — loaded once per process, never in `body`
+/// per redraw (the no-per-frame-allocation rule). `@MainActor` isolates the
+/// non-Sendable `NSImage` statics; only view code reads them.
+@MainActor
+enum OnboardingHeroArt {
+    static let welcome: NSImage? = load("OnboardingWelcomeHero")
+    static let done: NSImage? = load("OnboardingDoneHero")
+
+    /// The framing-card hero for `step` — nil for every task step (that nil is the
+    /// art-free-coach-marks verdict, enforced structurally).
+    static func hero(for step: OnboardingStep) -> NSImage? {
+        switch step {
+        case .welcome: return welcome
+        case .done: return done
+        default: return nil
+        }
+    }
+
+    private static func load(_ name: String) -> NSImage? {
+        let bundleName = "daw-pro_DAWApp.bundle"
+        let candidates: [URL?] = [
+            // Packaged app: Contents/Resources/daw-pro_DAWApp.bundle (bundle.sh).
+            Bundle.main.resourceURL?.appendingPathComponent(bundleName),
+            // Bare SwiftPM executable: the bundle sits beside the binary.
+            Bundle.main.bundleURL.appendingPathComponent(bundleName),
+        ]
+        for url in candidates.compactMap({ $0 }) {
+            // `image(forResource:)` pairs the @1x/@2x reps like NSImage(named:).
+            if let bundle = Bundle(url: url), let image = bundle.image(forResource: name) {
+                return image
+            }
+        }
+        return nil
+    }
+}
+
+/// One tour step's glass card: a hero media well (framing steps only), a progress
+/// header, the step title + beginner body, the primary CTA, and quiet skip
+/// affordances. A plain-value component (its info + three closures), so previews
+/// and the live overlay share it.
 struct OnboardingCard: View {
     var info: OnboardingStepInfo
     /// 1-based step number for the "N of M" readout.
@@ -29,8 +88,15 @@ struct OnboardingCard: View {
     /// Leave the whole tour (never re-offers; replayable from Settings).
     var onSkipTour: () -> Void
 
+    /// The hero media well's point size: the card's 320 pt overlay width minus the
+    /// 16 pt padding on each side, at the eval-reviewed 32:11 banner ratio. The
+    /// shipped assets are exactly this size (288×99 @1x, 576×198 @2x), so the @2x
+    /// rep maps 1:1 to Retina pixels — no runtime resampling of a big master.
+    private static let heroWellSize = CGSize(width: 288, height: 99)
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            heroWell
             progressHeader
             Text(info.title)
                 .font(.system(size: 15, weight: .semibold))
@@ -51,6 +117,31 @@ struct OnboardingCard: View {
                 .stroke(DAWTheme.hairline, lineWidth: 1)      // neutral glass edge — NOT violet
         )
         .shadow(color: .black.opacity(0.45), radius: 18, y: 9) // lifted popover
+    }
+
+    // MARK: Hero media well (framing steps only)
+
+    /// The glass-b eval's binding render rule: both heroes' base fields are DARKER
+    /// than the `#0B0D12` base surface, so the art renders as a rounded-rect
+    /// clipped INSET WELL (reads like a screen set into the panel) — never as the
+    /// card's own full-bleed background. Hairline border per the panel idiom;
+    /// deliberately NO `.glow` on or around the image — the glow depicted INSIDE
+    /// it is content (a waveform, a lit groove), and chrome keeps its earned-state
+    /// discipline. Decorative, so hidden from accessibility (the title says it).
+    @ViewBuilder private var heroWell: some View {
+        if let hero = OnboardingHeroArt.hero(for: info.step) {
+            Image(nsImage: hero)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFill()
+                .frame(width: Self.heroWellSize.width, height: Self.heroWellSize.height)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(DAWTheme.hairline, lineWidth: 1)
+                )
+                .accessibilityHidden(true)
+        }
     }
 
     // MARK: Progress header
@@ -145,6 +236,16 @@ struct OnboardingTourOverlay: View {
     var onSkipTour: () -> Void
 
     /// Measured card height, so a card near the bottom flips above its anchor.
+    ///
+    /// glass-d re-measure: the hero well adds ~109 pt to the WELCOME/DONE cards
+    /// only — both are centered (unanchored), so their height never enters the
+    /// flip-above-anchor math below (`cardCenter` ignores `cardSize` when `frame`
+    /// is nil). The five task cards stay art-free (the eval's settled verdict), so
+    /// the anchored flip math sees the same heights as before. The one hero-height
+    /// touch: for a single layout turn after welcome→generate the measured size is
+    /// stale (the welcome card's taller box) — the same transient every step
+    /// change always had, hidden by the 0.18 s step transition, and it settles via
+    /// `onChange` before the user can interact.
     @State private var cardSize: CGSize = CGSize(width: 320, height: 210)
     private let cardWidth: CGFloat = 320
 

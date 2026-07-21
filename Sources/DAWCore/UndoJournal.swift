@@ -59,6 +59,11 @@ struct EditState: Equatable {
     /// it moved (the masterEffects twin). Defaults to `[]` so entries captured
     /// before this field existed still compare equal.
     var masterAutomation: [AutomationLane] = []
+    /// Reference-track slot (m22-g). Additive — undo covers import (one undo
+    /// restores the replaced slot), remove, analyze, and the P2 offset/trim
+    /// edits. No engine intent in P1 (the lane lands with P2). Defaults to
+    /// nil so entries captured before this field existed still compare equal.
+    var reference: ReferenceSlot? = nil
 }
 
 /// One undo (or redo) record: the state captured BEFORE an edit, a

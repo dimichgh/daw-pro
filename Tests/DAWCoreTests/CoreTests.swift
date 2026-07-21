@@ -417,6 +417,23 @@ final class FakeEngine: AudioEngineControlling {
         return detectTransientsStubByURL[url] ?? detectTransientsStub
     }
 
+    /// Audio-content analysis stub (m21-e): configurable result + error and
+    /// a request spy — the detectTransients stub pattern. A nil stub throws
+    /// `engineUnavailable`, mirroring the protocol default's honesty rule
+    /// (never fabricate an empty analysis).
+    var analyzeAudioContentStub: AudioContentAnalysis?
+    var analyzeAudioContentError: (any Error)?
+    private(set) var analyzeAudioContentCalls:
+        [(url: URL, windowStartSeconds: Double, windowDurationSeconds: Double)] = []
+
+    func analyzeAudioContent(inFileAt url: URL, windowStartSeconds: Double,
+                             windowDurationSeconds: Double) async throws -> AudioContentAnalysis {
+        analyzeAudioContentCalls.append((url, windowStartSeconds, windowDurationSeconds))
+        if let analyzeAudioContentError { throw analyzeAudioContentError }
+        guard let analyzeAudioContentStub else { throw ProjectError.engineUnavailable }
+        return analyzeAudioContentStub
+    }
+
     func startPlayback(_ transport: TransportState) {
         calls.append(.startPlayback(beats: transport.positionBeats, tempo: transport.tempoBPM))
     }

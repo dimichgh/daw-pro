@@ -65,7 +65,7 @@ public final class QuantizeModel {
 
     // MARK: - Settings state
 
-    /// Index into `Self.grids` — the picked musical grid (1/4 … 1/16 triplet). The
+    /// Index into `Self.grids` — the picked musical grid (1/4 … 1/64). The
     /// picker is inert while a groove is selected (the groove defines the grid).
     /// Raw here; `grid` reads it clamped, so a stray index can never crash the view.
     public var gridIndex: Int = QuantizeModel.defaultGridIndex
@@ -145,6 +145,7 @@ public final class QuantizeModel {
         MusicalGrid(label: "1/16", beats: 0.25),
         MusicalGrid(label: "1/16 triplet", beats: 1.0 / 6.0),
         MusicalGrid(label: "1/32", beats: 0.125),
+        MusicalGrid(label: "1/64", beats: 0.0625),
     ]
 
     /// Default grid: 1/16 — the common beat-programming quantize default (also the

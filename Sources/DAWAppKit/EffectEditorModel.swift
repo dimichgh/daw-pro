@@ -75,6 +75,11 @@ public final class EffectEditorModel {
     private let applyParam: (UUID?, UUID, String, Double) throws -> Void
     /// Toggles bypass — wired to `store.setEffectBypassed` / the master twin.
     private let applyBypass: (UUID?, UUID, Bool) throws -> Void
+    /// The CURRENT project tempo in BPM (m22-f) — read live so the synced
+    /// delay card's derived-time readout tracks tempo edits. Wired to the
+    /// store's tempo map at the playhead; defaulted so pre-m22-f call sites
+    /// and fakes stay source-compatible.
+    private let tempoBPM: () -> Double
 
     /// The open insert (nil = the model is idle). The card's visibility is the
     /// app model's `effectEditorTarget`; this mirrors it for value reads.
@@ -89,11 +94,13 @@ public final class EffectEditorModel {
     public init(
         descriptor: @escaping (UUID?, UUID) -> EffectDescriptor?,
         apply: @escaping (UUID?, UUID, String, Double) throws -> Void,
-        setBypassed: @escaping (UUID?, UUID, Bool) throws -> Void
+        setBypassed: @escaping (UUID?, UUID, Bool) throws -> Void,
+        tempoBPM: @escaping () -> Double = { 120 }
     ) {
         self.descriptorProvider = descriptor
         self.applyParam = apply
         self.applyBypass = setBypassed
+        self.tempoBPM = tempoBPM
     }
 
     /// Points the editor at one insert and resets transient state.
@@ -148,13 +155,24 @@ public final class EffectEditorModel {
             // Single-knob card — no header needed.
             return [("", [("gainLinear", nil)])]
         case .eq:
-            // One band per group, low → high; short labels — the band prefix
-            // lives in the header (the tight-column abbreviation rule, §5).
+            // One band per group, low → high (HP first, LP last — signal-flow
+            // order); short labels — the band prefix lives in the header (the
+            // tight-column abbreviation rule, §5). m22-a: each gain band gets
+            // its Q knob and an ON bypass toggle (4 items wrap to a second
+            // row in the card); the HP/LP filters are Freq + Slope chip + ON.
             return [
-                ("LOW SHELF", [("lowShelfFreq", "Freq"), ("lowShelfGainDb", "Gain")]),
-                ("PEAK 1", [("peak1Freq", "Freq"), ("peak1GainDb", "Gain"), ("peak1Q", "Q")]),
-                ("PEAK 2", [("peak2Freq", "Freq"), ("peak2GainDb", "Gain"), ("peak2Q", "Q")]),
-                ("HIGH SHELF", [("highShelfFreq", "Freq"), ("highShelfGainDb", "Gain")]),
+                ("HIGH PASS", [("highPassFreq", "Freq"), ("highPassSlopeDbPerOct", "Slope"),
+                               ("highPassEnabled", "On")]),
+                ("LOW SHELF", [("lowShelfFreq", "Freq"), ("lowShelfGainDb", "Gain"),
+                               ("lowShelfQ", "Q"), ("lowShelfEnabled", "On")]),
+                ("PEAK 1", [("peak1Freq", "Freq"), ("peak1GainDb", "Gain"), ("peak1Q", "Q"),
+                            ("peak1Enabled", "On")]),
+                ("PEAK 2", [("peak2Freq", "Freq"), ("peak2GainDb", "Gain"), ("peak2Q", "Q"),
+                            ("peak2Enabled", "On")]),
+                ("HIGH SHELF", [("highShelfFreq", "Freq"), ("highShelfGainDb", "Gain"),
+                                ("highShelfQ", "Q"), ("highShelfEnabled", "On")]),
+                ("LOW PASS", [("lowPassFreq", "Freq"), ("lowPassSlopeDbPerOct", "Slope"),
+                              ("lowPassEnabled", "On")]),
             ]
         case .compressor:
             // Pro-C3's own grouping: trigger/shape, then time smoothing,
@@ -177,8 +195,11 @@ public final class EffectEditorModel {
                 ("OUTPUT", [("mix", nil)]),
             ]
         case .delay:
+            // m22-f: SYNC + DIVISION join the TIME section — one row of
+            // three cells (knob · toggle · menu picker). While synced the
+            // TIME cell shows the tempo-derived ms read-only.
             return [
-                ("TIME", [("timeMs", nil)]),
+                ("TIME", [("timeMs", nil), ("sync", nil), ("division", nil)]),
                 ("REPEATS", [("feedback", nil), ("pingPong", nil), ("highCutHz", nil)]),
                 ("OUTPUT", [("mix", nil)]),
             ]
@@ -244,14 +265,67 @@ public final class EffectEditorModel {
         }
     }
 
-    // MARK: - Toggle params (pingPong)
+    // MARK: - Toggle params (pingPong + the m22-a EQ binaries)
 
-    /// Delay `pingPong` is BINARY at the model layer — `DelayParams` rounds it
-    /// to 0/1 (Effects.swift) despite the continuous 0…1 spec — so it renders
-    /// as a TOGGLE, never a knob (report §3/§6). The wire shape is untouched:
-    /// the toggle still writes 0.0/1.0 through the same `set` path.
+    /// Binary-at-the-model-layer params render as TOGGLES, never knobs
+    /// (report §3/§6): delay `pingPong` (`DelayParams` rounds it), the
+    /// EQ's `*Enabled` band bypasses (the store snaps ≥ 0.5 to on, m22-a),
+    /// and the delay's tempo `sync` (m22-f, same ≥ 0.5 snap). The wire shape
+    /// is untouched: the toggle still writes 0.0/1.0 through the same `set`
+    /// path.
     public static func isToggleParam(_ spec: EffectParamSpec) -> Bool {
-        spec.name == "pingPong"
+        spec.name == "pingPong" || spec.name == "sync" || spec.name.hasSuffix("Enabled")
+    }
+
+    /// The delay's `division` (m22-f) is an 18-way note-length CHOICE, not a
+    /// continuum — it renders as a compact menu picker of `NoteDivision`
+    /// tokens, never a knob. Numerically it still rides the generic surface
+    /// as its length in beats (the store snaps to the nearest legal value).
+    public static func isDivisionParam(_ spec: EffectParamSpec) -> Bool {
+        spec.name == "division"
+    }
+
+    // MARK: - Delay tempo sync (m22-f)
+
+    /// True while the open insert is a delay with tempo sync ON — the TIME
+    /// knob then yields to the read-only derived readout (never fight a knob
+    /// the tempo owns).
+    public var delaySyncActive: Bool {
+        guard let descriptor, descriptor.kind == .delay else { return false }
+        return descriptor.resolvedDelay.resolvedSync
+    }
+
+    /// The synced delay's EFFECTIVE time at the current tempo (nil while the
+    /// card isn't a synced delay) — the SAME `effectiveTimeMs` the engine's
+    /// control-plane resolve pushes to the render thread.
+    public var syncedDelayTimeMs: Double? {
+        guard delaySyncActive, let descriptor else { return nil }
+        return descriptor.resolvedDelay.effectiveTimeMs(atTempoBPM: tempoBPM())
+    }
+
+    /// The open delay's current division (the picker's selection); defaults
+    /// through the resolved accessor (nil = 1/4).
+    public var delayDivision: NoteDivision {
+        descriptor?.resolvedDelay.resolvedDivision ?? .quarter
+    }
+
+    /// Picks a division through the SAME numeric `set` path the wire uses
+    /// (value = the division's length in beats; the store snaps exactly).
+    public func setDelayDivision(_ division: NoteDivision) {
+        set(name: "division", value: division.beats)
+    }
+
+    /// The EQ's HP/LP slope params are TWO-STATE (12 or 24 dB/oct — the model
+    /// layer snaps anything else, m22-a), so they render as a 12/24 chip, not
+    /// a knob. Same numeric wire underneath.
+    public static func isSlopeParam(_ spec: EffectParamSpec) -> Bool {
+        spec.name.hasSuffix("SlopeDbPerOct")
+    }
+
+    /// The chip's read side: 24 at or above the snap midpoint, else 12 —
+    /// mirrors `EQParams.snapSlope`.
+    public static func slopeIs24(_ value: Double) -> Bool {
+        value >= 18
     }
 
     /// The toggle read threshold — mirrors the model layer's `.rounded()`
@@ -405,6 +479,15 @@ public final class EffectEditorModel {
         if isToggleParam(spec) {
             return (toggleIsOn(value) ? "ON" : "OFF", "")
         }
+        // The two-state HP/LP slope reads as its snapped value (m22-a).
+        if isSlopeParam(spec) {
+            return (slopeIs24(value) ? "24" : "12", "dB/oct")
+        }
+        // The delay division reads as its note token, never raw beats
+        // (m22-f) — the same nearest-snap the store applies.
+        if isDivisionParam(spec) {
+            return (NoteDivision.nearest(toBeats: value).rawValue, "")
+        }
         // 0…1 amount knobs read in % (report Actionable-5); wire stays 0…1.
         if isPercentParam(spec) {
             return (String(format: "%.0f", value * 100), "%")
@@ -480,6 +563,20 @@ public final class EffectEditorModel {
             case "peak2Q": return p.peak2Q
             case "highShelfFreq": return p.highShelfFreq
             case "highShelfGainDb": return p.highShelfGainDb
+            // m22-a EQ v2 — resolved reads (nil semantics live in EQParams),
+            // matching the wire's resolved params object exactly.
+            case "highPassFreq": return p.resolvedHighPassFreq
+            case "highPassSlopeDbPerOct": return Double(p.resolvedHighPassSlope)
+            case "highPassEnabled": return p.resolvedHighPassEnabled ? 1 : 0
+            case "lowShelfQ": return p.resolvedLowShelfQ
+            case "lowShelfEnabled": return p.resolvedLowShelfEnabled ? 1 : 0
+            case "peak1Enabled": return p.resolvedPeak1Enabled ? 1 : 0
+            case "peak2Enabled": return p.resolvedPeak2Enabled ? 1 : 0
+            case "highShelfQ": return p.resolvedHighShelfQ
+            case "highShelfEnabled": return p.resolvedHighShelfEnabled ? 1 : 0
+            case "lowPassFreq": return p.resolvedLowPassFreq
+            case "lowPassSlopeDbPerOct": return Double(p.resolvedLowPassSlope)
+            case "lowPassEnabled": return p.resolvedLowPassEnabled ? 1 : 0
             default: return nil
             }
         case .compressor:
@@ -518,6 +615,10 @@ public final class EffectEditorModel {
             case "mix": return p.mix
             case "pingPong": return p.pingPong
             case "highCutHz": return p.highCutHz
+            // m22-f — resolved reads (nil semantics live in DelayParams),
+            // matching the wire's resolved params object exactly.
+            case "sync": return p.resolvedSync ? 1 : 0
+            case "division": return p.resolvedDivision.beats
             default: return nil
             }
         case .saturator:

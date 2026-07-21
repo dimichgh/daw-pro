@@ -26,6 +26,10 @@ struct PianoRollView: View {
     /// now sticky across close/reopen and relaunch. A plain value input — a
     /// preview can pass a `PanelDensityStore()` with an in-memory backing.
     var densityStore: PanelDensityStore
+    /// The shared layout store (m21-c): owns the persisted `pianoRollPPB` zoom
+    /// slot every band rescales from. A plain value input — a preview can pass
+    /// a `PanelLayoutStore()` with an in-memory backing.
+    var layout: PanelLayoutStore
     /// Submits the whole note array (wired to `ProjectStore.setClipNotes`).
     var onCommit: ([MIDINote]) -> Void
     /// Seeks the transport to a PROJECT beat (wired to `ProjectStore.seek`) — the
@@ -51,6 +55,11 @@ struct PianoRollView: View {
     /// closure (the `onCommit` precedent) so the view stays previewable.
     var onCommitControllerLane: (_ type: MIDIControllerType, _ points: [MIDIControllerPoint]) -> Clip?
     var onClose: () -> Void
+    /// Reports the editor's key-focus state (m21-c) so the app can route the
+    /// View-menu ⌘+/⌘−/⌘0 to THIS editor's zoom while it is focused (menu key
+    /// equivalents fire before any focused view sees the key, so the routing
+    /// must happen app-side). Defaulted so previews stay one-liner-simple.
+    var onFocusChange: (Bool) -> Void
 
     @State private var model: PianoRollModel
     /// Edit model for the Pro controller strip (m16-b4), seeded from the clip's
@@ -71,6 +80,16 @@ struct PianoRollView: View {
     /// panel's right edge instead of leaving dead glass. Changes only on a window
     /// or splitter resize — never on a transport tick or playback frame.
     @State private var panelWidth: CGFloat = 0
+    /// The zoom scale captured on the first pinch tick (m21-c) — each tick
+    /// rescales off the gesture-START value because `MagnifyGesture`'s
+    /// magnification is cumulative (the arrange `PinchState` rule, minus the
+    /// anchor math: the roll's plain SwiftUI scroller owns its own offset).
+    @State private var pinchStartPPB: CGFloat?
+    /// A transient inline reason shown when the delete-bar button is pressed
+    /// while it can't act (m21-c bar-ops honesty) — the m17-c refusal-bubble
+    /// idiom: amber, verbatim prose, auto-clearing.
+    @State private var barOpsNotice: String?
+    @State private var barOpsNoticeTask: Task<Void, Never>?
     @FocusState private var isFocused: Bool
 
     private static let keyboardWidth: CGFloat = 54
@@ -83,16 +102,19 @@ struct PianoRollView: View {
     private static let gridScrollSpace = "pianoRollGridScroll"
 
     init(clip: Clip, beatsPerBar: Int, positionBeats: Double, densityStore: PanelDensityStore,
+         layout: PanelLayoutStore,
          onCommit: @escaping ([MIDINote]) -> Void, onSeek: @escaping (Double) -> Void,
          onDeleteTimeRange: @escaping (_ startBeat: Double, _ lengthBeats: Double) -> Clip?,
          onInsertTimeRange: @escaping (_ atBeat: Double, _ lengthBeats: Double) -> Clip?,
          onOpenQuantize: @escaping () -> Void,
          onCommitControllerLane: @escaping (_ type: MIDIControllerType, _ points: [MIDIControllerPoint]) -> Clip?,
-         onClose: @escaping () -> Void) {
+         onClose: @escaping () -> Void,
+         onFocusChange: @escaping (Bool) -> Void = { _ in }) {
         self.clip = clip
         self.beatsPerBar = beatsPerBar
         self.positionBeats = positionBeats
         self.densityStore = densityStore
+        self.layout = layout
         self.onCommit = onCommit
         self.onSeek = onSeek
         self.onDeleteTimeRange = onDeleteTimeRange
@@ -100,6 +122,7 @@ struct PianoRollView: View {
         self.onOpenQuantize = onOpenQuantize
         self.onCommitControllerLane = onCommitControllerLane
         self.onClose = onClose
+        self.onFocusChange = onFocusChange
         _model = State(initialValue: PianoRollModel(
             notes: clip.notes ?? [],
             clipLengthBeats: clip.lengthBeats
@@ -155,6 +178,9 @@ struct PianoRollView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+                // The bar-ops refusal bubble hangs below the header over the
+                // grid; keep the header's overflow above the editor band.
+                .zIndex(1)
             Divider().overlay(DAWTheme.hairline)
             editor
                 .explainable(.pianoRollGrid)
@@ -178,6 +204,19 @@ struct PianoRollView: View {
             return .handled
         }
         .onAppear { isFocused = true }
+        // m21-c: report key focus so the app routes ⌘+/⌘−/⌘0 to THIS editor's
+        // zoom while it is focused (the View-menu key equivalents fire before
+        // any focused view sees the key, so routing lives app-side).
+        .onChange(of: isFocused, initial: true) { _, focused in onFocusChange(focused) }
+        .onDisappear { onFocusChange(false) }
+        // m21-c: ONE persisted zoom value (`panelLayout.pianoRollPPB`) feeds
+        // every band's beat→x mapping — the note grid + velocity lane via
+        // `model`, the controller strip via its own model — so all three
+        // rescale together and never drift.
+        .onChange(of: layout.pianoRollPPB, initial: true) { _, ppb in
+            model.pixelsPerBeat = ppb
+            controllerModel.pixelsPerBeat = ppb
+        }
         // m18-i: the external-mutation seam. `.id(clip.id)` recreates this view
         // (and its seeded @State models) only on a clip IDENTITY switch; a
         // wire/arrange-side geometry op (`clip.trim`/`move`/`split`, arrange
@@ -240,6 +279,10 @@ struct PianoRollView: View {
 
             modeToggle
                 .explainable(.panelDensity)   // shared density id (ex-b)
+            // Zoom cluster (m21-c) — shown in BOTH densities (zoom is view
+            // navigation, not Pro edit chrome — the arrange m17-b rationale).
+            zoomCluster
+                .explainable(.pianoRollZoom)
             if mode == .pro {
                 snapPicker
                     .explainable(.pianoRollSnap)
@@ -301,13 +344,20 @@ struct PianoRollView: View {
         PianoRollBarOps.canDeleteBar(lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
     }
 
+    /// The plain-language reason the delete-bar button can't act (≤ 1 bar left).
+    private static let deleteBarBlockedReason =
+        "This part is only one bar long — add a bar before deleting one."
+
     /// A compact glass cluster in the header: the target bar readout + insert/delete
     /// buttons (v1 acts on the bar under the playhead, or the first bar when the
     /// transport is elsewhere). Shown in BOTH densities — inserting/removing a
     /// measure is a structural edit a beginner reaches for, not Pro-only chrome.
     /// One bar = `beatsPerBar` beats (meter-aware). Dark glass + hairline, the
     /// snap-picker idiom; the +/− glyphs are neutral chrome (Rule 3 — an accent is
-    /// earned by state, not by inviting a click).
+    /// earned by state, not by inviting a click). The delete button never goes
+    /// dead (m21-c discoverability): when it can't act it stays dim but a press
+    /// explains WHY inline (the m17-c refusal-bubble idiom) instead of silently
+    /// swallowing the click — a tooltip alone proved undiscoverable.
     private var barOpsCluster: some View {
         HStack(spacing: 0) {
             Text("BAR \(targetBarNumber)")
@@ -323,18 +373,59 @@ struct PianoRollView: View {
             barOpButton(system: "minus", enabled: canDeleteBar,
                         help: canDeleteBar
                             ? "Delete bar \(targetBarNumber) and pull the rest of the part back to close the gap"
-                            : "Add more than one bar of notes before you can delete a bar") {
-                deleteBar()
+                            : Self.deleteBarBlockedReason) {
+                if canDeleteBar {
+                    deleteBar()
+                } else {
+                    flashBarOpsNotice(Self.deleteBarBlockedReason)
+                }
             }
         }
         .frame(height: 22)
         .background(DAWTheme.panelRaised)
         .clipShape(RoundedRectangle(cornerRadius: 5))
         .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+        .overlay(alignment: .topTrailing) { barOpsNoticeBubble }
     }
 
     private var barOpsDivider: some View {
         Rectangle().fill(DAWTheme.hairline).frame(width: 1, height: 14)
+    }
+
+    /// A press on a can't-act bar op explains itself here (m21-c): the m17-c
+    /// edit-refusal bubble — amber (nothing happened, nothing destroyed), SF Pro
+    /// prose, soft warning glow — hung under the cluster, auto-clearing.
+    @ViewBuilder
+    private var barOpsNoticeBubble: some View {
+        if let barOpsNotice {
+            Text(barOpsNotice)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(DAWTheme.record)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 240, alignment: .trailing)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(DAWTheme.panel)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4)
+                    .stroke(DAWTheme.record.opacity(0.6), lineWidth: 1))
+                .glow(DAWTheme.record, radius: 3, intensity: 0.3)
+                .offset(y: 26)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        }
+    }
+
+    /// Shows the inline bar-ops reason for a few seconds, then fades it.
+    private func flashBarOpsNotice(_ message: String) {
+        barOpsNoticeTask?.cancel()
+        withAnimation(.easeOut(duration: 0.15)) { barOpsNotice = message }
+        barOpsNoticeTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.3)) { barOpsNotice = nil }
+        }
     }
 
     private func barOpButton(system: String, enabled: Bool, help: String,
@@ -346,9 +437,67 @@ struct PianoRollView: View {
                 .frame(width: 26, height: 22)
                 .contentShape(Rectangle())
         }
+        // Deliberately NOT `.disabled` (m21-c): the action itself refuses and
+        // explains when it can't act, so the press is never silently dead; the
+        // dim `textFaint` glyph still reads as "not available right now".
         .buttonStyle(.plain)
-        .disabled(!enabled)
         .help(help)
+    }
+
+    // MARK: - Zoom (m21-c)
+
+    /// The header's compact zoom cluster — the arrange toolbar's magnifier
+    /// cluster (m17-b) at header-chip scale: −/+ steps around an SF Mono
+    /// percent readout, neutral chrome (zoom is navigation, not an active
+    /// state — Rule 3). Every driver mutates the ONE persisted
+    /// `panelLayout.pianoRollPPB` slot (buttons here, pinch on the grid, and
+    /// the View-menu ⌘+/⌘−/⌘0 while the editor is focused via the app router).
+    private var zoomCluster: some View {
+        HStack(spacing: 0) {
+            zoomStepButton("minus.magnifyingglass", help: "Zoom the notes out (⌘− while the editor is focused)") {
+                layout.setPianoRollPPB(PianoRollZoom.zoomedOut(layout.pianoRollPPB))
+            }
+            Text(PianoRollZoom.percentLabel(pixelsPerBeat: layout.pianoRollPPB))
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(DAWTheme.textDim)
+                .frame(width: 34)
+                .help("Editor zoom — ⌘0 resets to 100% while the editor is focused")
+            zoomStepButton("plus.magnifyingglass", help: "Zoom the notes in (⌘+ while the editor is focused)") {
+                layout.setPianoRollPPB(PianoRollZoom.zoomedIn(layout.pianoRollPPB))
+            }
+        }
+        .frame(height: 22)
+        .background(DAWTheme.panelRaised)
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+    }
+
+    private func zoomStepButton(_ systemImage: String, help: String,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(DAWTheme.textDim)
+                .padding(.horizontal, 6)
+                .frame(height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    /// The live pinch (m21-c): magnification is cumulative, so every tick
+    /// rescales off the gesture-START scale (the arrange `PinchState` rule).
+    /// The roll's plain SwiftUI scroller keeps its own offset — no programmatic
+    /// anchor re-pin here (the arrange lanes needed an AppKit bridge for that).
+    private var gridPinch: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                if pinchStartPPB == nil { pinchStartPPB = layout.pianoRollPPB }
+                guard let start = pinchStartPPB else { return }
+                layout.setPianoRollPPB(PianoRollZoom.clamp(start * value.magnification))
+            }
+            .onEnded { _ in pinchStartPPB = nil }
     }
 
     /// Inserts one empty bar at the target bar start, then reseeds the edit model
@@ -479,6 +628,9 @@ struct PianoRollView: View {
                         // grid keeps the arrow. Mirrors `gridDrag`'s hit routing.
                         .hoverCursor(resolve: gridCursor)
                         .gesture(gridDrag)
+                        // Pinch-to-zoom (m21-c) — simultaneous so it never
+                        // steals the drag/tap routing.
+                        .simultaneousGesture(gridPinch)
                         .simultaneousGesture(
                             SpatialTapGesture(count: 2).onEnded { value in
                                 let note = model.addNote(
@@ -796,19 +948,44 @@ private struct PianoRollGrid: View {
         }
     }
 
+    /// Grid lines follow the snap, density-adapted to the zoom (m21-c): bar
+    /// lines (`gridEmphasis`) and beat lines (`hairline`) always draw — the
+    /// survey grid — while SUB-beat division hairlines fade with zoom
+    /// (`PianoRollZoom.subBeatLineAlpha`) so a 1/64 or triplet grid appears
+    /// only once it has room to be useful, never as visual soup (the arrange
+    /// m17-b "grid density adapts, never forks" rule). Division x positions
+    /// are exact rationals (`beat + d/divisions`), so triplet lines never
+    /// accumulate float drift; when the fade bottoms out the sub-division loop
+    /// is skipped entirely (no invisible-line work).
     private nonisolated static func drawGridLines(_ context: inout GraphicsContext, size: CGSize, s: GridSnapshot) {
         let beatsShown = Int((size.width / s.pixelsPerBeat).rounded(.up))
         let step = s.snapStep
-        var beat = 0.0
-        while beat <= Double(beatsShown) + 0.0001 {
-            let x = CGFloat(beat) * s.pixelsPerBeat
-            let isBar = beat.truncatingRemainder(dividingBy: Double(s.beatsPerBar)).magnitude < 0.001
-            let isBeat = beat.truncatingRemainder(dividingBy: 1).magnitude < 0.001
-            let color = isBar
-                ? DAWTheme.gridEmphasis
-                : (isBeat ? DAWTheme.hairline : DAWTheme.hairline.opacity(0.5))
+        let barStride = max(1, s.beatsPerBar)
+        // Coarser-than-beat snaps (Bar) keep drawing only their own lines —
+        // the pre-zoom behavior.
+        if step >= 1 {
+            let stride = max(1, Int(step.rounded()))
+            var b = 0
+            while b <= beatsShown {
+                let x = CGFloat(b) * s.pixelsPerBeat
+                let color = b % barStride == 0 ? DAWTheme.gridEmphasis : DAWTheme.hairline
+                context.fill(Path(CGRect(x: x, y: 0, width: 1, height: size.height)), with: .color(color))
+                b += stride
+            }
+            return
+        }
+        let divisions = PianoRollZoom.divisionsPerBeat(step: step)
+        let alpha = PianoRollZoom.subBeatLineAlpha(step: step, pixelsPerBeat: s.pixelsPerBeat)
+        let subColor = DAWTheme.hairline.opacity(0.5 * alpha)
+        for b in 0...beatsShown {
+            let x = CGFloat(b) * s.pixelsPerBeat
+            let color = b % barStride == 0 ? DAWTheme.gridEmphasis : DAWTheme.hairline
             context.fill(Path(CGRect(x: x, y: 0, width: 1, height: size.height)), with: .color(color))
-            beat += step
+            guard alpha > 0, b < beatsShown, divisions > 1 else { continue }
+            for d in 1..<divisions {
+                let dx = (CGFloat(b) + CGFloat(d) / CGFloat(divisions)) * s.pixelsPerBeat
+                context.fill(Path(CGRect(x: dx, y: 0, width: 1, height: size.height)), with: .color(subColor))
+            }
         }
     }
 

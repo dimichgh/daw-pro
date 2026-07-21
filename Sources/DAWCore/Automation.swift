@@ -87,6 +87,14 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
             guard !paramName.isEmpty,
                   let effect = track.effects.first(where: { $0.id == effectID })
             else { return nil }
+            // m22-f: the delay's sync/division are control-plane-only (the
+            // effective time derives from the tempo OFF the render thread,
+            // which can't do tempo math) — a lane on them would be a silent
+            // dead lane (`DelayEffect.storeAutomatedParam` guards slots 0…4),
+            // so lane creation refuses them here like an unknown name.
+            if effect.kind == .delay, paramName == "sync" || paramName == "division" {
+                return nil
+            }
             // `.audioUnit` yields an empty spec table → `first(where:)` is nil.
             return EffectParamSpec.specs(for: effect.kind)
                 .first(where: { $0.name == paramName })?.range

@@ -21,6 +21,8 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__arrange_delete_bars,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_move,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_trim,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_fit_to_content,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_analyze_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_split,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_duplicate,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_crossfade,
@@ -62,7 +64,10 @@ take 1-based bar numbers, meter-aware; almost everything else here is beats.
   than one tempo, or a mid-song time-signature change. `transport_set_tempo`
   is the fast path for a single project-wide BPM — it's rejected once the
   project already has a multi-segment map (use `tempo_set_map` instead once
-  that's true).
+  that's true). When the song was built around an imported audio clip, call
+  `clip_analyze_audio` first to read its measured tempo/key before setting
+  the project tempo map to match — treat a null `bpm` or `steady: false` as
+  the honest "no single fixed tempo fits" answer, not a failed call.
 - **Structural edits.** `arrange_insert_bars`/`arrange_delete_bars` open up
   or close a gap across the WHOLE arrangement (every track's clips, markers,
   tempo/meter map, and loop shift together; a clip straddling the point
@@ -70,7 +75,10 @@ take 1-based bar numbers, meter-aware; almost everything else here is beats.
   right bar. These are destructive-shape edits — confirm with the user (or
   `producer`) before deleting bars that contain real material.
 - **Clip layout.** `clip_move`/`clip_trim`/`clip_split`/`clip_duplicate`
-  reposition and reshape clips on the timeline; `clip_crossfade` blends two
+  reposition and reshape clips on the timeline; `clip_fit_to_content` snaps a
+  clip's length to exactly what it contains (last MIDI note end / remaining
+  audio source) — prefer it over hand-computed trims when the goal is "make
+  the clip the size of its material"; `clip_crossfade` blends two
   adjacent/overlapping audio clips with complementary equal-power fades;
   `clip_set_fades` sets a clip's own fade-in/out; `clip_set_stretch`/
   `clip_stretch_to_length` time-stretch audio to fit a new length (audio

@@ -31,6 +31,10 @@ struct InstrumentPickerOverlay: View {
     /// (documented subset) or .dspreset sample-library file onto this
     /// track's built-in Sampler. Sits beside the sound-bank import flow.
     var onImportSampleLibrary: () -> Void
+    /// Opens the POLY SYNTH editor card for this track (the Poly Synth row's
+    /// TUNE affordance — wired to `AppModel.openPolySynthEditorFromPicker`,
+    /// which replaces this modal with the editor; one centered card at a time).
+    var onTunePolySynth: () -> Void
     var onClose: () -> Void
 
     /// The picker's stable panel ID for the shared density store.
@@ -161,8 +165,19 @@ struct InstrumentPickerOverlay: View {
                 // button precedent below).
                 sectionLabel("BUILT-IN", trailing: AnyView(sampleLibraryImportButton))
                 ForEach(items) { item in
+                    // The Poly Synth row grows a TUNE affordance while it is the
+                    // track's CURRENT instrument (the `EffectEditorButton` idiom
+                    // — the built-in kind that has no plugin window gets the
+                    // slider glyph instead). ONLY the poly synth: sound banks
+                    // pick programs, AUs open their own plugin window.
                     row(title: item.name, subtitle: item.detail, glyph: "waveform.path",
-                        isCurrent: model.isCurrent(item.choice)) {
+                        isCurrent: model.isCurrent(item.choice),
+                        accessory: item.kind == .polySynth && model.isCurrent(item.choice)
+                            ? AnyView(
+                                EffectEditorButton(action: onTunePolySynth)
+                                    .help("Tune the Poly Synth — wave shape, envelope, filter, and level")
+                                    .explainable(.polySynthEditor))
+                            : nil) {
                         onChoose(item.choice)
                     }
                 }
@@ -412,6 +427,7 @@ struct InstrumentPickerOverlay: View {
 
     private func row(title: String, subtitle: String, glyph: String,
                      isCurrent: Bool, badge: String? = nil,
+                     accessory: AnyView? = nil,
                      action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 9) {
@@ -435,6 +451,9 @@ struct InstrumentPickerOverlay: View {
                     }
                 }
                 Spacer(minLength: 0)
+                // A trailing per-row affordance (the InsertRow glyph-button
+                // slot) — its own hit target above the row's action.
+                if let accessory { accessory }
                 if isCurrent { currentTick }
             }
             .padding(.horizontal, 10).padding(.vertical, 7)

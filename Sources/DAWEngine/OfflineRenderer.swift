@@ -84,6 +84,16 @@ public final class OfflineRenderer {
     /// REAL production render loop. Production never touches it.
     var masterSandwichEnabled = true
 
+    /// T7 GATE SEAM ONLY (m22-g P2, `ReferenceLaneTransparencyTests`):
+    /// DEFAULT FALSE — production offline renders NEVER carry the reference
+    /// monitor lane (design D3: the live-only flag is simply never set on
+    /// offline graphs, so every offline byte-invariant holds by
+    /// construction). The transparency gate flips this to render lane-on
+    /// through the REAL production render loop and pin lane-off ≡ lane-on
+    /// byte-identical forever (the `masterSandwichEnabled` spike-seam
+    /// precedent).
+    var referenceLaneEnabled = false
+
     /// Render-load telemetry sink (M9 perf-b), handed to the graph before
     /// reconcile so offline pulls stamp the same counters live rendering
     /// does. `AudioEngine.renderOffline` assigns its OWN context here — that
@@ -220,6 +230,16 @@ public final class OfflineRenderer {
                               masterAutomation: [AutomationLane],
                               metronomeEnabled: Bool,
                               meterMap: MeterMap) throws -> OfflineRenderSession {
+        // m22-f: tempo-synced delays bounce at the tempo governing the render
+        // START — the same control-plane resolve the live engine's intake
+        // seams apply (`DelayTempoSync`), so an offline bounce and live
+        // playback of the same program derive the same effective time. A
+        // mid-window tempo change does not retune the delay (matches live,
+        // which retunes only on control-plane intents).
+        let tracks = DelayTempoSync.resolved(
+            tracks: tracks, tempoBPM: tempoMap.bpm(atBeat: fromBeat))
+        let masterEffects = DelayTempoSync.resolved(
+            effects: masterEffects, tempoBPM: tempoMap.bpm(atBeat: fromBeat))
         let engine = AVAudioEngine()
         // m20-c: the graph's rate is injected — the renderer's own rate, the
         // same value `enableManualRenderingMode` below pins on the engine.
@@ -233,6 +253,9 @@ public final class OfflineRenderer {
         // seam rides along (production default: sandwich on).
         graph.masterEffects = masterEffects
         graph.masterSandwichEnabled = masterSandwichEnabled
+        // m22-g P2: T7 gate seam only — false in every production path, so
+        // offline graphs stay lane-free by construction (design D3).
+        graph.referenceLaneEnabled = referenceLaneEnabled
         // Master volume automation (m15-c): lanes + the manual gain land
         // before the parameter passes, so the pre-start pass pins the master
         // fader (lane active) or leaves the static write below untouched.

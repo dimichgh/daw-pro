@@ -300,7 +300,8 @@ struct ContentView: View {
         // key equivalent, so the alias is a hidden in-window shortcut — folded
         // into this always-present overlay builder so the root body chain gains
         // no new modifier link (the chain sits at the type-checker's limit).
-        Button("") { model.zoomArrangeIn() }
+        // Routes through the m21-c focus router, like the menu item it aliases.
+        Button("") { model.zoomIn() }
             .keyboardShortcut("=", modifiers: .command)
             .buttonStyle(.plain)
             .frame(width: 0, height: 0)
@@ -313,7 +314,21 @@ struct ContentView: View {
                 onChoose: { model.applyInstrumentChoice($0) },
                 onImport: { model.importSoundBankViaPanel() },
                 onImportSampleLibrary: { model.importSampleLibraryViaPanel() },
+                onTunePolySynth: { withAnimation(.easeOut(duration: 0.15)) { model.openPolySynthEditorFromPicker() } },
                 onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeInstrumentPicker() } }
+            )
+        }
+        // Poly Synth editor: the effect editor's instrument twin — opened by
+        // the instrument picker's TUNE affordance (replacing the picker; one
+        // centered card at a time) and `debug.synthEditor`. Every knob routes
+        // through the SAME `store.setInstrument` the wire's
+        // `track.setInstrument` calls; the store's per-track coalescing makes
+        // a whole drag ONE undo step. The kind gate drops the card honestly if
+        // the instrument is swapped (e.g. a wire setInstrument) while open.
+        if model.polySynthEditorTrackID != nil, model.polySynthEditor.targetIsPolySynth {
+            PolySynthEditorOverlay(
+                model: model.polySynthEditor,
+                onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closePolySynthEditor() } }
             )
         }
         // AU-effect picker (m13-g, audit F6): opened by a Pro channel/bus strip's
@@ -337,6 +352,17 @@ struct ContentView: View {
         if model.effectEditorTarget != nil, model.effectEditor.descriptor != nil {
             EffectEditorOverlay(
                 model: model.effectEditor,
+                curveModel: model.eqCurveEditor,
+                densityStore: model.panelDensity,
+                spectrum: { model.vibeSeed ?? store.masterAnalysis() },
+                // The dynamics kinds' GAIN REDUCTION poll (m22-e): resolved
+                // against the card's CURRENT target each tick (grSeed override
+                // first — the scopeSeed idiom — else the live store tap).
+                gainReduction: {
+                    guard let target = model.effectEditorTarget else { return nil }
+                    return model.gainReductionDb(trackID: target.trackID,
+                                                 effectID: target.effectID)
+                },
                 onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeEffectEditor() } }
             )
         }
@@ -480,6 +506,9 @@ struct ContentView: View {
                 // ticker) — the piano roll playhead is a rendering of this state.
                 positionBeats: store.transport.positionBeats,
                 densityStore: model.panelDensity,
+                // m21-c: the shared layout store carries the persisted
+                // piano-roll zoom slot (`pianoRollPPB`) the editor scales by.
+                layout: model.panelLayout,
                 onCommit: { notes in _ = try? store.setClipNotes(clipID: clip.id, notes: notes) },
                 // Scrub seeks through the app's store seek (the existing transport.seek
                 // path), NOT the WebSocket. Refused mid-record → try? swallows it.
@@ -499,7 +528,10 @@ struct ContentView: View {
                 onCommitControllerLane: { type, points in
                     try? store.setControllerLane(clipID: clip.id, type: type, points: points)
                 },
-                onClose: { selectedClipID = nil }
+                onClose: { selectedClipID = nil },
+                // m21-c: while the editor holds key focus, the View-menu
+                // ⌘+/⌘−/⌘0 zoom THIS editor instead of the arrange timeline.
+                onFocusChange: { model.pianoRollEditorFocused = $0 }
             )
             .id(clip.id)
             .frame(height: geo.size.height * model.panelLayout.editorFraction)
@@ -551,6 +583,11 @@ struct ContentView: View {
             onTrimClip: { trackID, clip, newStart, newLength in
                 _ = try? store.trimClip(trackId: trackID, clipId: clip.id,
                                         newStartBeat: newStart, newLengthBeats: newLength)
+            },
+            // Fit to Content (m21-d, Pro clip menu): one store call — MIDI trims
+            // to the last note's end, audio to the remaining source duration.
+            onFitClipToContent: { trackID, clip in
+                _ = try? store.fitClipToContent(trackId: trackID, clipId: clip.id)
             },
             onSplitClip: { trackID, clip, atBeat in
                 // m17-c: refusals (comp member, outside-span) surface VERBATIM
@@ -890,7 +927,8 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    /// Themed grid-snap menu: Off / Bar / Beat / 1/2 / 1/4. Bar follows the meter.
+    /// Themed grid-snap menu: Off / Bar / Beat / 1/2 / 1/4 / 1/8 / 1/16 (beat
+    /// fractions). Bar follows the meter.
     private var snapPicker: some View {
         Menu {
             ForEach(ClipSnap.allCases, id: \.self) { resolution in

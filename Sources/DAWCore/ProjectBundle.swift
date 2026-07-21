@@ -113,7 +113,12 @@ public enum ProjectBundle {
     ///    are NOT re-copied (idempotent re-save).
     ///  - A missing external source is not fatal: the clip's ref becomes null
     ///    with a warning.
-    public static func planMedia(tracks: [Track], bundleURL: URL) -> MediaPlan {
+    ///  - `reference` (m22-g, ADDITIVE — existing call sites compile
+    ///    unchanged): the reference slot's file joins the SAME URL-keyed
+    ///    dedupe/copy/rewrite into `media/`, keyed by the slot id.
+    public static func planMedia(
+        tracks: [Track], reference: ReferenceSlot? = nil, bundleURL: URL
+    ) -> MediaPlan {
         let fm = FileManager.default
         let mediaDir = bundleURL.appendingPathComponent("media", isDirectory: true).standardizedFileURL
         let mediaDirPath = mediaDir.path
@@ -247,6 +252,35 @@ public enum ProjectBundle {
                     copies.append((source: stdSource, destination: mediaDir.appendingPathComponent(name)))
                     refs[clip.id] = "media/\(name)"
                 }
+            }
+        }
+
+        // Reference-slot media (m22-g) rides the SAME dedupe/collision
+        // machinery (shared `assigned`/`takenNames`), keyed by the slot id.
+        // Runs LAST for deterministic naming. A missing source records a
+        // NULL ref + warning; the document layer then persists the slot's
+        // ABSOLUTE path instead so the slot still names its file (unlike a
+        // clip, a pathless slot is meaningless — see ProjectDocument.init).
+        if let reference {
+            let stdSource = URL(fileURLWithPath: reference.sourcePath).standardizedFileURL
+            let stdPath = stdSource.path
+            if stdSource.deletingLastPathComponent().path == mediaDirPath {
+                let name = stdSource.lastPathComponent
+                refs[reference.id] = "media/\(name)"
+                takenNames.insert(name)
+            } else if !fm.fileExists(atPath: stdPath) {
+                refs[reference.id] = String?.none
+                warnings.append(
+                    "missing source file \(stdPath) — reference '\(reference.name)' saved without media (path kept)"
+                )
+            } else if let name = assigned[stdPath] {
+                refs[reference.id] = "media/\(name)"
+            } else {
+                let name = uniqueName(for: stdSource.lastPathComponent, taken: takenNames)
+                takenNames.insert(name)
+                assigned[stdPath] = name
+                copies.append((source: stdSource, destination: mediaDir.appendingPathComponent(name)))
+                refs[reference.id] = "media/\(name)"
             }
         }
 

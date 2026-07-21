@@ -350,3 +350,21 @@ test("no tool name contains a capital letter or a dot", () => {
   const violations = tools.filter((t) => /[A-Z.]/.test(t.name)).map((t) => t.name);
   assert.deepEqual(violations, [], `tool names with capitals or dots: ${violations.join(", ")}`);
 });
+
+test("project_snapshot teaches the m22-e per-effect gainReductionDb meter (additive wire field)", () => {
+  // m22-e rides an ADDITIVE field on the existing snapshot poll path instead
+  // of a new command, so the bijection above can't see it — pin the teaching
+  // here: the tool description is the agent's only manual for the field.
+  const snapshot = tools.find((t) => t.name === "project_snapshot");
+  assert.ok(snapshot, "project_snapshot tool exists");
+  const description = snapshot!.description ?? "";
+  assert.match(description, /gainReductionDb/, "teaches the gainReductionDb key");
+  assert.match(description, /held-peak/i, "teaches the held-peak ballistics");
+  assert.match(description, /-20 dB\/s|−20 dB\/s/, "pins the release convention");
+  assert.match(
+    description,
+    /compressor, limiter,\s*gate|compressor\/limiter\/gate/i,
+    "names the dynamics kinds that report it"
+  );
+  assert.match(description, /masterEffects/, "teaches that master inserts carry it too");
+});

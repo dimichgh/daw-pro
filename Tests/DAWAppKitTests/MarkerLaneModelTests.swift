@@ -35,6 +35,8 @@ struct MarkerLaneModelTests {
         case .beat: grid = 1
         case .half: grid = 0.5
         case .quarter: grid = 0.25
+        case .eighth: grid = 0.125
+        case .sixteenth: grid = 0.0625
         }
         guard let g = grid, g > 0 else { return max(0, beat) }
         return max(0, (beat / g).rounded() * g)

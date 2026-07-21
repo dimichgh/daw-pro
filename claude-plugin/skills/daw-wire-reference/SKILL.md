@@ -9,7 +9,7 @@ user-invocable: false
 This is the shared reference every agent in this plugin (`producer`, `composer`,
 `arranger`, `sound-designer`, `mix-engineer`, `finisher`) and every skill
 points at. It reflects the ACTUAL current tool surface enumerated from
-`mcp-server/src/server.ts` (136 tools) and `Sources/DAWControl/Commands.swift`
+`mcp-server/src/server.ts` (146 tools) and `Sources/DAWControl/Commands.swift`
 in the DAW Pro repo — not memory, and not the app's own in-app Copilot
 catalog (`Sources/DAWControl/CopilotCatalog.swift`), which is a **different,
 smaller, differently-named** tool set for a different AI (the app's built-in

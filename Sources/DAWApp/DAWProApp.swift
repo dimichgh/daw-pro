@@ -183,6 +183,29 @@ final class AppModel {
     /// wire's `fx.add` NEVER sets it (agents must not pop UI).
     var effectEditorTarget: EffectEditorTarget?
 
+    /// The EQ CURVE editor's headless model (m22-b): created over
+    /// `effectEditor` whenever the opened insert is an EQ — the engine's live
+    /// render sample rate is injected AT OPEN TIME (design §3.4; coefficients
+    /// near Nyquist depend on it) — and dropped on close or when a non-EQ
+    /// insert replaces it. Owned here (like `effectEditor`) so
+    /// `debug.effectEditor` can echo `selectedBand` off the SAME instance the
+    /// live card renders.
+    var eqCurveEditor: EQCurveEditorModel?
+
+    /// The built-in POLY SYNTH editor's headless model (the `effectEditor`
+    /// twin for instruments): the spec-driven knob sections + the
+    /// wire-identical apply path (`setInstrument` partial updates — exactly
+    /// what `track.setInstrument` calls). Owned here (like `effectEditor`) so
+    /// `debug.synthEditor` can drive it and `debug.captureUI` renders the
+    /// same instance the live card shows.
+    let polySynthEditor: PolySynthEditorModel
+
+    /// The track the Poly Synth editor is open for (nil = closed). Set by the
+    /// instrument picker's TUNE affordance (which replaces the picker modal)
+    /// and `debug.synthEditor`; the card renders as a centered overlay. Only
+    /// ever a track whose current instrument is the built-in poly synth.
+    var polySynthEditorTrackID: UUID?
+
     /// The Quantize & Groove panel's headless model (m11-a): the grid/strength/
     /// swing/ends state, the groove picker (built-in swings + saved templates), and
     /// the extract affordance. Owned here (like `instrumentPicker`) so the
@@ -309,6 +332,14 @@ final class AppModel {
     /// The pinch in flight (nil at rest): captured on the first magnify tick so
     /// per-tick zoom math measures off a FIXED anchor beat/screen-x.
     private var arrangePinch: ArrangeZoom.PinchState?
+
+    // MARK: Piano-roll zoom (m21-c)
+
+    /// True while the piano-roll editor holds key focus (reported by the view's
+    /// `onFocusChange`). Routes the View-menu ⌘+/⌘−/⌘0 to the ROLL's zoom
+    /// instead of the arrange timeline's — the menu key equivalents fire before
+    /// any focused view sees the key, so the routing must live here.
+    var pianoRollEditorFocused = false
 
     // MARK: Arrange pointer affordances (m17-c)
 
@@ -566,6 +597,36 @@ final class AppModel {
     /// without real audio. The ENGINE is never touched by seeding — this is a
     /// view-side override, the `debug.explainMode focus` precedent.
     var vibeSeed: MasterAnalysisSnapshot?
+
+    /// A synthetic goniometer frame + stereo-scalar override the master strip's
+    /// stereo-image block prefers over the live polls (m22-d). nil in normal use
+    /// (the block reads `store.masterScopeFrame()` / `store.masterAnalysis()`);
+    /// the debug-tier `debug.scopeSeed` command sets it so a capture / E2E can
+    /// stage a deterministic figure (mono line, anti-phase line, decorrelated
+    /// cloud, hard-pan diagonal) without real audio. The ENGINE is never touched
+    /// by seeding — a view-side override, the `debug.vibeSeed` precedent.
+    var scopeSeed: StereoScopeSeed?
+
+    /// A synthetic gain-reduction reading the GR meters (the dynamics editor
+    /// cards' GAIN REDUCTION block + the insert chips' mini-bar, m22-e) prefer
+    /// over the live store polls. nil in normal use (the meters read
+    /// `store.effectGainReductionDb` / `masterEffectGainReductionDb`); the
+    /// debug-tier `debug.grSeed` command sets it so a headless capture / E2E
+    /// shows a working meter deterministically. The ENGINE is never touched by
+    /// seeding — a view-side override, the `debug.scopeSeed` precedent.
+    var grSeed: GainReductionSeed?
+
+    /// One GR poll for the meters (m22-e): the `debug.grSeed` override when it
+    /// applies to this insert (blanket or id-targeted), else the live phase-1
+    /// store tap (`trackID` nil = the MASTER chain). nil = not reporting —
+    /// the meters show nothing fabricated.
+    func gainReductionDb(trackID: UUID?, effectID: UUID) -> Double? {
+        if let seeded = grSeed?.value(forEffect: effectID) { return seeded }
+        if let trackID {
+            return store.effectGainReductionDb(trackID: trackID, effectID: effectID)
+        }
+        return store.masterEffectGainReductionDb(effectID: effectID)
+    }
 
     /// A pending copilot draft (M8 ex-a hand-off). The explain card's "Ask the
     /// Copilot" button sets this to a prefilled question and opens the rail; the rail
@@ -888,6 +949,42 @@ final class AppModel {
                 } else {
                     try store.setMasterEffectBypassed(effectID: effectID, bypassed: bypassed)
                 }
+            },
+            // m22-f: the synced delay card's derived-time readout — tempo at
+            // the playhead, the same per-position rule the engine's control-
+            // plane resolve applies.
+            tempoBPM: { [weak store] in
+                guard let store else { return 120 }
+                return store.transport.tempoMap.bpm(atBeat: store.transport.positionBeats)
+            })
+
+        // The Poly Synth editor model: reads the LIVE resolved descriptor (nil
+        // instrument on an instrument track = `.default`, which IS the poly
+        // synth) so a wire `track.setInstrument` moves the open card's knobs,
+        // and applies every edit through the SAME `setInstrument`
+        // partial-update the wire calls — one field per knob tick, coalesced
+        // per-track ("Change Instrument") so a drag is ONE undo step.
+        self.polySynthEditor = PolySynthEditorModel(
+            descriptor: { [weak store] trackID in
+                guard let track = store?.tracks.first(where: { $0.id == trackID }),
+                      track.kind == .instrument else { return nil }
+                return track.instrument ?? .default
+            },
+            apply: { [weak store] trackID, name, value in
+                guard let store else { throw DebugError("project store unavailable") }
+                _ = try store.setInstrument(
+                    id: trackID,
+                    attack: name == "attack" ? value : nil,
+                    decay: name == "decay" ? value : nil,
+                    sustain: name == "sustain" ? value : nil,
+                    release: name == "release" ? value : nil,
+                    cutoffHz: name == "cutoffHz" ? value : nil,
+                    resonance: name == "resonance" ? value : nil,
+                    gain: name == "gain" ? value : nil)
+            },
+            setWaveform: { [weak store] trackID, waveform in
+                guard let store else { throw DebugError("project store unavailable") }
+                _ = try store.setInstrument(id: trackID, waveform: waveform)
             })
 
         // The Quantize & Groove model (m11-a): the built-in MPC swings are computed
@@ -1171,10 +1268,16 @@ final class AppModel {
                 return self.effectPickerDebug(params)
             case "debug.effectEditor":
                 return try self.effectEditorDebug(params)
+            case "debug.synthEditor":
+                return try self.synthEditorDebug(params)
             case "debug.explainMode":
                 return try self.setExplainMode(params)
             case "debug.vibeSeed":
                 return try self.setVibeSeed(params)
+            case "debug.scopeSeed":
+                return try self.setScopeSeed(params)
+            case "debug.grSeed":
+                return try self.setGRSeed(params)
             case "debug.onboardingState":
                 return try self.setOnboardingState(params)
             case "debug.recoveryOffer":
@@ -1289,25 +1392,31 @@ final class AppModel {
         ])
     }
 
-    /// `debug.panelLayout {sidebarWidth?, editorFraction?, rowHeight?, reset?}` —
-    /// stages the adjustable window layout (beta m10-d) so a headless capture / E2E
-    /// can drive the arrange sidebar width, the bottom editor's height fraction, and
-    /// the global track-row height before `debug.captureUI` (the `debug.panelDensity`
+    /// `debug.panelLayout {sidebarWidth?, editorFraction?, rowHeight?,
+    /// pianoRollPPB?, reset?}` — stages the adjustable window layout (beta m10-d)
+    /// so a headless capture / E2E can drive the arrange sidebar width, the bottom
+    /// editor's height fraction, the global track-row height, and (m21-c) the
+    /// piano-roll zoom before `debug.captureUI` (the `debug.panelDensity`
     /// precedent: writes straight to the shared `panelLayout` store so the live
     /// splitters reflect it). Debug tier ONLY — off `allCommands`/MCP (window layout
     /// is a UI preference, not an invokable capability; agents drive the protocol,
     /// not the chrome). Every field is optional; `reset:true` restores the defaults
     /// FIRST (so `{reset:true, rowHeight:48}` resets then applies 48). Values are
     /// clamped by the store, and the result echoes the APPLIED (post-clamp) values.
+    /// The piano-roll zoom lives HERE, not in a `debug.arrangeZoom` sibling: it is
+    /// one more `PanelLayoutStore` slot with no anchor/scroll machinery, so the
+    /// layout seam already tells the whole truth about it.
     private func setPanelLayout(_ params: [String: JSONValue]) -> JSONValue {
         if params["reset"]?.boolValue == true { panelLayout.reset() }
         if let w = params["sidebarWidth"]?.doubleValue { panelLayout.setSidebarWidth(CGFloat(w)) }
         if let f = params["editorFraction"]?.doubleValue { panelLayout.setEditorFraction(CGFloat(f)) }
         if let h = params["rowHeight"]?.doubleValue { panelLayout.setRowHeight(CGFloat(h)) }
+        if let z = params["pianoRollPPB"]?.doubleValue { panelLayout.setPianoRollPPB(CGFloat(z)) }
         return .object([
             "sidebarWidth": .number(Double(panelLayout.sidebarWidth)),
             "editorFraction": .number(Double(panelLayout.editorFraction)),
             "rowHeight": .number(Double(panelLayout.rowHeight)),
+            "pianoRollPPB": .number(Double(panelLayout.pianoRollPPB)),
         ])
     }
 
@@ -1455,6 +1564,32 @@ final class AppModel {
     func zoomArrangeOut() { setArrangeZoom(toPPB: ArrangeZoom.zoomedOut(arrangePPB)) }
     /// Back to the historical 16 pt/beat (⌘0).
     func zoomArrangeReset() { setArrangeZoom(toPPB: ArrangeZoom.defaultPixelsPerBeat) }
+
+    // MARK: - Zoom routing (m21-c)
+
+    /// The View-menu ⌘+/⌘−/⌘0 target: the PIANO ROLL's zoom while its editor
+    /// holds key focus, else the arrange timeline's (menu key equivalents fire
+    /// before any focused view sees the key, so the focused-editor rule is
+    /// applied here — one router for the menu items and the ⌘= alias).
+    func zoomIn() {
+        if pianoRollEditorFocused { zoomPianoRollIn() } else { zoomArrangeIn() }
+    }
+    func zoomOut() {
+        if pianoRollEditorFocused { zoomPianoRollOut() } else { zoomArrangeOut() }
+    }
+    func zoomReset() {
+        if pianoRollEditorFocused { zoomPianoRollReset() } else { zoomArrangeReset() }
+    }
+
+    /// Piano-roll zoom entry points (m21-c): every driver — the header cluster,
+    /// the grid pinch, the ⌘ router above, and `debug.panelLayout` — mutates
+    /// the ONE persisted `panelLayout.pianoRollPPB` slot (clamped by the
+    /// store); the editor's bands re-read it and rescale together. Unlike the
+    /// arrange entry points there is no anchor-offset recompute: the roll's
+    /// plain SwiftUI scroller owns its own offset.
+    func zoomPianoRollIn() { panelLayout.setPianoRollPPB(PianoRollZoom.zoomedIn(panelLayout.pianoRollPPB)) }
+    func zoomPianoRollOut() { panelLayout.setPianoRollPPB(PianoRollZoom.zoomedOut(panelLayout.pianoRollPPB)) }
+    func zoomPianoRollReset() { panelLayout.setPianoRollPPB(PianoRollZoom.defaultPixelsPerBeat) }
 
     /// Sets the stepped track-row height (S/M/L) through the SAME
     /// `panelLayout.rowHeight` slot the m10-d splitter drags — the sidebar rows
@@ -1803,6 +1938,104 @@ final class AppModel {
             "centroidHz": .number(Double(centroidHz)),
             "flux": .number(Double(flux)),
             "bands": .array(bands.map { .number(Double($0)) }),
+        ])
+    }
+
+    /// `debug.scopeSeed {preset?, left?, right?, correlation?, width?, balance?, clear?}`
+    /// — stages a synthetic goniometer frame + stereo scalars the master strip's
+    /// stereo-image block prefers over the live polls, so a capture / E2E can show a
+    /// deterministic figure without real audio (the `debug.vibeSeed` staging
+    /// precedent). App-level, debug tier ONLY — off `allCommands`/MCP (it's UI
+    /// chrome; agents drive the real audio path, and scope pairs stay off the wire
+    /// by the m22-d law). The ENGINE is never touched — this only sets `scopeSeed`;
+    /// `{clear: true}` drops the override back to the live polls.
+    ///
+    /// `preset` names a deterministic figure (`silence | mono | antiPhase | cloud |
+    /// hardLeft | hardRight`, default `mono` — pure sine constructions, headless in
+    /// `DAWAppKit.StereoScopePreset`); `left`/`right` (given together, exactly 256
+    /// values each) override the frame sample-exact; `correlation`/`width`/`balance`
+    /// override the preset's scalars. Returns the seeded scalars + pair count (NOT
+    /// the 512 floats — a deliberate slimming of the `vibeSeed` full echo).
+    private func setScopeSeed(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["clear"]?.boolValue == true {
+            scopeSeed = nil
+            return .object(["cleared": .bool(true)])
+        }
+        var preset = StereoScopePreset.mono
+        if let raw = params["preset"]?.stringValue {
+            guard let named = StereoScopePreset(rawValue: raw) else {
+                let valid = StereoScopePreset.allCases.map(\.rawValue).joined(separator: ", ")
+                throw DebugError("unknown scope preset \"\(raw)\" — expected one of: \(valid)")
+            }
+            preset = named
+        }
+        var seed = preset.seed()
+        let left = params["left"]?.arrayValue
+        let right = params["right"]?.arrayValue
+        if left != nil || right != nil {
+            let pairCount = MasterScopeFrame.pairCount
+            guard let left, let right else {
+                throw DebugError("debug.scopeSeed left/right must be given together")
+            }
+            guard left.count == pairCount, right.count == pairCount else {
+                throw DebugError("debug.scopeSeed left/right must each have exactly \(pairCount) values (got \(left.count)/\(right.count))")
+            }
+            seed.frame = MasterScopeFrame(
+                left: left.map { Float($0.doubleValue ?? 0) },
+                right: right.map { Float($0.doubleValue ?? 0) })
+        }
+        if let correlation = params["correlation"]?.doubleValue { seed.correlation = Float(correlation) }
+        if let width = params["width"]?.doubleValue { seed.width = Float(width) }
+        if let balance = params["balance"]?.doubleValue { seed.balance = Float(balance) }
+        scopeSeed = seed
+        return .object([
+            "preset": .string(preset.rawValue),
+            "correlation": .number(Double(seed.correlation)),
+            "width": .number(Double(seed.width)),
+            "balance": .number(Double(seed.balance)),
+            "pairs": .number(Double(MasterScopeFrame.pairCount)),
+        ])
+    }
+
+    /// `debug.grSeed {db?, effectId?, clear?}` — stages a synthetic
+    /// gain-reduction reading the GR meters (the dynamics editor cards' GAIN
+    /// REDUCTION block + the insert chips' mini-bar, m22-e) prefer over the
+    /// live store polls, so a headless capture / E2E shows a working meter
+    /// deterministically (the `debug.scopeSeed` staging precedent). App-level,
+    /// debug tier ONLY — off `allCommands`/MCP (it's UI chrome; agents read
+    /// the real per-effect `gainReductionDb` off the wire snapshot). The
+    /// ENGINE is never touched — this only sets `grSeed`; `{clear: true}`
+    /// drops the override back to the live polls.
+    ///
+    /// `db` is the POSITIVE dB of reduction (clamped to 0…80, mirroring the
+    /// engine cap — 80 pins a gate's meter as CLOSED). `effectId` (optional)
+    /// targets ONE insert — every other meter keeps its live poll; omitted =
+    /// a BLANKET seed (every dynamics meter shows `db`). Non-dynamics kinds
+    /// never grow a meter, seeded or not.
+    private func setGRSeed(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["clear"]?.boolValue == true {
+            grSeed = nil
+            return .object(["cleared": .bool(true)])
+        }
+        guard let raw = params["db"]?.doubleValue else {
+            throw DebugError("debug.grSeed needs db (positive dB of gain reduction) or {clear: true}")
+        }
+        guard raw.isFinite, raw >= 0 else {
+            throw DebugError("debug.grSeed db must be a finite dB value ≥ 0 (got \(raw))")
+        }
+        var effectID: UUID?
+        if let idRaw = params["effectId"]?.stringValue {
+            guard let id = UUID(uuidString: idRaw) else {
+                throw DebugError("debug.grSeed effectId must be a UUID (got \"\(idRaw)\")")
+            }
+            effectID = id
+        }
+        let seed = GainReductionSeed(
+            db: min(raw, GainReductionMeterModel.engineCapDb), effectID: effectID)
+        grSeed = seed
+        return .object([
+            "db": .number(seed.db),
+            "effectId": seed.effectID.map { JSONValue.string($0.uuidString) } ?? .null,
         ])
     }
 
@@ -2768,6 +3001,13 @@ final class AppModel {
             .map { "on \($0)" } ?? "on Master"
         effectEditor.prepare(trackID: trackID, effectID: effectID, targetLabel: label)
         effectEditorTarget = EffectEditorTarget(trackID: trackID, effectID: effectID)
+        // The EQ curve surface (m22-b): built over the SAME editor model, with
+        // the live render rate injected at open time (§3.4). Non-EQ inserts
+        // carry no curve model at all.
+        eqCurveEditor = descriptor.kind == .eq
+            ? EQCurveEditorModel(editor: effectEditor,
+                                 sampleRate: store.renderSampleRateHz())
+            : nil
     }
 
     /// The `InsertRow` click: toggles the editor on that insert (clicking the
@@ -2784,6 +3024,7 @@ final class AppModel {
     func closeEffectEditor() {
         effectEditorTarget = nil
         effectEditor.clear()
+        eqCurveEditor = nil
     }
 
     /// The UI insert add funnel (m17-a): adds a built-in effect through the
@@ -2802,17 +3043,122 @@ final class AppModel {
         openEffectEditor(trackID: trackID, effectID: added.id)
     }
 
+    // MARK: - Poly Synth editor
+
+    /// Opens the Poly Synth editor card for a track. Guarded to a track whose
+    /// CURRENT instrument is the built-in poly synth (nil instrument on an
+    /// instrument track = the default descriptor, which IS the poly synth) —
+    /// sound banks pick programs and hosted AUs open their own plugin window,
+    /// so neither ever reaches this card.
+    func openPolySynthEditor(trackID: UUID) {
+        guard let track = store.tracks.first(where: { $0.id == trackID }),
+              track.kind == .instrument,
+              (track.instrument?.kind ?? .polySynth) == .polySynth else { return }
+        polySynthEditor.prepare(trackID: trackID, targetLabel: "on \(track.name)")
+        polySynthEditorTrackID = trackID
+    }
+
+    /// Closes the Poly Synth editor (scrim click, ✕, or replacing modal flows).
+    func closePolySynthEditor() {
+        polySynthEditorTrackID = nil
+        polySynthEditor.clear()
+    }
+
+    /// The instrument picker's TUNE affordance: drills from the picker into
+    /// the Poly Synth editor for the same track — replacing the picker modal
+    /// (one centered card at a time, the house replacing-modal rule).
+    func openPolySynthEditorFromPicker() {
+        guard let trackID = instrumentPickerTrackID else { return }
+        closeInstrumentPicker()
+        openPolySynthEditor(trackID: trackID)
+    }
+
+    /// `debug.synthEditor {trackId?, open?, param?, value?, waveform?, close?}`
+    /// — stages the Poly Synth editor for captures/E2E (app-level, debug tier —
+    /// off `allCommands`/MCP, the `debug.effectEditor` precedent). `open:true`
+    /// opens the card (the given track, else the first poly-synth instrument
+    /// track, else a fresh instrument track); `param`+`value` and `waveform`
+    /// drive the OPEN card's apply path (`PolySynthEditorModel.set` /
+    /// `setWaveform` → the same `setInstrument` call a knob tick makes — the
+    /// UI-vs-wire seam); `close:true` dismisses. A bare call is READ-ONLY
+    /// (echoes state, never re-opens — the m11-a law).
+    private func synthEditorDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["close"]?.boolValue == true {
+            closePolySynthEditor()
+            return synthEditorStateResponse()
+        }
+        if params["open"]?.boolValue == true {
+            let trackID: UUID
+            if let raw = params["trackId"]?.stringValue {
+                guard let id = UUID(uuidString: raw),
+                      store.tracks.contains(where: { $0.id == id }) else {
+                    throw DebugError("trackId is not a known track UUID: \(raw)")
+                }
+                trackID = id
+            } else if let track = store.tracks.first(where: { track in
+                track.kind == .instrument && (track.instrument?.kind ?? .polySynth) == .polySynth
+            }) {
+                trackID = track.id
+            } else {
+                trackID = store.addTrack(kind: .instrument).id
+            }
+            openPolySynthEditor(trackID: trackID)
+            guard polySynthEditorTrackID != nil else {
+                throw DebugError("track does not play the built-in Poly Synth")
+            }
+        }
+        if let name = params["param"]?.stringValue {
+            guard polySynthEditorTrackID != nil else {
+                throw DebugError("no synth editor is open — pass open:true first")
+            }
+            guard let value = params["value"]?.doubleValue else {
+                throw DebugError("param requires a numeric value")
+            }
+            polySynthEditor.set(name: name, value: value)
+            if let error = polySynthEditor.lastErrorMessage { throw DebugError(error) }
+        }
+        if let raw = params["waveform"]?.stringValue {
+            guard polySynthEditorTrackID != nil else {
+                throw DebugError("no synth editor is open — pass open:true first")
+            }
+            guard let waveform = PolySynthParams.Waveform(rawValue: raw) else {
+                throw DebugError("waveform must be one of saw|square|triangle|sine, got: \(raw)")
+            }
+            polySynthEditor.setWaveform(waveform)
+            if let error = polySynthEditor.lastErrorMessage { throw DebugError(error) }
+        }
+        return synthEditorStateResponse()
+    }
+
+    private func synthEditorStateResponse() -> JSONValue {
+        let values: [String: JSONValue] = Dictionary(
+            uniqueKeysWithValues: PolySynthEditorModel.specs.map {
+                ($0.name, JSONValue.number(polySynthEditor.value(for: $0)))
+            })
+        return .object([
+            "visible": .bool(polySynthEditorTrackID != nil && polySynthEditor.targetIsPolySynth),
+            "trackId": polySynthEditorTrackID.map { JSONValue.string($0.uuidString) } ?? .null,
+            "waveform": .string(polySynthEditor.waveform.rawValue),
+            "values": .object(values),
+        ])
+    }
+
     /// `debug.effectEditor {trackId?, effectId?, open?, add?, param?, value?,
-    /// close?}` — stages the built-in effect editor for captures/E2E (app-level,
-    /// debug tier — off `allCommands`/MCP, the `debug.effectPicker` precedent).
-    /// `trackId` takes a track UUID or `"master"` (the fx.* sentinel; omitted =
-    /// the first chain carrying a built-in insert). `open:true` opens the card
-    /// (switching to the Mix workspace + Pro density so a capture frames it);
-    /// `add:"eq"` drives the EXACT UI add funnel (`addBuiltInInsert` — store add
-    /// + auto-open, what the strip's "+" menu runs); `param`+`value` drive the
-    /// OPEN card's apply path (`EffectEditorModel.set` → the same store call a
-    /// slider tick makes — the G2 UI-vs-wire seam); `close:true` dismisses. A
-    /// bare call is READ-ONLY (echoes state, never re-opens — the m11-a law).
+    /// probeHz?, close?}` — stages the built-in effect editor for captures/E2E
+    /// (app-level, debug tier — off `allCommands`/MCP, the `debug.effectPicker`
+    /// precedent). `trackId` takes a track UUID or `"master"` (the fx.* sentinel;
+    /// omitted = the first chain carrying a built-in insert). `open:true` opens
+    /// the card (switching to the Mix workspace + Pro density so a capture
+    /// frames it); `add:"eq"` drives the EXACT UI add funnel (`addBuiltInInsert`
+    /// — store add + auto-open, what the strip's "+" menu runs); `param`+`value`
+    /// drive the OPEN card's apply path (`EffectEditorModel.set` → the same
+    /// store call a slider tick makes — the G2 UI-vs-wire seam); `close:true`
+    /// dismisses. A bare call is READ-ONLY (echoes state, never re-opens — the
+    /// m11-a law). m22-b: when the open card is an EQ the state echo gains
+    /// `editorMode` ("curve"/"knobs" from the density store) + `selectedBand`,
+    /// and `probeHz: [Double]` returns `responseDb: {"<hz>": dB}` through the
+    /// SAME `EQFilterResponse` math + params + sample rate the curve Canvas
+    /// draws — numeric E2E without pixel-parsing (§7).
     private func effectEditorDebug(_ params: [String: JSONValue]) throws -> JSONValue {
         if params["close"]?.boolValue == true {
             closeEffectEditor()
@@ -2895,15 +3241,36 @@ final class AppModel {
                 throw DebugError(error)
             }
         }
-        return effectEditorStateResponse()
+
+        // m22-b: probeHz → the drawn curve's dB at each frequency, computed
+        // through the SAME EQFilterResponse call + resolved params + sample
+        // rate the curves Canvas uses (the honest numeric twin of the pixels).
+        var responseDb: JSONValue?
+        if let probe = params["probeHz"]?.arrayValue {
+            guard effectEditorTarget != nil, effectEditor.kind == .eq,
+                  let eqParams = effectEditor.descriptor?.resolvedEQ,
+                  let curveModel = eqCurveEditor else {
+                throw DebugError("probeHz requires an open EQ editor — pass open:true on an eq insert first")
+            }
+            var probes: [String: JSONValue] = [:]
+            for entry in probe {
+                guard let hz = entry.doubleValue, hz > 0 else {
+                    throw DebugError("probeHz values must be positive numbers")
+                }
+                probes[String(format: "%g", hz)] = .number(EQFilterResponse.responseDb(
+                    params: eqParams, frequency: hz, sampleRate: curveModel.sampleRate))
+            }
+            responseDb = .object(probes)
+        }
+        return effectEditorStateResponse(responseDb: responseDb)
     }
 
-    private func effectEditorStateResponse() -> JSONValue {
+    private func effectEditorStateResponse(responseDb: JSONValue? = nil) -> JSONValue {
         let values: [String: JSONValue] = Dictionary(
             uniqueKeysWithValues: effectEditor.specs.map {
                 ($0.name, JSONValue.number(effectEditor.value(for: $0)))
             })
-        return .object([
+        var fields: [String: JSONValue] = [
             "visible": .bool(effectEditorTarget != nil && effectEditor.descriptor != nil),
             "trackId": effectEditorTarget.map {
                 $0.trackID.map { JSONValue.string($0.uuidString) } ?? .string("master")
@@ -2912,7 +3279,21 @@ final class AppModel {
             "kind": effectEditor.kind.map { JSONValue.string($0.rawValue) } ?? .null,
             "bypassed": .bool(effectEditor.isBypassed),
             "values": .object(values),
-        ])
+        ]
+        // m22-b: an open EQ card additionally reports which surface renders
+        // (Simple = curve, Pro = knobs — the density store is the truth) and
+        // the curve model's selected band.
+        if effectEditor.kind == .eq {
+            fields["editorMode"] = .string(
+                panelDensity.density(forPanel: EffectEditorOverlay.panelID) == .pro
+                    ? "knobs" : "curve")
+            fields["selectedBand"] = eqCurveEditor?.selectedBand
+                .map { JSONValue.string($0.rawValue) } ?? .null
+        }
+        if let responseDb {
+            fields["responseDb"] = responseDb
+        }
+        return .object(fields)
     }
 
     /// Imports a SoundFont/DLS via NSOpenPanel (not headless — the app view drives

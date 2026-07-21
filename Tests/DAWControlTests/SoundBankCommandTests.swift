@@ -410,8 +410,12 @@ struct SoundBankCommandTests {
         // ai.copilotGetModel/ai.copilotSetModel (the model-selection wire pair)
         // took it 133 -> 135. The chat-persist design's Phase C
         // (ai.copilotChats/ai.copilotResumeChat/ai.copilotDeleteChat/
-        // ai.copilotRenameChat) took it 135 -> 139.
-        #expect(CommandRouter.allCommands.count == 139)
+        // ai.copilotRenameChat) took it 135 -> 139. The hosted-AU parameter
+        // surface (au.describeParams/au.setParam,
+        // design-au-parameter-surface) took it 139 -> 141. m21-d's
+        // clip.fitToContent took it 141 -> 142. m21-e's clip.analyzeAudio
+        // took it 142 -> 143. m22-c's mixer.liveLoudness took it 143 -> 144.
+        #expect(CommandRouter.allCommands.count == 152)
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBanks"))
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBankPrograms"))
         #expect(CommandRouter.allCommands.contains("instrument.importSoundBank"))

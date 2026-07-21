@@ -30,6 +30,136 @@ public enum AudioUnitTrackStatus: Sendable, Equatable {
     case failed(String)
 }
 
+/// Identity of one hosted-AU parameter-surface target (au.describeParams /
+/// au.setParam, design-au-parameter-surface §3): a track's hosted `.audioUnit`
+/// INSTRUMENT, or one `.audioUnit` insert EFFECT (the engine's registry keys
+/// effects by effectID alone). Foundation-only so DAWCore stays engine-free —
+/// the `HostedAUEndpoint` shape, mirrored here because DAWEngine's endpoint
+/// type must not leak into the protocol seam.
+public enum HostedAUTarget: Sendable, Equatable {
+    case instrument(trackID: UUID)
+    case effect(effectID: UUID)
+}
+
+/// One live `AUParameter` of a hosted Audio Unit, mirrored into Foundation-only
+/// facts (design-au-parameter-surface §3). `address` is the AU's
+/// `AUParameterAddress` (UInt64) as a DECIMAL STRING — JSON numbers are doubles
+/// and lose exactness past 2^53, and vendor addresses routinely use high bits.
+/// Addresses are opaque and PER-INSTANCE: never guessed, never reused across
+/// instances. `value` is read at build time — describe re-reads on every call,
+/// and a set's returned info is the post-write READ-BACK (quantizing/stepping
+/// units answer with the truth).
+public struct HostedAUParameterInfo: Sendable, Equatable, Codable {
+    /// `AUParameter.address` as a decimal string ("281474976710659").
+    public var address: String
+    /// `AUParameter.identifier` — the vendor's stable short name.
+    public var identifier: String
+    public var displayName: String
+    /// "group.param" key path — the flat v1 nod to group hierarchy.
+    public var keyPath: String
+    /// `AudioUnitParameterUnit` mapped to a stable label ("seconds", "hertz",
+    /// "decibels", …, "unknown(n)" for future cases).
+    public var unit: String
+    /// The vendor's custom unit string — populated for `customUnit` only.
+    public var unitName: String?
+    public var minValue: Double
+    public var maxValue: Double
+    /// Current value at read time (describe) / post-set read-back (set).
+    public var value: Double
+    /// `flags.contains(.flag_IsWritable)` — sets on a non-writable parameter
+    /// are rejected readably.
+    public var writable: Bool
+    public var readable: Bool
+    /// Display names of the discrete steps — indexed parameters only.
+    public var valueStrings: [String]?
+
+    public init(address: String, identifier: String, displayName: String,
+                keyPath: String, unit: String, unitName: String? = nil,
+                minValue: Double, maxValue: Double, value: Double,
+                writable: Bool, readable: Bool, valueStrings: [String]? = nil) {
+        self.address = address
+        self.identifier = identifier
+        self.displayName = displayName
+        self.keyPath = keyPath
+        self.unit = unit
+        self.unitName = unitName
+        self.minValue = minValue
+        self.maxValue = maxValue
+        self.value = value
+        self.writable = writable
+        self.readable = readable
+        self.valueStrings = valueStrings
+    }
+}
+
+/// One page of a hosted AU's parameter tree (design-au-parameter-surface §3).
+/// An AU that publishes NO tree (opaque state — Kontakt-style units are
+/// healthy hosts that simply don't publish) answers `hasParameterTree: false,
+/// totalCount: 0` — SUCCESS, never an error. `truncated` is the honest paging
+/// flag: `offset + parameters.count < totalCount`.
+public struct HostedAUParameterPage: Sendable, Equatable, Codable {
+    /// false ⇔ the AU publishes a nil `parameterTree` (opaque state).
+    public var hasParameterTree: Bool
+    /// Full tree size, pre-paging.
+    public var totalCount: Int
+    /// The applied page start (post-clamp).
+    public var offset: Int
+    /// True when parameters beyond this page exist.
+    public var truncated: Bool
+    public var parameters: [HostedAUParameterInfo]
+    /// Misses of an `addresses` exact-get filter — reported, never an error;
+    /// empty otherwise.
+    public var unknownAddresses: [String]
+
+    public init(hasParameterTree: Bool, totalCount: Int, offset: Int,
+                truncated: Bool, parameters: [HostedAUParameterInfo],
+                unknownAddresses: [String] = []) {
+        self.hasParameterTree = hasParameterTree
+        self.totalCount = totalCount
+        self.offset = offset
+        self.truncated = truncated
+        self.parameters = parameters
+        self.unknownAddresses = unknownAddresses
+    }
+}
+
+/// Engine-side failures of the hosted-AU parameter surface. `LocalizedError`
+/// with the design's teaching messages so the wire surfaces them verbatim
+/// (design-au-parameter-surface §4). `noHostedAU` normally never reaches the
+/// wire — `ProjectStore` maps it to the status-naming teaching error (the
+/// plugin-window open-failure precedent).
+public enum HostedAUParameterError: Error, Sendable, Equatable, LocalizedError {
+    /// No `.ready` hosted instance for the target.
+    case noHostedAU
+    /// A SET on a nil tree (describe answers `hasParameterTree: false`).
+    case noParameterTree
+    /// The address parsed but names no parameter in the live tree.
+    case unknownAddress(String)
+    /// The parameter exists but is read-only.
+    case notWritable(String)
+    /// The address is not a UInt64 decimal string.
+    case invalidAddress(String)
+    /// NaN/±Inf value on set.
+    case nonFiniteValue
+
+    public var errorDescription: String? {
+        switch self {
+        case .noHostedAU:
+            return "no hosted Audio Unit is ready for that target"
+        case .noParameterTree:
+            return "this Audio Unit publishes no parameter tree (opaque state) — use plugin.openUI to edit it visually"
+        case .unknownAddress(let address):
+            return "unknown AU parameter address '\(address)' — call au.describeParams to list addresses"
+        case .notWritable(let identifier):
+            return "parameter '\(identifier)' is not writable"
+        case .invalidAddress:
+            return "'address' must be the decimal string form of the parameter address (see au.describeParams)"
+        case .nonFiniteValue:
+            return "'value' must be a finite number"
+        }
+    }
+}
+
 /// Render state of one audio clip's offline stretch render (M5 ii-d), as the
 /// engine reports it at snapshot-build time (pull-based — never persisted).
 /// `.rendering` = the clip is scheduled as SILENCE until the render lands
@@ -214,6 +344,50 @@ public protocol AudioEngineControlling: AnyObject {
     /// render thread.
     func detectTransients(inFileAt url: URL, sensitivity: Double) async throws -> [TransientMarker]
 
+    /// Offline audio-content analysis of the file at `url` over the source
+    /// window `[windowStartSeconds, +windowDurationSeconds)` (m21-e,
+    /// design-clip-analyze-audio): key / tempo / spectral-balance / level
+    /// measurement, content-key cached on disk. Results are SOURCE-domain
+    /// (before any clip stretch/pitch — the store attaches the playback
+    /// projection). Runs in async/detached context only — never touches the
+    /// render thread.
+    func analyzeAudioContent(inFileAt url: URL, windowStartSeconds: Double,
+                             windowDurationSeconds: Double) async throws -> AudioContentAnalysis
+
+    /// One-time whole-file REFERENCE analysis (m22-g, the `analyzeAudioContent`
+    /// sibling): integrated/max-momentary/max-short-term LUFS, true peak, and
+    /// LRA through the SAME `Loudness.Stream` math as `Loudness.measure`, the
+    /// shared 24-band mean-power spectrum, and whole-file stereo aggregates —
+    /// streamed in bounded chunks, never a full-file buffer. Runs in
+    /// async/detached context only — never touches the render thread. No
+    /// cache: the result persists in the project's reference slot.
+    func analyzeReferenceFile(at url: URL) async throws -> ReferenceAnalysis
+
+    /// The project's reference SLOT changed (m22-g P2) — the
+    /// `masterEffectsChanged` twin for the monitor lane: live engines cache
+    /// the slot (path/offset/trim) for scheduling; an offset change while
+    /// monitoring during playback re-anchors the reference player LOCALLY
+    /// (the metronome enable-mid-play mechanism — the transport is never
+    /// touched). Pushed on every slot mutation AND every undo/redo/
+    /// project-boundary restore. The transient monitor state is NOT carried
+    /// here — that is `setReferenceMonitor`'s job.
+    func referenceChanged(_ slot: ReferenceSlot?)
+
+    /// A/B monitor toggle (m22-g P2, design D4/§5.4): ON gates the mix
+    /// (post-master-chain) and schedules the reference player at the
+    /// timeline-mapped file position with the STORE-computed level-match
+    /// gain (dB); mid-play the player re-anchors locally (the metronome
+    /// enable-mid-play mechanism), stopped it arms for the next transport
+    /// start. OFF is a player-local stop + mix un-gate. Never a topology
+    /// change, never a transport interruption.
+    func setReferenceMonitor(on: Bool, matchGainDb: Double) throws
+
+    /// Match-gain-only re-apply while monitoring (m22-g P2): a trim edit
+    /// recomputes the law store-side against the toggle-ON snapshot basis
+    /// and pushes just the gain — one node-volume write, NEVER a re-anchor
+    /// (a mid-audition player restart would be a gratuitous dropout).
+    func referenceMatchGainChanged(matchGainDb: Double)
+
     /// Begin playback from transport.positionBeats under transport.tempoMap
     /// (m12-b: the map is derived from transport.tempoBPM — trivial until
     /// Phase C). transport.isMetronomeEnabled is read HERE (and on every
@@ -350,6 +524,24 @@ public protocol AudioEngineControlling: AnyObject {
     /// engines without master-chain support (the default below).
     func masterEffectLatencySamples(effectID: UUID) -> Int
 
+    /// Current held-peak gain reduction of ONE live insert-effect instance
+    /// (m22-e): POSITIVE dB of reduction (0 = untouched signal), instant
+    /// attack, released at −20 dB/s (the `peakDB` meter convention), capped
+    /// at 80 dB (a fully closed gate's "full-range attenuation" reading —
+    /// the −80 dB house floor mirrored). Only the built-in dynamics kinds
+    /// (compressor / limiter / gate) measure GR; nil = no reading (every
+    /// other kind, unknown ids, engines without insert metering) — the wire
+    /// OMITS the field instead of fabricating a 0. A bypassed effect reads
+    /// 0 (it is applying no reduction). Poll-based like the meters: the
+    /// value moves while the engine renders (silence included — release
+    /// plays out) and freezes when the engine stops.
+    func effectGainReductionDb(trackID: UUID, effectID: UUID) -> Double?
+
+    /// The `effectGainReductionDb` twin on the post-fader MASTER chain
+    /// (m22-e) — feeds the additive `gainReductionDb` in the wire snapshot's
+    /// `masterEffects` array. Same semantics, same nil rule.
+    func masterEffectGainReductionDb(effectID: UUID) -> Double?
+
     /// The engine's latest latency-compensation report (M4 viii-c, spec §6):
     /// per-strip all-effects chain latency and applied ring targets plus the
     /// global stage maxima. Feeds the additive PDC snapshot fields. nil until
@@ -379,6 +571,29 @@ public protocol AudioEngineControlling: AnyObject {
     /// Current `fullStateForDocument` of one hosted insert-effect AU as a
     /// binary plist, for save-time capture; nil when no prepared AU exists.
     func effectState(forEffect id: UUID) -> Data?
+
+    /// One page of the live `AUParameterTree` of a hosted Audio Unit
+    /// (au.describeParams, design-au-parameter-surface): flat enumeration in
+    /// the tree's own stable order, sliced `[offset, offset + maxParams)`;
+    /// a non-nil `addresses` is the exact-get filter instead (misses land in
+    /// `unknownAddresses`, never an error). nil ⇒ no `.ready` instance for
+    /// the target (the store maps that to a status-naming teaching error);
+    /// a healthy AU with a nil TREE is success (`hasParameterTree: false`).
+    /// Control-plane only — the render thread is never involved.
+    func describeHostedAUParameters(_ target: HostedAUTarget, offset: Int,
+                                    maxParams: Int, addresses: [String]?) throws
+        -> HostedAUParameterPage?
+
+    /// Set ONE hosted-AU parameter by decimal-string address
+    /// (au.setParam, design-au-parameter-surface): out-of-range values clamp
+    /// SILENTLY to [minValue, maxValue] (the fx.setParam precedent), and the
+    /// returned info's `value` is the post-set READ-BACK — some AUs
+    /// quantize/step, and the echo must be the truth. Throws
+    /// `HostedAUParameterError` for every refusal (no instance, no tree,
+    /// unknown/malformed address, read-only parameter, non-finite value).
+    @discardableResult
+    func setHostedAUParameter(_ target: HostedAUTarget, address: String,
+                              value: Double) throws -> HostedAUParameterInfo
 
     /// Current microphone permission as the OS reports it.
     var recordPermission: RecordPermission { get }
@@ -449,6 +664,34 @@ public protocol AudioEngineControlling: AnyObject {
     /// decay to `.floor` — never an error, never NaN/Inf. `.floor` for
     /// engines without analysis support.
     func masterAnalysis() -> MasterAnalysisSnapshot
+
+    /// Latest goniometer/vectorscope frame (m22-d): the most recent
+    /// decimated L/R sample pairs from the master tap, oldest → newest —
+    /// the m22-d phase-scope view's data feed. Poll-based like
+    /// `masterAnalysis()` (refreshed at tap rate while running). This is
+    /// the APP-ONLY seam by design: raw sample pairs stay OFF the always-on
+    /// `mixer.masterAnalysis` wire payload (scalars only there); a
+    /// debug-tier wire command can be layered on later if a capture needs
+    /// it. `.empty` for engines without scope support.
+    func masterScopeFrame() -> MasterScopeFrame
+
+    /// The engine's live output sample rate in Hz (m22-b §3.4) — the rate the
+    /// meter tap's node reports, i.e. the rate the render path actually runs
+    /// at. An internal honesty read so response-curve math is truthful near
+    /// Nyquist; NEVER exposed on the wire. Engines without live output
+    /// (fakes, headless) report 48_000.
+    func renderSampleRateHz() -> Double
+
+    /// Latest live master-bus loudness snapshot (m22-c): streaming BS.1770-4
+    /// momentary/short-term/integrated + EBU 3342 LRA + 4× true peak (plus
+    /// DC offset and crest factor), measured POST-master-fader on the same
+    /// tap feed as `masterAnalysis()`. Poll-based like the meters; nil
+    /// fields = not enough audio yet (never a fabricated 0). `reset: true`
+    /// restarts the running measurement THEN returns the fresh (empty)
+    /// snapshot — transport-independent by design (see
+    /// `LiveLoudnessSnapshot`). Returns nil (whole snapshot) for engines
+    /// without live-loudness support (fakes, headless).
+    func liveLoudness(reset: Bool) -> LiveLoudnessSnapshot?
 
     /// Render-load / overrun telemetry (M9 perf-b), accumulated per render
     /// callback by the engine's instrumented render blocks — live playback
@@ -535,6 +778,44 @@ extension AudioEngineControlling {
     /// headless) report no onsets.
     public func detectTransients(inFileAt url: URL, sensitivity: Double) async throws -> [TransientMarker] { [] }
 
+    /// Audio-content analysis is optional capability — but unlike
+    /// `detectTransients` (an empty marker list is honest data), a fabricated
+    /// all-floors analysis would be a lie, so the default THROWS
+    /// `engineUnavailable` (design-clip-analyze-audio §4). Fakes that need
+    /// the surface override it.
+    public func analyzeAudioContent(inFileAt url: URL, windowStartSeconds: Double,
+                                    windowDurationSeconds: Double) async throws -> AudioContentAnalysis {
+        throw ProjectError.engineUnavailable
+    }
+
+    /// Reference analysis is optional capability (m22-g) — and like
+    /// `analyzeAudioContent` above, a fabricated all-floors analysis would be
+    /// a lie, so the default THROWS `engineUnavailable` (the m21-e
+    /// precedent). Fakes that need the surface override it; the import path
+    /// catches the throw and lands the slot with `analysis: nil` + a warning.
+    public func analyzeReferenceFile(at url: URL) async throws -> ReferenceAnalysis {
+        throw ProjectError.engineUnavailable
+    }
+
+    /// The reference slot push is optional capability (m22-g P2, the
+    /// `masterEffectsChanged` precedent): fakes and headless engines carry
+    /// no monitor lane, so the default is a no-op.
+    public func referenceChanged(_ slot: ReferenceSlot?) {}
+
+    /// The A/B monitor is optional capability (m22-g P2) — and like
+    /// `liveLoudness`, a monitor is NEVER faked: an engine that cannot
+    /// audibly gate the mix and play the reference must refuse, not
+    /// pretend, so the default THROWS `engineUnavailable`. (The store only
+    /// reaches this seam after its own refusal ladder — design §5.6.)
+    public func setReferenceMonitor(on: Bool, matchGainDb: Double) throws {
+        throw ProjectError.engineUnavailable
+    }
+
+    /// The match-gain re-apply is optional capability (m22-g P2): without a
+    /// lane there is no gain node, so the default is a no-op (the store
+    /// only pushes it while monitoring, which implies a real lane).
+    public func referenceMatchGainChanged(matchGainDb: Double) {}
+
     /// Insert chains are optional capability: engines without them report
     /// zero latency everywhere.
     public func insertChainLatencySamples(forTrack id: UUID) -> Int { 0 }
@@ -542,12 +823,32 @@ extension AudioEngineControlling {
     public func masterEffectLatencySamples(effectID: UUID) -> Int { 0 }
     public func pdcReport() -> PDCReport? { nil }
 
+    /// Gain-reduction metering is optional capability (m22-e) — and unlike
+    /// `effectLatencySamples` (whose 0 is honest data), a fabricated 0 dB
+    /// from an engine that cannot measure would read like a resting meter,
+    /// so the default is nil (no reading) and the wire omits the field.
+    public func effectGainReductionDb(trackID: UUID, effectID: UUID) -> Double? { nil }
+    public func masterEffectGainReductionDb(effectID: UUID) -> Double? { nil }
+
     public func availableAudioUnits() -> [AudioUnitComponentInfo] { [] }
     public func audioUnitStatus(forTrack id: UUID) -> AudioUnitTrackStatus? { nil }
     public func audioUnitEffectStatus(forEffect id: UUID) -> AudioUnitTrackStatus? { nil }
     public func instrumentState(forTrack id: UUID) -> Data? { nil }
     public func availableAudioUnitEffects() -> [AudioUnitComponentInfo] { [] }
     public func effectState(forEffect id: UUID) -> Data? { nil }
+
+    /// The hosted-AU parameter surface is optional capability
+    /// (design-au-parameter-surface): engines without AU hosting (fakes,
+    /// headless) report no hosted instance, so existing conformers compile
+    /// unchanged.
+    public func describeHostedAUParameters(_ target: HostedAUTarget, offset: Int,
+                                           maxParams: Int, addresses: [String]?) throws
+        -> HostedAUParameterPage? { nil }
+    @discardableResult
+    public func setHostedAUParameter(_ target: HostedAUTarget, address: String,
+                                     value: Double) throws -> HostedAUParameterInfo {
+        throw HostedAUParameterError.noHostedAU
+    }
 
     /// Default: audio-only engines forward audio takes to the legacy
     /// `startRecording` (midi side nil); a MIDI-only take is unsupported.
@@ -567,6 +868,23 @@ extension AudioEngineControlling {
     /// Master-mix analysis is optional capability: engines without it
     /// (fakes, headless) sit on the floor snapshot.
     public func masterAnalysis() -> MasterAnalysisSnapshot { .floor }
+
+    /// The scope feed is optional capability (m22-d): engines without it
+    /// (fakes, headless) report the all-zero frame — an honest "silent
+    /// center dot", like `masterAnalysis()`'s floor.
+    public func masterScopeFrame() -> MasterScopeFrame { .empty }
+
+    /// The live render rate is optional capability: engines without live
+    /// output (fakes, headless) report the 48 kHz default (m22-b §3.4).
+    public func renderSampleRateHz() -> Double { 48_000 }
+
+    /// Live loudness metering is optional capability (m22-c) — and unlike
+    /// `masterAnalysis()` (whose floor snapshot is honest data), a fabricated
+    /// all-nil snapshot claiming "0 s analyzed" from an engine that CANNOT
+    /// analyze would still read like a real meter, so the default returns
+    /// nil (no snapshot at all) and `ProjectStore` maps that to the
+    /// engineUnavailable teaching error.
+    public func liveLoudness(reset: Bool) -> LiveLoudnessSnapshot? { nil }
 
     /// Performance telemetry is optional capability: engines without it
     /// (fakes, headless) report the all-zero window.

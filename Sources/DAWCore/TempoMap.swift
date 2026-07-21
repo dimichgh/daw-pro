@@ -253,6 +253,86 @@ extension TempoMap: Codable {
     }
 }
 
+/// Musical note-length divisions, 1/1 … 1/32 with dotted and triplet
+/// variants (m22-f delay tempo sync). Lives HERE — TempoMap.swift is the one
+/// sanctioned home of beat↔seconds arithmetic (the permanent tempo lint,
+/// mcp-server/test/tempo-lint.test.ts), and `milliseconds(atBPM:)` IS a
+/// beat→seconds conversion.
+///
+/// Serialization (the raw value, used on disk and in UI labels): the note
+/// fraction with an optional modifier suffix — `"1/4"` straight, `"1/8d"`
+/// dotted (×1.5), `"1/8t"` triplet (×2/3). Declaration order runs longest →
+/// shortest, straight/dotted/triplet per base — the order pickers present.
+public enum NoteDivision: String, Codable, Sendable, CaseIterable, Equatable {
+    case whole = "1/1", wholeDotted = "1/1d", wholeTriplet = "1/1t"
+    case half = "1/2", halfDotted = "1/2d", halfTriplet = "1/2t"
+    case quarter = "1/4", quarterDotted = "1/4d", quarterTriplet = "1/4t"
+    case eighth = "1/8", eighthDotted = "1/8d", eighthTriplet = "1/8t"
+    case sixteenth = "1/16", sixteenthDotted = "1/16d", sixteenthTriplet = "1/16t"
+    case thirtySecond = "1/32", thirtySecondDotted = "1/32d", thirtySecondTriplet = "1/32t"
+
+    /// The length in BEATS (quarter-note units — the project timeline unit
+    /// everywhere): 1/1 = 4, 1/4 = 1, 1/16 = 0.25; dotted ×1.5, triplet ×2/3.
+    /// This is also the division's NUMERIC value on the generic effect-param
+    /// surface (`fx.setParam name:"division"` — see `nearest(toBeats:)`).
+    public var beats: Double {
+        straightBeats * modifier
+    }
+
+    private var straightBeats: Double {
+        switch self {
+        case .whole, .wholeDotted, .wholeTriplet: return 4
+        case .half, .halfDotted, .halfTriplet: return 2
+        case .quarter, .quarterDotted, .quarterTriplet: return 1
+        case .eighth, .eighthDotted, .eighthTriplet: return 0.5
+        case .sixteenth, .sixteenthDotted, .sixteenthTriplet: return 0.25
+        case .thirtySecond, .thirtySecondDotted, .thirtySecondTriplet: return 0.125
+        }
+    }
+
+    private var modifier: Double {
+        switch self {
+        case .wholeDotted, .halfDotted, .quarterDotted, .eighthDotted,
+             .sixteenthDotted, .thirtySecondDotted:
+            return 1.5
+        case .wholeTriplet, .halfTriplet, .quarterTriplet, .eighthTriplet,
+             .sixteenthTriplet, .thirtySecondTriplet:
+            return 2.0 / 3.0
+        default:
+            return 1
+        }
+    }
+
+    /// The division's duration in milliseconds at a constant tempo — the
+    /// m22-f division→ms formula, UNclamped (`DelayParams.effectiveTimeMs`
+    /// clamps to its own param range): 1/4 @ 120 = 500 ms, 1/8d @ 120 =
+    /// 375 ms, 1/4t @ 120 = 333.33… ms. A non-finite or non-positive bpm
+    /// (impossible through `TempoMap`, whose segments clamp to the transport
+    /// range) answers NaN honestly rather than trapping.
+    public func milliseconds(atBPM bpm: Double) -> Double {
+        guard bpm.isFinite, bpm > 0 else { return .nan }
+        return beats * 60_000.0 / bpm
+    }
+
+    /// Snaps a numeric beats value to the NEAREST legal division — the
+    /// generic effect-param surface is numeric-only, so `division` rides as
+    /// its beat length and snaps here (the `EQParams.snapSlope` precedent).
+    /// Ties resolve to the earlier (longer) declaration.
+    public static func nearest(toBeats value: Double) -> NoteDivision {
+        guard value.isFinite else { return .quarter }
+        var best = NoteDivision.quarter
+        var bestDistance = Double.infinity
+        for candidate in allCases {
+            let distance = abs(candidate.beats - value)
+            if distance < bestDistance {
+                bestDistance = distance
+                best = candidate
+            }
+        }
+        return best
+    }
+}
+
 /// Time-signature change list (design §3.2) — SEPARATE from TempoMap because
 /// meter is display/snap/click structure ONLY: it never enters audio timing
 /// math (a beat is a quarter-note duration unit everywhere; `beatUnit` stays

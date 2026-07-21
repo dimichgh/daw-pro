@@ -124,6 +124,31 @@ struct PanelLayoutStoreTests {
         #expect(backing.storage[PanelLayoutStore.arrangePPBKey] == 16)
     }
 
+    @Test("piano-roll zoom (m21-c) defaults to 32 pt/beat, clamps to 4–200, and persists")
+    func pianoRollPPB() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        #expect(store.pianoRollPPB == 32)                     // the historical fixed scale
+        store.setPianoRollPPB(9999)
+        #expect(store.pianoRollPPB == 200)
+        store.setPianoRollPPB(0)
+        #expect(store.pianoRollPPB == 4)
+        store.setPianoRollPPB(64)
+        #expect(store.pianoRollPPB == 64)
+        #expect(backing.storage[PanelLayoutStore.pianoRollPPBKey] == 64)   // write-through
+        // Independent of the arrange slot — zooming the roll never moves the timeline.
+        #expect(store.arrangePPB == PanelLayoutStore.defaultArrangePPB)
+        // Sticky across a "relaunch": a fresh store over the same backing.
+        #expect(PanelLayoutStore(backing: backing).pianoRollPPB == 64)
+        // A corrupt stored value is re-clamped on load (the every-dimension rule).
+        #expect(PanelLayoutStore(backing: SpyBacking([PanelLayoutStore.pianoRollPPBKey: 100_000]))
+            .pianoRollPPB == 200)
+        // Reset restores + persists the default (like every dimension).
+        store.reset()
+        #expect(store.pianoRollPPB == 32)
+        #expect(backing.storage[PanelLayoutStore.pianoRollPPBKey] == 32)
+    }
+
     @Test("a stored OUT-OF-RANGE value is re-clamped on load")
     func loadReClamps() {
         // Simulate a corrupt / stale defaults value beyond the range.

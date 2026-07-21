@@ -52,6 +52,19 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 # iconutil; CFBundleIconFile=AppIcon in the plist template points at it.
 cp "Sources/DAWApp/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
+# SwiftPM resource bundle (glass-d): the DAWApp target declares runtime-loaded
+# resources (the onboarding hero PNGs), which SwiftPM emits as a .bundle beside
+# the binary. Ship it in Contents/Resources — the standard app location, where
+# OnboardingHeroArt.load looks first (NOT the bundle root: a stray top-level
+# item there would break the codesign seal).
+RESOURCE_BUNDLE="$BIN_DIR/daw-pro_DAWApp.bundle"
+if [[ -d "$RESOURCE_BUNDLE" ]]; then
+    cp -R "$RESOURCE_BUNDLE" "$APP/Contents/Resources/"
+else
+    echo "error: SwiftPM resource bundle not found at $RESOURCE_BUNDLE" >&2
+    exit 1
+fi
+
 echo "==> plutil -lint"
 plutil -lint "$APP/Contents/Info.plist"
 

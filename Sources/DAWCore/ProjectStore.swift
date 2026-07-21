@@ -75,6 +75,23 @@ public final class ProjectStore {
     /// the mutation helpers below (and the load boundary) can rebuild it inside
     /// `performEdit` bodies while external callers go through the named methods.
     public internal(set) var markers: [Marker] = []
+    /// Reference-track slot (m22-g): the ONE finished song this project is
+    /// mixed against, or nil. PROJECT DATA — it rides `EditState` (undo
+    /// covers import/replace/remove/analyze) and persists additively via the
+    /// `ReferenceDocument` mirror (omit-when-nil). Deliberately NOT a
+    /// `Track`: every offline render path walks `tracks`, so exclusion from
+    /// mixdown/bounce/stems holds BY CONSTRUCTION (design D1). The transient
+    /// A/B monitor state (P2) is NOT here and never persists. Setter is
+    /// module-`internal` so `ProjectStore+Reference` mutates it inside
+    /// `performEdit` bodies (the `markers` rule).
+    public internal(set) var reference: ReferenceSlot?
+    /// Transient reference A/B monitor state (m22-g P2): non-nil while the
+    /// monitor lane is auditioning the reference — the toggle-ON snapshot of
+    /// the level-match law (design §5.6). NEVER persisted, NEVER undoable,
+    /// NEVER in `project.snapshot` (the `isPlaying` transient-state law);
+    /// `reference.status`/`reference.setMonitor` surface it on the wire.
+    /// Observable so P3's REF chip lights from it.
+    public internal(set) var referenceMonitor: ReferenceMonitorSnapshot?
     /// Monotonic tempo/meter-map revision (m12-d, design row 29). Bumped on
     /// EVERY mutation that changes the effective tempo or meter map — scalar
     /// `setTempo`, `tempo.setMap`, and an undo/redo that swaps the map — and
@@ -323,6 +340,15 @@ public final class ProjectStore {
     /// relocation preference) can point it elsewhere.
     @ObservationIgnored public var generationImportsDirectory =
         ProjectStore.defaultGenerationImportsDirectory()
+
+    /// Base directory for imported REFERENCE audio (m22-g). `reference.import`
+    /// COPIES the source file here (import copies, never moves — the
+    /// SoundBank/VoiceDataset law): a stable pre-save home that survives
+    /// until a save folds it into the `.dawproj` `media/` (planMedia) — the
+    /// generation-imports precedent above. Defaults to the real Application
+    /// Support location; a public seam so tests point it at temp dirs.
+    @ObservationIgnored public var referenceImportsDirectory =
+        ProjectStore.defaultReferenceImportsDirectory()
 
     /// In-flight AI clip fixes, jobId-keyed (M6 v-b). In-memory only: cleared by
     /// project.open/new, not persisted (a pending fix does not survive relaunch
@@ -1150,6 +1176,37 @@ public final class ProjectStore {
     /// engine injected) or when the session is stopped/silent.
     public func masterAnalysis() -> MasterAnalysisSnapshot {
         engine?.masterAnalysis() ?? .floor
+    }
+
+    /// Latest goniometer/vectorscope frame (m22-d) as the engine reports it
+    /// — the phase-scope view's poll seam, `.empty` when running headless.
+    /// In-process ONLY by design: raw sample pairs never ride the always-on
+    /// `mixer.masterAnalysis` payload (see `MasterScopeFrame`).
+    public func masterScopeFrame() -> MasterScopeFrame {
+        engine?.masterScopeFrame() ?? .empty
+    }
+
+    /// The engine's live render sample rate in Hz (m22-b §3.4) — what the EQ
+    /// curve editor derives its drawn response at, so the curve is honest
+    /// near Nyquist. 48 kHz when running headless (no engine injected).
+    public func renderSampleRateHz() -> Double {
+        engine?.renderSampleRateHz() ?? 48_000
+    }
+
+    // MARK: - Live loudness metering (m22-c)
+
+    /// Latest live master-bus loudness snapshot as the engine reports it —
+    /// poll-based like `masterAnalysis()`, but throwing: headless (no
+    /// engine) or an engine without live-loudness support surfaces the
+    /// engineUnavailable teaching error instead of a fabricated meter
+    /// reading. `reset: true` restarts the running measurement (integrated /
+    /// LRA / peaks) and returns the fresh snapshot — transport-independent
+    /// (see `LiveLoudnessSnapshot`).
+    public func liveLoudness(reset: Bool = false) throws -> LiveLoudnessSnapshot {
+        guard let engine, let snapshot = engine.liveLoudness(reset: reset) else {
+            throw ProjectError.engineUnavailable
+        }
+        return snapshot
     }
 
     // MARK: - Engine performance telemetry (M9 perf-b)
@@ -2239,6 +2296,33 @@ public final class ProjectStore {
             case "peak2Q": params.peak2Q = value
             case "highShelfFreq": params.highShelfFreq = value
             case "highShelfGainDb": params.highShelfGainDb = value
+            // m22-a EQ v2. Setting an HP/LP frequency ACTIVATES that filter
+            // (nil freq = off); slopes snap to 12/24; `*Enabled` is binary on
+            // the numeric surface (the pingPong precedent, ≥ 0.5 = on).
+            // Enabling an HP/LP that has no corner yet materializes the spec
+            // default (20 Hz / 20 kHz) so the toggle is never a silent no-op.
+            case "highPassFreq": params.highPassFreq = value
+            case "highPassSlopeDbPerOct": params.highPassSlopeDbPerOct = EQParams.snapSlope(value)
+            case "highPassEnabled":
+                let on = value >= 0.5
+                params.highPassEnabled = on
+                if on, params.highPassFreq == nil {
+                    params.highPassFreq = EQParams.highPassFreqRange.lowerBound
+                }
+            case "lowPassFreq": params.lowPassFreq = value
+            case "lowPassSlopeDbPerOct": params.lowPassSlopeDbPerOct = EQParams.snapSlope(value)
+            case "lowPassEnabled":
+                let on = value >= 0.5
+                params.lowPassEnabled = on
+                if on, params.lowPassFreq == nil {
+                    params.lowPassFreq = EQParams.lowPassFreqRange.upperBound
+                }
+            case "lowShelfQ": params.lowShelfQ = value
+            case "highShelfQ": params.highShelfQ = value
+            case "lowShelfEnabled": params.lowShelfEnabled = value >= 0.5
+            case "peak1Enabled": params.peak1Enabled = value >= 0.5
+            case "peak2Enabled": params.peak2Enabled = value >= 0.5
+            case "highShelfEnabled": params.highShelfEnabled = value >= 0.5
             default: return
             }
             effect.eq = params
@@ -2279,12 +2363,21 @@ public final class ProjectStore {
             case "timeMs": params.timeMs = value
             case "feedback": params.feedback = value
             case "mix": params.mix = value
-            // pingPong snaps to 0/1 through the clamping init (numeric bool).
+            // pingPong snaps to 0/1 through the clamping init (numeric bool);
+            // the rebuild carries the m22-f fields so a pingPong write can
+            // never silently drop sync/division.
             case "pingPong": params = DelayParams(timeMs: params.timeMs,
                                                   feedback: params.feedback,
                                                   mix: params.mix, pingPong: value,
-                                                  highCutHz: params.highCutHz)
+                                                  highCutHz: params.highCutHz,
+                                                  sync: params.sync,
+                                                  division: params.division)
             case "highCutHz": params.highCutHz = value
+            // m22-f tempo sync: binary on the numeric surface (the pingPong
+            // precedent, ≥ 0.5 = on); division rides as its length in beats
+            // and snaps to the nearest legal note value.
+            case "sync": params.sync = value >= 0.5
+            case "division": params.division = NoteDivision.nearest(toBeats: value)
             default: return
             }
             effect.delay = params
@@ -2483,6 +2576,129 @@ public final class ProjectStore {
         engine?.audioUnitStatus(forTrack: id)
     }
 
+    /// Effect mirror of `audioUnitStatus(forTrack:)` — nil when the engine
+    /// tracks no AU for that effect id, or when running headless. Feeds the
+    /// AU-parameter surface's status-naming teaching error.
+    public func audioUnitEffectStatus(forEffect id: UUID) -> AudioUnitTrackStatus? {
+        engine?.audioUnitEffectStatus(forEffect: id)
+    }
+
+    // MARK: - Hosted-AU parameter surface (au.describeParams / au.setParam)
+
+    /// One page of the live `AUParameterTree` of the hosted AU behind a track
+    /// slot (design-au-parameter-surface): `effectID` names an `.audioUnit`
+    /// insert ON `trackID`; nil targets the track's `.audioUnit` INSTRUMENT.
+    /// Full target validation first (the `requirePluginTarget` taxonomy with
+    /// AU-parameters wording — see `resolveHostedAUTarget`); a target with no
+    /// `.ready` instance throws the status-naming teaching error (the
+    /// plugin-window open-failure precedent). Returns the page plus the
+    /// selection's display name for the wire's `componentName` echo. Pure
+    /// read — no model mutation, no undo entry, no `tracksDidChange`.
+    public func describeAudioUnitParams(trackID: UUID, effectID: UUID?,
+                                        offset: Int = 0, maxParams: Int = 512,
+                                        addresses: [String]? = nil) throws
+        -> (componentName: String, page: HostedAUParameterPage) {
+        let resolved = try resolveHostedAUTarget(trackID: trackID, effectID: effectID)
+        guard let engine else { throw ProjectError.engineUnavailable }
+        guard let page = try engine.describeHostedAUParameters(
+            resolved.target, offset: offset, maxParams: maxParams, addresses: addresses
+        ) else {
+            throw hostedAUNotReadyError(resolved.target)
+        }
+        return (resolved.componentName, page)
+    }
+
+    /// Set ONE hosted-AU parameter by decimal-string address (silent clamp +
+    /// post-set READ-BACK echo — the returned info's `value` is the AU's own
+    /// answer). Same target validation and status naming as
+    /// `describeAudioUnitParams`; address/value refusals surface as
+    /// `HostedAUParameterError` teaching messages. Deliberately NO undo step
+    /// (parity with edits made in the vendor window via plugin.openUI) and no
+    /// `tracksDidChange` — an AU param write is live engine-side state,
+    /// captured into `stateData` at save time via the existing
+    /// `instrumentState`/`effectState` path.
+    @discardableResult
+    public func setAudioUnitParam(trackID: UUID, effectID: UUID?, address: String,
+                                  value: Double) throws -> HostedAUParameterInfo {
+        let resolved = try resolveHostedAUTarget(trackID: trackID, effectID: effectID)
+        guard let engine else { throw ProjectError.engineUnavailable }
+        do {
+            return try engine.setHostedAUParameter(resolved.target,
+                                                   address: address, value: value)
+        } catch HostedAUParameterError.noHostedAU {
+            throw hostedAUNotReadyError(resolved.target)
+        }
+    }
+
+    /// Target validation for the AU parameter surface — the
+    /// `requirePluginTarget` (plugin.openUI) taxonomy with AU-parameters
+    /// wording: track exists; a named effect must exist ON that track with
+    /// kind `.audioUnit`; no effectID targets the track's `.audioUnit`
+    /// instrument. `.soundBank` REDIRECTS (LAW L3: `SoundBankConfig` is the
+    /// single source of truth — AUSampler tree edits would be silently lost
+    /// on save).
+    private func resolveHostedAUTarget(trackID: UUID, effectID: UUID?) throws
+        -> (target: HostedAUTarget, componentName: String) {
+        guard let track = tracks.first(where: { $0.id == trackID }) else {
+            throw ProjectError.trackNotFound(trackID)
+        }
+        if let effectID {
+            guard let effect = track.effects.first(where: { $0.id == effectID }) else {
+                throw ProjectError.effectNotFound(effectID)
+            }
+            guard effect.kind == .audioUnit else {
+                throw ProjectError.notAnAudioUnitParamTarget(
+                    "effect '\(effectID.uuidString)' is a built-in \(effect.kind.rawValue) — AU parameters apply only to Audio Unit effects (built-in kinds use fx.setParam)")
+            }
+            return (.effect(effectID: effectID), Self.hostedAUDisplayName(effect.audioUnit))
+        }
+        guard track.kind == .instrument else {
+            throw ProjectError.notAnAudioUnitParamTarget(
+                "track '\(trackID.uuidString)' is a '\(track.kind.rawValue)' track — AU parameters apply only to Audio Unit instruments (pass effectId to target an insert effect)")
+        }
+        let descriptor = track.instrument ?? .default
+        guard descriptor.kind == .audioUnit else {
+            if descriptor.kind == .soundBank {
+                throw ProjectError.notAnAudioUnitParamTarget(
+                    "track '\(trackID.uuidString)' uses a sound-bank instrument — sound banks have no AU parameter surface (the bank program is the single source of truth); choose programs with instrument.listSoundBankPrograms + track.setInstrument. AU parameters apply only to Audio Unit instruments")
+            }
+            throw ProjectError.notAnAudioUnitParamTarget(
+                "track '\(trackID.uuidString)' uses the built-in \(descriptor.kind.rawValue) instrument — AU parameters apply only to Audio Unit instruments (built-in kinds use track.setInstrument)")
+        }
+        return (.instrument(trackID: trackID), Self.hostedAUDisplayName(descriptor.audioUnit))
+    }
+
+    /// Status-naming teaching error for a target with no `.ready` hosted
+    /// instance — the plugin-window open-failure wording, built from
+    /// `audioUnitStatus`/`audioUnitEffectStatus`.
+    private func hostedAUNotReadyError(_ target: HostedAUTarget) -> ProjectError {
+        let status: AudioUnitTrackStatus?
+        switch target {
+        case .instrument(let trackID): status = engine?.audioUnitStatus(forTrack: trackID)
+        case .effect(let effectID): status = engine?.audioUnitEffectStatus(forEffect: effectID)
+        }
+        switch status {
+        case .pending:
+            return .audioUnitNotReady("Audio Unit is not ready (status: pending) — retry once prepared")
+        case .missing:
+            return .audioUnitNotReady("Audio Unit is not ready (status: missing)")
+        case .failed(let reason):
+            return .audioUnitNotReady("Audio Unit is not ready (status: failed: \(reason))")
+        case .ready, nil:
+            return .audioUnitNotReady("Audio Unit is not ready — the engine is not hosting this target yet (running headless, or the instance was just released)")
+        }
+    }
+
+    /// Display name for the wire's `componentName` echo: the selection-time
+    /// display name, falling back to the component triple for configs saved
+    /// without one.
+    private static func hostedAUDisplayName(_ config: AudioUnitConfig?) -> String {
+        guard let config else { return "" }
+        if !config.name.isEmpty { return config.name }
+        let component = config.component
+        return "\(component.type)/\(component.subType)/\(component.manufacturer)"
+    }
+
     // MARK: - Sound banks (m10-n)
 
     /// Discoverable sound banks — GM first, then each scan dir's `*.sf2`/`*.dls`
@@ -2537,6 +2753,22 @@ public final class ProjectStore {
     /// snapshot's `masterEffects` array while staying engine-free itself.
     public func masterEffectLatencySamples(effectID: UUID) -> Int {
         engine?.masterEffectLatencySamples(effectID: effectID) ?? 0
+    }
+
+    /// Current held-peak gain reduction of one live insert-effect instance
+    /// (m22-e): POSITIVE dB, 0 = untouched, −20 dB/s release — see the
+    /// engine protocol. The `effectLatencySamples` forwarding pattern:
+    /// DAWControl reads this to attach the additive per-effect
+    /// `gainReductionDb` to the wire while staying engine-free itself. nil
+    /// (field omitted) for non-dynamics kinds, unknown ids, and headless.
+    public func effectGainReductionDb(trackID: UUID, effectID: UUID) -> Double? {
+        engine?.effectGainReductionDb(trackID: trackID, effectID: effectID)
+    }
+
+    /// The `effectGainReductionDb` twin for the MASTER chain — feeds the
+    /// wire snapshot's `masterEffects[].gainReductionDb`. nil rule as above.
+    public func masterEffectGainReductionDb(effectID: UUID) -> Double? {
+        engine?.masterEffectGainReductionDb(effectID: effectID)
     }
 
     /// The engine's latest PDC report (M4 viii-c) — per-strip chain latency
@@ -3046,7 +3278,25 @@ public final class ProjectStore {
                          newStartBeat: Double, newLengthBeats: Double) throws -> Clip {
         let (t, c) = try locateClip(trackID: trackId, clipID: clipId)
         try requireNotCompMember(trackIndex: t, clipIndex: c)
+        return applyTrimWindow(
+            trackIndex: t, clipIndex: c,
+            newStartBeat: newStartBeat, newLengthBeats: newLengthBeats,
+            label: "Trim Clip '\(tracks[t].clips[c].name)'",
+            key: "clip.trim:\(clipId.uuidString)")
+    }
+
+    /// The trim engine shared by `trimClip` and `fitClipToContent` (m21-d): all
+    /// of the window math — offset advance, MIDI note drop/truncate, fade and
+    /// gain-envelope/controller-lane re-clamp, overlap resolution — under a
+    /// caller-supplied undo label/coalescing key, so a "Fit Clip to Content"
+    /// journals under its own name without duplicating any of this logic.
+    /// Callers have already located the clip and run `requireNotCompMember`.
+    @discardableResult
+    private func applyTrimWindow(trackIndex t: Int, clipIndex c: Int,
+                                 newStartBeat: Double, newLengthBeats: Double,
+                                 label: String, key: String?) -> Clip {
         let clip = tracks[t].clips[c]
+        let clipId = clip.id
         let oldStart = clip.startBeat
         let newStart = max(0, newStartBeat)
         let newLength = max(Self.minClipLengthBeats, newLengthBeats)
@@ -3096,7 +3346,7 @@ public final class ProjectStore {
             formantPreserve: clip.formantPreserve, gainEnvelope: newEnv,
             controllerLanes: newLanes)
 
-        performEdit("Trim Clip '\(clip.name)'", key: "clip.trim:\(clipId.uuidString)") {
+        performEdit(label, key: key) {
             tracks[t].clips[c] = rebuilt
             // Extending either edge over a same-track neighbour resolves through
             // the ONE no-silent-overlap choke point (m13-b), folded into this
@@ -3108,6 +3358,65 @@ public final class ProjectStore {
             engine?.tracksDidChange(tracks)
         }
         return tracks[t].clips.first { $0.id == clipId } ?? rebuilt
+    }
+
+    /// Trims a clip's TRAILING edge to the end of its actual content (m21-d) —
+    /// the one-gesture answer to "make the clip the size its material is". The
+    /// leading edge never moves; the new length rides the full `trimClip`
+    /// machinery (`applyTrimWindow`: fades/envelopes re-clamp, overlap
+    /// resolution) under the undo label "Fit Clip to Content".
+    ///
+    /// - MIDI: the new length is the END BEAT OF THE LAST NOTE (clip-relative),
+    ///   floored at `minClipLengthBeats`. A clip with ZERO notes is a NO-OP —
+    ///   there is no content to fit to, so erroring would teach nothing; the
+    ///   echo is honest instead (`changed: false`, clip untouched, no undo
+    ///   entry). A note overhanging the clip's current end EXTENDS the clip to
+    ///   cover it (fit means "match the content", in either direction).
+    /// - Audio: the new length covers the source file's REMAINING duration from
+    ///   the clip's current `startOffsetSeconds` — seconds → beats through the
+    ///   tempo map at the clip's start, times `stretchRatio` (stretched material
+    ///   occupies ratio× the timeline). Never longer than the source; a clip
+    ///   already exactly source-length echoes `changed: false`.
+    ///
+    /// Comp members are rejected (`requireNotCompMember`, the trimClip rule).
+    /// Audio needs `media` (`mediaServiceUnavailable` otherwise).
+    @discardableResult
+    public func fitClipToContent(trackId: UUID, clipId: UUID) throws -> (clip: Clip, changed: Bool) {
+        let (t, c) = try locateClip(trackID: trackId, clipID: clipId)
+        try requireNotCompMember(trackIndex: t, clipIndex: c)
+        let clip = tracks[t].clips[c]
+
+        let targetLength: Double
+        if let notes = clip.notes {
+            guard let lastNoteEnd = notes.map(\.endBeat).max() else {
+                // Empty MIDI clip: nothing to fit to → honest no-op.
+                return (clip, false)
+            }
+            targetLength = max(Self.minClipLengthBeats, lastNoteEnd)
+        } else {
+            guard let media else { throw ProjectError.mediaServiceUnavailable }
+            guard let url = clip.audioFileURL else {
+                throw ProjectError.invalidClipEdit(
+                    "clip '\(clip.name)' has no source audio file to fit to")
+            }
+            let fileDuration = try media.audioFileInfo(at: url).durationSeconds
+            let remainingSource = max(0, fileDuration - clip.startOffsetSeconds)
+            // Stretched material covers ratio× its source seconds on the
+            // timeline (`sourceWindowSeconds` inverted), then seconds → beats
+            // through the tempo map from the clip's (unmoved) start.
+            let timelineSeconds = remainingSource * clip.stretchRatio
+            let targetEnd = transport.tempoMap.beat(
+                from: clip.startBeat, elapsedSeconds: timelineSeconds)
+            targetLength = max(Self.minClipLengthBeats, targetEnd - clip.startBeat)
+        }
+
+        // Already exact (within float honesty) → no edit, no undo entry.
+        guard abs(targetLength - clip.lengthBeats) > 1e-9 else { return (clip, false) }
+        let fitted = applyTrimWindow(
+            trackIndex: t, clipIndex: c,
+            newStartBeat: clip.startBeat, newLengthBeats: targetLength,
+            label: "Fit Clip to Content", key: "clip.fitToContent:\(clipId.uuidString)")
+        return (fitted, true)
     }
 
     /// Moves a clip to a new timeline start (clamped >= 0), then RESOLVES any
@@ -4345,7 +4654,8 @@ public final class ProjectStore {
         return EditState(tracks: tracks, masterVolume: masterVolume, transport: t,
                          grooveTemplates: grooveTemplates, markers: markers,
                          masterEffects: masterEffects,
-                         masterAutomation: masterAutomation)
+                         masterAutomation: masterAutomation,
+                         reference: reference)
     }
 
     /// The single funnel every undoable mutation passes through. Captures the
@@ -4401,6 +4711,8 @@ public final class ProjectStore {
             || transport.loopEndBeat != target.transport.loopEndBeat
         let metronomeChanged = transport.isMetronomeEnabled != target.transport.isMetronomeEnabled
             || transport.countInBars != target.transport.countInBars
+        // Reference slot (m22-g P2): the masterEffects twin.
+        let referenceSlotChanged = reference != target.reference
 
         tracks = target.tracks
         masterVolume = target.masterVolume
@@ -4412,6 +4724,9 @@ public final class ProjectStore {
         // Markers ride the same snapshot (pure data — no engine, no media); the
         // captured list is already beat-sorted, so undo/redo preserve the invariant.
         markers = target.markers
+        // Reference slot (m22-g): rides the snapshot; the engine push +
+        // monitor consistency land below beside masterEffectsChanged.
+        reference = target.reference
         // Keep the live playhead + play state; restore every persistable field.
         var restored = target.transport
         restored.isPlaying = transport.isPlaying
@@ -4429,6 +4744,14 @@ public final class ProjectStore {
         if masterChanged { engine?.masterVolumeChanged(masterVolume) }
         if masterFXChanged { engine?.masterEffectsChanged(masterEffects) }
         if masterAutoChanged { engine?.masterAutomationChanged(masterAutomation) }
+        // Reference slot (m22-g P2): keep the transient monitor honest across
+        // the restore — a restore that removes/replaces the slot mid-audition
+        // turns the monitor OFF (un-gating the mix); an offset/trim restore
+        // re-syncs the lane in place. Then push the slot cache.
+        if referenceSlotChanged {
+            syncReferenceMonitorAfterSlotChange()
+            engine?.referenceChanged(reference)
+        }
         // A map swap by undo/redo counts as a change for Clip-Fix staleness
         // (mapRevision only ever climbs), and re-anchors the engine's tempo.
         if tempoChanged || meterChanged { mapRevision &+= 1 }
@@ -4490,7 +4813,8 @@ public final class ProjectStore {
                 }
             }
         }
-        let plan = ProjectBundle.planMedia(tracks: persistedTracks, bundleURL: bundleURL)
+        let plan = ProjectBundle.planMedia(
+            tracks: persistedTracks, reference: reference, bundleURL: bundleURL)
         let effectiveName = adoptName
             ? bundleURL.deletingPathExtension().lastPathComponent
             : projectName
@@ -4518,7 +4842,8 @@ public final class ProjectStore {
             tempoMapRevision: mapRevision,
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
-            copilotChats: persistedChats
+            copilotChats: persistedChats,
+            reference: reference
         )
         do {
             try ProjectBundle.write(document: document, plan: plan, to: bundleURL)
@@ -4563,6 +4888,18 @@ public final class ProjectStore {
             }
         }
         if anyURLChanged { engine?.tracksDidChange(tracks) }
+
+        // Reference slot (m22-g): repoint the in-memory sourcePath at the
+        // bundle's self-contained copy (the clip URL rewrite mechanism
+        // verbatim). Direct assignment — a save is not an edit (no
+        // performEdit, no undo entry, no dirty flip beyond the clear below).
+        if let slot = reference, let ref = plan.refs[slot.id] ?? nil, ref.hasPrefix("media/") {
+            let newPath = mediaDir
+                .appendingPathComponent(String(ref.dropFirst("media/".count))).path
+            if reference?.sourcePath != newPath {
+                reference?.sourcePath = newPath
+            }
+        }
 
         isDirty = false
         // Chats rode this save (copilotChatsForPersistence above), so their
@@ -4663,6 +5000,11 @@ public final class ProjectStore {
         masterAutomation = []  // m15-c: … and no master automation
         grooveTemplates = []
         markers = []
+        reference = nil  // m22-g: … and no reference slot
+        // m22-g P2: the transient monitor dies with it — through the
+        // engine-off helper, so an active audition un-gates the mix BEFORE
+        // the engine boundary below.
+        stopReferenceMonitorIfNeeded()
         // Copilot chats belong to the replaced session (chat-persist §4.5).
         copilotChats = []
         chatsDirty = false
@@ -4689,6 +5031,7 @@ public final class ProjectStore {
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
         engine?.masterAutomationChanged(masterAutomation)
+        engine?.referenceChanged(reference)  // m22-g P2: clear the lane cache
         engine?.loopChanged(transport)
 
         projectPath = nil
@@ -4727,6 +5070,15 @@ public final class ProjectStore {
         // by the lossy decode; the count surfaces in the warnings below (L6).
         copilotChats = document.copilotChats ?? []
         chatsDirty = false
+        // Reference slot (m22-g): resolved (media ref → path, band-count
+        // sanitize) by runtimeState; a missing FILE keeps the slot, honest
+        // absence surfacing at analyze/monitor time.
+        reference = runtime.reference
+        // The transient A/B monitor never crosses a project boundary
+        // (m22-g P2, the transient-state law) — through the engine-off
+        // helper, so an active audition un-gates the mix BEFORE the engine
+        // boundary below.
+        stopReferenceMonitorIfNeeded()
         projectGeneration &+= 1
 
         masterMeter = .silence
@@ -4750,6 +5102,7 @@ public final class ProjectStore {
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
         engine?.masterAutomationChanged(masterAutomation)
+        engine?.referenceChanged(reference)  // m22-g P2: fresh lane cache
         engine?.loopChanged(transport)
 
         projectPath = bundleURL.path
@@ -4765,6 +5118,10 @@ public final class ProjectStore {
         if document.copilotChatsDroppedOnLoad > 0 {
             warnings.append(
                 "\(document.copilotChatsDroppedOnLoad) copilot chats could not be read and were dropped")
+        }
+        if document.referenceDroppedOnLoad {
+            warnings.append(
+                "the reference entry could not be read and was dropped — import it again with reference.import")
         }
         return warnings
     }
@@ -4953,6 +5310,11 @@ public final class ProjectStore {
                 refs[zone.id] = zone.audioFileURL.standardizedFileURL.path
             }
         }
+        // The reference slot serializes verbatim with an ABSOLUTE ref, zero
+        // copies (the crash-b law) — resolveMedia accepts absolute paths.
+        if let slot = reference {
+            refs[slot.id] = URL(fileURLWithPath: slot.sourcePath).standardizedFileURL.path
+        }
         return ProjectDocument(
             name: projectName,
             transport: transport,
@@ -4964,7 +5326,8 @@ public final class ProjectStore {
             tempoMapRevision: mapRevision,
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
-            copilotChats: includeChats ? copilotChatsForPersistence() : []
+            copilotChats: includeChats ? copilotChatsForPersistence() : [],
+            reference: reference
         )
     }
 
@@ -5117,6 +5480,13 @@ public final class ProjectStore {
         // by definition, so the next autosave keeps protecting it.
         copilotChats = document.copilotChats ?? []
         chatsDirty = true
+        // Reference slot (m22-g): the autosave recorded an absolute ref,
+        // which runtimeState resolved verbatim (the open-path rule).
+        reference = runtime.reference
+        // The transient A/B monitor never crosses a session boundary
+        // (m22-g P2, the transient-state law) — engine-off helper, the
+        // open-path rule.
+        stopReferenceMonitorIfNeeded()
         projectGeneration &+= 1
 
         masterMeter = .silence
@@ -5135,6 +5505,7 @@ public final class ProjectStore {
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
         engine?.masterAutomationChanged(masterAutomation)
+        engine?.referenceChanged(reference)  // m22-g P2: fresh lane cache
         engine?.loopChanged(transport)
 
         projectPath = sourcePath
@@ -5148,6 +5519,10 @@ public final class ProjectStore {
         if document.copilotChatsDroppedOnLoad > 0 {
             warnings.append(
                 "\(document.copilotChatsDroppedOnLoad) copilot chats could not be read and were dropped")
+        }
+        if document.referenceDroppedOnLoad {
+            warnings.append(
+                "the reference entry could not be read and was dropped — import it again with reference.import")
         }
         return warnings
     }
@@ -5307,6 +5682,18 @@ public final class ProjectStore {
             .appendingPathComponent("Generations", isDirectory: true)
     }
 
+    /// Default home for imported reference audio (m22-g) — the Generations
+    /// sibling under Application Support (design §3.3).
+    static func defaultReferenceImportsDirectory() -> URL {
+        let base = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return base
+            .appendingPathComponent("DAWPro", isDirectory: true)
+            .appendingPathComponent("References", isDirectory: true)
+    }
+
     /// Readable reason from any error (LocalizedError message when present).
     private static func reason(_ error: any Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -5338,7 +5725,8 @@ public final class ProjectStore {
             redoLabel: journal.redoLabel,
             midiInputs: engine?.availableMIDIInputs(),
             midiEventCount: engine?.midiEventCount(),
-            engineNotices: engineNotices
+            engineNotices: engineNotices,
+            reference: reference
         )
     }
 

@@ -4,18 +4,24 @@ import DAWCore
 
 /// Grid snap resolution for the arrange clip editor (M5 i-d), expressed as a
 /// beat division. `bar` respects the project time signature (`beatsPerBar`);
-/// `beat` = 1 beat, `half` = 1/2 beat, `quarter` = 1/4 beat, `off` disables
-/// snapping. Distinct from the piano roll's `SnapResolution` (which hard-codes a
-/// 4-beat bar and names fine grids musically): the clip surface snaps clip
-/// MOVE / TRIM / SPLIT to a beat grid that follows the meter, so a 3/4 session
-/// snaps bars every 3 beats. Labels are beginner-first for the coarse divisions
-/// and plain fractions for the fine ones (docs/DESIGN-LANGUAGE.md rule 6).
+/// `beat` = 1 beat, `half` = 1/2 beat, `quarter` = 1/4 beat, `eighth` = 1/8
+/// beat, `sixteenth` = 1/16 beat, `off` disables snapping. The two finest
+/// divisions (m21-d) let an arrange trim reach down toward the store's 1/32-beat
+/// trim floor (`ProjectStore.minClipLengthBeats`) so odd AI-authored clip
+/// lengths are reachable by hand. Distinct from the piano roll's
+/// `SnapResolution` (which hard-codes a 4-beat bar and names fine grids
+/// musically): the clip surface snaps clip MOVE / TRIM / SPLIT to a beat grid
+/// that follows the meter, so a 3/4 session snaps bars every 3 beats. Labels
+/// are beginner-first for the coarse divisions and plain BEAT fractions for the
+/// fine ones (docs/DESIGN-LANGUAGE.md rule 6).
 public enum ClipSnap: String, CaseIterable, Sendable, Equatable {
     case off
     case bar
     case beat
     case half
     case quarter
+    case eighth
+    case sixteenth
 
     /// Grid size in beats for the given meter, or nil when snapping is off. Only
     /// `bar` depends on the time signature; the finer divisions are meter-agnostic.
@@ -26,6 +32,8 @@ public enum ClipSnap: String, CaseIterable, Sendable, Equatable {
         case .beat: return 1
         case .half: return 0.5
         case .quarter: return 0.25
+        case .eighth: return 0.125
+        case .sixteenth: return 0.0625
         }
     }
 
@@ -37,6 +45,8 @@ public enum ClipSnap: String, CaseIterable, Sendable, Equatable {
         case .beat: return "Beat"
         case .half: return "1/2"
         case .quarter: return "1/4"
+        case .eighth: return "1/8"
+        case .sixteenth: return "1/16"
         }
     }
 
@@ -50,8 +60,9 @@ public enum ClipSnap: String, CaseIterable, Sendable, Equatable {
     /// Meter-map-aware snap (m12-d, design rows 62–67). `bar` follows the
     /// accumulated meter — across a time-signature change the bar grid is not
     /// uniform, so it routes through `MeterMap.nearestBarline`; the finer
-    /// divisions (`beat`/`half`/`quarter`) are meter-agnostic (a beat is a
-    /// quarter-note everywhere) and fall through to the uniform math. Reproduces
+    /// divisions (`beat`/`half`/`quarter`/`eighth`/`sixteenth`) are
+    /// meter-agnostic (a beat is a quarter-note everywhere) and fall through to
+    /// the uniform math. Reproduces
     /// `snap(beat:beatsPerBar:)` exactly for a trivial single-meter map, so
     /// arrange surfaces adopt it without changing single-meter behavior.
     public func snap(beat: Double, meterMap: MeterMap) -> Double {

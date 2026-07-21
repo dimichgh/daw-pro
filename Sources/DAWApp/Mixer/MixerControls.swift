@@ -283,6 +283,13 @@ struct InsertRow: View {
     /// slider glyph makes the affordance discoverable (the AU row's
     /// window-button twin). Supplied on tracks, buses, AND the master chain.
     var onOpenEditor: (() -> Void)?
+    /// Non-nil ONLY for the built-in DYNAMICS kinds (compressor/limiter/gate,
+    /// m22-e): the 10 Hz GR poll behind the chip's tiny activity bar —
+    /// `AppModel.gainReductionDb` (the `debug.grSeed` override, else the live
+    /// store tap). The bar renders only while the poll reports (nil poll =
+    /// NO bar — hosted AUs / headless stay visually untouched), and it ticks
+    /// in its own TimelineView so the row never re-renders with it.
+    var gainReduction: (() -> Double?)?
 
     /// Built-in compressor/gate inserts take a sidechain key (m12-g). Hosted AUs
     /// and every other kind do NOT (the store rejects them with a teaching
@@ -310,6 +317,13 @@ struct InsertRow: View {
                     .lineLimit(1)
                     .strikethrough(effect.isBypassed, color: DAWTheme.textDim)
                 Spacer(minLength: 0)
+                // The GR activity bar (m22-e): dynamics inserts only, seated
+                // right of the soft name (which truncates first — the m10-i
+                // soft-name rule) so the row's height and chip anatomy stay
+                // untouched. Draws nothing while the effect isn't reporting.
+                if let gainReduction {
+                    GainReductionMiniBar(kind: effect.kind, gainReduction: gainReduction)
+                }
                 if let onOpenWindow {
                     PluginWindowButton(action: onOpenWindow)
                         .help("Open the effect plugin window")

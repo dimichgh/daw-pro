@@ -20,16 +20,102 @@ public struct LoudnessMeasurement: Codable, Sendable, Equatable {
     /// Max 3.0 s window loudness, hop 0.1 s (EBU 3341 short-term), LUFS.
     /// nil = shorter than 3 s or zero-energy throughout.
     public var maxShortTermLufs: Double?
+    /// EBU Tech 3342 loudness range (LRA), LU (m22-c, additive): the spread
+    /// (95th − 10th percentile) of the gated short-term loudness
+    /// distribution — absolute gate −70 LUFS, then a relative gate 20 LU
+    /// below the absolute-gated energy mean. nil = no short-term window
+    /// survived the gates (program shorter than 3 s, or everything at/below
+    /// −70 LUFS).
+    public var loudnessRangeLu: Double?
 
     public init(integratedLufs: Double? = nil,
                 truePeakDbtp: Double? = nil,
                 maxMomentaryLufs: Double? = nil,
-                maxShortTermLufs: Double? = nil) {
+                maxShortTermLufs: Double? = nil,
+                loudnessRangeLu: Double? = nil) {
         self.integratedLufs = integratedLufs
         self.truePeakDbtp = truePeakDbtp
         self.maxMomentaryLufs = maxMomentaryLufs
         self.maxShortTermLufs = maxShortTermLufs
+        self.loudnessRangeLu = loudnessRangeLu
     }
+}
+
+/// One live master-bus loudness snapshot (m22-c): the streaming BS.1770-4 /
+/// EBU 3341 + 3342 state of everything the master tap has fed the analyzer
+/// since the last reset. Codable IS the wire shape (`mixer.liveLoudness`
+/// carries it verbatim; wire-never-drifts; synthesized Codable omits nil
+/// optionals). nil = NO EVIDENCE — never a fabricated 0 (JSON has no −inf):
+/// momentary needs 400 ms of audio, short-term 3 s, integrated ≥ 1 block
+/// above the −70 LUFS absolute gate, LRA ≥ 1 gated short-term window, and
+/// the peak/crest/DC trio any non-silent signal. Signal below −200 dB
+/// (beyond any audio path's physical floor) is float noise — a live
+/// engine's decaying denormal tails, not program — and also reads as nil
+/// rather than a "−3140 LUFS" absurdity. Agents must null-check.
+///
+/// RESET SEMANTICS (transport-independent by design): the running
+/// integrated / LRA / maxima / true peak / DC / crest accumulate across
+/// transport stop/start — pausing playback does NOT restart the program,
+/// exactly like a hardware loudness meter left running (only fed samples
+/// count; `secondsAnalyzed` is audio time, not wall clock). The program
+/// starts over on `mixer.liveLoudness {reset:true}` or an engine
+/// teardown/rebuild (project close, device change).
+public struct LiveLoudnessSnapshot: Codable, Sendable, Equatable {
+    /// EBU 3341 momentary loudness — the CURRENT (most recent) 400 ms
+    /// block, LUFS, refreshed every 100 ms hop.
+    public var momentaryLufs: Double?
+    /// EBU 3341 short-term loudness — the CURRENT 3 s window, LUFS.
+    public var shortTermLufs: Double?
+    /// Loudest momentary block since reset, LUFS (ungated, the offline
+    /// `maxMomentaryLufs` semantics).
+    public var maxMomentaryLufs: Double?
+    /// Loudest short-term window since reset, LUFS.
+    public var maxShortTermLufs: Double?
+    /// Running BS.1770-4 gated integrated loudness since reset, LUFS —
+    /// re-gated over ALL blocks at every update, not an approximation.
+    public var integratedLufs: Double?
+    /// Running EBU 3342 loudness range since reset, LU. Statistically thin
+    /// below ~1 min of program — read alongside `secondsAnalyzed`.
+    public var loudnessRangeLu: Double?
+    /// Running 4× oversampled true peak since reset, dBTP (BS.1770-4
+    /// Annex 2, the same interpolator as the offline measurement).
+    public var truePeakDbtp: Double?
+    /// Mean sample value since reset of the channel with the largest DC
+    /// magnitude, signed linear (−1…1). ≈ 0 for healthy audio; a sustained
+    /// offset wastes headroom and thumps on edits.
+    public var dcOffset: Double?
+    /// Sample-peak-to-RMS crest factor since reset, dB (RAW sample peak
+    /// over whole-program RMS — the conventional crest definition, NOT true
+    /// peak). Low single digits = heavily limited; ~12–20 dB = dynamic.
+    public var crestFactorDb: Double?
+    /// Audio actually analyzed since reset, seconds (fed frames ÷ rate).
+    public var secondsAnalyzed: Double
+
+    public init(momentaryLufs: Double? = nil,
+                shortTermLufs: Double? = nil,
+                maxMomentaryLufs: Double? = nil,
+                maxShortTermLufs: Double? = nil,
+                integratedLufs: Double? = nil,
+                loudnessRangeLu: Double? = nil,
+                truePeakDbtp: Double? = nil,
+                dcOffset: Double? = nil,
+                crestFactorDb: Double? = nil,
+                secondsAnalyzed: Double = 0) {
+        self.momentaryLufs = momentaryLufs
+        self.shortTermLufs = shortTermLufs
+        self.maxMomentaryLufs = maxMomentaryLufs
+        self.maxShortTermLufs = maxShortTermLufs
+        self.integratedLufs = integratedLufs
+        self.loudnessRangeLu = loudnessRangeLu
+        self.truePeakDbtp = truePeakDbtp
+        self.dcOffset = dcOffset
+        self.crestFactorDb = crestFactorDb
+        self.secondsAnalyzed = secondsAnalyzed
+    }
+
+    /// The no-evidence snapshot: fresh analyzer, just-reset, or an engine
+    /// whose tap has not delivered yet.
+    public static let empty = LiveLoudnessSnapshot()
 }
 
 /// The loudness story of one bounce (M5 iv-b, spec §4.2). Codable IS the wire
@@ -110,9 +196,11 @@ public struct LoudnessMeasureResult: Codable, Sendable, Equatable {
 }
 
 /// BS.1770-4 loudness measurement, hand-rolled pure-Swift scalar DSP (M5 iv-a,
-/// spec §3). No Accelerate, no libebur128 — DAWCore stays dependency-free, and
-/// this is offline-only math (~milliseconds for a full song; never on the
-/// render thread).
+/// spec §3). No Accelerate, no libebur128 — DAWCore stays dependency-free.
+/// This enum is the ONE DSP home: the offline `measure(_:)` (~milliseconds
+/// for a full song) and the live `Loudness.Stream` (m22-c, fed from the
+/// master tap queue) share every formula below — neither ever touches the
+/// render thread.
 ///
 /// - K-weighting (§3.1): two cascaded biquads whose coefficients are
 ///   RE-DERIVED at any sample rate from the analog-prototype constants (the
@@ -192,6 +280,8 @@ public enum Loudness {
         }
 
         // Short-term: 3.0 s windows = 30 hops, hop 0.1 s, same energy math.
+        // The per-window weighted mean squares are collected so LRA (EBU
+        // 3342, m22-c) reads the SAME series the short-term maximum does.
         let hopsPerShortTerm = 30
         if hopCount >= hopsPerShortTerm {
             let windowFrames = Double(hopsPerShortTerm * hopFrames)
@@ -200,7 +290,12 @@ public enum Loudness {
             for (i, energies) in hopEnergies.enumerated() {
                 for h in 0..<hopsPerShortTerm { channelWindowEnergies[i] += energies[h] }
             }
-            var maxShortTerm = windowLoudness(channelWindowEnergies, windowFrames: windowFrames)
+            var shortTermSeries: [Double] = []
+            shortTermSeries.reserveCapacity(hopCount - hopsPerShortTerm + 1)
+            var windowMeanSquare = windowWeightedMeanSquare(channelWindowEnergies,
+                                                            windowFrames: windowFrames)
+            shortTermSeries.append(windowMeanSquare)
+            var maxShortTerm = loudness(fromWeightedMeanSquare: windowMeanSquare)
             // `hopCount == hopsPerShortTerm` means exactly one window fits
             // (already computed above) and there is nothing left to slide —
             // `1...0` is an invalid Range and must not be constructed.
@@ -209,31 +304,96 @@ public enum Loudness {
                     for (i, energies) in hopEnergies.enumerated() {
                         channelWindowEnergies[i] += energies[k + hopsPerShortTerm - 1] - energies[k - 1]
                     }
-                    let value = windowLoudness(channelWindowEnergies, windowFrames: windowFrames)
+                    windowMeanSquare = windowWeightedMeanSquare(channelWindowEnergies,
+                                                                windowFrames: windowFrames)
+                    shortTermSeries.append(windowMeanSquare)
+                    let value = loudness(fromWeightedMeanSquare: windowMeanSquare)
                     if value > maxShortTerm { maxShortTerm = value }
                 }
             }
             if maxShortTerm.isFinite { result.maxShortTermLufs = maxShortTerm }
-        }
-
-        // Gating (§3.2): absolute −70 LUFS, then relative (mean − 10 LU),
-        // integrated over blocks passing BOTH.
-        let absoluteGateLufs = -70.0
-        let absGated = blockLoudness.indices.filter { blockLoudness[$0] > absoluteGateLufs }
-        if !absGated.isEmpty {
-            let absMean = absGated.reduce(0.0) { $0 + blockWeightedMeanSquare[$1] }
-                / Double(absGated.count)
-            let relativeGateLufs = loudness(fromWeightedMeanSquare: absMean) - 10.0
-            let gated = absGated.filter { blockLoudness[$0] > relativeGateLufs }
-            if !gated.isEmpty {
-                let mean = gated.reduce(0.0) { $0 + blockWeightedMeanSquare[$1] }
-                    / Double(gated.count)
-                let integrated = loudness(fromWeightedMeanSquare: mean)
-                if integrated.isFinite { result.integratedLufs = integrated }
+            if let range = loudnessRange(fromShortTermWeightedMeanSquares: shortTermSeries),
+               range.isFinite {
+                result.loudnessRangeLu = range
             }
         }
 
+        // Gating (§3.2): absolute −70 LUFS, then relative (mean − 10 LU),
+        // integrated over blocks passing BOTH — the ONE shared gating
+        // implementation (`gatedIntegrated`, also driven live by `Stream`).
+        if let integrated = gatedIntegrated(blockLoudness: blockLoudness,
+                                            blockWeightedMeanSquares: blockWeightedMeanSquare) {
+            result.integratedLufs = integrated
+        }
+
         return result
+    }
+
+    // MARK: - Gating (§3.2) + loudness range (EBU 3342)
+
+    /// BS.1770-4 §3.2 gated integration over a 400 ms block series: absolute
+    /// −70 LUFS gate, then a single-pass relative gate 10 LU below the
+    /// absolute-gated ENERGY mean. THE one gating implementation —
+    /// `measure(_:)` (offline) and `Stream` (live, m22-c) both call it, so
+    /// the two can never drift (live-vs-offline convergence is test-pinned
+    /// bit-exact). nil when no block passes both gates.
+    static func gatedIntegrated(blockLoudness: [Double],
+                                blockWeightedMeanSquares: [Double]) -> Double? {
+        let absoluteGateLufs = -70.0
+        let absGated = blockLoudness.indices.filter { blockLoudness[$0] > absoluteGateLufs }
+        guard !absGated.isEmpty else { return nil }
+        let absMean = absGated.reduce(0.0) { $0 + blockWeightedMeanSquares[$1] }
+            / Double(absGated.count)
+        let relativeGateLufs = loudness(fromWeightedMeanSquare: absMean) - 10.0
+        let gated = absGated.filter { blockLoudness[$0] > relativeGateLufs }
+        guard !gated.isEmpty else { return nil }
+        let mean = gated.reduce(0.0) { $0 + blockWeightedMeanSquares[$1] }
+            / Double(gated.count)
+        let integrated = loudness(fromWeightedMeanSquare: mean)
+        return integrated.isFinite ? integrated : nil
+    }
+
+    /// EBU Tech 3342 loudness range from a chronological series of
+    /// short-term (3 s) window weighted mean squares — the
+    /// `windowWeightedMeanSquare` output, the SAME series the short-term
+    /// maximum reads (offline and live feed identical series, so LRA
+    /// converges bit-exactly). Gating per the spec: absolute −70 LUFS on
+    /// the short-term loudness, then a relative gate 20 LU below the
+    /// absolute-gated ENERGY mean; LRA = 95th − 10th percentile of the
+    /// survivors. Percentile estimator: nearest rank on the sorted
+    /// survivors, index = round(p·(n−1)) — the libebur128 convention, exact
+    /// on the flat-plateau fixtures that pin this function. nil when
+    /// nothing survives the gates.
+    static func loudnessRange(fromShortTermWeightedMeanSquares series: [Double]) -> Double? {
+        guard !series.isEmpty else { return nil }
+        let absoluteGateLufs = -70.0
+        var shortTermLoudness: [Double] = []
+        shortTermLoudness.reserveCapacity(series.count)
+        var absSum = 0.0
+        var absCount = 0
+        for meanSquare in series {
+            let value = loudness(fromWeightedMeanSquare: meanSquare)
+            shortTermLoudness.append(value)
+            if value > absoluteGateLufs {
+                absSum += meanSquare
+                absCount += 1
+            }
+        }
+        guard absCount > 0 else { return nil }
+        let relativeGateLufs = loudness(fromWeightedMeanSquare: absSum / Double(absCount)) - 20.0
+        var survivors: [Double] = []
+        survivors.reserveCapacity(absCount)
+        for value in shortTermLoudness
+        where value > absoluteGateLufs && value > relativeGateLufs {
+            survivors.append(value)
+        }
+        guard !survivors.isEmpty else { return nil }
+        survivors.sort()
+        let lastIndex = Double(survivors.count - 1)
+        let low = survivors[Int((0.10 * lastIndex).rounded())]
+        let high = survivors[Int((0.95 * lastIndex).rounded())]
+        let range = high - low
+        return range.isFinite ? range : nil
     }
 
     // MARK: - K-weighting (§3.1)
@@ -322,12 +482,17 @@ public enum Loudness {
         z > 0 ? -0.691 + 10.0 * log10(z) : -.infinity
     }
 
-    private static func windowLoudness(_ channelEnergies: [Double], windowFrames: Double) -> Double {
+    /// Weighted mean square of one 3 s window from per-channel energy sums
+    /// (`loudness(fromWeightedMeanSquare:)` of this IS the old
+    /// `windowLoudness` — split so the LRA series can reuse the identical
+    /// arithmetic; the composition is byte-identical to the pre-split code).
+    private static func windowWeightedMeanSquare(_ channelEnergies: [Double],
+                                                 windowFrames: Double) -> Double {
         var weightedSum = 0.0
         for (i, energy) in channelEnergies.enumerated() {
             weightedSum += channelWeight(i) * (energy / windowFrames)
         }
-        return loudness(fromWeightedMeanSquare: weightedSum)
+        return weightedSum
     }
 
     // MARK: - True peak (§3.3, Annex 2)
@@ -483,5 +648,456 @@ extension Loudness {
     private final class GainHopCell: @unchecked Sendable {
         var audio: RenderedAudio
         init(_ audio: consuming RenderedAudio) { self.audio = audio }
+    }
+}
+
+// MARK: - Live streaming analyzer (m22-c)
+
+extension Loudness {
+    /// Streaming BS.1770-4 / EBU 3341 + 3342 loudness engine: the SAME
+    /// K-weighting, block/window, gating, LRA, and true-peak math as
+    /// `measure(_:)` — literally the same helpers in this file
+    /// (`kWeightingStages`, `channelWeight`, `loudness(fromWeightedMeanSquare:)`,
+    /// `gatedIntegrated`, `loudnessRange`, `interpolatorPhases`) —
+    /// restructured for chunked feeding. Convergence is test-pinned: fed the
+    /// same program (chunked arbitrarily, plus ≥ 31 trailing zero frames so
+    /// the 4× interpolator's tail matches the offline zero-padded edge, on a
+    /// hop-aligned program), integrated / maxima / LRA / true peak equal the
+    /// offline `measure(_:)` to fp-identity.
+    ///
+    /// THREADING (`@unchecked Sendable`): `process*`, `snapshot()`, and
+    /// `reset()` must run on ONE thread at a time — in the engine that is
+    /// AVFAudio's serial tap queue (the MasterMixAnalyzer contract; the
+    /// engine's `LiveLoudnessAnalyzer` wrapper adds the atomic reset
+    /// handshake for the main actor).
+    ///
+    /// MEMORY: the per-sample and per-hop paths touch only preallocated
+    /// state. The block/window history arrays grow by 10 elements/second
+    /// (amortized append, ~1 MB/hour, capacity pre-reserved for an hour) and
+    /// the gating + LRA recompute — the only allocating work — runs at most
+    /// once per 100 ms hop, never per buffer, so the tap queue's ~21 ms
+    /// cadence is never back-pressured. Denormals are left alone on purpose:
+    /// `measure(_:)` does not flush them either (bit-exactness) and Double
+    /// denormal arithmetic carries no penalty on Apple Silicon.
+    ///
+    /// NaN/Inf inputs are sanitized to 0 at the door (a live tap must never
+    /// poison hours of running state); published fields additionally pass
+    /// `isFinite` guards, so the wire never carries NaN/Inf.
+    public final class Stream: @unchecked Sendable {
+
+        /// EBU 3341 geometry, shared with `measure(_:)`: 100 ms hops,
+        /// 4 hops per 400 ms momentary block, 30 per 3 s short-term window.
+        static let hopsPerBlock = 4
+        static let hopsPerShortTerm = 30
+        /// Hop-energy ring capacity per channel: must exceed
+        /// `hopsPerShortTerm` (the sliding window subtracts e[h−30] while
+        /// h is newest). 32 = the next power of two, cheap masking.
+        private static let ringSize = 32
+        /// One hour of 10 Hz history pre-reserved so steady-state appends
+        /// never reallocate inside a session of ordinary length.
+        private static let reservedHistory = 36_000
+
+        public let sampleRate: Double
+        public let channelCount: Int
+
+        private let hopFrames: Int
+        private let blockFrames: Double
+        private let windowFrames: Double
+        private let shelf: Biquad
+        private let highPass: Biquad
+
+        /// Per-channel filter + accumulator state (fixed size, value types).
+        private struct ChannelState {
+            var sx1 = 0.0, sx2 = 0.0, sy1 = 0.0, sy2 = 0.0
+            var hx1 = 0.0, hx2 = 0.0, hy1 = 0.0, hy2 = 0.0
+            var hopAccumulator = 0.0
+            var shortTermWindowSum = 0.0
+            var dcSum = 0.0
+            /// Per-channel so the accumulation order is the channel's own
+            /// sample order regardless of chunking (chunking invariance is
+            /// test-pinned exact); combined across channels only in
+            /// `snapshot()`, in fixed channel order.
+            var sumSquares = 0.0
+        }
+        private var channelStates: [ChannelState]
+        /// Hop-energy history, `channel * ringSize + (hopIndex & 31)`.
+        private var hopEnergyRing: [Double]
+        /// True-peak delay line per channel, DOUBLE-WRITTEN (`2 * ringSize`
+        /// per channel): each sample is stored at `slot` and `slot +
+        /// ringSize`, so `history[slot + k]` for k = 0..<taps is ALWAYS one
+        /// contiguous newest-to-oldest walk — each phase's dot product is a
+        /// sequential ascending-k loop (the exact `truePeakLinear` order)
+        /// with no per-tap wrap math.
+        private var truePeakHistory: [Double]
+        /// Newest-sample slot per channel (0..<ringSize, decrementing).
+        private var truePeakSlot: [Int]
+        /// `interpolatorPhases` flattened to 3 × 32 for the hot loop; tap
+        /// ORDER per phase is preserved so sums match `truePeakLinear`.
+        private let flatPhases: [Double]
+        private let tapsPerPhase: Int
+
+        private var hopFill = 0
+        private var completedHops = 0
+        private var framesSeen = 0
+
+        // Growing 10 Hz history (chronological, exactly measure()'s series).
+        private var blockWeightedMeanSquares: [Double] = []
+        private var blockLoudnessValues: [Double] = []
+        private var shortTermWeightedMeanSquares: [Double] = []
+
+        // Running outputs.
+        private var currentMomentary = -Double.infinity
+        private var currentShortTerm = -Double.infinity
+        private var maxMomentary = -Double.infinity
+        private var maxShortTerm = -Double.infinity
+        private var truePeakAbs = 0.0
+        private var rawPeakAbs = 0.0
+
+        /// Gating + LRA memoization: recomputed in `snapshot()` only when a
+        /// new block/window landed since the last recompute (≤ 10 Hz).
+        private var gatedDirty = false
+        private var cachedIntegrated: Double?
+        private var cachedRange: Double?
+
+        /// `sampleRate`/`channelCount` degenerate inputs fall back to
+        /// 48 kHz stereo — a live analyzer must never trap on a broken
+        /// format (the MasterMixAnalyzer convention).
+        public init(sampleRate: Double, channelCount: Int) {
+            let rate = sampleRate > 0 ? sampleRate : 48_000
+            self.sampleRate = rate
+            self.channelCount = max(1, channelCount)
+            self.hopFrames = max(1, Int((0.1 * rate).rounded()))
+            self.blockFrames = Double(Stream.hopsPerBlock * hopFrames)
+            self.windowFrames = Double(Stream.hopsPerShortTerm * hopFrames)
+            let stages = Loudness.kWeightingStages(sampleRate: rate)
+            self.shelf = stages.shelf
+            self.highPass = stages.highPass
+            self.channelStates = [ChannelState](repeating: ChannelState(),
+                                                count: self.channelCount)
+            self.hopEnergyRing = [Double](repeating: 0,
+                                          count: self.channelCount * Stream.ringSize)
+            self.truePeakHistory = [Double](repeating: 0,
+                                            count: self.channelCount * 2 * Stream.ringSize)
+            self.truePeakSlot = [Int](repeating: 0, count: self.channelCount)
+            let phases = Loudness.interpolatorPhases
+            self.tapsPerPhase = phases[0].count
+            self.flatPhases = phases.flatMap { $0 }
+            blockWeightedMeanSquares.reserveCapacity(Stream.reservedHistory)
+            blockLoudnessValues.reserveCapacity(Stream.reservedHistory)
+            shortTermWeightedMeanSquares.reserveCapacity(Stream.reservedHistory)
+        }
+
+        // MARK: Feeding
+
+        /// Feed a deinterleaved float buffer (the `floatChannelData` shape).
+        /// Channels beyond `channelCount` are ignored; missing channels read
+        /// as silence. Splits at hop boundaries so block/window/gating
+        /// updates land once per completed 100 ms hop.
+        public func process(channels: UnsafePointer<UnsafeMutablePointer<Float>>,
+                            channelCount bufferChannels: Int,
+                            frameCount: Int) {
+            guard frameCount > 0, bufferChannels > 0 else { return }
+            var offset = 0
+            var remaining = frameCount
+            while remaining > 0 {
+                let take = min(hopFrames - hopFill, remaining)
+                for channel in 0..<channelCount {
+                    if channel < bufferChannels {
+                        processRun(channel: channel,
+                                   samples: channels[channel] + offset,
+                                   count: take)
+                    } else {
+                        processSilentRun(channel: channel, count: take)
+                    }
+                }
+                hopFill += take
+                offset += take
+                remaining -= take
+                framesSeen += take
+                if hopFill == hopFrames {
+                    completeHop()
+                    hopFill = 0
+                }
+            }
+        }
+
+        /// Array convenience for tests / offline feeding. Copies into
+        /// temporary contiguous buffers (allocates — never used on the tap
+        /// path). Frames beyond the shortest channel are dropped.
+        public func process(_ chunk: [[Float]]) {
+            guard !chunk.isEmpty else { return }
+            let frames = chunk.map(\.count).min() ?? 0
+            guard frames > 0 else { return }
+            let pointers = UnsafeMutablePointer<UnsafeMutablePointer<Float>>
+                .allocate(capacity: chunk.count)
+            defer { pointers.deallocate() }
+            for (index, channel) in chunk.enumerated() {
+                let buffer = UnsafeMutablePointer<Float>.allocate(capacity: frames)
+                channel.withUnsafeBufferPointer {
+                    buffer.update(from: $0.baseAddress!, count: frames)
+                }
+                pointers[index] = buffer
+            }
+            defer { for index in 0..<chunk.count { pointers[index].deallocate() } }
+            process(channels: pointers, channelCount: chunk.count, frameCount: frames)
+        }
+
+        /// One channel's samples through K-weighting (hop energy), the 4×
+        /// true-peak interpolator, and the DC/crest accumulators. The exact
+        /// per-sample expressions of `kWeightedHopEnergies` and
+        /// `truePeakLinear`, state carried across chunks.
+        ///
+        /// HOT-LOOP SHAPE IS LOAD-BEARING: raw `UnsafeMutablePointer`
+        /// arithmetic and `while` loops ONLY — no Range iteration, no Array
+        /// subscripts, no per-sample closures. The tap queue runs this in
+        /// DEBUG builds too (the test suite), where `for k in 0..<n` costs
+        /// generic-metadata lookups PER ITERATION; at ~100 ops/sample that
+        /// saturated AVFAudio's RealtimeMessenger queue and deadlocked
+        /// `AVAudioNode` teardown (`sample(1)`-diagnosed). Pointer loads/
+        /// stores and Double arithmetic compile to direct instructions even
+        /// at -Onone. Summation orders are unchanged (bit-exactness with
+        /// `measure(_:)` stays test-pinned).
+        private func processRun(channel: Int, samples: UnsafePointer<Float>, count: Int) {
+            guard count > 0 else { return }
+            var state = channelStates[channel]
+            let historyBase = channel * 2 * Stream.ringSize
+            var slot = truePeakSlot[channel]
+            var localRawPeak = rawPeakAbs
+            var localTruePeak = truePeakAbs
+            let taps = tapsPerPhase
+            let s = shelf
+            let h = highPass
+            flatPhases.withUnsafeBufferPointer { phaseTaps in
+                truePeakHistory.withUnsafeMutableBufferPointer { historyBuffer in
+                    let g = phaseTaps.baseAddress!
+                    let history = historyBuffer.baseAddress! + historyBase
+                    // Filter/accumulator state in locals for the whole run.
+                    var sx1 = state.sx1, sx2 = state.sx2, sy1 = state.sy1, sy2 = state.sy2
+                    var hx1 = state.hx1, hx2 = state.hx2, hy1 = state.hy1, hy2 = state.hy2
+                    var hopAccumulator = state.hopAccumulator
+                    var dcSum = state.dcSum
+                    var sumSquares = state.sumSquares
+                    var frame = 0
+                    while frame < count {
+                        let raw = Double(samples[frame])
+                        let x = raw.isFinite ? raw : 0
+
+                        // K-weighting cascade (kWeightedHopEnergies verbatim).
+                        let y = s.b0 * x + s.b1 * sx1 + s.b2 * sx2
+                            - s.a1 * sy1 - s.a2 * sy2
+                        sx2 = sx1; sx1 = x
+                        sy2 = sy1; sy1 = y
+                        let z = h.b0 * y + h.b1 * hx1 + h.b2 * hx2
+                            - h.a1 * hy1 - h.a2 * hy2
+                        hx2 = hx1; hx1 = y
+                        hy2 = hy1; hy1 = z
+                        hopAccumulator += z * z
+
+                        // DC + crest accumulators (raw domain).
+                        dcSum += x
+                        sumSquares += x * x
+                        let magnitude = abs(x)
+                        if magnitude > localRawPeak { localRawPeak = magnitude }
+                        if magnitude > localTruePeak { localTruePeak = magnitude }
+
+                        // 4× true peak: newest sample into the double-write
+                        // delay line, then each phase's 32-tap dot product as
+                        // ONE contiguous ascending-k walk — the SAME
+                        // newest-to-oldest order truePeakLinear uses (history
+                        // zeros reproduce the offline zero-padded edge).
+                        slot = slot == 0 ? Stream.ringSize - 1 : slot - 1
+                        history[slot] = x
+                        history[slot + Stream.ringSize] = x
+                        let window = history + slot
+                        var phase = 0
+                        while phase < 3 {
+                            var acc = 0.0
+                            let phaseBase = g + phase * taps
+                            var k = 0
+                            while k < taps {
+                                acc += phaseBase[k] * window[k]
+                                k += 1
+                            }
+                            let interpolated = abs(acc)
+                            if interpolated > localTruePeak { localTruePeak = interpolated }
+                            phase += 1
+                        }
+                        frame += 1
+                    }
+                    state.sx1 = sx1; state.sx2 = sx2; state.sy1 = sy1; state.sy2 = sy2
+                    state.hx1 = hx1; state.hx2 = hx2; state.hy1 = hy1; state.hy2 = hy2
+                    state.hopAccumulator = hopAccumulator
+                    state.dcSum = dcSum
+                    state.sumSquares = sumSquares
+                }
+            }
+            channelStates[channel] = state
+            truePeakSlot[channel] = slot
+            rawPeakAbs = localRawPeak
+            truePeakAbs = localTruePeak
+        }
+
+        /// A missing channel reads as digital silence — same state advance
+        /// (filter/interpolator tails ring out), zero input.
+        private func processSilentRun(channel: Int, count: Int) {
+            var zeros = [Float](repeating: 0, count: count)
+            zeros.withUnsafeMutableBufferPointer { buffer in
+                processRun(channel: channel, samples: buffer.baseAddress!, count: count)
+            }
+        }
+
+        /// A 100 ms hop just completed on every channel: push energies into
+        /// the ring, slide the short-term window, and land the new momentary
+        /// block / short-term window exactly as `measure(_:)` does.
+        private func completeHop() {
+            let hopIndex = completedHops
+            completedHops += 1
+            let hops = completedHops
+            let mask = Stream.ringSize - 1
+
+            for channel in 0..<channelCount {
+                let energy = channelStates[channel].hopAccumulator
+                channelStates[channel].hopAccumulator = 0
+                let ringBase = channel * Stream.ringSize
+                hopEnergyRing[ringBase + (hopIndex & mask)] = energy
+                if hops <= Stream.hopsPerShortTerm {
+                    // measure()'s initial window: += e[h] in hop order.
+                    channelStates[channel].shortTermWindowSum += energy
+                } else {
+                    // measure()'s slide: += (e[k+29] − e[k−1]), one expression.
+                    channelStates[channel].shortTermWindowSum += energy
+                        - hopEnergyRing[ringBase + ((hopIndex - Stream.hopsPerShortTerm) & mask)]
+                }
+            }
+
+            if hops >= Stream.hopsPerBlock {
+                let blockStart = hops - Stream.hopsPerBlock
+                var weightedSum = 0.0
+                for channel in 0..<channelCount {
+                    let ringBase = channel * Stream.ringSize
+                    // Left-to-right sum of 4 hops — measure()'s expression.
+                    let energy = hopEnergyRing[ringBase + (blockStart & mask)]
+                        + hopEnergyRing[ringBase + ((blockStart + 1) & mask)]
+                        + hopEnergyRing[ringBase + ((blockStart + 2) & mask)]
+                        + hopEnergyRing[ringBase + ((blockStart + 3) & mask)]
+                    weightedSum += Loudness.channelWeight(channel) * (energy / blockFrames)
+                }
+                let blockValue = Loudness.loudness(fromWeightedMeanSquare: weightedSum)
+                blockWeightedMeanSquares.append(weightedSum)
+                blockLoudnessValues.append(blockValue)
+                currentMomentary = blockValue
+                if blockValue > maxMomentary { maxMomentary = blockValue }
+                gatedDirty = true
+            }
+
+            if hops >= Stream.hopsPerShortTerm {
+                var weightedSum = 0.0
+                for channel in 0..<channelCount {
+                    // windowWeightedMeanSquare's expression, channel order.
+                    weightedSum += Loudness.channelWeight(channel)
+                        * (channelStates[channel].shortTermWindowSum / windowFrames)
+                }
+                let windowValue = Loudness.loudness(fromWeightedMeanSquare: weightedSum)
+                shortTermWeightedMeanSquares.append(weightedSum)
+                currentShortTerm = windowValue
+                if windowValue > maxShortTerm { maxShortTerm = windowValue }
+                gatedDirty = true
+            }
+        }
+
+        // MARK: Snapshot / reset
+
+        /// Wire floor for the ungated EBU 3341 fields + true peak: below
+        /// −200 dB nothing is audio — real paths bottom out ≈ −150 dB
+        /// (24-bit dither ≈ −147 LUFS), while a live engine's decaying
+        /// denormal tails land around −600…−3000 dB and would otherwise
+        /// ride the wire as finite "−3140 LUFS" absurdities (the offline
+        /// gates at −70 LUFS already stop them for integrated/LRA). Below
+        /// the floor = float noise = no evidence = nil.
+        private static let noiseFloorDb = -200.0
+        /// `10^(noiseFloorDb / 20)` — the same floor as an amplitude.
+        private static let noiseFloorAmplitude = 1e-10
+
+        /// The current running measurement. Recomputes gated integrated +
+        /// LRA only when a new block/window landed (≤ 10 Hz); every field
+        /// passes an `isFinite` guard AND the −200 dB float-noise floor —
+        /// nil means no evidence, never NaN, never a denormal-tail reading.
+        public func snapshot() -> LiveLoudnessSnapshot {
+            if gatedDirty {
+                cachedIntegrated = Loudness.gatedIntegrated(
+                    blockLoudness: blockLoudnessValues,
+                    blockWeightedMeanSquares: blockWeightedMeanSquares)
+                cachedRange = Loudness.loudnessRange(
+                    fromShortTermWeightedMeanSquares: shortTermWeightedMeanSquares)
+                gatedDirty = false
+            }
+            var snap = LiveLoudnessSnapshot(secondsAnalyzed: Double(framesSeen) / sampleRate)
+            if currentMomentary.isFinite, currentMomentary > Stream.noiseFloorDb {
+                snap.momentaryLufs = currentMomentary
+            }
+            if currentShortTerm.isFinite, currentShortTerm > Stream.noiseFloorDb {
+                snap.shortTermLufs = currentShortTerm
+            }
+            if maxMomentary.isFinite, maxMomentary > Stream.noiseFloorDb {
+                snap.maxMomentaryLufs = maxMomentary
+            }
+            if maxShortTerm.isFinite, maxShortTerm > Stream.noiseFloorDb {
+                snap.maxShortTermLufs = maxShortTerm
+            }
+            if let integrated = cachedIntegrated, integrated.isFinite {
+                snap.integratedLufs = integrated
+            }
+            if let range = cachedRange, range.isFinite {
+                snap.loudnessRangeLu = range
+            }
+            if truePeakAbs > Stream.noiseFloorAmplitude {
+                let dbtp = 20.0 * log10(truePeakAbs)
+                if dbtp.isFinite { snap.truePeakDbtp = dbtp }
+            }
+            if framesSeen > 0 {
+                var worstDC = 0.0
+                for channel in 0..<channelCount {
+                    let mean = channelStates[channel].dcSum / Double(framesSeen)
+                    if abs(mean) > abs(worstDC) { worstDC = mean }
+                }
+                if worstDC.isFinite { snap.dcOffset = worstDC }
+                var sumSquares = 0.0
+                for channel in 0..<channelCount {
+                    sumSquares += channelStates[channel].sumSquares
+                }
+                if rawPeakAbs > Stream.noiseFloorAmplitude, sumSquares > 0 {
+                    let rms = (sumSquares / Double(framesSeen * channelCount)).squareRoot()
+                    if rms > 0 {
+                        let crest = 20.0 * log10(rawPeakAbs / rms)
+                        if crest.isFinite { snap.crestFactorDb = crest }
+                    }
+                }
+            }
+            return snap
+        }
+
+        /// Back to the fresh state: the next snapshot is `.empty` until new
+        /// audio lands. Same single-thread contract as `process`.
+        public func reset() {
+            for channel in 0..<channelCount { channelStates[channel] = ChannelState() }
+            for index in hopEnergyRing.indices { hopEnergyRing[index] = 0 }
+            for index in truePeakHistory.indices { truePeakHistory[index] = 0 }
+            for channel in 0..<channelCount { truePeakSlot[channel] = 0 }
+            hopFill = 0
+            completedHops = 0
+            framesSeen = 0
+            blockWeightedMeanSquares.removeAll(keepingCapacity: true)
+            blockLoudnessValues.removeAll(keepingCapacity: true)
+            shortTermWeightedMeanSquares.removeAll(keepingCapacity: true)
+            currentMomentary = -.infinity
+            currentShortTerm = -.infinity
+            maxMomentary = -.infinity
+            maxShortTerm = -.infinity
+            truePeakAbs = 0
+            rawPeakAbs = 0
+            gatedDirty = false
+            cachedIntegrated = nil
+            cachedRange = nil
+        }
     }
 }

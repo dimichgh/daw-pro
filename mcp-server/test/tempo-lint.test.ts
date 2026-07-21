@@ -27,13 +27,22 @@
  *     frame-dt fallback: display refresh, not tempo.
  *
  * ALLOWLIST (every entry carries its removal phase; shrink-only):
- *   · Sources/DAWCore/TempoMap.swift — the sanctioned home (permanent, and
- *     now the LAST entry — the lint's end state per design §10 condition 2).
+ *   · Sources/DAWCore/TempoMap.swift — the sanctioned home for musical-time
+ *     CONVERSION (permanent — the lint's end state per design §10
+ *     condition 2 for project-timeline math; the estimator entry below is
+ *     measurement, not conversion).
  *     Since m12-c this includes `framesPerBeat(atBeat:sampleRate:)`, the
  *     verbatim-op-order `rate * 60.0 / bpm` idiom ClipFadeBake's fast path
  *     uses (the former ClipFadeBake.swift entry died in Phase B as planned:
  *     fade baking is now piecewise across segment boundaries, and its
  *     constant-tempo fast path borrows the arithmetic from the map itself).
+ *   · Sources/DAWEngine/Analysis/TempoEstimator.swift — m21-e tempo
+ *     MEASUREMENT (permanent by nature): `envelopeRate * 60.0 / bpm`
+ *     converts a candidate-BPM hypothesis to an ACF lag in onset-envelope
+ *     bins while ESTIMATING the tempo of imported audio. The estimate is
+ *     the input a project TempoMap might later be set from, so there is no
+ *     map to route through — TempoMap describes the project timeline, not
+ *     the audio being measured (design-clip-analyze-audio.md §4).
  *   · (m12-d Phase D removed the Sources/DAWApp/ContentView.swift entry — its
  *     waveform `60.0 / tempoBPM` now routes through
  *     `TempoMap.secondsPerBeat(atBeat:)`, so no UI consumer holds raw tempo
@@ -84,7 +93,9 @@ function swiftFilesUnder(dir: string): string[] {
 // The scan. Allowlist paths are repo-relative (posix separators).
 
 const ALLOWLIST = new Set<string>([
-  "Sources/DAWCore/TempoMap.swift", // the one sanctioned home (permanent)
+  "Sources/DAWCore/TempoMap.swift", // the one sanctioned CONVERSION home (permanent)
+  // m21-e tempo MEASUREMENT (BPM hypothesis -> ACF lag) — see header block.
+  "Sources/DAWEngine/Analysis/TempoEstimator.swift",
 ]);
 
 /** Tempo-adjacent identifier: any identifier/member/subscript chain

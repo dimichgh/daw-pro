@@ -48,6 +48,13 @@ final class FakeEngine: AudioEngineControlling {
         permissionRequests += 1
     }
 
+    /// m22-c: live loudness support, so the every-command routing loop can
+    /// exercise `mixer.liveLoudness` inline (the protocol DEFAULT is nil →
+    /// engineUnavailable — that teaching path is pinned in
+    /// LiveLoudnessCommandTests). The empty snapshot is the honest
+    /// "nothing analyzed yet" answer a real idle engine gives.
+    func liveLoudness(reset: Bool) -> LiveLoudnessSnapshot? { .empty }
+
     /// Configurable device list, mirroring CoreAudio enumeration; the real
     /// engine's unknown-uid contract (exact message via ProjectError) applies.
     var inputDevices: [AudioInputDevice] = []
@@ -1341,6 +1348,9 @@ struct CommandRouterTests {
         let renamableMarkerID = store.addMarker(name: "Rn", beat: 4).id.uuidString
         let movableMarkerID = store.addMarker(name: "Mv", beat: 8).id.uuidString
         let paramsByCommand: [String: [String: JSONValue]] = [
+            // m22-g P2: OFF is the idempotent never-refusing side of the A/B
+            // monitor (design §5.6) — a legitimate headless route.
+            "reference.setMonitor": ["on": .bool(false)],
             "transport.seek": ["beats": .number(0)],
             "marker.add": ["beat": .number(0)],
             "marker.remove": ["markerId": .string(removableMarkerID)],
@@ -1482,6 +1492,21 @@ struct CommandRouterTests {
                 // DAWCore ControllerLaneStoreTests.
                 "clip.setControllerLane", "clip.removeControllerLane",
                 "clip.setFades",
+                // clip.fitToContent (m21-d) needs a clip id like the other
+                // per-clip edits; proven by ClipFitToContentCommandTests
+                // (round-trips + changed flag + error taxonomy) and DAWCore
+                // FitClipToContentTests.
+                "clip.fitToContent",
+                // clip.analyzeAudio (m21-e) needs a clip id like the other
+                // per-clip reads; the shared fixture's 2 s @ 120 clip clears
+                // the >= 1 s window floor but this bare FakeEngine doesn't
+                // override analyzeAudioContent, so it would legitimately hit
+                // the AudioEngineControlling default's engineUnavailable
+                // throw here. Proven by ClipAnalyzeAudioCommandTests (happy
+                // path shape, MIDI rejection, unknown clip/key, and the
+                // engine-default-throw path) and DAWCore
+                // AudioContentAnalyzerTests.
+                "clip.analyzeAudio",
                 // clip.crossfade (m11-d) needs TWO adjacent audio clips with source
                 // material on each side of the seam — a fixture this shared, single-
                 // clip project doesn't have. Proven by ClipCrossfadeCommandTests
@@ -1571,6 +1596,16 @@ struct CommandRouterTests {
                 // plugin.listOpenUIs is NOT excluded: it answers ok with
                 // {available:false} when the seam is nil.
                 "plugin.openUI", "plugin.closeUI",
+                // au.describeParams / au.setParam (hosted-AU parameter
+                // surface) need a LIVE `.ready` hosted Audio Unit behind the
+                // target — this bare router's FakeEngine hosts none (the
+                // protocol defaults answer "no hosted instance"), so both
+                // legitimately return the actionable status-naming error
+                // here. Proven by AUParamCommandTests (full wire taxonomy +
+                // shapes over a parameter-surface fake) and DAWEngine's
+                // AUParameterSurfaceTests (real AUDelay/DLSMusicDevice trees,
+                // audible-truth render).
+                "au.describeParams", "au.setParam",
                 // vc.convertVocals/vc.trainVoice (m10-p-4) hit a REAL
                 // VoiceConversionClient talking to a REAL (almost certainly
                 // not-running-in-CI, and stopped again by the vc.sidecarStop
@@ -1598,7 +1633,30 @@ struct CommandRouterTests {
                 // VoiceConverting) and AIServicesTests/
                 // VoiceConversionClientTests (listVoices against a stub
                 // facade).
-                "vc.listVoices"].contains(command) {
+                "vc.listVoices",
+                // reference.import (m22-g) copies a real file into the central
+                // References home (~/Library/Application Support/DAWPro/
+                // References) — the instrument.importSoundBank real-FS-side-
+                // effect exclusion, verbatim. reference.remove/reference.analyze
+                // need a slot that only exists after an import this loop
+                // deliberately doesn't run (and analyze additionally needs the
+                // analyzeReferenceFile capability this bare FakeEngine doesn't
+                // override — the clip.analyzeAudio rationale). All three proven
+                // by ReferenceCommandTests with injected temp dirs + a
+                // reference-capable fake. reference.status is read-only, never
+                // throws, and stays IN the loop.
+                "reference.import", "reference.remove",
+                "reference.analyze",
+                // reference.setOffset/setTrim/compare (m22-g P2) need a slot
+                // that only exists after the import this loop deliberately
+                // doesn't run (compare additionally needs a live loudness
+                // meter this bare FakeEngine doesn't provide — the
+                // mixer.liveLoudness rationale). All three proven by
+                // ReferenceMonitorCommandTests with injected temp dirs + a
+                // monitor-capable fake. reference.setMonitor stays IN the
+                // loop with {on:false} — the idempotent never-refusing OFF.
+                "reference.setOffset", "reference.setTrim",
+                "reference.compare"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

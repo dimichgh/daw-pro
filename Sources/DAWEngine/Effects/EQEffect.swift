@@ -3,9 +3,17 @@ import CAtomics
 import DAWCore
 import Foundation
 
-/// Built-in 4-band parametric EQ (M4 iii): RBJ cookbook biquads — low shelf,
-/// two peaking bands, high shelf — in series, transposed direct form II with
-/// Float64 accumulators per channel for stability.
+/// Built-in parametric EQ (M4 iii; HP/LP + shelf Q + per-band bypass are
+/// m22-a): RBJ cookbook biquads — optional high-pass, low shelf, two peaking
+/// bands, high shelf, optional low-pass — in series, transposed direct form II
+/// with Float64 accumulators per channel for stability.
+///
+/// Band slots (8 biquad sections, fixed layout): 0-1 the high-pass cascade,
+/// 2 low shelf, 3 peak 1, 4 peak 2, 5 high shelf, 6-7 the low-pass cascade.
+/// HP/LP topology: 12 dB/oct = ONE 2nd-order Butterworth section
+/// (Q = 1/√2); 24 dB/oct = TWO cascaded 2nd-order sections at the 4th-order
+/// Butterworth Qs 1/(2cos(π/8)) ≈ 0.5412 and 1/(2cos(3π/8)) ≈ 1.3066 — flat
+/// passband, −3 dB at the corner at either slope.
 ///
 /// Parameter updates follow the GainEffect atomic-POD-publish convention:
 /// `apply(params:)` publishes an immutable snapshot through a heap
@@ -13,17 +21,26 @@ import Foundation
 /// biquad coefficients ONLY when the snapshot generation changes (never per
 /// sample or per quantum otherwise).
 ///
-/// Neutrality: a band whose gain is EXACTLY 0 dB is skipped entirely (its
-/// state is not even advanced), so an all-neutral EQ is bit-exact transparent
-/// (`eqNeutralSettingsAreTransparent` pins max |wet − dry| == 0).
+/// Neutrality: a band whose gain is EXACTLY 0 dB, a band whose `*Enabled` is
+/// false, and an HP/LP with a nil corner are skipped entirely (their state is
+/// not even advanced), so an all-neutral EQ is bit-exact transparent
+/// (`eqNeutralSettingsAreTransparent` pins max |wet − dry| == 0) and a
+/// bypassed band is coefficient-identical to the band being absent. A nil
+/// shelf Q keeps the ORIGINAL S = 1 alpha expression verbatim, so legacy
+/// params render bit-identical to the pre-m22-a build (the EQv2 null pin).
 ///
 /// Render-path contract: `process()`/`reset()` allocate nothing, take no
 /// locks, log nothing, touch no ObjC. Coefficient math (sin/cos/pow) runs
 /// only on param adoption — pure libm, no allocation. Denormals in the
 /// Float64 state are flushed to zero once per process call.
 final class EQEffect: EffectRendering, @unchecked Sendable {
-    private static let bandCount = 4
+    private static let bandCount = 8
     private static let maxChannels = 8
+
+    // Slot layout + Butterworth constants + the RBJ coefficient math live in
+    // DAWCore's `EQFilterResponse` (m22-b Phase 1): ONE source of truth
+    // shared with the curve editor, expression-verbatim so renders stay
+    // bit-identical (the EQv2 null pin gates it).
 
     /// Immutable box crossing main actor → render thread. POD payload.
     private final class ParamSnapshot {
@@ -109,56 +126,6 @@ final class EQEffect: EffectRendering, @unchecked Sendable {
         for index in state.indices { state[index] = 0 }
     }
 
-    /// RBJ Audio EQ Cookbook coefficients for one band, normalized by a0 and
-    /// written into `coeffs` at `band * 5`. `kind`: 0 = low shelf, 1 = peaking,
-    /// 2 = high shelf. Runs on the render thread ONLY on generation change —
-    /// pure math, no allocation.
-    private func setBand(_ band: Int, kind: Int, freq: Double, gainDb: Double, q: Double) {
-        bandActive[band] = gainDb != 0
-        guard bandActive[band] else { return }
-        let a = pow(10.0, gainDb / 40.0)
-        let f = min(freq, sampleRate * 0.49)
-        let w0 = 2.0 * Double.pi * f / sampleRate
-        let cosW0 = cos(w0)
-        let sinW0 = sin(w0)
-        var b0 = 1.0, b1 = 0.0, b2 = 0.0, a0 = 1.0, a1 = 0.0, a2 = 0.0
-        switch kind {
-        case 1:  // peaking, alpha from Q
-            let alpha = sinW0 / (2.0 * q)
-            b0 = 1.0 + alpha * a
-            b1 = -2.0 * cosW0
-            b2 = 1.0 - alpha * a
-            a0 = 1.0 + alpha / a
-            a1 = -2.0 * cosW0
-            a2 = 1.0 - alpha / a
-        default:  // shelves, slope S = 1
-            let alpha = sinW0 / 2.0 * (2.0).squareRoot()
-            let sqrtA = a.squareRoot()
-            let twoSqrtAAlpha = 2.0 * sqrtA * alpha
-            if kind == 0 {  // low shelf
-                b0 = a * ((a + 1.0) - (a - 1.0) * cosW0 + twoSqrtAAlpha)
-                b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cosW0)
-                b2 = a * ((a + 1.0) - (a - 1.0) * cosW0 - twoSqrtAAlpha)
-                a0 = (a + 1.0) + (a - 1.0) * cosW0 + twoSqrtAAlpha
-                a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cosW0)
-                a2 = (a + 1.0) + (a - 1.0) * cosW0 - twoSqrtAAlpha
-            } else {  // high shelf
-                b0 = a * ((a + 1.0) + (a - 1.0) * cosW0 + twoSqrtAAlpha)
-                b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cosW0)
-                b2 = a * ((a + 1.0) + (a - 1.0) * cosW0 - twoSqrtAAlpha)
-                a0 = (a + 1.0) - (a - 1.0) * cosW0 + twoSqrtAAlpha
-                a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cosW0)
-                a2 = (a + 1.0) - (a - 1.0) * cosW0 - twoSqrtAAlpha
-            }
-        }
-        let base = band * 5
-        coeffs[base] = b0 / a0
-        coeffs[base + 1] = b1 / a0
-        coeffs[base + 2] = b2 / a0
-        coeffs[base + 3] = a1 / a0
-        coeffs[base + 4] = a2 / a0
-    }
-
     /// Adopts a newly published main-actor snapshot (borrowed — retire bin
     /// guarantees lifetime). Called at the top of `process()` AND by
     /// `storeAutomatedParam`, so an automation store never loses to a
@@ -174,21 +141,28 @@ final class EQEffect: EffectRendering, @unchecked Sendable {
 
     /// Recomputes all band coefficients from `p` — generation change,
     /// automation stores, and the automation revert route through the SAME
-    /// math (pure libm, no allocation; render-thread safe).
+    /// math (pure libm, no allocation; render-thread safe). The coefficient
+    /// expressions live in DAWCore's `EQFilterResponse` (m22-b: ONE source of
+    /// truth shared with the curve editor); the fill mutates the preallocated
+    /// `coeffs`/`bandActive` in place — nothing is reassigned or allocated.
     private func deriveRenderParams(_ p: EQParams) {
-        setBand(0, kind: 0, freq: p.lowShelfFreq, gainDb: p.lowShelfGainDb, q: 1)
-        setBand(1, kind: 1, freq: p.peak1Freq, gainDb: p.peak1GainDb, q: p.peak1Q)
-        setBand(2, kind: 1, freq: p.peak2Freq, gainDb: p.peak2GainDb, q: p.peak2Q)
-        setBand(3, kind: 2, freq: p.highShelfFreq, gainDb: p.highShelfGainDb, q: 1)
+        EQFilterResponse.fillRenderPlan(params: p, sampleRate: sampleRate,
+                                        coefficients: &coeffs, active: &bandActive)
     }
 
     /// RENDER-THREAD automation store (M4 vii-c). Slot order =
     /// `EffectParamSpec.specs(for: .eq)`: 0 lowShelfFreq, 1 lowShelfGainDb,
     /// 2 peak1Freq, 3 peak1GainDb, 4 peak1Q, 5 peak2Freq, 6 peak2GainDb,
-    /// 7 peak2Q, 8 highShelfFreq, 9 highShelfGainDb. Pokes a preallocated
-    /// params copy and re-derives — no allocation, no locks.
+    /// 7 peak2Q, 8 highShelfFreq, 9 highShelfGainDb, then the m22-a appends:
+    /// 10 highPassFreq, 11 highPassSlopeDbPerOct, 12 highPassEnabled,
+    /// 13 lowShelfQ, 14 lowShelfEnabled, 15 peak1Enabled, 16 peak2Enabled,
+    /// 17 highShelfQ, 18 highShelfEnabled, 19 lowPassFreq,
+    /// 20 lowPassSlopeDbPerOct, 21 lowPassEnabled. Pokes a preallocated
+    /// params copy and re-derives — no allocation, no locks. Slope stores
+    /// snap 12/24 and `*Enabled` stores read ≥ 0.5, matching the store's
+    /// `applyEffectParam` mapping.
     func storeAutomatedParam(slot: Int, value: Double) {
-        guard value.isFinite, (0...9).contains(slot) else { return }
+        guard value.isFinite, (0...21).contains(slot) else { return }
         adoptPendingParams()
         overlay.beginStore()
         switch slot {
@@ -201,7 +175,19 @@ final class EQEffect: EffectRendering, @unchecked Sendable {
         case 6: overlay.effective.peak2GainDb = value
         case 7: overlay.effective.peak2Q = value
         case 8: overlay.effective.highShelfFreq = value
-        default: overlay.effective.highShelfGainDb = value
+        case 9: overlay.effective.highShelfGainDb = value
+        case 10: overlay.effective.highPassFreq = value
+        case 11: overlay.effective.highPassSlopeDbPerOct = EQParams.snapSlope(value)
+        case 12: overlay.effective.highPassEnabled = value >= 0.5
+        case 13: overlay.effective.lowShelfQ = value
+        case 14: overlay.effective.lowShelfEnabled = value >= 0.5
+        case 15: overlay.effective.peak1Enabled = value >= 0.5
+        case 16: overlay.effective.peak2Enabled = value >= 0.5
+        case 17: overlay.effective.highShelfQ = value
+        case 18: overlay.effective.highShelfEnabled = value >= 0.5
+        case 19: overlay.effective.lowPassFreq = value
+        case 20: overlay.effective.lowPassSlopeDbPerOct = EQParams.snapSlope(value)
+        default: overlay.effective.lowPassEnabled = value >= 0.5
         }
         deriveRenderParams(overlay.effective)
     }

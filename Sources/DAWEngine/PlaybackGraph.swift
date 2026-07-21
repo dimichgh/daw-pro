@@ -376,6 +376,54 @@ final class PlaybackGraph {
     /// render "today's shape" against the master insert forever. Production
     /// code never touches it — the insert is unconditional (R1).
     var masterSandwichEnabled = true
+
+    // MARK: Reference monitor lane (m22-g P2, design D3/§5.1)
+
+    /// Live-only A/B monitor lane flag, **DEFAULT FALSE** — only the live
+    /// `AudioEngine` sets it true (in `wireGraphHooks`, before the first
+    /// `ensureMasterSandwich`). `OfflineRenderer` builds its own graphs and
+    /// never touches it, so NO reference node ever exists in an offline
+    /// render: the m12-b anchor SHAs, byte-identical bounce, and
+    /// `Σ stems ≡ mixdown` hold BY CONSTRUCTION, not by filtering
+    /// (default-off is the fail-safe direction).
+    ///
+    /// With the flag TRUE the sandwich grows a post-chain monitor pair:
+    ///
+    ///     masterChainHost ─► mixMonitorGate ─┐
+    ///                        (outputVolume    ├─► monitorSum ─► outputNode
+    ///                         1=mix, 0=ref)   │   (unity sum)
+    ///     referencePlayer ─► referenceGain ───┘
+    ///                        (level-match gain)
+    ///
+    /// The lane is PERMANENT for the life of a live graph — import/remove/
+    /// toggle never mutate topology (nothing here is announce-capable, no
+    /// rebuild, legal mid-play and mid-record; the m13-d creation-site pins
+    /// extend verbatim). It is NOT a strip: no chain host, no sends, no
+    /// solo/automation, no stem identity — monitor furniture in the
+    /// metronome-click category, entering DOWNSTREAM of the master chain
+    /// because the reference must bypass it (design §5.2). All mutable
+    /// state is param-class `outputVolume` writes + control-plane player
+    /// schedules — zero new render-thread code.
+    var referenceLaneEnabled = false
+    /// Post-chain mix gate: outputVolume 1 = hear the mix, 0 = hear the
+    /// reference (design D4). nil until the lane builds.
+    private(set) var mixMonitorGate: AVAudioMixerNode?
+    /// The one summing node in front of `outputNode` (its single input bus
+    /// is why a sum exists at all — the `:327` constraint).
+    private(set) var monitorSum: AVAudioMixerNode?
+    /// The reference file player — scheduled ONLY while monitoring is ON
+    /// (the m19-f schedule-gated ledger keeps it cost-free otherwise).
+    private(set) var referencePlayer: AVAudioPlayerNode?
+    /// Level-match gain stage (linear `outputVolume` = the store-computed
+    /// `ReferenceLevelMatch` gain).
+    private(set) var referenceGain: AVAudioMixerNode?
+    /// m19-f-style enqueue ledger for the reference player: false ⇒ zero
+    /// schedules since the last stop ⇒ start/stop are skipped entirely (no
+    /// ~6 ms handshakes for a lane nobody is auditioning). Kept TRUE after
+    /// a raised `play(at:)` so the next stop still clears the queue (the
+    /// clip-player asymmetry, design §2.3).
+    private(set) var referenceScheduled = false
+
     private(set) var signature: [UUID: [ClipKey]] = [:]
     private(set) var instrumentSignature: [UUID: InstrumentTrackKey] = [:]
     /// Structural routing identity per source (audio + instrument) track.
@@ -1149,6 +1197,20 @@ final class PlaybackGraph {
         masterChainState?.latencySamples(forEffect: effectID) ?? 0
     }
 
+    /// Held-peak gain reduction of ONE live effect instance on a strip
+    /// (m22-e; nil = unknown ids or kinds that don't measure GR) — surfaced
+    /// through `AudioEngine.effectGainReductionDb(trackID:effectID:)`.
+    func effectGainReductionDb(forTrack trackID: UUID, effectID: UUID) -> Double? {
+        effectChainState(forTrack: trackID)?.gainReductionDb(forEffect: effectID)
+    }
+
+    /// Held-peak gain reduction of ONE live MASTER-chain effect instance
+    /// (m22-e), the master twin — surfaced through
+    /// `AudioEngine.masterEffectGainReductionDb(effectID:)`.
+    func masterEffectGainReductionDb(forEffect effectID: UUID) -> Double? {
+        masterChainState?.gainReductionDb(forEffect: effectID)
+    }
+
     /// All-effects chain latency for one strip (bypassed effects INCLUDED —
     /// `chainLatencyAll`, spec §1): the stable reported total and the stage-
     /// maxima input. 0 for unknown ids.
@@ -1710,7 +1772,48 @@ final class PlaybackGraph {
         // mixer → output edge through the chain host.
         engine.connect(engine.mainMixerNode, to: chainHost, fromBus: 0, toBus: 0,
                        format: format)
-        engine.connect(chainHost, to: engine.outputNode, format: format)
+        if referenceLaneEnabled {
+            // m22-g P2 (design §5.1): the live-only monitor lane —
+            // chainHost → mixMonitorGate → monitorSum → outputNode plus
+            // referencePlayer → referenceGain → monitorSum. Stock nodes,
+            // attached HERE (before the engine ever starts/renders in every
+            // production path — the m16-h attach-while-running raise class
+            // never applies), fresh-nodes-only like the chain host itself.
+            let gate = AVAudioMixerNode()
+            let sum = AVAudioMixerNode()
+            let player = AVAudioPlayerNode()
+            let gain = AVAudioMixerNode()
+            engine.attach(gate)
+            engine.attach(sum)
+            engine.attach(player)
+            engine.attach(gain)
+            // EXPLICIT toBus on the summing node (the m12-f rule): bus 0 is
+            // the mix feed, bus 1 the reference — never a
+            // nextAvailableInputBus query.
+            engine.connect(chainHost, to: gate, fromBus: 0, toBus: 0, format: format)
+            engine.connect(gate, to: sum, fromBus: 0, toBus: 0, format: format)
+            // The player edge forms at the GRAPH format; scheduled file
+            // segments convert from the file's processing format inside the
+            // player (AVAudioPlayerNode's documented file-segment
+            // conversion) — keeping the topology fully static, no
+            // file-known-time reconnect. (The design's §5.1 wording put SRC
+            // on `referenceGain`; the player's own converter is the same
+            // audible result with zero mid-life connect calls.)
+            engine.connect(player, to: gain, fromBus: 0, toBus: 0, format: format)
+            engine.connect(gain, to: sum, fromBus: 0, toBus: 1, format: format)
+            engine.connect(sum, to: engine.outputNode, format: format)
+            // Defaults: hear the mix, reference at unity until the store
+            // pushes a match gain, sum strictly unity (never touched).
+            gate.outputVolume = 1
+            gain.outputVolume = 1
+            sum.outputVolume = 1
+            mixMonitorGate = gate
+            monitorSum = sum
+            referencePlayer = player
+            referenceGain = gain
+        } else {
+            engine.connect(chainHost, to: engine.outputNode, format: format)
+        }
         let processor: EffectChainProcessor
         if let hosted = ChainHostAU.chainProcessor(of: chainHost) {
             processor = hosted
@@ -1737,6 +1840,82 @@ final class PlaybackGraph {
         ChainHostAU.setVolumeStagePreChain(true, of: chainHost)
         masterChainHost = chainHost
         masterChainState = chainState
+    }
+
+    // MARK: - Reference monitor lane control (m22-g P2, control plane only)
+
+    /// Post-chain mix gate (design D4): open = hear the mix, closed = hear
+    /// the reference. A main-actor param write on a stock mixer — the same
+    /// node-level property the strip faders trust.
+    func setMixMonitorGate(open: Bool) {
+        mixMonitorGate?.outputVolume = open ? 1 : 0
+    }
+
+    /// Level-match gain on the reference branch, linear (the store-computed
+    /// `ReferenceLevelMatch.linearGain`).
+    func setReferenceMonitorGain(linear: Double) {
+        referenceGain?.outputVolume = Float(linear)
+    }
+
+    /// Schedules ONE monitor engagement of the reference file (design §5.4):
+    /// the tail of the file from `fileStartSeconds` (caller-mapped timeline →
+    /// file time, ≥ 0), optionally deferred by `playerDelaySeconds` of
+    /// player-relative time (the negative-mapped-file-time case: the player
+    /// starts on its anchor and the audio begins when file time reaches 0).
+    /// Raises the m19-f-style ledger. Returns false when the lane is absent
+    /// or nothing remains to play (mapped position past EOF) — the caller
+    /// then simply leaves the player idle (honest silence, matching what the
+    /// timeline maps to).
+    func scheduleReference(file: AVAudioFile, fileStartSeconds: Double,
+                           playerDelaySeconds: Double) -> Bool {
+        guard let player = referencePlayer else { return false }
+        let fileRate = file.processingFormat.sampleRate
+        guard fileRate > 0, fileStartSeconds >= 0 else { return false }
+        let startFrame = AVAudioFramePosition((fileStartSeconds * fileRate).rounded())
+        let remaining = file.length - startFrame
+        guard remaining > 0 else { return false }
+        var at: AVAudioTime?
+        if playerDelaySeconds > 0 {
+            // Player-relative sample time (player time 0 ≡ its start
+            // anchor — the metronome click-anchor convention). The player's
+            // output edge runs at the graph rate.
+            let playerRate = player.outputFormat(forBus: 0).sampleRate
+            if playerRate > 0 {
+                at = AVAudioTime(
+                    sampleTime: AVAudioFramePosition(
+                        (playerDelaySeconds * playerRate).rounded()),
+                    atRate: playerRate)
+            }
+        }
+        player.scheduleSegment(file, startingFrame: startFrame,
+                               frameCount: AVAudioFrameCount(remaining), at: at)
+        referenceScheduled = true
+        return true
+    }
+
+    /// Starts the reference player against `anchor` (the caller computes
+    /// shared-anchor + PDC delay). Ledger-gated; a raise converts to one
+    /// stderr line and a skipped audition — never a crash, and the ledger
+    /// stays raised so the next stop clears the queue (the clip asymmetry).
+    func startReference(at anchor: AVAudioTime) {
+        guard referenceScheduled, let player = referencePlayer else { return }
+        do {
+            try withObjCExceptionBarrier("reference player start") {
+                player.play(at: anchor)
+            }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "PlaybackGraph: reference player start raised — audition skipped: \(error)\n".utf8))
+        }
+    }
+
+    /// Player-local stop (design D6): clears the queue, resets player time
+    /// to 0, lowers the ledger. Ledger-gated — an idle lane costs zero
+    /// start/stop handshakes (m19-f).
+    func stopReference() {
+        guard referenceScheduled, let player = referencePlayer else { return }
+        player.stop()
+        referenceScheduled = false
     }
 
     /// One strip's permanent insert sandwich (audio tracks and buses alike):
@@ -2920,6 +3099,11 @@ final class PlaybackGraph {
     func stopAllPlayers() {
         loopUnroll = nil
         midiRollContext = nil
+        // m22-g P2: the reference player joins every restart-class seam
+        // (stop/seek/tempo/loop-bounds edits) — ledger-gated, so sessions
+        // that never audition pay nothing. `AudioEngine.startPlayers`
+        // re-schedules it in the same pass while monitoring is ON.
+        stopReference()
         // R1 (m19-f): the skip predicate is the LEDGER FLAG, never "was
         // started" — flag false ⇒ zero enqueues since the last stop ⇒ the
         // queue is already empty AND (under R1) play was never called, so

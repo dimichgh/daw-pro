@@ -25,7 +25,8 @@ import Foundation
 /// allocate nothing, take no locks, log nothing, touch no ObjC — per-sample
 /// log10/pow are pure libm. The envelope snaps to 0 near rest (denormal/
 /// asymptote guard).
-final class CompressorEffect: KeyableEffectRendering, @unchecked Sendable {
+final class CompressorEffect: KeyableEffectRendering, GainReductionReporting,
+                              @unchecked Sendable {
     private static let maxChannels = 8
 
     /// Immutable box crossing main actor → render thread. POD payload.
@@ -56,6 +57,15 @@ final class CompressorEffect: KeyableEffectRendering, @unchecked Sendable {
     private var detectorLevel = 0.0
     private var detectorDecay = 0.0
     private var preparedChannels = 2
+    /// GR meter (m22-e): held-peak reduction in POSITIVE dB. The envelope is
+    /// already in the dB domain, so the −20 dB/s release is a per-sample
+    /// SUBTRACTION (`grDecayDbPerSample`) — linear-in-dB, exactly the peakDB
+    /// convention. Render-thread-only state; published via `grSlot`.
+    private var grHeldDb = 0.0
+    private var grDecayDbPerSample = 0.0
+    /// Render → control-plane publish slot (`Float.bitPattern`), one atomic
+    /// store per quantum. See `GainReductionMeter`.
+    private let grSlot: UnsafeMutablePointer<daw_atomic_u32>
     /// Automation overlay (M4 vii-c) — render-thread-only knob/lane split.
     private var overlay: AutomationParamOverlay<CompressorParams>
 
@@ -67,6 +77,8 @@ final class CompressorEffect: KeyableEffectRendering, @unchecked Sendable {
     init(params: CompressorParams = CompressorParams()) {
         paramsSlot = .allocate(capacity: 1)
         daw_atomic_ptr_init(paramsSlot)
+        grSlot = .allocate(capacity: 1)
+        daw_atomic_u32_store(grSlot, Float(0).bitPattern)
         lastAppliedParams = params
         overlay = AutomationParamOverlay(base: params)
         let snapshot = ParamSnapshot(generation: 0, params: params)
@@ -79,7 +91,14 @@ final class CompressorEffect: KeyableEffectRendering, @unchecked Sendable {
             Unmanaged<ParamSnapshot>.fromOpaque(raw).release()
         }
         paramsSlot.deallocate()
+        grSlot.deallocate()
     }
+
+    // MARK: - GainReductionReporting (m22-e)
+
+    /// Held-peak gain reduction, POSITIVE dB (0 = untouched), −20 dB/s
+    /// release. One atomic load — safe from any thread.
+    var gainReductionDb: Float { Float(bitPattern: daw_atomic_u32_load(grSlot)) }
 
     // MARK: - Main-actor surface
 
@@ -107,15 +126,21 @@ final class CompressorEffect: KeyableEffectRendering, @unchecked Sendable {
         envelopeDb = 0
         detectorLevel = 0
         detectorDecay = exp(-1.0 / (0.005 * sampleRate))  // fixed 5 ms peak decay
+        grHeldDb = 0
+        grDecayDbPerSample = GainReductionMeter.decayDbPerSample(sampleRate: sampleRate)
+        GainReductionMeter.publish(grSlot, db: 0)
         lastGeneration = .max  // re-derive coefficients at the new rate
     }
 
     var latencySamples: Int { 0 }
 
-    /// Clears the envelopes — post-reset output is uncompressed immediately.
+    /// Clears the envelopes — post-reset output is uncompressed immediately,
+    /// and the GR meter honestly reads 0 (atomic store — render-thread safe).
     func reset() {
         envelopeDb = 0
         detectorLevel = 0
+        grHeldDb = 0
+        GainReductionMeter.publish(grSlot, db: 0)
     }
 
     /// Adopts a newly published main-actor snapshot (borrowed — retire bin
@@ -213,6 +238,8 @@ final class CompressorEffect: KeyableEffectRendering, @unchecked Sendable {
 
         var env = envelopeDb
         var level = detectorLevel
+        var grHeld = grHeldDb
+        let grDecay = grDecayDbPerSample
         for frame in 0..<minFrames {
             // Stereo-linked peak detector: instant attack, fixed 5 ms decay.
             // Keyed: the detector listens to the KEY signal (frames beyond
@@ -250,6 +277,11 @@ final class CompressorEffect: KeyableEffectRendering, @unchecked Sendable {
             let coeff = targetDb < env ? attackCoeff : releaseCoeff
             env = coeff * env + (1.0 - coeff) * targetDb
             if env > -1e-10 { env = 0 }  // snap at rest → exact unity below threshold
+            // GR meter (m22-e): instant attack to the applied reduction
+            // (−env, makeup EXCLUDED — makeup is static gain, not the
+            // detector's doing), −20 dB/s linear-in-dB release. One max +
+            // one subtract per sample; publish happens once after the loop.
+            grHeld = max(-env, grHeld - grDecay)
             // Makeup applied last.
             let gain = Float(pow(10.0, (env + makeupDb) / 20.0))
             for channel in 0..<channelCount {
@@ -258,6 +290,8 @@ final class CompressorEffect: KeyableEffectRendering, @unchecked Sendable {
         }
         envelopeDb = env
         detectorLevel = level
+        grHeldDb = grHeld
+        GainReductionMeter.publish(grSlot, db: Float(grHeld))
     }
 }
 
