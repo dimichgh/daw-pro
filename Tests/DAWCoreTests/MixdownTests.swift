@@ -187,7 +187,7 @@ struct MixdownStoreTests {
         #expect(result.path == NSHomeDirectory() + "/daw-pro-mix-test.wav")
     }
 
-    @Test(".wav is appended when missing, never doubled")
+    @Test(".wav is appended when missing, never doubled; casing is canonicalized")
     func wavExtensionAppending() async throws {
         let engine = FakeEngine()
         let store = makeStore(engine: engine)
@@ -195,9 +195,22 @@ struct MixdownStoreTests {
         _ = try await store.renderMixdown(toPath: "/tmp/daw-pro-bounce")
         #expect(engine.mixdownRequests.last?.url.path == "/tmp/daw-pro-bounce.wav")
 
-        // An existing suffix survives untouched (case-insensitive check).
+        // An existing lowercase suffix survives untouched.
+        _ = try await store.renderMixdown(toPath: "/tmp/daw-pro-bounce.wav")
+        #expect(engine.mixdownRequests.last?.url.path == "/tmp/daw-pro-bounce.wav")
+
+        // CHANGED AT m23-m2, deliberately: this leg used to assert that
+        // "/tmp/daw-pro-bounce.WAV" survived VERBATIM — the destination policy
+        // matched ".wav" case-INSENSITIVELY and appended nothing. But
+        // `AVAudioFile(forWriting:)` infers the container from the path
+        // extension case-SENSITIVELY, so an uppercase ".WAV" fell through to
+        // its unknown-extension fallback and the file landed as a **CAF** under
+        // a .WAV name, with no error raised (measured on the pre-m23-m2 tree:
+        // `afinfo` reported "File type ID: caff"). The casing is canonicalized
+        // now, so the file that lands really is a WAV — the old assertion was
+        // pinning the bug.
         _ = try await store.renderMixdown(toPath: "/tmp/daw-pro-bounce.WAV")
-        #expect(engine.mixdownRequests.last?.url.path == "/tmp/daw-pro-bounce.WAV")
+        #expect(engine.mixdownRequests.last?.url.path == "/tmp/daw-pro-bounce.wav")
     }
 
     @Test("nil engine throws engineUnavailable")

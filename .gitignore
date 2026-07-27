@@ -12,3 +12,14 @@ mcp-server/dist/
 mcp-server/dist-test/
 *.log
 assets/generated/
+
+# On-device speech model weights (m23-n1). ~1.5 GB of CoreML `.mlmodelc`
+# bundles + a HuggingFace tokenizer, copied in from a local source — NEVER
+# committed. Root-anchored so it can only ever match the one directory
+# `WhisperModelLocation.relativeModelsPath` names; scripts/bundle.sh (m23-n3)
+# copies that same directory inside the codesign seal.
+/Models/
+# HuggingFace snapshot bookkeeping that rides along next to a copied
+# tokenizer (`tokenizer/.cache/huggingface`). Belt-and-braces: the copy step
+# already excludes it, this makes staging it impossible.
+**/.cache/huggingface/

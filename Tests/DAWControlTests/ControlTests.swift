@@ -1390,6 +1390,23 @@ struct CommandRouterTests {
             "track.removeSend": ["trackId": .string(trackID), "sendId": .string(preSendID)],
             // Instrument-only; use the instrument track (the shared trackID is audio).
             "track.setInstrument": ["trackId": .string(instTrackID), "waveform": .string("saw")],
+            // m23-h: track.reorder sits at the END of allCommands, by which
+            // point track.remove has already deleted the shared audio trackID —
+            // so it moves the INSTRUMENT track, which survives the whole loop
+            // (bounceInPlace only mutes it). Reordering is audio-inert and
+            // touches no id, so landing it at 0 disturbs no later route.
+            "track.reorder": ["trackId": .string(instTrackID), "index": .number(0)],
+            // m23-k4a: both export verbs stay IN the loop, on `dryRun: true` —
+            // which computes the FULL report (so the route is genuinely
+            // exercised, not short-circuited) while writing no file at all. A
+            // bare `project.exportMIDI` would land a real `.mid` in the system
+            // temp directory, which is the `instrument.importSoundBank`
+            // real-FS-side-effect exclusion; the dry run sidesteps it without
+            // giving up the coverage. `track.exportMIDI` REFUSES a non-
+            // instrument track by design, so it names the instrument track that
+            // survives the whole loop (the track.reorder rationale above).
+            "project.exportMIDI": ["dryRun": .bool(true)],
+            "track.exportMIDI": ["trackId": .string(instTrackID), "dryRun": .bool(true)],
             // Bounce the instrument track (a master input that survives the loop —
             // track.remove targets the audio trackID). Explicit duration so the
             // route succeeds before any clip exists (the render.stems precedent);
@@ -1535,6 +1552,14 @@ struct CommandRouterTests {
                 // shape, undo, offline-render gate) by SampleLibraryCommandTests
                 // with temp-dir fixtures.
                 "instrument.importSampleLibrary",
+                // m23-k3: both MIDI-import verbs read a REAL .mid off disk — a
+                // fixture this bare loop doesn't stage — and clip.importMIDI
+                // additionally needs an existing MIDI clip. The
+                // instrument.importSampleLibrary rationale exactly. Both are
+                // proven end-to-end (happy path, dryRun, parts/instruments,
+                // every §4.3 error row, unknown keys) by
+                // MIDIFileImportCommandTests with temp-file fixtures.
+                "project.importMIDI", "clip.importMIDI",
                 "ai.sidecarStart", "ai.sidecarStop",
                 // vc.sidecarStart/Stop (m10-p-3): the EXACT ai.sidecarStart/Stop
                 // rationale above, for the RVC voice-conversion sidecar — the
@@ -1656,7 +1681,16 @@ struct CommandRouterTests {
                 // monitor-capable fake. reference.setMonitor stays IN the
                 // loop with {on:false} — the idempotent never-refusing OFF.
                 "reference.setOffset", "reference.setTrim",
-                "reference.compare"].contains(command) {
+                "reference.compare",
+                // m23-d: note.audition is DELIBERATELY refused while a take is
+                // rolling (design §9 — anything heard during a take is
+                // reasonably assumed to be in it), and this loop leaves
+                // transport.record's take rolling by the time the tail is
+                // reached. Its route (happy path, every clamp, the
+                // refuse-while-recording guard itself) is proven by
+                // AuditionCommandTests against a stopped transport — the
+                // reference.import rationale.
+                "note.audition"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

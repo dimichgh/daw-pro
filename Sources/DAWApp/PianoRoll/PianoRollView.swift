@@ -11,7 +11,10 @@ import DAWAppKit
 /// The transport playhead + scrub (beta m10-e) are RENDERINGS of existing state:
 /// `positionBeats` is the SAME source the arrange timeline consumes (no second
 /// ticker), mapped clip-local by the headless `PianoRollPlayhead`; the cyan line
-/// shows only while the transport is inside the edited clip, and `onSeek` is the
+/// shows only while the transport is inside the edited clip — off-clip the SAME
+/// bands (the note grid, plus the velocity lane in Pro; never the controller
+/// strip, which carries neither) show the `OffClipEdgeCue` instead (m23-c1) —
+/// and `onSeek` is the
 /// app's store seek (the existing `transport.seek` path, NOT the WebSocket).
 struct PianoRollView: View {
     /// The clip being edited (value input — previewable without the store).
@@ -21,6 +24,10 @@ struct PianoRollView: View {
     /// mapped clip-local for the playhead. A plain value input so a preview can
     /// stage the line at any position.
     var positionBeats: Double
+    /// Whether the transport is rolling (m23-c2). Follow keeps the playhead in
+    /// frame DURING PLAYBACK only, so this gates it — a seek must not scroll the
+    /// editor out from under an edit.
+    var isPlaying: Bool
     /// The shared per-panel density store (docs/DESIGN-LANGUAGE.md "Panels"). The
     /// piano roll reads/sets its Simple/Pro mode under `panelID`, so the mode is
     /// now sticky across close/reopen and relaunch. A plain value input — a
@@ -30,6 +37,12 @@ struct PianoRollView: View {
     /// slot every band rescales from. A plain value input — a preview can pass
     /// a `PanelLayoutStore()` with an in-memory backing.
     var layout: PanelLayoutStore
+    /// The ROLL's follow runtime (m23-c2) — its suspension state and the offset it
+    /// last asked for. Held by the app (not this view's `@State`) so it survives a
+    /// clip switch and so `debug.followPlayhead` can echo the roll's ground truth.
+    /// The ON/OFF flag itself is `layout.followPlayhead`: ONE value for both
+    /// following surfaces.
+    var follow: FollowPlayheadModel
     /// Submits the whole note array (wired to `ProjectStore.setClipNotes`).
     var onCommit: ([MIDINote]) -> Void
     /// Seeks the transport to a PROJECT beat (wired to `ProjectStore.seek`) — the
@@ -55,6 +68,16 @@ struct PianoRollView: View {
     /// closure (the `onCommit` precedent) so the view stays previewable.
     var onCommitControllerLane: (_ type: MIDIControllerType, _ points: [MIDIControllerPoint]) -> Clip?
     var onClose: () -> Void
+    /// Sounds EXACTLY these pitches on the clip's track right now — SET
+    /// semantics, so an empty array is "stop" (m23-d). Called on every gesture
+    /// tick; the controller below diffs, so this view neither throttles nor
+    /// decides when to retrigger. `velocity` is the anchor note's own velocity,
+    /// so a drag sounds as the note will actually sound. Store-free closure (the
+    /// `onCommit`/`onSeek` precedent) — the view stays previewable, and holds NO
+    /// audition policy: the voice cap, the retrigger rule, the heartbeat and the
+    /// defeat switch all live outside it.
+    var onAudition: (_ pitches: [Int], _ velocity: Int) -> Void
+
     /// Reports the editor's key-focus state (m21-c) so the app can route the
     /// View-menu ⌘+/⌘−/⌘0 to THIS editor's zoom while it is focused (menu key
     /// equivalents fire before any focused view sees the key, so the routing
@@ -90,6 +113,11 @@ struct PianoRollView: View {
     /// idiom: amber, verbatim prose, auto-clearing.
     @State private var barOpsNotice: String?
     @State private var barOpsNoticeTask: Task<Void, Never>?
+    /// The content x follow last asked every band to put at its leading edge
+    /// (m23-c2), plus the nonce that makes a repeat of the same x still apply. The
+    /// bands' `ScrollViewReader`s watch the nonce; the markers size off the x.
+    @State private var followTargetX: CGFloat = 0
+    @State private var followNonce = 0
     @FocusState private var isFocused: Bool
 
     private static let keyboardWidth: CGFloat = 54
@@ -100,21 +128,32 @@ struct PianoRollView: View {
     /// Coordinate space naming the grid's horizontal scroll viewport, so the
     /// content's leading edge reports the live scroll offset.
     private static let gridScrollSpace = "pianoRollGridScroll"
+    /// Follow anchors (m23-c2) — one per horizontally scrolling band. All three
+    /// scroll to the SAME content x, computed once against the grid, so a page turn
+    /// can never leave the note grid and the velocity lane disagreeing about where
+    /// the transport is (the m23-c1 law, which the bands' independent scrollers
+    /// would otherwise break the moment follow moved only one of them).
+    private static let gridFollowMarkerID = "pianoRollGridFollowMarker"
+    private static let velocityFollowMarkerID = "pianoRollVelocityFollowMarker"
 
-    init(clip: Clip, beatsPerBar: Int, positionBeats: Double, densityStore: PanelDensityStore,
-         layout: PanelLayoutStore,
+    init(clip: Clip, beatsPerBar: Int, positionBeats: Double, isPlaying: Bool,
+         densityStore: PanelDensityStore,
+         layout: PanelLayoutStore, follow: FollowPlayheadModel,
          onCommit: @escaping ([MIDINote]) -> Void, onSeek: @escaping (Double) -> Void,
          onDeleteTimeRange: @escaping (_ startBeat: Double, _ lengthBeats: Double) -> Clip?,
          onInsertTimeRange: @escaping (_ atBeat: Double, _ lengthBeats: Double) -> Clip?,
          onOpenQuantize: @escaping () -> Void,
          onCommitControllerLane: @escaping (_ type: MIDIControllerType, _ points: [MIDIControllerPoint]) -> Clip?,
          onClose: @escaping () -> Void,
+         onAudition: @escaping (_ pitches: [Int], _ velocity: Int) -> Void = { _, _ in },
          onFocusChange: @escaping (Bool) -> Void = { _ in }) {
         self.clip = clip
         self.beatsPerBar = beatsPerBar
         self.positionBeats = positionBeats
+        self.isPlaying = isPlaying
         self.densityStore = densityStore
         self.layout = layout
+        self.follow = follow
         self.onCommit = onCommit
         self.onSeek = onSeek
         self.onDeleteTimeRange = onDeleteTimeRange
@@ -122,6 +161,7 @@ struct PianoRollView: View {
         self.onOpenQuantize = onOpenQuantize
         self.onCommitControllerLane = onCommitControllerLane
         self.onClose = onClose
+        self.onAudition = onAudition
         self.onFocusChange = onFocusChange
         _model = State(initialValue: PianoRollModel(
             notes: clip.notes ?? [],
@@ -208,7 +248,12 @@ struct PianoRollView: View {
         // zoom while it is focused (the View-menu key equivalents fire before
         // any focused view sees the key, so routing lives app-side).
         .onChange(of: isFocused, initial: true) { _, focused in onFocusChange(focused) }
-        .onDisappear { onFocusChange(false) }
+        .onDisappear {
+            onFocusChange(false)
+            // m23-d: a clip switch recreates this view (`.id(clip.id)`), so the
+            // disappearing instance must release whatever it was sounding.
+            onAudition([], 0)
+        }
         // m21-c: ONE persisted zoom value (`panelLayout.pianoRollPPB`) feeds
         // every band's beat→x mapping — the note grid + velocity lane via
         // `model`, the controller strip via its own model — so all three
@@ -230,6 +275,79 @@ struct PianoRollView: View {
         .onChange(of: clip) { _, newValue in
             reseedFromExternalMutation(newValue)
         }
+        // FOLLOW THE PLAYHEAD (m23-c2) — driven from the TRANSPORT observation
+        // path (`positionBeats` is plain @Observable state the engine's playhead
+        // handler pushes at ~30 Hz), never from a geometry callback: a `scrollTo`
+        // issued inside a layout transaction moves layout but does not durably
+        // update the scroller's position (m17-b, measured).
+        .onChange(of: positionBeats) { _, _ in followTick() }
+        // The gate's simulated pointer scroll (m23-c2) — the same band-scroll seam
+        // follow uses, minus the expectation, so the manual-scroll detector sees
+        // what a real drag would report.
+        .onChange(of: follow.externalScrollNonce) { _, _ in
+            followTargetX = follow.externalScrollX
+            followNonce += 1
+        }
+    }
+
+    // MARK: - Follow the playhead (m23-c2)
+
+    /// One transport tick's follow for the roll's bands.
+    ///
+    /// **Off-clip policy:** when the transport sits outside the edited clip there
+    /// is no line to keep in frame (m23-c1 — `lineX` is nil, and the `OffClipEdgeCue`
+    /// already says which way the transport went), so follow does NOTHING. Scrolling
+    /// the grid to a position the editor does not draw would be motion with no
+    /// referent, and the cue is anchored to the VIEWPORT, so scrolling would not
+    /// even move it.
+    ///
+    /// The target is computed once, against the note GRID's geometry (the band the
+    /// playhead lives in), and every band scrolls to that same content x.
+    private func followTick() {
+        guard let localX = playheadLineX else { return }
+        guard let target = follow.target(
+            isEnabled: followDrives, isPlaying: isPlaying,
+            playheadX: localX, viewportWidth: bandViewportWidth,
+            contentWidth: gridDrawnWidth, currentOffset: gridScrollX) else { return }
+        followTargetX = target
+        followNonce += 1
+    }
+
+    /// The playhead's x in the GRID's content space, or nil when the transport
+    /// sits outside the edited clip (m23-c1).
+    private var playheadLineX: CGFloat? {
+        PianoRollPlayhead.lineX(
+            position: positionBeats, clipStartBeat: clip.startBeat,
+            lengthBeats: clip.lengthBeats, pixelsPerBeat: model.pixelsPerBeat)
+    }
+
+    /// Whether follow is actually DRIVING this surface right now — the enable flag
+    /// AND a playhead to keep in frame.
+    ///
+    /// Off-clip this is false, and that matters to more than `followTick`: the
+    /// manual-scroll detector reads the same predicate. Without it, a user scrolling
+    /// the grid while the transport played outside the edited clip would suspend a
+    /// follow that was never contesting the scroll — and the chip would show its
+    /// PAUSED face for a fight that never happened, which is exactly the dishonest
+    /// readout the chip exists to avoid.
+    private var followDrives: Bool {
+        layout.followPlayhead && playheadLineX != nil
+    }
+
+    /// A band's follow anchor: a 1 pt, layout-real, hit-test-inert marker whose
+    /// LEADING edge sits at `followTargetX` — `scrollTo(..., anchor: .leading)`
+    /// lands the viewport edge exactly on it (the arrange `hScrollMarker` idiom;
+    /// real frames, never `.offset`, so `scrollTo` reads a true layout position).
+    ///
+    /// Sizing the marker re-lays-out these two empty views and nothing else: the
+    /// band's width is pinned by its own `.frame`, so the marker can never grow the
+    /// content — which is why follow costs no Canvas redraw and no band relayout.
+    private func followMarker(_ id: String) -> some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: max(0, followTargetX), height: 1)
+            Color.clear.frame(width: 1, height: 1).id(id)
+        }
+        .allowsHitTesting(false)
     }
 
     /// Reseeds the edit models from an externally mutated clip value (m18-i).
@@ -488,8 +606,16 @@ struct PianoRollView: View {
 
     /// The live pinch (m21-c): magnification is cumulative, so every tick
     /// rescales off the gesture-START scale (the arrange `PinchState` rule).
-    /// The roll's plain SwiftUI scroller keeps its own offset — no programmatic
-    /// anchor re-pin here (the arrange lanes needed an AppKit bridge for that).
+    /// No anchor RE-PIN here: a pinch rescales the bands but does not hold the
+    /// beat under the cursor at a fixed screen x the way the arrange's zoom does.
+    ///
+    /// That is a scope choice, not a platform limit — corrected m23-c2, because
+    /// this comment used to say the arrange "needed an AppKit bridge for that" and
+    /// that bridge was never built: the arrange's programmatic scroll is plain
+    /// SwiftUI (`ScrollViewReader` + a layout-real marker), and this view now uses
+    /// the same idiom for follow. An anchor re-pin here is strictly harder than
+    /// follow's scroll-into-view (it must land mid-gesture, against content that is
+    /// rescaling under it), and it remains unbuilt for that reason alone.
     private var gridPinch: some Gesture {
         MagnifyGesture()
             .onChanged { value in
@@ -604,7 +730,18 @@ struct PianoRollView: View {
     private var editor: some View {
         ScrollView(.vertical, showsIndicators: true) {
             HStack(alignment: .top, spacing: 0) {
-                KeyboardSidebar(model: model, width: Self.keyboardWidth)
+                KeyboardSidebar(model: model, width: Self.keyboardWidth,
+                                onAudition: onAudition)
+                // The follow reader (m23-c2) wraps ONLY this horizontal scroller,
+                // NOT the vertical one above it. A `ScrollViewReader` resolves
+                // `scrollTo` against every scroll view inside ITS content, and
+                // `anchor: .leading` carries a y of 0.5 — so a reader wrapping both
+                // axes would centre the target VERTICALLY on every page turn and
+                // silently yank the pitch view away from wherever the user left it.
+                // Scoped here, the vertical scroller (and its
+                // `.defaultScrollAnchor(.center)` opening position) is untouchable
+                // by follow.
+                ScrollViewReader { gridProxy in
                 ScrollView(.horizontal, showsIndicators: true) {
                     // The grid Canvas is its own struct with closure-free, tick-stable
                     // inputs (model ref + beatsPerBar + snap + color), so a transport
@@ -622,6 +759,9 @@ struct PianoRollView: View {
                         // Playhead above the grid, below floating chrome; full grid
                         // height so it reads at any vertical scroll position.
                         .overlay(alignment: .topLeading) { gridPlayhead }
+                        .overlay(alignment: .topLeading) {
+                            followMarker(Self.gridFollowMarkerID)
+                        }
                         .background { gridScrollReader }
                         // Pointer affordances (docs/DESIGN-LANGUAGE.md): a note body
                         // grabs, its right-edge resize handle (Pro) resizes, empty
@@ -644,10 +784,31 @@ struct PianoRollView: View {
                         )
                 }
                 .coordinateSpace(name: Self.gridScrollSpace)
+                // Never animated — a page turn must not glide. The deferred
+                // re-issue is the m17-b DURABILITY rule: a `scrollTo` that is not
+                // re-issued on a fresh main-actor turn moves layout without
+                // updating the scroller's internal position, and any later forced
+                // re-render (`debug.captureUI`'s `cacheDisplay`, a resize) jumps
+                // back to the stale value.
+                .onChange(of: followNonce) { _, _ in
+                    gridProxy.scrollTo(Self.gridFollowMarkerID, anchor: .leading)
+                    Task { @MainActor in
+                        gridProxy.scrollTo(Self.gridFollowMarkerID, anchor: .leading)
+                    }
+                }
+                }
             }
         }
         .defaultScrollAnchor(.center)   // open near middle C, full 0-127 scrollable
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Off-clip cue (m23-c1): the complement of `gridPlayhead` — it draws
+        // exactly when the line does not. Overlaid on the EDITOR (not on the
+        // grid content) because it is viewport furniture, not a timeline
+        // object; the pill clears the frozen scrub strip above it. Below the
+        // scrub overlay so the scrub keeps the hit surface.
+        .overlay(alignment: .topLeading) {
+            offClipCueBand(topInset: Self.scrubStripHeight + 6)
+        }
         // Scrub strip: a frozen band pinned to the top of the VISIBLE grid (the
         // note grid vertical-scrolls under it), so it's always reachable — a drag
         // seeks the transport (m10-e). Sits over the grid area only, past the
@@ -658,8 +819,10 @@ struct PianoRollView: View {
     /// The cyan transport playhead inside the grid content (beta m10-e). Same
     /// visual idiom as the arrange playhead — a glowing cyan hairline offset by
     /// `localBeat · pixelsPerBeat` — drawn ONLY while the transport is inside the
-    /// edited clip (honest absence otherwise). Cyan is the active-state accent,
-    /// never violet, even for an AI clip whose notes are violet (Rule 3).
+    /// edited clip; off-clip the band shows `offClipCueBand` instead (m23-c1 —
+    /// the absence is annotated, the line is still never parked at an edge).
+    /// Cyan is the active-state accent, never violet, even for an AI clip whose
+    /// notes are violet (Rule 3).
     @ViewBuilder
     private var gridPlayhead: some View {
         if let x = PianoRollPlayhead.lineX(
@@ -671,6 +834,48 @@ struct PianoRollView: View {
                 .glow(DAWTheme.playback, radius: 5, intensity: 0.7)
                 .offset(x: x)
                 .allowsHitTesting(false)
+        }
+    }
+
+    // MARK: - Off-clip edge cue (m23-c1)
+
+    /// The off-clip cue value — non-nil EXACTLY when the playhead line is absent
+    /// (`PianoRollPlayhead.offClipCue` is gated on the same `isVisible` predicate
+    /// `lineX` is). ONE value feeds both drawing bands, so the note grid and the
+    /// velocity lane cannot disagree about where the transport is.
+    private var offClipCue: PianoRollPlayhead.OffClipCue? {
+        PianoRollPlayhead.offClipCue(
+            position: positionBeats, clipStartBeat: clip.startBeat,
+            lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
+    }
+
+    /// Band-aligned wrapper the playhead bands overlay (the note grid, plus the
+    /// velocity lane in Pro — the controller strip carries neither the line nor
+    /// the cue): the shared 54 pt gutter spacer
+    /// followed by the cue at EXACTLY `bandViewportWidth` — the one number the
+    /// grid, velocity lane and controller strip already share. Deriving both
+    /// bands' rect from it makes the leading AND the TRAILING edge agree
+    /// structurally rather than coincidentally (each band's own scroller
+    /// furniture differs, so measuring per-band would let the trailing cue drift
+    /// between them by the scroller width).
+    ///
+    /// Anchored to the VIEWPORT, not to the clip's boundary: that is what makes
+    /// it furniture rather than a timeline claim, and it keeps the cue on screen
+    /// at any scroll offset. Accepted tradeoff — with the m18-f viewport
+    /// extension the drawn band can run past the clip's end, so a trailing cue
+    /// can sit to the right of the visible clip end; anchoring to the clip edge
+    /// instead would need a horizontal scroll reader the velocity lane does not
+    /// have and would reintroduce exactly the two-band divergence this prevents.
+    @ViewBuilder
+    private func offClipCueBand(topInset: CGFloat) -> some View {
+        if let cue = offClipCue {
+            HStack(spacing: 0) {
+                Color.clear.frame(width: Self.keyboardWidth)   // gutter — no cue here
+                OffClipEdgeCue(cue: cue, topInset: topInset)
+                    .frame(width: bandViewportWidth)
+                Spacer(minLength: 0)
+            }
+            .allowsHitTesting(false)
         }
     }
 
@@ -696,6 +901,18 @@ struct PianoRollView: View {
             Color.clear
                 .onChange(of: leadingX, initial: true) { _, newValue in
                     gridScrollX = -newValue
+                    // Ground truth for follow (m23-c2): this is the ONLY place the
+                    // roll learns where its scroller actually sits, so it is also
+                    // where a MANUAL scroll is detected — an offset that diverges
+                    // from the one follow asked for, while playing, with the
+                    // geometry unchanged, is the user, and follow stands down.
+                    // `followDrives`, not the raw flag: off-clip follow issues
+                    // nothing, so it must not blame the user for scrolling either.
+                    follow.reportOffset(-newValue,
+                                        isEnabled: followDrives,
+                                        isPlaying: isPlaying,
+                                        contentWidth: gridDrawnWidth,
+                                        viewportWidth: bandViewportWidth)
                 }
         }
         .allowsHitTesting(false)
@@ -790,6 +1007,12 @@ struct PianoRollView: View {
             let deltaPitch = -Int((value.translation.height / model.rowHeight).rounded())
             model.moveSelection(deltaBeats: deltaBeats, deltaPitch: deltaPitch, resolution: effectiveSnap)
             if abs(value.translation.width) > 3 || abs(value.translation.height) > 3 { didMove = true }
+            // m23-d: hear the pitch you are dragging. Fired on EVERY tick,
+            // including the very first one (deltaPitch == 0), so pressing a note
+            // sounds it at its current pitch before any movement — Logic's
+            // behavior, and intended. A no-change tick is free: the controller
+            // below diffs, so no events are pushed when the set is unchanged.
+            onAudition(selectedPitches, anchorVelocity)
         case .resize(let id):
             model.resizeNote(id: id, toEndBeat: model.beat(forX: value.location.x), resolution: effectiveSnap)
             if abs(value.translation.width) > 3 { didMove = true }
@@ -816,6 +1039,25 @@ struct PianoRollView: View {
         }
         activeDrag = .none
         didMove = false
+        // m23-d: EVERY exit silences the audition — including `.cancelled`, the
+        // m18-i external reseed that swallows the gesture without an
+        // `onEnded`-shaped end. A branch that forgot this is exactly how a stuck
+        // note ships.
+        onAudition([], 0)
+    }
+
+    /// Distinct pitches of the current selection, ascending (m23-d) — the set the
+    /// audition should be sounding right now.
+    private var selectedPitches: [Int] {
+        Array(Set(model.draft.filter { model.isSelected($0.id) }.map(\.pitch))).sorted()
+    }
+
+    /// Velocity of the LOWEST selected note — a drag sounds the way the note it
+    /// carries will actually sound (m23-d).
+    private var anchorVelocity: Int {
+        model.draft.filter { model.isSelected($0.id) }
+            .min { ($0.pitch, $0.startBeat) < ($1.pitch, $1.startBeat) }?.velocity
+            ?? AuditionController.defaultVelocity
     }
 
     // MARK: - Velocity lane (Pro)
@@ -827,18 +1069,39 @@ struct PianoRollView: View {
                 .tracking(1)
                 .foregroundStyle(DAWTheme.textDim)
                 .frame(width: Self.keyboardWidth, height: VelocityLane.height, alignment: .center)
-            ScrollView(.horizontal, showsIndicators: false) {
-                VelocityLane(model: model, noteColor: noteColor, onCommit: commit)
-                    // Width-identical with the note grid (same beat→x space),
-                    // so the m18-f viewport extension rides along.
-                    .frame(width: gridDrawnWidth)
-                    // The playhead continues through the velocity lane so the eye
-                    // tracks it across both editors (m10-e). Same content x + scale
-                    // as the grid, so it lines up.
-                    .overlay(alignment: .topLeading) { velocityPlayhead }
+            // The velocity lane has its OWN horizontal scroller, so follow has to
+            // move it too (m23-c2): a page turn that moved only the grid would put
+            // the grid's playhead in frame and the velocity lane's off-screen —
+            // exactly the two-bands-disagreeing defect m23-c1 closed. Same target,
+            // same nonce, its own marker.
+            ScrollViewReader { velocityProxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    VelocityLane(model: model, noteColor: noteColor, onCommit: commit)
+                        // Width-identical with the note grid (same beat→x space),
+                        // so the m18-f viewport extension rides along.
+                        .frame(width: gridDrawnWidth)
+                        // The playhead continues through the velocity lane so the eye
+                        // tracks it across both editors (m10-e). Same content x + scale
+                        // as the grid, so it lines up.
+                        .overlay(alignment: .topLeading) { velocityPlayhead }
+                        .overlay(alignment: .topLeading) {
+                            followMarker(Self.velocityFollowMarkerID)
+                        }
+                }
+                .onChange(of: followNonce) { _, _ in
+                    velocityProxy.scrollTo(Self.velocityFollowMarkerID, anchor: .leading)
+                    Task { @MainActor in
+                        velocityProxy.scrollTo(Self.velocityFollowMarkerID, anchor: .leading)
+                    }
+                }
             }
         }
         .frame(height: VelocityLane.height)
+        // The off-clip cue continues through the velocity lane for the same
+        // reason the line does (m23-c1): if only one band carried it, the two
+        // bands would disagree about where the transport is. Same builder, same
+        // `bandViewportWidth`, so both edges land at the same x as the grid's.
+        .overlay(alignment: .topLeading) { offClipCueBand(topInset: 6) }
     }
 
     /// The playhead line inside the velocity lane content (beta m10-e) — same cyan
@@ -868,6 +1131,10 @@ struct PianoRollView: View {
             accent: noteColor,
             snap: effectiveSnap,
             drawnWidth: controllerDrawnWidth,
+            // m23-c2: the strip has no playhead of its own, but it must stay
+            // horizontally aligned with the notes above it through a page turn.
+            followTargetX: followTargetX,
+            followNonce: followNonce,
             onCommit: commitControllerLane
         )
     }

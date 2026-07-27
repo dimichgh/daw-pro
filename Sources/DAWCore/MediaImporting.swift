@@ -48,6 +48,11 @@ public enum ProjectError: Error, LocalizedError {
     case invalidPunchRange(String)
     case engineUnavailable
     case nothingToRender
+    /// Output-format contract (m23-m2): an unusable `bitDepth`/`container`, or
+    /// an engine that cannot honour one. Message built at throw time (the
+    /// `mixerPresetNotFound` precedent) so it can name the offending value and
+    /// list the valid ones.
+    case invalidOutputFormat(String)
     case noArmedTracks
     case recordPermissionDenied
     case recordPermissionPending
@@ -157,6 +162,11 @@ public enum ProjectError: Error, LocalizedError {
     case referenceNotAnalyzed
     case referenceSilent
     case referenceFileMissing(String)
+    // Note audition (m23-d, note.audition): field-named validation built at
+    // throw time — the `invalidArrangeEdit` ready-to-show precedent. Every
+    // audition rejection lands BEFORE anything is pushed to a renderer, so a
+    // refused call is guaranteed to have sounded nothing.
+    case invalidAudition(String)
 
     public var errorDescription: String? {
         switch self {
@@ -253,6 +263,10 @@ public enum ProjectError: Error, LocalizedError {
             // teaches the two ways forward.
             return "nothing to render — no clips found in the render range; "
                 + "add clips or pass an explicit durationSeconds"
+        case .invalidOutputFormat(let reason):
+            // Exact wording is contract (control protocol + MCP surface it
+            // verbatim); built at throw time so it names the bad value.
+            return reason
         case .noArmedTracks:
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "no armed audio or instrument tracks — arm a track (track.setArm) before recording"
@@ -444,6 +458,10 @@ public enum ProjectError: Error, LocalizedError {
             // Built at throw time (which policy blocked the bar edit, naming the
             // offending group / meter boundary); surfaced verbatim — the
             // invalidClipEdit precedent for a ready-to-show string.
+            return message
+        case .invalidAudition(let message):
+            // Built at throw time (which audition field was out of range, and
+            // what the legal range is); surfaced verbatim.
             return message
         case .voiceConversionRequiresAudioClip(let id):
             // Exact wording is contract (control protocol + MCP surface it verbatim).

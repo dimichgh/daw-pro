@@ -47,11 +47,14 @@ Use the specialized agents in `.claude/agents/`. Route by domain and complexity 
 
 | Work | Agent | Model |
 |---|---|---|
-| Architecture, RT audio, DSP algorithms | `daw-architect`, `audio-dsp-engineer` | fable |
-| App features, SwiftUI, custom controls/design | `swift-app-engineer`, `ui-design-engineer` | fable |
+| Architecture, cross-module design, RT-safety review | `daw-architect` | opus |
+| RT audio, DSP algorithms | `audio-dsp-engineer` | opus |
+| App features, SwiftUI, custom controls/design | `swift-app-engineer`, `ui-design-engineer` | opus |
 | MCP tools, AI-service clients, control protocol | `mcp-integration-engineer` | sonnet |
 | Research, competitive analysis | `research-analyst` | sonnet |
 | Tests, verification, regressions | `qa-test-engineer` | sonnet |
 | Docs, changelog, README upkeep | `docs-scribe` | haiku |
+
+Model tiers, current as of 2026-07: `opus` = Claude Opus 5 — the top tier for this project's work (deep reasoning, agentic and long-horizon coding, RT-safety review), at half Fable 5's price; every design and implementation agent runs here. `sonnet` = Claude Sonnet 5 — narrow, test-gated, well-specified lanes (MCP/wire plumbing, test authoring, research) where a weaker model fails loudly rather than silently. `haiku` = Claude Haiku 4.5 (there is no Haiku 5). No agent is pinned to `fable` (Claude Fable 5): it stays reachable per-call as a model override when one design decision is expensive enough to want a second, differently-shaped opinion.
 
 Autonomous development: run the `/dev-cycle` skill (optionally under `/loop`) — it picks the next roadmap item, plans, delegates to the right agent, tests, and updates the roadmap.

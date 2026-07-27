@@ -204,3 +204,142 @@ struct ArrangePointerModelTests {
                 && ArrangePointer.scrubSlop < ArrangePointer.playheadGrabTolerance)
     }
 }
+
+/// The m23-e empty-lane double-click decisions: WHICH lane a double-click names
+/// (if any) and HOW LONG the clip it creates may be. Both are pure so the
+/// beginner's "new track → writable grid" path is pinned without AppKit.
+@Suite("ArrangePointer — empty-lane MIDI clip create (m23-e)")
+struct ArrangeCreateClipTests {
+
+    /// Row 0 plain, row 1 expanded with 64 pt of extras (the m17-c fixture):
+    /// clip bands [0, 34) and [40, 74), extras [74, 138).
+    private func lanes(rowHeight: CGFloat = 34) -> [ArrangePointerLane] {
+        let r1Top = rowHeight + 6
+        return [
+            ArrangePointerLane(clipTop: 0, clipBottom: rowHeight, bottom: rowHeight),
+            ArrangePointerLane(clipTop: r1Top, clipBottom: r1Top + rowHeight,
+                               bottom: r1Top + rowHeight + 64),
+        ]
+    }
+
+    // MARK: - Lane resolution
+
+    @Test("clipLaneIndex names the row whose CLIP BAND holds y")
+    func laneBands() {
+        let l = lanes()
+        #expect(ArrangePointer.clipLaneIndex(atY: 0, in: l) == 0)
+        #expect(ArrangePointer.clipLaneIndex(atY: 33.9, in: l) == 0)
+        #expect(ArrangePointer.clipLaneIndex(atY: 40, in: l) == 1)
+        #expect(ArrangePointer.clipLaneIndex(atY: 73.9, in: l) == 1)
+    }
+
+    @Test("no lane in the row gap, in a row's extras, or below the stack")
+    func nonLaneBands() {
+        let l = lanes()
+        #expect(ArrangePointer.clipLaneIndex(atY: 36, in: l) == nil)    // 6 pt gap
+        #expect(ArrangePointer.clipLaneIndex(atY: 100, in: l) == nil)   // automation editor
+        #expect(ArrangePointer.clipLaneIndex(atY: 400, in: l) == nil)   // free space below
+        #expect(ArrangePointer.clipLaneIndex(atY: -5, in: l) == nil)
+        #expect(ArrangePointer.clipLaneIndex(atY: 10, in: []) == nil)   // empty project
+    }
+
+    @Test("lane resolution follows the live row height (S/L rows)",
+          arguments: [CGFloat(24), 34, 50])
+    func laneBandsFollowRowHeight(rowHeight: CGFloat) {
+        let l = lanes(rowHeight: rowHeight)
+        #expect(ArrangePointer.clipLaneIndex(atY: rowHeight - 0.5, in: l) == 0)
+        #expect(ArrangePointer.clipLaneIndex(atY: rowHeight + 0.5, in: l) == nil)
+        #expect(ArrangePointer.clipLaneIndex(atY: rowHeight + 6, in: l) == 1)
+    }
+
+    /// The create must NOT inherit `zone`'s playhead-grab precedence: empty lane
+    /// space within the grab tolerance classifies `.playheadGrab`, so a zone
+    /// guard would refuse a create at exactly the beat a preceding single tap
+    /// had just seeked to — while the staged path (which never seeks) passed.
+    @Test("lane resolution is independent of the playhead, unlike zone()")
+    func independentOfPlayhead() {
+        let l = lanes()
+        let x: CGFloat = 5 * 16
+        #expect(ArrangePointer.zone(x: x, y: 10, playheadX: x, pixelsPerBeat: 16,
+                                    topInset: 0, contentBottom: 600,
+                                    lanes: l, laneSpacing: 6) == .playheadGrab)
+        #expect(ArrangePointer.clipLaneIndex(atY: 10, in: l) == 0)
+        #expect(ArrangePointer.createClipLength(startBeat: 5, beatsPerBar: 4, spans: []) == 4)
+    }
+
+    // MARK: - Length policy
+
+    @Test("an empty lane yields one BAR of the governing meter, not a hardcoded 4",
+          arguments: [2, 3, 4, 5, 7])
+    func oneBarOfTheMeter(bpb: Int) {
+        #expect(ArrangePointer.createClipLength(
+            startBeat: 8, beatsPerBar: bpb, spans: []) == Double(bpb))
+    }
+
+    @Test("a degenerate meter still yields a positive length")
+    func degenerateMeter() {
+        #expect(ArrangePointer.createClipLength(startBeat: 0, beatsPerBar: 0, spans: []) == 1)
+        #expect(ArrangePointer.createClipLength(startBeat: 0, beatsPerBar: -3, spans: []) == 1)
+    }
+
+    /// The clamp is not cosmetic: `addMIDIClip` lands through the no-silent-
+    /// overlap choke point with the NEW clip active, so an unclamped bar reaching
+    /// over a resident would TRIM the resident's notes away — silent data loss
+    /// from a double-click on empty space.
+    @Test("the bar is clamped to the gap before the next clip")
+    func clampedToGap() {
+        let spans = [ArrangeClipSpan(startBeat: 6, lengthBeats: 4)]
+        #expect(ArrangePointer.createClipLength(startBeat: 4, beatsPerBar: 4, spans: spans) == 2)
+        // A gap wider than a bar keeps the full bar.
+        #expect(ArrangePointer.createClipLength(startBeat: 0, beatsPerBar: 4, spans: spans) == 4)
+        // Past the resident there is nothing to clamp against.
+        #expect(ArrangePointer.createClipLength(startBeat: 12, beatsPerBar: 4, spans: spans) == 4)
+    }
+
+    @Test("only clips STARTING after the point clamp it — an earlier one is irrelevant")
+    func clampIgnoresEarlierClips() {
+        let spans = [
+            ArrangeClipSpan(startBeat: 0, lengthBeats: 4),
+            ArrangeClipSpan(startBeat: 16, lengthBeats: 4),
+        ]
+        #expect(ArrangePointer.createClipLength(startBeat: 8, beatsPerBar: 4, spans: spans) == 4)
+        #expect(ArrangePointer.createClipLength(startBeat: 14, beatsPerBar: 4, spans: spans) == 2)
+    }
+
+    @Test("zero-length spans never clamp (they are inert everywhere else too)")
+    func zeroLengthSpansInert() {
+        let spans = [ArrangeClipSpan(startBeat: 5, lengthBeats: 0)]
+        #expect(ArrangePointer.createClipLength(startBeat: 4, beatsPerBar: 4, spans: spans) == 4)
+    }
+
+    /// The SNAP can land the start beat inside a clip even though the raw
+    /// pointer was over empty space (hovering just left of a clip that starts on
+    /// the barline). Creating there would trim the resident — so: create nothing.
+    @Test("a start beat at or inside a resident yields nil (create nothing)")
+    func noRoomInsideResident() {
+        let spans = [ArrangeClipSpan(startBeat: 4, lengthBeats: 4)]
+        #expect(ArrangePointer.createClipLength(startBeat: 4, beatsPerBar: 4, spans: spans) == nil)
+        #expect(ArrangePointer.createClipLength(startBeat: 6, beatsPerBar: 4, spans: spans) == nil)
+        // The end beat is exclusive — the clip's own end is free space again.
+        #expect(ArrangePointer.createClipLength(startBeat: 8, beatsPerBar: 4, spans: spans) == 4)
+    }
+
+    @Test("back-to-back residents leave no room between them")
+    func noRoomBetweenAbuttingClips() {
+        let spans = [
+            ArrangeClipSpan(startBeat: 0, lengthBeats: 4),
+            ArrangeClipSpan(startBeat: 4, lengthBeats: 4),
+        ]
+        #expect(ArrangePointer.createClipLength(startBeat: 4, beatsPerBar: 4, spans: spans) == nil)
+    }
+
+    @Test("every length the policy returns is strictly positive")
+    func lengthsAlwaysPositive() {
+        let spans = [ArrangeClipSpan(startBeat: 3.25, lengthBeats: 2)]
+        for start in stride(from: 0.0, through: 3.0, by: 0.25) {
+            let length = ArrangePointer.createClipLength(
+                startBeat: start, beatsPerBar: 4, spans: spans)
+            #expect(length == nil || length! > 0)
+        }
+    }
+}

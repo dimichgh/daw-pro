@@ -907,6 +907,41 @@ public struct ClipMoveResult: Sendable, Equatable {
     }
 }
 
+/// Outcome of `ProjectStore.moveClips(ids:byBeats:)` (m23-g2) — the group-move
+/// twin of `ClipMoveResult`.
+///
+/// `requestedDeltaBeats` is what the caller asked for; `effectiveDeltaBeats` is
+/// what the WHOLE GROUP actually translated by after the beat-0 clamp, and
+/// `clamped` says whether the two differ. Reporting both is the honesty half of
+/// the clamp rule: a caller can see that its drag hit the wall instead of
+/// inferring it from positions (and the drag readout can show the ACHIEVED
+/// start rather than the requested one).
+///
+/// `clips` are the moved clips in their FINAL geometry, in the caller's id
+/// order (duplicates collapsed). `trimmedClipIDs` / `removedClipIDs` carry the
+/// same meaning as `ClipMoveResult`'s, aggregated across every mover's overlap
+/// pass and de-duplicated — a clip that was edge-trimmed by one mover and then
+/// fully covered by another appears ONLY in `removedClipIDs`, because that is
+/// what actually happened to it.
+public struct ClipsMoveResult: Sendable, Equatable {
+    public var clips: [Clip]
+    public var requestedDeltaBeats: Double
+    public var effectiveDeltaBeats: Double
+    public var clamped: Bool
+    public var trimmedClipIDs: [UUID]
+    public var removedClipIDs: [UUID]
+
+    public init(clips: [Clip], requestedDeltaBeats: Double, effectiveDeltaBeats: Double,
+                clamped: Bool, trimmedClipIDs: [UUID] = [], removedClipIDs: [UUID] = []) {
+        self.clips = clips
+        self.requestedDeltaBeats = requestedDeltaBeats
+        self.effectiveDeltaBeats = effectiveDeltaBeats
+        self.clamped = clamped
+        self.trimmedClipIDs = trimmedClipIDs
+        self.removedClipIDs = removedClipIDs
+    }
+}
+
 /// Outcome of `ProjectStore.insertBars` (m15-d): where the empty bars landed
 /// (absolute beat) and how many beats were inserted (meter-aware: `count` bars
 /// of the meter governing the insertion point).
@@ -993,6 +1028,54 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
     /// engine, renderer, snapshot, and media pipeline see only those clips.
     /// Empty on a track with no takes; additive like `automation`.
     public var takeGroups: [TakeGroup]
+
+    /// Whether this track can be written out as a Standard MIDI File (m23-m3b).
+    ///
+    /// **The ONE home for MIDI-export eligibility.** Three places ask this same
+    /// question and must never disagree: the arrange track-header context menu
+    /// decides whether to OFFER "Export MIDI…" (`TrackHeaderMenu`, DAWAppKit),
+    /// `exportTrackMIDIFile` REFUSES a track that fails it, and the whole-project
+    /// `SMFProjectExporter.map` SKIPS-and-reports one. A menu that offered an item
+    /// the store then refused is a bug you can only find by right-clicking, which
+    /// is exactly the class of divergence a shared predicate makes unrepresentable.
+    ///
+    /// It stays a one-line comparison on purpose — there is no computation here to
+    /// give a resolver type, so a `fileprivate`-init producer (the `DeliveryFormat`
+    /// / `ResolvedDropBeat` pattern) would be ceremony around two tokens.
+    ///
+    /// **The predicate is TOTAL, not merely necessary.** An instrument track with
+    /// no clips at all still exports successfully — a valid file carrying a named,
+    /// empty chunk, because the `nothingToExport` guard counts track CHUNKS, not
+    /// notes. So every track this returns true for WILL produce a file, and the
+    /// menu can HIDE rather than disable: there is no "shown but would fail" state
+    /// to explain.
+    public var canExportMIDI: Bool { kind == .instrument }
+
+    /// Whether this track is one of the signals the MAIN MIX sums — a bus, or a
+    /// track routed direct to master (m23-m3c).
+    ///
+    /// **The ONE home for master-input eligibility**, the `canExportMIDI` shape.
+    /// It is the rule the stem partition is built on (`StemPlan.descriptors`
+    /// filters by it AND refuses a named track that fails it — one rule, both
+    /// halves), which makes it the rule behind `render.stems`, `bounceTrackInPlace`
+    /// (it plans through the same `descriptors`), the arrange row's "Bounce in
+    /// Place" item (`TrackHeaderMenu`, DAWAppKit) and the Export dialog's stems
+    /// preview. Those surfaces MUST agree: a menu that offered a bounce the store
+    /// refuses, or a preview naming a file the render will not write, is a bug you
+    /// can only find by right-clicking or by counting files afterwards.
+    ///
+    /// **A BUS IS A MASTER INPUT.** "Stems" is not "instrument tracks": a track
+    /// routed into a bus has NO stem of its own — its signal (dry post-fader,
+    /// plus every send contribution) lives in the destination bus's stem, which
+    /// is the only partition where nonlinear bus FX stay correct. That is why the
+    /// predicate reads `kind == .bus || outputBusID == nil` and not anything about
+    /// audio-vs-instrument.
+    ///
+    /// Deliberately NOT the same question `PlaybackGraph` asks at its two
+    /// `outputBusID == nil` sites: one is a graph KEY carrying an extra
+    /// `sends.isEmpty` term, the other a differently-shaped node label. Folding
+    /// those in would invent a shared rule neither actually wants.
+    public var isMasterInput: Bool { kind == .bus || outputBusID == nil }
 
     public static let volumeRange: ClosedRange<Double> = 0...2
     public static let panRange: ClosedRange<Double> = -1...1
@@ -1866,12 +1949,35 @@ public struct MixdownResult: Codable, Sendable, Equatable {
     public var durationSeconds: Double
     public var sampleRate: Double
     public var channels: Int
+    /// Honesty echo for `excludeTrackIds` (m23-m1): names of the tracks
+    /// silenced for THIS render, in session order. nil (key omitted) when no
+    /// exclusion was requested, keeping every pre-m23-m1 response
+    /// byte-identical. The project's own mute flags were never touched.
+    public var excludedTracks: [String]?
+    /// Output format echo (m23-m2): the INTEGER bit depth written, or nil (key
+    /// omitted) for the Float32 default — absence means "the default", so every
+    /// pre-m23-m2 payload stays byte-identical.
+    public var bitDepth: Int?
+    /// Output format echo (m23-m2): `"aiff"`, or nil (key omitted) for the WAV
+    /// default. Same absence rule as `bitDepth`.
+    public var container: String?
+    /// Present only where dithering could apply (an integer depth), and always
+    /// `false` in v0 (m23-m2): the quantizer is undithered, and saying so is
+    /// better than implying a noise-shaped dither we do not perform.
+    public var ditherApplied: Bool?
 
-    public init(path: String, durationSeconds: Double, sampleRate: Double, channels: Int) {
+    public init(path: String, durationSeconds: Double, sampleRate: Double, channels: Int,
+                excludedTracks: [String]? = nil,
+                bitDepth: Int? = nil, container: String? = nil,
+                ditherApplied: Bool? = nil) {
         self.path = path
         self.durationSeconds = durationSeconds
         self.sampleRate = sampleRate
         self.channels = channels
+        self.excludedTracks = excludedTracks
+        self.bitDepth = bitDepth
+        self.container = container
+        self.ditherApplied = ditherApplied
     }
 }
 

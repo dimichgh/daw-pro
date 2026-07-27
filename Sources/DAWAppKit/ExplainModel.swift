@@ -36,6 +36,11 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// the whole mix to an audio file. A core beginner action, so it shows in both
     /// Simple and Pro transport modes.
     case transportExport
+    /// The Export dialog itself (m23-m3) — the sheet the EXPORT chip opens:
+    /// quality, file type, tracks to leave out, and the loudness target. ONE
+    /// honest entry for the whole card (the Voice/Effect-editor precedent — a
+    /// single coherent surface, not a card per control).
+    case exportDialog
     /// The session vibe meter — the glowing orb near the master cluster (vm-b).
     /// Read-only status chrome, so it shows in both Simple and Pro transport modes.
     case vibeMeter
@@ -58,6 +63,10 @@ public enum ExplainID: String, CaseIterable, Sendable {
     case mixerSends
     case mixerOutput
     case mixerPan
+    /// The round volume knob beside the pan knob (m23-a) — the fader's compact
+    /// twin. Its own card, not `.mixerFader`'s: the question a user has here is
+    /// "why is there a knob AND a fader?", which the fader's copy never answers.
+    case mixerVolumeKnob
     /// The long-throw fader beside its live meter and dB readout (one card).
     case mixerFader
     case mixerMute
@@ -78,6 +87,24 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// there is no track-lane counterpart to point at (track automation lives in the
     /// arrange timeline, not the mixer, and carries no Explain card today).
     case masterAutomation
+
+    // MARK: Reference track (m22-g)
+    /// The master strip's compact REFERENCE row — shown only when the project
+    /// carries a reference slot. Names the loaded reference, carries the shared
+    /// MIX|REF chip pair, and opens the REFERENCE panel.
+    case referenceRow
+    /// The REFERENCE panel itself (the centered card) — import/replace/remove,
+    /// the timing offset and trim, and the whole comparison surface.
+    case referencePanel
+    /// The MIX | REF chip pair. ONE id shared by the strip row and the panel's
+    /// A/B cluster (the shared-control rule — two entries with near-identical
+    /// copy are forbidden); per-instance frames anchor the card on whichever
+    /// copy is hovered. Its body carries the feature's core teaching moment:
+    /// why the reference sounds quieter here than on a streaming service.
+    case referenceABToggle
+    /// The panel's two-curve spectrum overlay — the reference's whole-song
+    /// average against the mix's recent average.
+    case referenceSpectrum
 
     // MARK: Piano roll
     case pianoRollSnap
@@ -103,6 +130,10 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// (its ⌘ shortcuts and the pinch gesture included — the honest-scope rule
     /// for gesture chrome).
     case arrangeZoom
+    /// The arrange-toolbar FOLLOW chip (m23-c2). One card for the whole feature:
+    /// it governs the timeline AND the note editor, so its scope is both surfaces
+    /// (the `arrangeZoom` honest-scope precedent).
+    case arrangeFollow
     case arrangeAddTrack
     /// A sidebar track row's identity (its name + kind icon).
     case trackRowIdentity
@@ -336,7 +367,10 @@ public enum ExplainCatalog {
             body: "Sets the overall loudness of everything you hear, mixed together. Drag it down when the whole song is too loud; double-click to reset it to normal."),
         .transportExport: ExplainEntry(
             title: "Export Song",
-            body: "Saves your finished song as an audio file you can share or keep. Pick a spot to save it, and the whole mix is rendered down into one clean file."),
+            body: "Saves your finished song as audio you can share or keep — one finished file, or each part on its own. It opens a panel where you choose the quality and what goes in, then asks where to put it."),
+        .exportDialog: ExplainEntry(
+            title: "Export Settings",
+            body: "Chooses how your song is written out: one finished file, or a folder holding each part on its own. You pick how much detail to keep and which file type to use — and for the single file, whether to leave a track silent for a backing track. Your project is never changed."),
         .vibeMeter: ExplainEntry(
             title: "Vibe Meter",
             body: "A living glow that shows the feel of your whole mix at a glance. It burns warm and low when the sound is deep and bassy, turns cool and airy when it is bright, and settles to a dim ember when things go quiet."),
@@ -355,7 +389,7 @@ public enum ExplainCatalog {
             body: "A colored tag showing what this channel carries — recorded audio, a software instrument, or a bus that groups other tracks. It tells you at a glance how the channel behaves."),
         .mixerInserts: ExplainEntry(
             title: "Inserts",
-            body: "Effects that reshape this track's sound in order, top to bottom — think reverb, compression, or delay. Add one to color the tone, or bypass it to compare before and after."),
+            body: "Effects that reshape this track's sound in order, top to bottom — think reverb, compression, or delay. Add one to color the tone, bypass it to compare before and after, or fold the list away with the arrow to give the fader more room."),
         .mixerSends: ExplainEntry(
             title: "Sends",
             body: "Taps a copy of this track off to a shared effect bus, like one reverb feeding many channels. Raise a send to add more of that shared effect to this track."),
@@ -365,6 +399,9 @@ public enum ExplainCatalog {
         .mixerPan: ExplainEntry(
             title: "Pan",
             body: "Places the track across the stereo field, from far left to far right. Spread instruments apart so each one owns its own space and the mix feels wider."),
+        .mixerVolumeKnob: ExplainEntry(
+            title: "Volume Knob",
+            body: "The same loudness the fader below sets, in a control that always fits. Reach for it when the strip is full of effects and the fader is short. Drag up or down; double-click to return the track to its normal level."),
         .mixerFader: ExplainEntry(
             title: "Volume Fader",
             body: "Sets how loud this track sits in the mix, with a live meter beside it showing its signal. Drag up to bring the part forward, down to tuck it behind the others."),
@@ -388,6 +425,20 @@ public enum ExplainCatalog {
         .masterAutomation: ExplainEntry(
             title: "Master Volume Automation",
             body: "Draws the master volume as a curve over time — the way to fade the whole mix out at the end of a song or ride the level through a section. Add points and drag them: higher is louder. This fade shapes what you hear but is left out of exported stems."),
+
+        // MARK: Reference track (m22-g)
+        .referenceRow: ExplainEntry(
+            title: "Reference Track",
+            body: "Shows the finished song you are mixing against, right on the master strip. Press MIX or REF to flip between your own mix and that record, and click the name to open the full comparison."),
+        .referencePanel: ExplainEntry(
+            title: "Reference Panel",
+            body: "Where you load a finished song you trust and hold your mix up against it. Import one, nudge its timing so the choruses line up, then read the two curves and the differences listed under them."),
+        .referenceABToggle: ExplainEntry(
+            title: "Mix / Reference A-B",
+            body: "Flips your ears between your own mix and the reference. The reference is turned down to sit at your mix's loudness, so it can sound quieter here than on a streaming service — that is deliberate, because the louder of two things always wins a blind comparison."),
+        .referenceSpectrum: ExplainEntry(
+            title: "Reference Spectrum",
+            body: "Shows where the energy sits across low, middle and high tones: the reference in plain white, your own mix in glowing cyan, averaged over the last few seconds. Where your line runs below the white one, that part of your sound is thinner than the record you chose."),
 
         // MARK: Piano roll
         .pianoRollSnap: ExplainEntry(
@@ -416,18 +467,21 @@ public enum ExplainCatalog {
         .arrangeZoom: ExplainEntry(
             title: "Zoom",
             body: "Zooms the timeline in for fine edits or out to see the whole song — the view holds its place around the playhead so nothing jumps. You can also pinch the timeline, and S, M, L set how tall each track row is."),
+        .arrangeFollow: ExplainEntry(
+            title: "Follow the Playhead",
+            body: "Keeps the playing position in view: as the song plays past the right edge, the timeline and the note editor turn to the next page on their own. Scroll somewhere yourself and following steps aside so it never fights you — press play again, or click FOLLOW, to hand it back."),
         .arrangeAddTrack: ExplainEntry(
             title: "Add Track",
             body: "Creates a new empty track to hold a recording, an instrument, or a generated part. Add one whenever you want to layer another sound on top of what you already have."),
         .trackRowIdentity: ExplainEntry(
             title: "Track",
-            body: "A single lane of your song. The icon shows what it carries — recorded audio, a software instrument, or a group — and the name is yours to rename; its clips live in the timeline to the right."),
+            body: "A single lane of your song. The icon shows what it carries — recorded audio, a software instrument, or a group — and the name is yours to rename; its clips live in the timeline to the right. Drag the header up or down to reorder; a gap opens where it lands."),
         .clipBlock: ExplainEntry(
             title: "Clip",
             body: "A block of sound or notes on the timeline. Drag it to move it in time; in Pro you can also drag its edges to trim, its top corners to fade, and double-click to split it in two."),
         .arrangePlayhead: ExplainEntry(
             title: "Playhead & Timeline",
-            body: "Click any empty lane space to move the playhead there, or grab the glowing line and drag it to scrub through the song. A faint guide line previews the beat you would land on. Double-click a clip to split it at that spot."),
+            body: "Click any empty lane space to move the playhead there, or grab the glowing line and drag it to scrub. A faint guide line previews the beat you land on. Double-click empty space on an instrument track to start a clip and open the note editor; double-click a clip to split it."),
         .loopRuler: ExplainEntry(
             title: "Loop Region",
             body: "The strip along the top of the timeline where you mark a section to repeat. Drag across it to set the loop, click inside to turn looping on or off, or click an empty spot to jump the playhead there."),

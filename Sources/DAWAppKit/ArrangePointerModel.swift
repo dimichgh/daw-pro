@@ -124,6 +124,47 @@ public enum ArrangePointer {
         spans.lastIndex { beat >= $0.startBeat && beat < $0.endBeat && $0.lengthBeats > 0 }
     }
 
+    /// The row whose CLIP BAND contains a content-space y (m23-e), or nil when y
+    /// falls in a row's expanded extras, in the gap between rows, or in the free
+    /// space below the last lane — none of which name a track a clip could be
+    /// written on. Deliberately NOT `zone(...)`: the double-click create must not
+    /// inherit `zone`'s playhead-grab precedence (empty space within the grab
+    /// tolerance classifies `.playheadGrab`, which would silently refuse a create
+    /// on exactly the beat the single tap had just seeked to).
+    public static func clipLaneIndex(atY y: CGFloat, in lanes: [ArrangePointerLane]) -> Int? {
+        lanes.firstIndex { y >= $0.clipTop && y < $0.clipBottom }
+    }
+
+    /// The length (in beats) of the empty MIDI clip an empty-lane double-click
+    /// creates at `startBeat` (m23-e), or nil when there is no room for one.
+    ///
+    /// One BAR of the meter governing that beat (`beatsPerBar`) — the m12-d
+    /// meter-aware policy the piano-roll grid already follows, so a clip born in
+    /// a 7/8 section is 7 beats and a 4/4 one is 4 — but CLAMPED to the gap
+    /// before the next clip on the lane. The clamp is not cosmetic: the store's
+    /// `addMIDIClip` lands through the no-silent-overlap choke point with the NEW
+    /// clip active, so an unclamped bar reaching over a resident would trim the
+    /// resident's notes away — silent data loss from a double-click on empty
+    /// space. nil (create nothing) when `startBeat` is at or inside a clip, which
+    /// the SNAP can produce even though the raw pointer was over empty space.
+    public static func createClipLength(
+        startBeat: Double,
+        beatsPerBar: Int,
+        spans: [ArrangeClipSpan]
+    ) -> Double? {
+        let bar = Double(max(1, beatsPerBar))
+        let nextStart = spans
+            .filter { $0.lengthBeats > 0 && $0.startBeat > startBeat }
+            .map(\.startBeat)
+            .min()
+        // At/inside a resident (snap can land here) → no room, create nothing.
+        if clipIndex(atBeat: startBeat, in: spans) != nil { return nil }
+        guard let nextStart else { return bar }
+        let room = nextStart - startBeat
+        guard room > 0 else { return nil }
+        return min(bar, room)
+    }
+
     /// The beat a pointer x maps to for the seek surfaces (ghost line,
     /// empty-lane click, playhead scrub): floored at 0, snapped on the active
     /// arrange grid — or raw when the fine-drag modifier (⌥, the house

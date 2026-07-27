@@ -220,6 +220,21 @@ final class AppModel {
     /// `debug.quantizePanel` command; the panel renders as a centered overlay.
     var quantizePanelClipID: UUID?
 
+    /// The Export (bounce) dialog's headless model (m23-m3): the output format
+    /// (`DeliveryFormat`), the tracks to leave out, and the loudness target —
+    /// plus the ONE place that state becomes `ProjectStore.renderBounce`
+    /// arguments (`ExportDialogModel.export`). Owned here (like `quantizeModel`)
+    /// rather than in `ContentView`'s `@State` so `debug.captureUI` renders the
+    /// same instance the user sees and `debug.exportDialog` can drive it
+    /// headlessly — that hoisting is what makes the item's gate runnable.
+    let exportDialog: ExportDialogModel
+
+    /// Whether the Export dialog is open. Driven by the transport EXPORT chip
+    /// (via `exportSong()`), the onboarding tour's export step, and the
+    /// `debug.exportDialog` staging command; the card renders as a centered
+    /// overlay over the workspace.
+    var showExportSheet = false
+
     /// Staging seam for the arrange marker-lane inline rename (m11-c): when set to
     /// a marker id, the timeline opens that flag's rename field. Driven ONLY by the
     /// `debug.markerRename` capture command (the live UI uses double-click / the
@@ -293,10 +308,54 @@ final class AppModel {
     /// false in normal use (the panel opens at the top, on the API keys).
     var settingsRevealConnection = false
 
-    /// UI selection: the clip whose piano roll is open (nil = closed). Hoisted
-    /// out of ContentView's @State so `debug.captureUI` renders with the same
-    /// selection as the live window. Only MIDI clips open the editor.
-    var selectedClipID: UUID?
+    /// UI selection: which arrange clips are selected, and which one is the FOCUS
+    /// (m23-g1). Hoisted out of ContentView's @State so `debug.captureUI` renders
+    /// with the same selection as the live window.
+    ///
+    /// The invariants and the focus rule live on the type (`ArrangeSelection`),
+    /// not here — `ids`/`focusID` are `private(set)`, so nothing outside its
+    /// mutators can put the pair into an incoherent state.
+    var arrangeSelection = ArrangeSelection()
+
+    /// The FOCUS clip — the one whose piano roll is open (nil = closed). Only
+    /// MIDI clips actually open the editor (`openEditorClip` filters).
+    ///
+    /// A COMPUTED MIRROR of `arrangeSelection.focusID` since m23-g1, rather than
+    /// stored state that could drift from the selection set. Every pre-existing
+    /// read and write keeps its exact meaning: a non-nil assignment is a fresh
+    /// SINGLE selection (`selectOnly`) and nil is "nothing selected" (`clear`) —
+    /// which is bit-identical to the pre-g1 behaviour, because single selection
+    /// is the only selection that existed before g1. That is what keeps the
+    /// m23-e note-editor path (this property IS the editor's target resolver, at
+    /// ~19 call sites) safe from the multi-select work.
+    var selectedClipID: UUID? {
+        get { arrangeSelection.focusID }
+        set { arrangeSelection.focus(newValue) }
+    }
+
+    /// Bumped every time the LANES have re-rendered with a new selection — the
+    /// `arrangeDropReportSeq` contract (m23-e echo-seam law). Not state anyone
+    /// renders: it is the `debug.arrangeSelection` seam's proof that a selection
+    /// it just changed has been THROUGH the view, so a capture taken right after
+    /// the echo answers frames the NEW selection rather than the previous one.
+    var arrangeSelectionRenderSeq = 0
+
+    /// Bumped every time the LANES have re-rendered with new clip GEOMETRY —
+    /// the `arrangeSelectionRenderSeq` twin, for `debug.arrangeDrag` (m23-g2).
+    ///
+    /// A SEPARATE counter is required, not a convenience: `arrangeSelectionRenderSeq`
+    /// fires on `.onChange(of: selection)`, and a group MOVE does not change the
+    /// selection at all — so waiting on it after a drag would always time out
+    /// (and, worse, a gate that waited on it would read whatever the last
+    /// SELECTION change left behind and believe it had waited for something).
+    var arrangeClipLayoutRenderSeq = 0
+
+    /// Bumped whenever a clip is clicked in the arrange (real tap or staged) so
+    /// ContentView moves keyboard focus onto the arrange surface. A nonce rather
+    /// than a Bool because the request repeats: every click re-asserts focus,
+    /// including the clicks that follow the piano roll grabbing it on open
+    /// (`PianoRollView.onAppear { isFocused = true }`).
+    var arrangeKeyFocusNonce = 0
 
     /// Deep-scroll staging for the pinned-ruler proof (m13-g): the track id the
     /// shared arrange scroll should jump to (via ContentView's `ScrollViewReader`),
@@ -324,15 +383,38 @@ final class AppModel {
     /// The lanes viewport width, reported by ContentView's geometry — sizes the
     /// zoom anchor's viewport-center fallback and the zoomed-out padding.
     var arrangeViewportWidth: CGFloat = 0
-    /// A programmatic horizontal scroll request (the anchor-preserving offset a
-    /// zoom computed) + its nonce; consumed by the lanes' `ArrangeHScrollBridge`
-    /// in the same transaction as the scale change.
-    var arrangeZoomScrollTarget: CGFloat?
-    var arrangeZoomScrollNonce = 0
+    /// A programmatic horizontal scroll request + its nonce, consumed by the lanes
+    /// (`TimelineLanesView.hScrollApplyTarget`) — a `ScrollViewReader` jump onto a
+    /// layout-real 1 pt marker at that content x. There is NO AppKit bridge here
+    /// and never was: the arrange's programmatic scroll is plain SwiftUI (the name
+    /// `ArrangeHScrollBridge` in this comment before m23-c2 described
+    /// infrastructure that was never built, and it is what made m23-c2's roadmap
+    /// line assume the piano roll needed one too — it did not).
+    ///
+    /// TWO drivers write here: a zoom's anchor-preserving offset (m17-b), applied
+    /// in the same transaction as the scale change, and follow-the-playhead's page
+    /// turns (m23-c2).
+    var arrangeHScrollApplyTarget: CGFloat?
+    var arrangeHScrollApplyNonce = 0
     /// The pinch in flight (nil at rest): captured on the first magnify tick so
     /// per-tick zoom math measures off a FIXED anchor beat/screen-x.
     private var arrangePinch: ArrangeZoom.PinchState?
 
+    // MARK: Follow the playhead (m23-c2)
+
+    /// The arrange lanes' follow runtime. Per-surface (scrolling the roll must not
+    /// suspend the arrange) while the ENABLE flag both surfaces read is the one
+    /// persisted `panelLayout.followPlayhead` slot.
+    let arrangeFollow = FollowPlayheadModel()
+    /// The piano-roll bands' follow runtime. Hoisted here rather than living in the
+    /// view's `@State` so it survives a clip switch and so the `debug.followPlayhead`
+    /// echo can report BOTH surfaces' ground truth from one place.
+    let pianoRollFollow = FollowPlayheadModel()
+    /// The lanes' LAID-OUT content width, reported by the lanes' own geometry. The
+    /// follow clamp's ceiling — computing it here instead would fork
+    /// `TimelineLanesView.totalBeats`'s padding heuristic into a second source of
+    /// truth. `@ObservationIgnored`: nothing renders it, so it must not invalidate.
+    @ObservationIgnored var arrangeContentWidth: CGFloat = 0
     // MARK: Piano-roll zoom (m21-c)
 
     /// True while the piano-roll editor holds key focus (reported by the view's
@@ -353,25 +435,472 @@ final class AppModel {
     /// own input (the `arrangeHScrollReported` honesty rule).
     var arrangePointerZone: String = ArrangePointerZone.outside.rawValue
     var arrangeGhostBeat: Double?
-    /// The split refusal currently surfaced on a clip block (verbatim store
-    /// message, amber bubble). Auto-clears a few seconds after presentation.
+    /// Bumped every time the lanes report pointer state back UP (m23-e). Not
+    /// state anyone renders — it is the seam's proof that a staged event has
+    /// been THROUGH the view, which is what `arrangePointerDebug` waits on
+    /// before it answers. Every staged action reports (`applyPointerStage` runs
+    /// `handlePointerHover`/`endPointerHover` on all four), so this bumps once
+    /// per staging regardless of what the action then did.
+    var arrangePointerReportSeq = 0
+    /// The refusal currently surfaced in the arrange lanes (verbatim store
+    /// message, amber bubble) — on a clip block, or (m23-e) on the lane an
+    /// empty-lane create was refused on. Auto-clears a few seconds after
+    /// presentation.
     var arrangeSplitRefusal: ArrangeSplitRefusal?
     private var arrangeRefusalSeq = 0
 
-    /// Surfaces a refused clip edit VERBATIM (m17-c): the store's
+    /// The clip the last empty-lane double-click CREATED (m23-e), or nil when
+    /// that create was refused or found no room. Read-back state for the
+    /// `debug.arrangePointer` echo — never a source of truth for the UI. Set
+    /// ONLY by the view's own create callback; the seam clears it before staging
+    /// a double-click so the echo can never describe a previous one.
+    var arrangeCreatedClipID: UUID?
+
+    // MARK: Arrange audio-drop staging (m23-f)
+
+    /// The staged drop event `debug.arrangeDrop` injects (nil in normal use) —
+    /// ContentView threads it into the lanes, which run it through the SAME
+    /// `AudioLaneDropCore` a real Finder drag runs. A real drag is not
+    /// injectable: `DropInfo` has no public initializer, and the unbundled
+    /// staging binary has no Accessibility grant (the m17-b measurement).
+    var arrangeDropStage: ArrangeDropStage?
+    /// The drop layer's LIVE hover, reported UP by the lanes — i.e. whether a
+    /// drop line is actually standing. Never the seam's own input.
+    var arrangeDropHover: AudioDropHover?
+    /// What the drop handler RESOLVED on the last staged action (as opposed to
+    /// what it left behind). Distinguishing the two is the point: a drop decides
+    /// a landing beat and must leave no live hover.
+    var arrangeDropDecided: AudioDropHover?
+    /// Bumped every time the lanes report drop state back UP. Not state anyone
+    /// renders — it is the seam's proof that a staged event has been THROUGH the
+    /// view, which `arrangeDropDebug` waits on before it answers (the m23-e
+    /// echo-seam law: an echo that reports state the caller just changed must
+    /// wait for the view to confirm it applied, or it returns the PREVIOUS
+    /// call's state and can stale-green a gate).
+    var arrangeDropReportSeq = 0
+    /// The per-file results of the last import that came in through the ARRANGE
+    /// DROP path (never the File→Import menu, which reports its own failures in
+    /// an alert). Read-back state for the `debug.arrangeDrop` echo; cleared by
+    /// the seam before staging a drop so the echo can never describe an earlier
+    /// one (the `arrangeCreatedClipID` convention).
+    var arrangeDropImportResults: [AudioImportFileResult] = []
+
+    // MARK: Arrange rubber band (m23-g3)
+
+    /// The staged marquee step `debug.arrangeMarquee` injects (nil in normal
+    /// use) — ContentView threads it into the lanes, which run it through the
+    /// SAME handlers the real `DragGesture` runs (the `arrangePointerStage`
+    /// precedent; a real mouse drag is not injectable on the unbundled staging
+    /// binary — the m17-b Accessibility measurement).
+    var arrangeMarqueeStage: ArrangeMarqueeStage?
+    /// The band the lanes are ACTUALLY drawing, reported up — nil exactly when
+    /// no marquee is in flight. Never the seam's own input: this is the only
+    /// honest instrument for "the band is standing mid-drag and gone after",
+    /// and a mirror written by the seam would prove nothing about the view.
+    var arrangeMarqueeBand: CGRect?
+    /// What the last reported band TOUCHED. Distinct from the selection: with
+    /// the shift chord the selection is base ∪ hits, so a gate that could only
+    /// see the selection could not tell a union from a replace.
+    var arrangeMarqueeHits: Set<UUID> = []
+    /// Bumped every time the lanes report marquee state back UP — the seam's
+    /// proof that a staged step has been THROUGH the view (the m23-e echo-seam
+    /// law: an echo that reports state the caller just changed must wait for the
+    /// view to confirm it applied, or it answers with the PREVIOUS call's state
+    /// and can stale-GREEN a gate).
+    var arrangeMarqueeReportSeq = 0
+    /// The lanes' RESOLVED vertical ladder, reported up on first render and on
+    /// every change. The ladder is NON-UNIFORM (an expanded automation row adds
+    /// 64 pt) and `rowHeight` is user-adjustable (beta m10-d), so a caller that
+    /// hardcoded a pitch would compute a fixture the app never renders — and a
+    /// ladder recomputed HERE would be a second producer free to agree with the
+    /// view by luck. The view produces it; this only carries it out.
+    var arrangeLaneGeometry: ArrangeLaneGeometry = .empty
+
+    // MARK: Arrange track-header reorder (m23-h)
+
+    /// The staged drag step `debug.trackHeaderDrag` injects (nil in normal use)
+    /// — `TrackRowsList` runs it through the SAME `dragUpdate`/`dragEnd`
+    /// handlers the real `DragGesture` runs (the `arrangeMarqueeStage`
+    /// precedent; a real mouse drag is not injectable on the unbundled staging
+    /// binary — the m17-b Accessibility measurement).
+    var trackReorderStage: TrackReorderStage?
+    /// The list's MEASURED row ladder, reported up on first layout and on every
+    /// change. The seam echoes it because it is the ground truth a caller must
+    /// compute a fixture FROM: row heights vary with each track's open
+    /// takes/automation sections and `rowHeight` is user-adjustable (beta
+    /// m10-d), so a hardcoded pitch would describe a list the app never drew.
+    var trackRowLadder: TrackRowLadder = .empty
+    /// The drag the list is ACTUALLY running — including the landing it is
+    /// drawing the indicator from. Never the seam's own input: this is the only
+    /// honest instrument for "the drop line stands at the right slot mid-drag,
+    /// and the order has NOT changed yet".
+    var trackReorderDrag: TrackReorderDragState?
+    /// Bumped every time the list reports back UP — the seam's proof that a
+    /// staged step has been THROUGH the view (the m23-e echo-seam law: an echo
+    /// that reports state the caller just changed must wait for the view to
+    /// confirm it applied, or it answers with the PREVIOUS call's state and can
+    /// stale-GREEN a gate).
+    var trackReorderReportSeq = 0
+
+    // MARK: Mixer strip reorder (m23-z)
+
+    /// The staged drag step `debug.mixerStripDrag` injects (nil in normal use)
+    /// — `MixerView` runs it through the SAME `dragUpdate`/`dragEnd` handlers
+    /// the real `DragGesture` runs.
+    var mixerStripDragStage: MixerStripDragStage?
+    /// The console's MEASURED strip ladder, in VISUAL order, reported up on
+    /// first layout and on every change. The seam echoes it because it is the
+    /// ground truth a caller must compute a fixture FROM: the bus divider's
+    /// width is intrinsic (its caption's text), so the gaps are NOT uniform and
+    /// a hardcoded pitch would describe a rack the app never drew.
+    ///
+    /// Only measured while the Mix workspace is on screen — a caller reads it
+    /// after `ui.showMixer`, and an empty ladder from the Arrange tab means
+    /// "not rendered", which is why the seam echoes `workspaceMode` beside it.
+    var mixerStripLadder: MixerStripLadder = .empty
+    /// The drag the console is ACTUALLY running — the landing it is drawing the
+    /// line from, and the parting offsets it is rendering the resting strips
+    /// with. The only honest instrument for "the line stands at the right slot,
+    /// the rack parted by the right distance, and the order has NOT changed yet".
+    var mixerStripDrag: MixerStripDragState?
+    /// Bumped every time the console reports back UP (the echo-seam law).
+    var mixerStripDragReportSeq = 0
+
+    /// Surfaces a refused arrange edit VERBATIM (m17-c): the store's
     /// LocalizedError message — the SAME string the wire returns for the same
-    /// call — as a transient amber bubble on the refused clip. Auto-clears
+    /// call — as a transient amber bubble on whatever refused. Auto-clears
     /// after 6 s unless a newer refusal replaced it (seq guard).
     func presentArrangeSplitRefusal(_ error: any Error, clipID: UUID?) {
+        presentArrangeRefusal(error, anchor: clipID.map { .clip($0) })
+    }
+
+    /// m23-e: the empty-lane create's refusal — same verbatim copy, anchored on
+    /// the LANE it was attempted on (there is no clip to hang it from).
+    func presentArrangeLaneRefusal(_ error: any Error, trackID: UUID, beat: Double) {
+        arrangeCreatedClipID = nil
+        presentArrangeRefusal(error, anchor: .lane(trackID: trackID, beat: beat))
+    }
+
+    private func presentArrangeRefusal(_ error: any Error, anchor: ArrangeSplitRefusal.Anchor?) {
         arrangeRefusalSeq += 1
         let seq = arrangeRefusalSeq
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        arrangeSplitRefusal = ArrangeSplitRefusal(clipID: clipID, message: message, seq: seq)
+        arrangeSplitRefusal = ArrangeSplitRefusal(anchor: anchor, message: message, seq: seq)
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 6_000_000_000)
             guard let self, self.arrangeSplitRefusal?.seq == seq else { return }
             self.arrangeSplitRefusal = nil
         }
+    }
+
+    /// m23-e: a successful empty-lane create — select the new clip (which is
+    /// what OPENS the piano roll on it) and clear any standing refusal, so the
+    /// amber bubble can never outlive the condition that produced it.
+    func noteCreatedClip(_ clipID: UUID) {
+        arrangeCreatedClipID = clipID
+        arrangeSplitRefusal = nil
+        selectedClipID = clipID
+    }
+
+    // MARK: - Arrange multi-select (m23-g1)
+
+    /// The ONE arrange click handler: the ClipBlock tap and the
+    /// `debug.arrangeSelection {act:"click"}` seam both land here, so the seam
+    /// cannot drift from the gesture. Policy is the headless type's
+    /// (`ArrangeSelection.apply(click:modifiers:)`); this adds only the focus
+    /// request, which is view state the model cannot set itself.
+    @discardableResult
+    func clickClip(id: UUID, modifiers: ArrangeClickModifiers) -> ArrangeClickIntent {
+        let intent = arrangeSelection.apply(click: id, modifiers: modifiers)
+        // Move keyboard focus onto the arrange so DELETE reaches it. Bumped on
+        // EVERY click, including a plain re-click of an already-selected clip:
+        // opening the piano roll steals focus back (its `.onAppear`), so a
+        // one-shot flag would leave the arrange permanently unfocused for MIDI.
+        arrangeKeyFocusNonce &+= 1
+        return intent
+    }
+
+    /// The ONE arrange MARQUEE handler (m23-g3): the lanes' `DragGesture` and
+    /// the `debug.arrangeMarquee` seam both land here, so the seam cannot drift
+    /// from the gesture.
+    ///
+    /// Geometry is `ArrangeMarquee`'s and selection policy is
+    /// `ArrangeSelection`'s; this owns only the composition of the two, and it
+    /// is deliberately tiny:
+    ///   • plain band → the selection IS the hit set
+    ///   • shift/⌘ band → the pre-drag BASE, then the hits unioned on
+    /// The additive path restores the base FIRST rather than unioning onto
+    /// whatever the previous update left, because a marquee re-decides on every
+    /// pointer move: without the restore, shrinking a shift-band could never
+    /// give a clip back and the selection would only ever grow. The focus
+    /// survives both paths untouched (it is a member of `base`), and neither
+    /// path invents one — see `ArrangeSelection.replace(with:)` for why a band
+    /// must never open the note editor.
+    ///
+    /// NO keyboard-focus nonce here, unlike `clickClip`: a marquee is a
+    /// pointer-only bulk gesture on EMPTY space, and asserting arrange focus
+    /// mid-drag would fight the piano roll for the key window on every update.
+    func applyArrangeMarquee(hits: Set<UUID>, base: Set<UUID>, additive: Bool) {
+        if additive {
+            arrangeSelection.replace(with: base)
+            arrangeSelection.formUnion(hits)
+        } else {
+            arrangeSelection.replace(with: hits)
+        }
+    }
+
+    /// Deletes every selected clip as ONE undoable edit. The DELETE key and the
+    /// `debug.arrangeSelection {act:"delete"}` seam both call exactly this.
+    ///
+    /// Filters the selection against LIVE clips first (the stale-id policy on
+    /// `ArrangeSelection.resolved(in:)`): a selected clip can vanish under the
+    /// selection via undo/redo or an agent's `clip.remove`, and a stale id must
+    /// be a silent skip, never a thrown refusal at the user. Anything the store
+    /// then refuses (a take-comp member) surfaces VERBATIM as the amber bubble,
+    /// on the focus clip if there is one — the m17-c/m23-e refusal convention;
+    /// a silent no-op is the complaint that convention exists to prevent.
+    ///
+    /// Returns true when clips were actually removed (so the key handler can
+    /// answer `.handled` vs `.ignored` honestly).
+    @discardableResult
+    func deleteArrangeSelection() -> Bool {
+        let live = Set(store.tracks.flatMap { $0.clips.map(\.id) })
+        let targets = arrangeSelection.resolved(in: live)
+        guard !targets.isEmpty else { return false }
+        do {
+            _ = try store.removeClips(ids: Array(targets))
+            // Cleared only on success: a refused delete leaves the selection
+            // standing so the user can see what was refused and fix it.
+            arrangeSelection.clear()
+            return true
+        } catch {
+            presentArrangeSplitRefusal(error, clipID: arrangeSelection.focusID ?? targets.first)
+            return false
+        }
+    }
+
+    // MARK: - Arrange group drag (m23-g2)
+
+    /// The arrange grid the LANES actually apply — Simple locks it to `.bar`
+    /// regardless of the picker (`ClipSnap.effective`). One expression, shared by
+    /// the group-drag handler and both debug seams, so a gate that sets `snap`
+    /// and a gesture that reads it can never disagree about what is in force.
+    var effectiveClipSnap: ClipSnap {
+        ClipSnap.effective(density: panelDensity.density(forPanel: TimelineLanesView.panelID),
+                           picked: clipSnap)
+    }
+
+    /// What a group drag actually did — the drag's honest answer, sourced from
+    /// the STORE's own `ClipsMoveResult` rather than recomputed.
+    struct ArrangeGroupDragOutcome {
+        /// The ACHIEVED anchor start (not the requested one). The drag readout
+        /// shows this, so the bubble cannot claim a beat the clamp overrode.
+        var anchorStart: Double
+        var movedIDs: [UUID] = []
+        /// What the STORE was asked for — post-gesture-floor, so it is NOT
+        /// always what the pointer asked for. When `gestureFlooredAtZero` is
+        /// true this equals `effectiveDeltaBeats` (the store had nothing left
+        /// to clamp) and the earlier reduction is the flag's to report. Kept
+        /// store-local on purpose: an app-layer field that shadowed
+        /// `ClipsMoveResult.requestedDeltaBeats` with a DIFFERENT meaning is
+        /// exactly the drift this cycle was spent designing out.
+        var requestedDeltaBeats: Double = 0
+        var effectiveDeltaBeats: Double = 0
+        /// The whole-group clamp inside `ProjectStore.moveClips` engaged.
+        var storeClamped: Bool = false
+        /// The gesture's own anchor floor engaged (`ArrangeGroupDrag.Plan`).
+        var gestureFlooredAtZero: Bool = false
+        /// THE DRAG'S REQUESTED LANDING WAS REDUCED — by either stage.
+        ///
+        /// COMPUTED, never stored, because the two stages are genuinely two
+        /// places and a stored copy could drift from them. This shape is a
+        /// REGRESSION FIX (m23-g2 round 2, found in independent verification):
+        /// `clamped` used to be the store's flag alone, which made it
+        /// ANCHOR-DEPENDENT — clips at 4 and 12 dragged by -10 with snap off
+        /// land at 0 and 8 either way, but grabbing the leftmost reported
+        /// `clamped: false` (the gesture floor had already absorbed it) and
+        /// grabbing the rightmost reported `true`. Same geometry, same
+        /// effective delta, opposite report. A debug echo that answers the same
+        /// question two ways poisons every diagnosis made through it — the
+        /// ECHO-SEAM LAW, learned at m23-e — and this is the field m23-x's
+        /// arrow-key nudge will inherit.
+        var clamped: Bool { storeClamped || gestureFlooredAtZero }
+        var trimmedIDs: [UUID] = []
+        var removedIDs: [UUID] = []
+        var refusal: String?
+        /// True when the store was actually mutated — the debug seam only waits
+        /// on a re-render when there is one to wait for.
+        var changed: Bool {
+            effectiveDeltaBeats != 0 || !trimmedIDs.isEmpty || !removedIDs.isEmpty
+        }
+    }
+
+    /// The ONE arrange body-drag handler: the ClipBlock drag gesture and the
+    /// `debug.arrangeDrag` seam both land here, so the seam cannot drift from
+    /// the gesture. Returns the ACHIEVED anchor start.
+    ///
+    /// THE GRAB RULE, decided and documented: dragging a clip that IS in the
+    /// selection moves the WHOLE selection; dragging one that is NOT selects it
+    /// first — collapsing the selection to it — and moves it alone. Without the
+    /// second half, a selection left standing from an earlier gesture would
+    /// silently drag clips the user is not touching, possibly off-screen. The
+    /// collapse routes through `clickClip`, the same handler a plain click uses,
+    /// so it also bumps `arrangeKeyFocusNonce` and DELETE still reaches the
+    /// arrange after the drag.
+    ///
+    /// Snap, delta and clamp each have exactly one home: `effectiveClipSnap`
+    /// (which grid), `ArrangeGroupDrag.plan` (the rigid delta, anchor-snapped
+    /// once, plus the ANCHOR's own beat-0 floor), `ProjectStore.moveClips` (the
+    /// WHOLE-GROUP beat-0 clamp and every resulting position). This method only
+    /// routes between them — and unions the two reductions into one honest
+    /// `clamped`, which neither stage can answer alone.
+    @discardableResult
+    func dragArrangeClips(anchorClipID: UUID, anchorOriginalStart: Double,
+                          rawDragDeltaBeats: Double) -> ArrangeGroupDragOutcome {
+        // GRAB RULE — collapse onto the grabbed clip when it is not selected.
+        if !arrangeSelection.contains(anchorClipID) {
+            clickClip(id: anchorClipID, modifiers: [])
+        }
+        guard let anchorCurrentStart = liveClip(anchorClipID)?.startBeat else {
+            // The anchor vanished under the drag (an undo, an agent's
+            // clip.remove). Nothing to translate against — report honestly.
+            return ArrangeGroupDragOutcome(anchorStart: anchorOriginalStart)
+        }
+        let plan = ArrangeGroupDrag.plan(
+            anchorOriginalStart: anchorOriginalStart, anchorCurrentStart: anchorCurrentStart,
+            rawDragDeltaBeats: rawDragDeltaBeats,
+            snap: effectiveClipSnap, meterMap: store.transport.meterMap)
+        // Stale ids are a silent skip (the `ArrangeSelection.resolved(in:)`
+        // policy) — a clip can vanish under the selection, and that must never
+        // reach the store as a thrown refusal at the user.
+        let live = Set(store.tracks.flatMap { $0.clips.map(\.id) })
+        let targets = arrangeSelection.resolved(in: live)
+        guard !targets.isEmpty else {
+            return ArrangeGroupDragOutcome(anchorStart: anchorCurrentStart)
+        }
+        do {
+            let result = try store.moveClips(ids: Array(targets), byBeats: plan.deltaBeats)
+            return ArrangeGroupDragOutcome(
+                anchorStart: liveClip(anchorClipID)?.startBeat ?? anchorCurrentStart,
+                movedIDs: result.clips.map(\.id),
+                requestedDeltaBeats: result.requestedDeltaBeats,
+                effectiveDeltaBeats: result.effectiveDeltaBeats,
+                storeClamped: result.clamped,
+                gestureFlooredAtZero: plan.flooredAtZero,
+                trimmedIDs: result.trimmedClipIDs,
+                removedIDs: result.removedClipIDs)
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            presentArrangeDragRefusal(error, message: message, clipID: anchorClipID)
+            return ArrangeGroupDragOutcome(anchorStart: anchorCurrentStart, refusal: message)
+        }
+    }
+
+    /// The clip with this id, from whichever track holds it.
+    func liveClip(_ id: UUID) -> Clip? {
+        for track in store.tracks {
+            if let clip = track.clips.first(where: { $0.id == id }) { return clip }
+        }
+        return nil
+    }
+
+    /// A refused drag surfaces the store's message VERBATIM as the amber bubble
+    /// (the m17-c/m23-e convention — a silent no-op is what that convention
+    /// exists to prevent), but ONLY when the message is new.
+    ///
+    /// A drag emits one call per pointer event, and `presentArrangeSplitRefusal`
+    /// spawns a six-second auto-dismiss `Task` per call. Without this guard,
+    /// dragging one take-comp member across the lane would spawn hundreds of
+    /// sleeping tasks for a single gesture that shows exactly one bubble.
+    private func presentArrangeDragRefusal(_ error: any Error, message: String, clipID: UUID) {
+        guard arrangeSplitRefusal?.message != message else { return }
+        presentArrangeSplitRefusal(error, clipID: clipID)
+    }
+
+    /// True when a text-input surface owns keyboard focus — the m17-d focus
+    /// guard, SECOND CONSUMER. Reuses `transportKeyResponder`, the classifier
+    /// MEASURED live at m17-d (`NSText` covers the shared field editor behind
+    /// every AppKit-backed `TextField`; `NSTextInputClient` catches SwiftUI-native
+    /// hosts), so "is the user typing?" has one answer in this app, not two.
+    ///
+    /// Why the delete handler checks this even though SwiftUI's focused-view-first
+    /// ordering should already keep the key inside a focused field: a Backspace
+    /// that reaches the arrange while a track/marker rename is open would delete
+    /// the user's CLIPS instead of a character. That failure is destructive and
+    /// silent, so it gets a guard that does not depend on delivery order.
+    var isArrangeTextEditingFocused: Bool {
+        let responder = (contentWindow ?? NSApp.keyWindow)?.firstResponder
+        return Self.transportKeyResponder(responder) == .textEditing
+    }
+
+    /// The DELETE key's arrange handler — ContentView's `.onKeyPress(.delete)`
+    /// fallback calls it and reports `.handled` when it returns true.
+    ///
+    /// It is a FALLBACK by construction: the piano roll and the automation lane
+    /// editor own `.onKeyPress(.delete)` on their own surfaces and are
+    /// DESCENDANTS of the view that hosts this one, so a focused roll with notes
+    /// selected consumes the key and this never runs. Structural, not asserted —
+    /// which is why m23-e's note-deletion path cannot regress through here.
+    /// Whether a blocking modal is on screen. Every one of these renders as a
+    /// centered panel over a scrim in `ContentView`'s `.overlay` chain.
+    ///
+    /// WHY AN ENUMERATED LIST, when the rest of this guard is structural: scoping
+    /// `ArrangeDeleteKey` to the arrange workspace closes the PROPAGATION path
+    /// (focus lands in the modal, the modal ignores the key, it bubbles to an
+    /// ancestor — the workspace is no longer an ancestor of the overlays). It does
+    /// NOT close the RETAINED-FOCUS path: selecting clips bumps
+    /// `arrangeKeyFocusNonce`, which asserts focus on the workspace, and opening
+    /// an inline `.overlay` does not necessarily move it — so a DELETE pressed
+    /// with a modal open can arrive here directly, never having propagated.
+    /// That path cannot be observed from the debug seam (it depends on SwiftUI's
+    /// focus arbitration, which `debug.arrangeSelection {keyHandler}` bypasses by
+    /// construction, and real key delivery does not reach staging). Since the
+    /// failure it prevents is SILENT DESTRUCTION of the user's clips behind a
+    /// panel they are looking at, it is guarded here, where a gate can see it,
+    /// rather than argued to be impossible.
+    ///
+    /// MAINTENANCE OBLIGATION: a new blocking modal must be added to this list.
+    /// `showEngineNotices` is deliberately NOT here — it is a passive bottom
+    /// banner, not a scrimmed modal, and it can linger; blocking DELETE under it
+    /// would be the usability bug, not the fix.
+    var isModalPresented: Bool {
+        instrumentPickerTrackID != nil
+            || (polySynthEditorTrackID != nil && polySynthEditor.targetIsPolySynth)
+            || effectPickerTrackID != nil
+            || quantizePanelClipID != nil
+            || voiceConvertClipID != nil
+            || showExportSheet
+            || showUndoHistory
+            || showSettings
+    }
+
+    func handleArrangeDeleteKey() -> Bool {
+        // The Mix console has no clip selection, so DELETE there must be inert.
+        // The view already makes this unreachable (`ArrangeDeleteKey` is mounted
+        // inside the arrange workspace, which the Mix branch replaces), but this
+        // is the half of that scoping a headless gate can OBSERVE.
+        guard workspaceMode == .arrange else { return false }
+        guard !isModalPresented else { return false }
+        guard !isArrangeTextEditingFocused else { return false }
+        guard !arrangeSelection.isEmpty else { return false }
+        return deleteArrangeSelection()
+    }
+
+    /// The clip the piano roll is ACTUALLY open on: `selectedClipID` resolved
+    /// against the live store and filtered to MIDI. This is the ONE rule —
+    /// `ContentView`'s editor branch renders exactly when this is non-nil, and
+    /// the `debug.arrangePointer` echo reports exactly this — so the echo can
+    /// never claim an editor that isn't on screen (a stale id after an undo
+    /// resolves to nil here, closing the panel and emptying the echo together).
+    var openEditorClip: Clip? {
+        guard let id = selectedClipID else { return nil }
+        for track in store.tracks {
+            if let clip = track.clips.first(where: { $0.id == id }), clip.isMIDI {
+                return clip
+            }
+        }
+        return nil
     }
 
     // MARK: Space-bar transport toggle (m17-d)
@@ -628,6 +1157,74 @@ final class AppModel {
         return store.masterEffectGainReductionDb(effectID: effectID)
     }
 
+    /// A synthetic reference slot / monitor status / mix-side evidence the
+    /// master strip's REFERENCE row and the REFERENCE panel prefer over the
+    /// live store polls (m22-g P3). nil in normal use; the debug-tier
+    /// `debug.referenceSeed` command sets it so a headless capture / E2E can
+    /// stage every §7.1/§7.2 state deterministically. The STORE and the ENGINE
+    /// are never touched by seeding — a view-side override, the
+    /// `debug.scopeSeed` / `debug.grSeed` precedent. Because seeding writes no
+    /// project data, an UNSEEDED capture is honest evidence that the live polls
+    /// are ticking.
+    var referenceSeed: ReferenceSeed?
+
+    /// The REFERENCE panel's headless model (m22-g P3) — created in `init`
+    /// against the store's `reference.*` methods, the SAME ones the wire's
+    /// `reference.*` commands call (UI == wire by construction), with every
+    /// READ routed through the seed override first.
+    let referencePanel: ReferencePanelModel
+
+    /// The slot the master strip's REFERENCE row gates on: the staged slot when
+    /// seeding, else the project's own. nil = no row at all (zero cost for a
+    /// project without a reference).
+    var referenceRowSlot: ReferenceSlot? {
+        if let referenceSeed { return referenceSeed.slot }
+        return store.reference
+    }
+
+    /// The panel's status read: the staged status when seeding, else the
+    /// store's own (which computes the `wouldMatchGainDb` preview through the
+    /// exact `ReferenceLevelMatch` law).
+    func referenceStatusForUI() -> ReferenceStatus {
+        if let referenceSeed { return referenceSeed.status }
+        return store.referenceStatus()
+    }
+
+    /// The panel's comparison read. Seeded mix evidence wins; otherwise the
+    /// live polls — `liveLoudness()` for loudness/true-peak/range and the
+    /// `vibeSeed ?? masterAnalysis()` spectrum closure the EQ card already uses
+    /// (ContentView.swift's `spectrum:` argument), so one spectrum override
+    /// serves both surfaces. nil whenever there is no reference analysis to
+    /// compare against — the panel then shows honest dashes, never a floor.
+    func referenceCompareForUI() -> ReferenceCompareResult? {
+        let slot = referenceSeed?.slot ?? store.reference
+        guard let analysis = slot?.analysis else { return nil }
+        let live: LiveLoudnessSnapshot
+        if let seeded = referenceSeed?.mixLive {
+            live = seeded
+        } else if referenceSeed != nil {
+            // A seed with no staged mix evidence stages the honest
+            // no-live-reading case (every loudness delta reads "—").
+            live = .empty
+        } else if let polled = try? store.liveLoudness() {
+            live = polled
+        } else {
+            live = .empty
+        }
+        let master = referenceSeed?.mixAnalysis ?? vibeSeed ?? store.masterAnalysis()
+        return ReferenceCompareResult.assemble(live: live, master: master, analysis: analysis)
+    }
+
+    /// Opens the REFERENCE panel (the master strip's row, and
+    /// `debug.referenceSeed {panel: true}`).
+    func openReferencePanel() {
+        withAnimation(.easeOut(duration: 0.15)) { referencePanel.open() }
+    }
+
+    func closeReferencePanel() {
+        withAnimation(.easeOut(duration: 0.15)) { referencePanel.close() }
+    }
+
     /// A pending copilot draft (M8 ex-a hand-off). The explain card's "Ask the
     /// Copilot" button sets this to a prefilled question and opens the rail; the rail
     /// loads it into its input on appear and clears it (never auto-sends — the user
@@ -745,6 +1342,11 @@ final class AppModel {
             // finished seconds before quit is never lost (previously only
             // the crash path would have covered it).
             MainActor.assumeIsolated {
+                // m23-d: release any held audition FIRST — after this the main
+                // actor stops being able to send note-offs, and the render side's
+                // 3 s watchdog would be the only thing left between a held key
+                // and a note ringing through teardown.
+                store?.stopAllAudition()
                 store?.autosaveIfNeeded()
             }
             try? FileManager.default.removeItem(at: lockURL)
@@ -796,6 +1398,11 @@ final class AppModel {
                 return try store.importConvertedVoice(
                     fileURL: url, trackName: trackName, atBeat: atBeat)
             })
+
+        // The REFERENCE panel model (m22-g P3). Constructed bare here (its
+        // providers close over `self`, which is not whole yet) and wired at the
+        // tail of `init` by `wireReferencePanel()`.
+        self.referencePanel = ReferencePanelModel()
 
         // The unified generation-progress registry (m17-h): its own polls read
         // the RAW client (never a decorator — no self-observation loop) and the
@@ -1004,6 +1611,12 @@ final class AppModel {
                     fromClipId: clipID, name: name, gridBeats: grid, cycleBeats: cycle)
             })
 
+        // The Export dialog model (m23-m3). Stateless to construct — it takes
+        // its track list as a VALUE snapshot at open time (`prepare(tracks:)`)
+        // and drives the store only through the export call it is handed, so it
+        // previews and unit-tests without a store at all.
+        self.exportDialog = ExportDialogModel()
+
         // The Undo-history model (m11-b): reads the store's label projection and
         // steps through history by RE-DRIVING the same `undo()`/`redo()` the wire
         // and Cmd-Z use — so the coalescing barrier + mid-take guard apply and no
@@ -1150,11 +1763,61 @@ final class AppModel {
         // completion signals (ob-b) — for UI AND wire-driven actions alike.
         onboardingAdapter = OnboardingSignalAdapter(store: store, model: onboarding)
         onboardingAdapter.start()
+        wireReferencePanel()
         installDebugCommands()
         // Space-bar transport toggle (m17-d): the app-wide key monitor. Last —
         // it reads store state only through the toggle funnel, no init order
         // dependency, but keeping bootstrap side effects at the tail is house style.
         installSpaceKeyMonitor()
+    }
+
+    /// Binds the REFERENCE panel model to the store (m22-g P3). Every READ goes
+    /// through the seed override first (the `scopeSeed` idiom) and every ACTION
+    /// routes to the SAME `ProjectStore` method the matching `reference.*` wire
+    /// command calls — so a reference imported from the panel and one imported
+    /// by an agent are byte-identical, and the panel adds ZERO wire surface (the
+    /// m10-c/m22-b pure-view precedent).
+    private func wireReferencePanel() {
+        referencePanel.slotProvider = { [weak self] in self?.referenceRowSlot }
+        referencePanel.statusProvider = { [weak self] in
+            self?.referenceStatusForUI() ?? ReferenceStatus()
+        }
+        referencePanel.compareProvider = { [weak self] in self?.referenceCompareForUI() }
+        referencePanel.fileExists = { [weak self] path in
+            // A STAGED slot is a view-side fiction whose path names nothing on
+            // disk, so while one is seeded the seed's own `fileMissing` flag is
+            // the whole truth — probing the filesystem there would report every
+            // seeded capture as a missing file (caught by the m22-g P3 gate's
+            // C2 leg, which staged "loaded + monitoring" and got fileMissing).
+            if let seed = self?.referenceSeed, seed.slot != nil {
+                return !seed.fileMissing
+            }
+            return FileManager.default.fileExists(atPath: path)
+        }
+        referencePanel.importAction = { [weak self] path in
+            guard let self else { return }
+            try await self.store.importReference(path: path)
+        }
+        referencePanel.analyzeAction = { [weak self] in
+            guard let self else { return }
+            _ = try await self.store.analyzeReference()
+        }
+        referencePanel.removeAction = { [weak self] in
+            guard let self else { return }
+            _ = try self.store.removeReference()
+        }
+        referencePanel.monitorAction = { [weak self] on in
+            guard let self else { return }
+            _ = try self.store.setReferenceMonitor(on: on)
+        }
+        referencePanel.offsetAction = { [weak self] seconds in
+            guard let self else { return }
+            _ = try self.store.setReferenceOffset(seconds: seconds)
+        }
+        referencePanel.trimAction = { [weak self] db in
+            guard let self else { return }
+            _ = try self.store.setReferenceTrim(db: db)
+        }
     }
 
     /// Offers the tour on first launch: begins it when eligible (fresh / reset).
@@ -1193,26 +1856,105 @@ final class AppModel {
         withAnimation(.easeOut(duration: 0.18)) { recoveryOffer = nil }
     }
 
-    /// Runs the bounce-to-file flow behind the transport EXPORT button and the
-    /// onboarding `export` step (ob-b): an NSSavePanel, then
-    /// `store.renderBounce(toPath:)`. Completion flows through the store's
-    /// `renderCompletedCount` — the onboarding adapter fires `renderCompleted` on
-    /// the increment, so there is ONE path and no direct tour-signal emission here.
+    /// Opens the Export dialog — the entry point behind the transport EXPORT
+    /// button and the onboarding `export` step (ob-b).
+    ///
+    /// Before m23-m3 this ran a bare `NSSavePanel` hardcoded to `.wav` straight
+    /// into `store.renderBounce(toPath:)` with every format parameter defaulted.
+    /// The save panel now comes AFTER the settings (`runExportFromDialog`), which
+    /// is also what lets it offer the chosen file type. Completion still flows
+    /// through the store's `renderCompletedCount` — the onboarding adapter fires
+    /// `renderCompleted` on the increment, so there is ONE path and no direct
+    /// tour-signal emission here.
     func exportSong() {
+        openExportSheet()
+    }
+
+    /// Opens (or re-opens) the Export dialog. Refreshes its track snapshot from
+    /// the live store and drops the previous run's result; the FORMAT and
+    /// normalization choices survive, because a second export in one session
+    /// almost always wants the first one's settings.
+    func openExportSheet() {
+        // Whole `Track` VALUES (m23-m3c): the dialog's stems preview plans
+        // through `StemPlan`, which reads each track's routing and kind to work
+        // out which tracks are master inputs. The checkbox rows' reduced view is
+        // derived inside `prepare`.
+        exportDialog.prepare(tracks: store.tracks)
+        withAnimation(.easeOut(duration: 0.15)) { showExportSheet = true }
+    }
+
+    func closeExportSheet() {
+        withAnimation(.easeOut(duration: 0.15)) { showExportSheet = false }
+    }
+
+    /// The dialog's EXPORT button: pick a destination, then run the bounce the
+    /// dialog describes.
+    ///
+    /// The panel's file type and default name come from the model's
+    /// `DeliveryFormat` — never a literal `.wav` — because the extension is what
+    /// actually selects the container (m23-m2). The user can still type any name
+    /// they like; `DeliveryFormat.applyingExtension` then APPENDS the canonical
+    /// extension rather than clobbering theirs, so an AIFF export saved as
+    /// "mix.wav" lands as "mix.wav.aiff" — ugly, but never a file whose bytes
+    /// disagree with its name.
+    ///
+    /// The render itself goes through `ExportDialogModel.export` — the SAME
+    /// method `debug.exportDialog {exportToPath}` and the suites call, so the
+    /// button cannot drift from what the gate measures.
+    ///
+    /// The dialog's ONE button, dispatched on the mode (m23-m3c): the two modes
+    /// need different terminal steps — a save panel for the single bounce file,
+    /// a folder chooser for the stems SET — and this is the only place that
+    /// choice is made, so the button can never open the panel for the mode the
+    /// model is not in.
+    func runExportFromDialog() {
+        switch exportDialog.mode {
+        case .bounce: runBounceExportFromDialog()
+        case .stems: runStemExportFromDialog()
+        }
+    }
+
+    private func runBounceExportFromDialog() {
+        let format = exportDialog.format
         let panel = NSSavePanel()
         panel.title = "Export Song"
         panel.prompt = "Export"
-        panel.nameFieldStringValue = "\(store.projectName).wav"
-        panel.allowedContentTypes = [.wav]
+        panel.nameFieldStringValue = exportDialog.suggestedFileName(
+            projectName: store.projectName)
+        if let type = UTType(filenameExtension: format.fileExtension) {
+            panel.allowedContentTypes = [type]
+        }
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task {
-            do {
-                _ = try await store.renderBounce(toPath: url.path)
-            } catch {
-                FileHandle.standardError.write(
-                    Data("export failed: \(error.localizedDescription)\n".utf8))
-            }
+        Task { @MainActor in
+            _ = await self.exportDialog.export(store: self.store, toPath: url.path)
+        }
+    }
+
+    /// The dialog's EXPORT button in STEMS mode (m23-m3c): pick a FOLDER, then
+    /// write the set the preview promised.
+    ///
+    /// A different terminal step, not a different dialog — `renderStems` writes
+    /// a SET into a directory, so this is an `NSOpenPanel` in directory mode
+    /// rather than the bounce's `NSSavePanel`. There is no file name to suggest
+    /// and no content type to allow: the files' names come from `StemPlan` and
+    /// their container from the shared format control, which is exactly why the
+    /// card previews them before this panel opens.
+    ///
+    /// The render goes through `ExportDialogModel.exportStems` — the SAME method
+    /// `debug.exportDialog {exportToDirectory}` and the suites call.
+    private func runStemExportFromDialog() {
+        let panel = NSOpenPanel()
+        panel.title = "Export Stems"
+        panel.message = "Choose a folder for the stem files"
+        panel.prompt = "Export"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { @MainActor in
+            _ = await self.exportDialog.exportStems(store: self.store, toDirectory: url.path)
         }
     }
 
@@ -1250,6 +1992,8 @@ final class AppModel {
                 return try self.setPanelDensity(params)
             case "debug.panelLayout":
                 return self.setPanelLayout(params)
+            case "debug.followPlayhead":
+                return try self.followPlayheadDebug(params)
             case "debug.windowFrame":
                 return self.setWindowFrame(params)
             case "debug.arrangeScroll":
@@ -1258,6 +2002,18 @@ final class AppModel {
                 return try self.arrangeZoomDebug(params)
             case "debug.arrangePointer":
                 return try self.arrangePointerDebug(params)
+            case "debug.arrangeDrop":
+                return try self.arrangeDropDebug(params)
+            case "debug.arrangeSelection":
+                return try self.arrangeSelectionDebug(params)
+            case "debug.arrangeDrag":
+                return try self.arrangeDragDebug(params)
+            case "debug.arrangeMarquee":
+                return try self.arrangeMarqueeDebug(params)
+            case "debug.trackHeaderDrag":
+                return try self.trackHeaderDragDebug(params)
+            case "debug.mixerStripDrag":
+                return try self.mixerStripDragDebug(params)
             case "debug.keySpace":
                 return try self.keySpaceDebug(params)
             case "debug.mainActorWedge":
@@ -1278,6 +2034,8 @@ final class AppModel {
                 return try self.setScopeSeed(params)
             case "debug.grSeed":
                 return try self.setGRSeed(params)
+            case "debug.referenceSeed":
+                return try self.setReferenceSeed(params)
             case "debug.onboardingState":
                 return try self.setOnboardingState(params)
             case "debug.recoveryOffer":
@@ -1318,6 +2076,10 @@ final class AppModel {
                 return self.instrumentPickerDebug(params)
             case "debug.quantizePanel":
                 return self.quantizePanelDebug(params)
+            case "debug.exportDialog":
+                return try self.exportDialogDebug(params)
+            case "debug.trackMenu":
+                return try self.trackMenuDebug(params)
             case "debug.tempoLane":
                 return self.tempoLaneDebug(params)
             case "debug.undoHistory":
@@ -1393,7 +2155,9 @@ final class AppModel {
     }
 
     /// `debug.panelLayout {sidebarWidth?, editorFraction?, rowHeight?,
-    /// pianoRollPPB?, reset?}` — stages the adjustable window layout (beta m10-d)
+    /// pianoRollPPB?, mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
+    /// reset?}` — stages the adjustable
+    /// window layout (beta m10-d)
     /// so a headless capture / E2E can drive the arrange sidebar width, the bottom
     /// editor's height fraction, the global track-row height, and (m21-c) the
     /// piano-roll zoom before `debug.captureUI` (the `debug.panelDensity`
@@ -1412,11 +2176,91 @@ final class AppModel {
         if let f = params["editorFraction"]?.doubleValue { panelLayout.setEditorFraction(CGFloat(f)) }
         if let h = params["rowHeight"]?.doubleValue { panelLayout.setRowHeight(CGFloat(h)) }
         if let z = params["pianoRollPPB"]?.doubleValue { panelLayout.setPianoRollPPB(CGFloat(z)) }
+        // m23-a: the mixer console's INSERTS disclosure — one more sticky layout
+        // slot, staged here so a capture can prove the collapsed strip.
+        if let c = params["mixerInsertsCollapsed"]?.boolValue {
+            panelLayout.setMixerInsertsCollapsed(c)
+        }
+        // m23-c2: follow-the-playhead is one more sticky slot. Set through the
+        // AppModel so both surfaces are re-armed with it (a stale suspension must
+        // not survive an enable) — `debug.followPlayhead` echoes the RUNTIME.
+        if let f = params["followPlayhead"]?.boolValue { setFollowPlayhead(f) }
+        // m23-d: the note-audition defeat switch. Also a `PanelLayoutStore` slot,
+        // also debug tier ONLY — hearing notes while you edit is view chrome, and
+        // the `note.audition` WIRE verb deliberately ignores it (an agent asking to
+        // hear something is an explicit request, not an editing preference).
+        if let a = params["auditionEnabled"]?.boolValue { panelLayout.setAuditionEnabled(a) }
         return .object([
             "sidebarWidth": .number(Double(panelLayout.sidebarWidth)),
             "editorFraction": .number(Double(panelLayout.editorFraction)),
             "rowHeight": .number(Double(panelLayout.rowHeight)),
             "pianoRollPPB": .number(Double(panelLayout.pianoRollPPB)),
+            "mixerInsertsCollapsed": .bool(panelLayout.mixerInsertsCollapsed),
+            "followPlayhead": .bool(panelLayout.followPlayhead),
+            "auditionEnabled": .bool(panelLayout.auditionEnabled),
+        ])
+    }
+
+    /// `debug.followPlayhead {rearm?, resetCounters?}` — the m23-c2 follow
+    /// seam for captures/E2E. Debug tier ONLY (off `allCommands`/MCP — following is
+    /// view chrome, so it adds ZERO wire surface; the m10-c/sp-b pure-view rule).
+    /// The persisted ON/OFF switch is NOT here: it is a `PanelLayoutStore` slot, so
+    /// it is staged through `debug.panelLayout {followPlayhead}` like every other
+    /// sticky dimension. What lives here is RUNTIME ground truth neither the store
+    /// nor a capture can tell you: each surface's live scroll offset, whether a
+    /// manual scroll has suspended it, and the churn counters.
+    ///
+    /// A BARE call is READ-ONLY (the m11-a law). `rearm:true` clears a manual-scroll
+    /// suspension; `resetCounters:true` zeroes the churn counters — the pair that
+    /// measured page against continuous (`FollowPlayhead`'s table) and that any
+    /// re-measurement of follow's cost still runs on.
+    private func followPlayheadDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["rearm"]?.boolValue == true { rearmFollow() }
+        if params["resetCounters"]?.boolValue == true {
+            arrangeFollow.resetCounters()
+            pianoRollFollow.resetCounters()
+        }
+        // A simulated POINTER scroll (gate seam): moves the named surface's scroller
+        // without registering an expected offset, which is exactly what a drag looks
+        // like to the manual-scroll detector. The arrange applies here because its
+        // scroller is driven from this model; the roll's lives in view state, so it
+        // travels the model's `scrollExternally` seam — different hop count, same
+        // thing arrives at the detector (an offset follow never asked for).
+        if let raw = params["simulateUserScroll"]?.doubleValue {
+            let surface = params["surface"]?.stringValue ?? "arrange"
+            switch surface {
+            case "arrange": applyArrangeHScroll(CGFloat(raw))
+            case "pianoRoll": pianoRollFollow.scrollExternally(to: CGFloat(raw))
+            default:
+                throw DebugError(
+                    "unknown surface \"\(surface)\" — expected \"arrange\" or \"pianoRoll\"")
+            }
+        }
+        // Geometry is echoed LIVE where the app owns it. The follow model only
+        // learns geometry when a target is computed or an offset reported, so its
+        // own copy can be one report stale — and a stale `contentWidth: 0` in a
+        // gate's first read looks exactly like a surface that cannot scroll. The
+        // arrange's geometry lives on this model, so it is passed in; the roll's
+        // lives in view state, so the model's last-seen IS the freshest value here.
+        func surface(_ model: FollowPlayheadModel,
+                     contentWidth: CGFloat? = nil, viewportWidth: CGFloat? = nil) -> JSONValue {
+            .object([
+                "offset": .number(Double(model.reportedOffset)),
+                "viewportWidth": .number(Double(viewportWidth ?? model.viewportWidth)),
+                "contentWidth": .number(Double(contentWidth ?? model.contentWidth)),
+                "suspended": .bool(model.isSuspended),
+                "expectedOffset": model.expectedOffset.map { JSONValue.number(Double($0)) } ?? .null,
+                "scrolls": .number(Double(model.scrollCount)),
+                "offsetReports": .number(Double(model.offsetReportCount)),
+                "contentWidthChanges": .number(Double(model.contentWidthChangeCount)),
+            ])
+        }
+        return .object([
+            "enabled": .bool(panelLayout.followPlayhead),
+            "isPlaying": .bool(store.transport.isPlaying),
+            "arrange": surface(arrangeFollow, contentWidth: arrangeContentWidth,
+                               viewportWidth: arrangeViewportWidth),
+            "pianoRoll": surface(pianoRollFollow),
         ])
     }
 
@@ -1618,13 +2462,87 @@ final class AppModel {
     func arrangePinchEnded() { arrangePinch = nil }
 
     /// Routes a computed offset to BOTH sync surfaces in one update: the pinned
-    /// ruler mirror (`arrangeHScroll` — the preference will re-confirm it from
-    /// the real layout) and the lanes' AppKit bridge (nonce-bumped so repeats
-    /// still apply).
+    /// ruler mirror (`arrangeHScroll` — the lanes' live report will re-confirm it
+    /// from the real layout) and the lanes' `ScrollViewReader` marker (nonce-bumped
+    /// so repeats still apply). Used by the zoom anchor (m17-b) AND by follow
+    /// (m23-c2) — one seam, so the ruler can never lag whichever one moved.
     private func applyArrangeHScroll(_ offset: CGFloat) {
         arrangeHScroll = offset
-        arrangeZoomScrollTarget = offset
-        arrangeZoomScrollNonce += 1
+        arrangeHScrollApplyTarget = offset
+        arrangeHScrollApplyNonce += 1
+    }
+
+    // MARK: - Follow the playhead (m23-c2)
+
+    /// The ONE opt-in flag both following surfaces read.
+    var isFollowingPlayhead: Bool { panelLayout.followPlayhead }
+
+    /// Whichever follow surface is currently suspended by a manual scroll — what
+    /// the FOLLOW chip's paused face reports.
+    var isFollowSuspended: Bool {
+        panelLayout.followPlayhead && (arrangeFollow.isSuspended || pianoRollFollow.isSuspended)
+    }
+
+    /// The FOLLOW chip's action. While follow is PAUSED (the user scrolled during
+    /// playback) a click RESUMES rather than switching off — resuming is what the
+    /// press means when the chip is showing "paused", and the off state is still
+    /// one more click away.
+    func toggleFollowPlayhead() {
+        if isFollowSuspended {
+            rearmFollow()
+        } else {
+            setFollowPlayhead(!panelLayout.followPlayhead)
+        }
+    }
+
+    /// Sets the persisted flag and re-arms both surfaces (turning follow on must
+    /// never inherit a stale suspension from a previous run).
+    func setFollowPlayhead(_ following: Bool) {
+        panelLayout.setFollowPlayhead(following)
+        rearmFollow()
+    }
+
+    /// Clears the manual-scroll suspension on both surfaces. Called on the chip's
+    /// resume and whenever the transport STARTS — pressing play is the moment a
+    /// user expects the view to take charge again.
+    func rearmFollow() {
+        arrangeFollow.rearm()
+        pianoRollFollow.rearm()
+    }
+
+    /// One transport tick's follow for the ARRANGE lanes. Driven from the
+    /// TRANSPORT observation path (ContentView's `onChange` of
+    /// `transport.positionBeats`), never from a geometry callback: a `scrollTo`
+    /// issued inside a layout transaction moves layout without durably updating
+    /// the scroller's internal position (m17-b, measured), and `debug.captureUI`'s
+    /// `cacheDisplay` forces exactly the re-render that would then jump.
+    ///
+    /// `currentOffset` is `arrangeHScrollReported` — the offset the lanes ACTUALLY
+    /// reported, never the analytic mirror, so follow can never chase a value it
+    /// wrote itself.
+    func followArrangeTick() {
+        guard workspaceMode == .arrange else { return }
+        guard let target = arrangeFollow.target(
+            isEnabled: panelLayout.followPlayhead,
+            isPlaying: store.transport.isPlaying,
+            playheadX: CGFloat(store.transport.positionBeats) * arrangePPB,
+            viewportWidth: arrangeViewportWidth,
+            contentWidth: arrangeContentWidth,
+            currentOffset: arrangeHScrollReported) else { return }
+        applyArrangeHScroll(target)
+    }
+
+    /// The lanes' live horizontal offset (ground truth from their own geometry):
+    /// drives the pinned-ruler mirror, the `reported` copy the debug seams echo,
+    /// and follow's manual-scroll detector.
+    func reportArrangeHScroll(_ offset: CGFloat) {
+        arrangeHScroll = offset
+        arrangeHScrollReported = offset
+        arrangeFollow.reportOffset(offset,
+                                   isEnabled: panelLayout.followPlayhead,
+                                   isPlaying: store.transport.isPlaying,
+                                   contentWidth: arrangeContentWidth,
+                                   viewportWidth: arrangeViewportWidth)
     }
 
     /// `debug.arrangeZoom {ppb?, step?, rowStep?, reset?, anchorX?}` — the m17-b
@@ -1682,15 +2600,59 @@ final class AppModel {
     /// `debug.arrangePointer {act?, x?, y?}` — the m17-c pointer seam for
     /// captures/E2E (the `debug.arrangeZoom` precedent: app-level, debug tier
     /// ONLY, off `allCommands`/MCP — pointer affordances ride the EXISTING
-    /// `transport.seek`/`clip.split` verbs, so ZERO new wire surface).
+    /// `transport.seek`/`clip.split`/`clip.addMIDI` verbs, so ZERO new wire
+    /// surface).
     /// `act` is "hover" | "click" | "doubleClick" | "clear"; `x`/`y` are
     /// CONTENT-space points (x = beats · ppb — zoom-exact without knowing the
     /// scroll offset), required for all but "clear". The staged event runs
-    /// through the SAME view handlers a real pointer uses; the echo reflects
-    /// the state the view last REPORTED, so after a mutating call settle one
-    /// main-actor turn (~250 ms, the m17-b law) and re-read with a bare call.
+    /// through the SAME view handlers a real pointer uses.
+    ///
+    /// m23-e: an `act` call WAITS (bounded) for the lanes to actually run the
+    /// event before answering — see `awaitPointerStageApplied` — so the call
+    /// that CAUSES a change reports that change. It used to answer from the
+    /// state the view had last reported, i.e. one call behind, which meant a
+    /// caller reading the causing response could pass on a stale id from an
+    /// earlier action. Settling and re-reading with a bare call still works and
+    /// is still the safest habit; it is no longer required.
     /// A BARE call is READ-ONLY (the m11-a law) and echoes
-    /// {zone, ghostBeat, playheadBeat, ppb, refusal, refusalClipId}.
+    /// {zone, ghostBeat, playheadBeat, ppb, refusal, refusalClipId,
+    ///  refusalTrackId, selectedClipId, editorClipId, createdClipId}.
+    ///
+    /// m23-e: `doubleClick` over EMPTY lane space creates a bar-long MIDI clip
+    /// at the snapped beat and opens the editor on it (over a clip it still
+    /// splits, Pro-only). Assert the outcome with `createdClipId` +
+    /// `editorClipId` — a refused create (audio/bus lane) nulls `createdClipId`
+    /// and fills `refusal`/`refusalTrackId` with the store's verbatim message.
+    /// Spins the main runloop, BOUNDED, until the lanes have actually run the
+    /// staged pointer event — or the deadline passes (m23-e).
+    ///
+    /// Assigning `arrangePointerStage` only SCHEDULES a SwiftUI update; the
+    /// view's `.onChange` (and everything downstream of it: the seek, the clip
+    /// create, the refusal) runs when the main runloop processes that
+    /// transaction. Without this wait the response is built from state the call
+    /// has not caused yet, so the call that CAUSES the change answers with the
+    /// PREVIOUS one's — measured as a clean one-call lag. That is not merely
+    /// inconvenient: because the stale value is a real id from an earlier
+    /// action, a caller reading the causing response can pass on it. The seam
+    /// exists to prevent exactly that class of false pass, so the fix belongs
+    /// here and not in a "read a follow-up call" convention at the caller.
+    ///
+    /// The `captureUI` precedent (same problem, same shape): we are on the main
+    /// actor, so a bare `layoutSubtreeIfNeeded` would lay out the CURRENT tree,
+    /// not the pending update — only spinning the runloop lets it land.
+    /// Bounded twice over: it stops the instant the view reports back (the
+    /// common case — one turn), and hard-stops at `deadline` if no lanes view
+    /// is present to report at all (e.g. a `.ruler`-only or not-yet-created
+    /// arrange surface), so the main actor is never held indefinitely.
+    /// Reentrancy caveat, inherited from `captureUI`: the spin can service other
+    /// queued main work — fine for the serial control stream this serves.
+    private func awaitPointerStageApplied(after reportsBefore: Int) {
+        let deadline = Date().addingTimeInterval(0.30)
+        while arrangePointerReportSeq == reportsBefore, Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+        }
+    }
+
     private func arrangePointerDebug(_ params: [String: JSONValue]) throws -> JSONValue {
         if let act = params["act"]?.stringValue {
             guard let action = ArrangePointerStage.Action(rawValue: act) else {
@@ -1707,9 +2669,21 @@ final class AppModel {
                 x = CGFloat(xv)
                 y = CGFloat(yv)
             }
+            // m23-e: staging a double-click CLEARS the previous outcome first, so
+            // the echo describes THIS double-click and not a stale one — a
+            // create that finds no room (snap landing inside a resident) leaves
+            // both null rather than re-reporting the last successful create.
+            // Only ever cleared here, never optimistically set: the success value
+            // can arrive solely from the view's own create callback.
+            if action == .doubleClick {
+                arrangeCreatedClipID = nil
+                arrangeSplitRefusal = nil
+            }
+            let reportsBefore = arrangePointerReportSeq
             arrangePointerStage = ArrangePointerStage(
                 action: action, x: x, y: y,
                 nonce: (arrangePointerStage?.nonce ?? 0) + 1)
+            awaitPointerStageApplied(after: reportsBefore)
         }
         return .object([
             "zone": .string(arrangePointerZone),
@@ -1718,6 +2692,770 @@ final class AppModel {
             "ppb": .number(Double(arrangePPB)),
             "refusal": arrangeSplitRefusal.map { .string($0.message) } ?? .null,
             "refusalClipId": arrangeSplitRefusal?.clipID.map { .string($0.uuidString) } ?? .null,
+            // m23-e: the refused LANE (an empty-lane create has no clip to name).
+            "refusalTrackId": arrangeSplitRefusal?.laneAnchor
+                .map { .string($0.trackID.uuidString) } ?? .null,
+            // m23-e read-back. `selectedClipId` is the raw selection; `editorClipId`
+            // is the clip the piano roll is ACTUALLY open on — the SAME
+            // `openEditorClip` the ContentView editor branch gates on, so a
+            // non-null value here means the roll is on screen for that clip (a
+            // stale id after undo resolves to null in both places at once).
+            // `createdClipId` is the clip the last empty-lane double-click made,
+            // and is cleared by a refusal, so it can never survive a failed create.
+            "selectedClipId": selectedClipID.map { .string($0.uuidString) } ?? .null,
+            "editorClipId": openEditorClip.map { .string($0.id.uuidString) } ?? .null,
+            "createdClipId": arrangeCreatedClipID.map { .string($0.uuidString) } ?? .null,
+        ])
+    }
+
+    /// Spins the main runloop, BOUNDED, until the lanes have actually run the
+    /// staged DROP event — the `awaitPointerStageApplied` contract, same reasons
+    /// (m23-e echo-seam law). Bounded twice over: it stops the instant the view
+    /// reports back, and hard-stops at the deadline if no lanes view is present
+    /// to report at all (a `.ruler`-only / not-yet-created arrange surface).
+    private func awaitDropStageApplied(after reportsBefore: Int) {
+        let deadline = Date().addingTimeInterval(0.30)
+        while arrangeDropReportSeq == reportsBefore, Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+        }
+    }
+
+    /// `debug.arrangeDrop {act?, x?, y?, paths?, fileCount?}` — the m23-f staging
+    /// seam for the Finder audio-file drag-drop onto the arrange lanes. App-level,
+    /// debug tier ONLY (off `allCommands`/MCP — ZERO wire growth; the import
+    /// itself is already agent-invokable via `clip.addAudio` / `debug.importAudio`,
+    /// and this stages the DROP GESTURE, which no wire verb models).
+    ///
+    /// A real Finder drag cannot be driven over the control port for two
+    /// independent reasons — `DropInfo` has no public initializer, and the
+    /// unbundled staging binary has no Accessibility grant (m17-b, −1712) — so
+    /// the seam drives `AudioLaneDropCore`, the same object `AudioLaneDropDelegate`
+    /// drives. Each drag phase is independently addressable so a gate can
+    /// reproduce a REAL ordering (`enter → update → update → drop`) rather than an
+    /// isolated drop (the m23-e staged-gate law: a synthetic gate cannot see a bug
+    /// that only real event ordering produces).
+    ///
+    ///   - `{}` — READ-ONLY (the m11-a bare-read law).
+    ///   - `{act:"enter"|"update", x, y, fileCount?, carriesMidi?}` — the hover
+    ///     phases. `carriesMidi` stages a drag carrying a `.mid` (m23-k4b): a
+    ///     real hover reads that from the drag's UTIs before any URL has loaded,
+    ///     so there is nothing for a staged hover to derive it from. It changes
+    ///     the ROUTING (`hoverTargetLaneIndex` goes null — a `.mid` makes its own
+    ///     instrument tracks, so no audio lane may be highlighted) and nothing
+    ///     about the landing beat.
+    ///   - `{act:"exit"}` — the drag left the lanes.
+    ///   - `{act:"drop", x, y, paths:[...]}` — the release. `paths` are resolved
+    ///     SYNCHRONOUSLY (no `NSItemProvider`), so one bounded wait covers the
+    ///     whole drop and the causing response can already report the landing.
+    ///   - `{snap:"off"|"bar"|"beat"|…}` — sets the arrange snap PICKER, so a
+    ///     gate can sweep the drop-position table. Combinable with an `act`
+    ///     (applied first) or usable alone. There is no wire verb for the snap
+    ///     picker; it is UI state, so it belongs on a debug seam rather than
+    ///     growing the agent-facing surface.
+    ///
+    /// Echoes `{hoverVisible, hoverBeat, hoverRawBeat, hoverTargetTrackId,
+    /// hoverTargetLaneIndex, hoverSnapSource, decidedBeat, decidedRawBeat,
+    /// decidedSnapSource, decidedTargetTrackId, ppb, snap, effectiveSnap,
+    /// results}`. `hoverVisible` is the report-(2) measurement: whether a drop
+    /// line is standing. It is read from the LIVE view state, never from the
+    /// seam's input. `snap`/`effectiveSnap` are echoed so a caller CHECKS that a
+    /// snap it asked for actually landed instead of assuming it (the m23-c2
+    /// corollary: a debug command silently ignores keys it does not own).
+    private func arrangeDropDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if let raw = params["snap"]?.stringValue {
+            guard let snap = ClipSnap(rawValue: raw) else {
+                throw DebugError("unknown snap \"\(raw)\" — expected one of "
+                    + ClipSnap.allCases.map(\.rawValue).joined(separator: ", "))
+            }
+            clipSnap = snap
+        }
+        if let act = params["act"]?.stringValue {
+            guard let action = ArrangeDropStage.Action(rawValue: act) else {
+                throw DebugError(
+                    "unknown act \"\(act)\" — expected \"enter\", \"update\", \"drop\", or \"exit\"")
+            }
+            workspaceMode = .arrange
+            var x: CGFloat = 0, y: CGFloat = 0
+            if action != .exit {
+                guard let xv = params["x"]?.doubleValue, let yv = params["y"]?.doubleValue else {
+                    throw DebugError(
+                        "act \"\(act)\" needs content-space x and y (points; x = beats · ppb)")
+                }
+                x = CGFloat(xv)
+                y = CGFloat(yv)
+            }
+            var urls: [URL] = []
+            if action == .drop {
+                guard let rawPaths = params["paths"]?.arrayValue, !rawPaths.isEmpty else {
+                    throw DebugError(
+                        "act \"drop\" requires a non-empty 'paths' array (the dragged files)")
+                }
+                let strings = rawPaths.compactMap { $0.stringValue }
+                guard strings.count == rawPaths.count else {
+                    throw DebugError("debug.arrangeDrop 'paths' must all be strings")
+                }
+                urls = strings.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+                // Clear the previous drop's results so the echo describes THIS
+                // drop and not a stale one (the `arrangeCreatedClipID` rule).
+                arrangeDropImportResults = []
+            }
+            let fileCount = params["fileCount"]?.doubleValue.map { Int($0) } ?? max(1, urls.count)
+            // A staged HOVER has no URLs to classify (neither does a real one —
+            // its providers load async), so `carriesMidi` is how a gate stages a
+            // MIDI-carrying drag. A staged DROP ignores it and derives the truth
+            // from `paths`, exactly as the real drop does (m23-k4b).
+            let carriesMIDI = params["carriesMidi"]?.boolValue ?? false
+            let reportsBefore = arrangeDropReportSeq
+            arrangeDropStage = ArrangeDropStage(
+                action: action, x: x, y: y, urls: urls, fileCount: fileCount,
+                carriesMIDI: carriesMIDI,
+                nonce: (arrangeDropStage?.nonce ?? 0) + 1)
+            awaitDropStageApplied(after: reportsBefore)
+        }
+        let live = arrangeDropHover
+        let decided = arrangeDropDecided
+        return .object([
+            "hoverVisible": .bool(live != nil),
+            "hoverBeat": live.map { .number($0.snappedBeat) } ?? .null,
+            "hoverRawBeat": live.map { .number($0.rawBeat) } ?? .null,
+            "hoverTargetTrackId": live?.targetTrackID.map { .string($0.uuidString) } ?? .null,
+            "hoverTargetLaneIndex": live?.targetLaneIndex.map { .number(Double($0)) } ?? .null,
+            // WHICH rule decided the landing (m23-f) — "raw" | "grid" |
+            // "magnetBarOne" | "magnetClipEdge". A gate can then assert not just
+            // where a drop landed but why, which is what distinguishes a working
+            // magnet from a grid line that happened to sit in the same place.
+            "hoverSnapSource": live.map { .string($0.landing.source.rawValue) } ?? .null,
+            "decidedBeat": decided.map { .number($0.snappedBeat) } ?? .null,
+            "decidedRawBeat": decided.map { .number($0.rawBeat) } ?? .null,
+            "decidedSnapSource": decided.map { .string($0.landing.source.rawValue) } ?? .null,
+            "decidedTargetTrackId": decided?.targetTrackID.map { .string($0.uuidString) } ?? .null,
+            "ppb": .number(Double(arrangePPB)),
+            "snap": .string(clipSnap.rawValue),
+            // The guard behind the pointer dismissal, echoed so this seam can be
+            // diagnosed instead of guessed at: a non-zero value means a mouse
+            // button is held, and a stranded line will (correctly) survive an
+            // ordinary pointer event.
+            "pressedMouseButtons": .number(Double(NSEvent.pressedMouseButtons)),
+            // What the arrange lane ACTUALLY uses — Simple locks it to Bar
+            // regardless of the picker, so a gate that only read `snap` could
+            // sweep a table that the view never applied.
+            "effectiveSnap": .string(effectiveClipSnap.rawValue),
+            "results": .array(arrangeDropImportResults.map(Self.encodeImportResult)),
+        ])
+    }
+
+    /// Spins the main runloop, BOUNDED, until the LANES have re-rendered with the
+    /// selection this call just changed — the `awaitDropStageApplied` contract
+    /// (m23-e echo-seam law). Without it a capture taken straight after the echo
+    /// can frame the PREVIOUS selection, which does not merely fail a gate: it
+    /// can stale-GREEN one. Bounded twice over: it stops the instant the lanes
+    /// report, and hard-stops at the deadline when no lanes view exists to report
+    /// at all (the Mix workspace, a not-yet-created arrange surface).
+    private func awaitSelectionRendered(after reportsBefore: Int) {
+        let deadline = Date().addingTimeInterval(0.30)
+        while arrangeSelectionRenderSeq == reportsBefore, Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+        }
+    }
+
+    /// `debug.arrangeSelection {act?, clipId?, shift?, command?}` — the m23-g1
+    /// staging seam for arrange multi-select and group delete. App-level, debug
+    /// tier ONLY (off `allCommands`/MCP — ZERO wire growth).
+    ///
+    /// WHY DEBUG TIER: the selection is UI state, and UI state belongs on a debug
+    /// seam rather than on the agent-facing surface (the `debug.arrangeDrop` snap
+    /// picker set the precedent, for the same reason). The DOMAIN effect of group
+    /// delete is already agent-reachable as N× `clip.remove`; the only delta is
+    /// undo ATOMICITY, and the command that would expose it (`clip.removeMany`
+    /// → MCP `daw_clip_remove_many`) is left as a TODO on
+    /// `ProjectStore.removeClips` rather than shipped unasked.
+    ///
+    ///   - `{}` — READ-ONLY (the m11-a bare-read law).
+    ///   - `{act:"click", clipId, shift?, command?}` — runs the SAME
+    ///     `AppModel.clickClip` the ClipBlock tap runs, with EXPLICIT modifiers.
+    ///     The one thing it does not exercise is `NSEvent.modifierFlags` (a
+    ///     synthesized tap carries no chord) — see `ArrangeClickModifiers.current`.
+    ///   - `{act:"clear"}` — deselect everything.
+    ///   - `{act:"delete"}` — the group delete, through the SAME
+    ///     `deleteArrangeSelection` the DELETE key calls.
+    ///   - `{act:"keyHandler"}` — the DELETE key's HANDLER body including its
+    ///     guards (`handleArrangeDeleteKey`), for proving the text-editing guard.
+    ///   - `{act:"keyDelete"}` — the STRONGER probe: synthesizes a real DELETE
+    ///     key-down and sends it through `NSApp.sendEvent`, i.e. the actual
+    ///     responder chain and SwiftUI's focus arbitration. When `delivered` is
+    ///     true this proves key DELIVERY, not just the handler. It is a probe,
+    ///     not a guarantee: an unbundled staging binary whose window is not key
+    ///     may never route it, and the honest report of that is `delivered:false`
+    ///     with the selection unchanged.
+    ///
+    /// Echoes the selection GROUND TRUTH (`arrangeSelection`, the model's own
+    /// state — never the seam's input), plus `editorClipId`, which is the clip
+    /// the piano roll is ACTUALLY open on (`openEditorClip`, the same value
+    /// `debug.arrangePointer` reports): that is the m23-e regression instrument.
+    private func arrangeSelectionDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        var deleted: Bool?
+        var intent: ArrangeClickIntent?
+        var delivered: Bool?
+        if let act = params["act"]?.stringValue {
+            let reportsBefore = arrangeSelectionRenderSeq
+            switch act {
+            case "click":
+                guard let raw = params["clipId"]?.stringValue, let id = UUID(uuidString: raw) else {
+                    throw DebugError("act \"click\" needs a 'clipId' UUID")
+                }
+                workspaceMode = .arrange
+                var mods: ArrangeClickModifiers = []
+                if params["shift"]?.boolValue == true { mods.insert(.shift) }
+                if params["command"]?.boolValue == true { mods.insert(.command) }
+                intent = clickClip(id: id, modifiers: mods)
+            case "clear":
+                arrangeSelection.clear()
+            case "delete":
+                deleted = deleteArrangeSelection()
+            case "keyHandler":
+                // The DELETE key's HANDLER body, guards and all — what
+                // `.onKeyPress(.delete)` calls. Distinct from "delete" (which is
+                // the bare action) because the guards are the point: this is how
+                // a gate proves that a Backspace typed into a rename field
+                // cannot delete the user's clips, WITHOUT depending on whether
+                // an unbundled staging binary routes real key events.
+                deleted = handleArrangeDeleteKey()
+            case "keyDelete":
+                guard let event = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: contentWindow?.windowNumber ?? 0,
+                    context: nil,
+                    // NSDeleteCharacter (0x7F) is what the Mac's Delete/Backspace
+                    // key sends, and is what SwiftUI's `KeyEquivalent.delete`
+                    // matches. keyCode 51 = kVK_Delete, layout-independent.
+                    characters: "\u{7F}", charactersIgnoringModifiers: "\u{7F}",
+                    isARepeat: false, keyCode: 51) else {
+                    throw DebugError("failed to synthesize the delete key event")
+                }
+                let before = arrangeSelection.ids
+                // Make the target window key first: SwiftUI's focus system is
+                // only ACTIVE in the key window, so a key event sent to a
+                // non-key window is dropped before any `.onKeyPress` sees it.
+                // Window-scoped, not `NSApp.activate` — staging must never steal
+                // the user's system focus.
+                contentWindow?.makeKeyAndOrderFront(nil)
+                NSApplication.shared.sendEvent(event)
+                // Let SwiftUI's key handling land before the echo answers.
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15))
+                delivered = arrangeSelection.ids != before
+            default:
+                throw DebugError("unknown act \"\(act)\" — expected \"click\", \"clear\", "
+                    + "\"delete\", \"keyHandler\", or \"keyDelete\"")
+            }
+            awaitSelectionRendered(after: reportsBefore)
+        }
+        var object: [String: JSONValue] = [
+            "selectedIds": .array(arrangeSelection.ids.map { .string($0.uuidString) }
+                .sorted { a, b in (a.stringValue ?? "") < (b.stringValue ?? "") }),
+            "count": .number(Double(arrangeSelection.count)),
+            // The FOCUS clip and its two aliases, so a gate can see the mirror is
+            // coherent rather than assume it: `selectedClipId` is the property
+            // ~19 pre-g1 call sites read, and it must always equal `focusClipId`.
+            "focusClipId": arrangeSelection.focusID.map { .string($0.uuidString) } ?? .null,
+            "selectedClipId": selectedClipID.map { .string($0.uuidString) } ?? .null,
+            // The m23-e instrument: the clip the piano roll is ACTUALLY open on.
+            "editorClipId": openEditorClip.map { .string($0.id.uuidString) } ?? .null,
+            // The focus guard's live verdict — echoed so a gate can PROVE the
+            // text-editing leg is testing what it thinks it is.
+            "textEditing": .bool(isArrangeTextEditingFocused),
+            // Which workspace is live — the observable half of the DELETE-key
+            // scoping (see `handleArrangeDeleteKey`).
+            "workspaceMode": .string(workspaceMode.rawValue),
+            // Whether a blocking modal is up — the retained-focus DELETE guard
+            // (see `isModalPresented`), echoed so a gate can prove it non-vacuous.
+            "modalPresented": .bool(isModalPresented),
+            // Whether the PIANO ROLL currently holds key focus (set by the roll's
+            // own `onFocusChange`). Echoed because clicking an arrange clip bumps
+            // `arrangeKeyFocusNonce`, which asserts focus on the workspace scope —
+            // this is the only way to see whether that nonce is racing the roll's
+            // focus, i.e. whether note DELETE inside the roll can still win the key.
+            // It is a MEASUREMENT, not a proof: note selection is not drivable from
+            // any seam here, so the roll's note-delete path still needs a human.
+            "pianoRollEditorFocused": .bool(pianoRollEditorFocused),
+            "renderSeq": .number(Double(arrangeSelectionRenderSeq)),
+        ]
+        if let deleted { object["deleted"] = .bool(deleted) }
+        if let intent { object["intent"] = .string(intent.rawValue) }
+        if let delivered { object["delivered"] = .bool(delivered) }
+        if let refusal = arrangeSplitRefusal { object["refusal"] = .string(refusal.message) }
+        return .object(object)
+    }
+
+    /// Spins the main runloop, BOUNDED, until the LANES have re-rendered with
+    /// the clip GEOMETRY this call just changed — the `awaitSelectionRendered`
+    /// contract (m23-e echo-seam law), on the other counter.
+    private func awaitClipLayoutRendered(after reportsBefore: Int) {
+        let deadline = Date().addingTimeInterval(0.30)
+        while arrangeClipLayoutRenderSeq == reportsBefore, Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+        }
+    }
+
+    /// `debug.arrangeDrag {clipId?, deltaBeats?, snap?}` — the m23-g2 staging seam
+    /// for the arrange clip BODY DRAG. App-level, debug tier ONLY (off
+    /// `allCommands`/MCP — ZERO wire growth; the group-move verb's own wire
+    /// exposure is filed as roadmap item m23-w, see `ProjectStore.moveClips`).
+    ///
+    /// WHY IT EXISTS: `debug.arrangePointer` models hover / click / doubleClick
+    /// / clear and has no DRAG act, so before this the group-drag feature was
+    /// not observable from outside the app at all.
+    ///
+    ///   - `{}` — READ-ONLY (the m11-a bare-read law).
+    ///   - `{clipId, deltaBeats}` — one body-drag update anchored on `clipId`.
+    ///     **`deltaBeats` is the RAW, PRE-SNAP pointer translation in beats**, so
+    ///     the seam exercises the snapping decision instead of bypassing it; the
+    ///     anchor's drag-origin start is its CURRENT start (a staged drag starts
+    ///     from rest). It runs `AppModel.dragArrangeClips` — the SAME method the
+    ///     ClipBlock gesture runs, grab rule included, so a staged drag on an
+    ///     UNSELECTED clip collapses the selection onto it exactly as the mouse
+    ///     would.
+    ///   - `{snap:"off"|"bar"|…}` — sets the arrange snap PICKER (the
+    ///     `debug.arrangeDrop` precedent), combinable with a drag (applied first)
+    ///     or alone.
+    ///
+    /// Echoes `snap` AND `effectiveSnap`: Simple density locks the grid to `.bar`
+    /// regardless of the picker, so a caller that set `sixteenth` and read back
+    /// only `snap` would sweep a table the view never applied (the m23-c2
+    /// corollary — echo back and CHECK, never assume a parameter landed).
+    /// `starts`/`lengths`/`noteCounts` cover EVERY live clip, not just the
+    /// movers, because the data-loss guard this item exists for is about the
+    /// INNOCENT clip between two movers.
+    private func arrangeDragDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if let raw = params["snap"]?.stringValue {
+            guard let snap = ClipSnap(rawValue: raw) else {
+                throw DebugError("unknown snap \"\(raw)\" — expected one of "
+                    + ClipSnap.allCases.map(\.rawValue).joined(separator: ", "))
+            }
+            clipSnap = snap
+        }
+        var outcome: ArrangeGroupDragOutcome?
+        if let rawID = params["clipId"]?.stringValue {
+            guard let id = UUID(uuidString: rawID) else {
+                throw DebugError("debug.arrangeDrag 'clipId' must be a UUID")
+            }
+            guard let delta = params["deltaBeats"]?.doubleValue else {
+                throw DebugError(
+                    "debug.arrangeDrag needs 'deltaBeats' — the RAW, PRE-SNAP drag translation in beats")
+            }
+            guard let anchor = liveClip(id) else {
+                throw DebugError("no clip \(rawID) in this project")
+            }
+            workspaceMode = .arrange
+            let reportsBefore = arrangeClipLayoutRenderSeq
+            let result = dragArrangeClips(
+                anchorClipID: id, anchorOriginalStart: anchor.startBeat,
+                rawDragDeltaBeats: delta)
+            outcome = result
+            // Only wait when there IS a re-render coming: a drag that moved
+            // nothing would otherwise burn the full 0.30 s deadline.
+            if result.changed { awaitClipLayoutRendered(after: reportsBefore) }
+        } else if params["deltaBeats"] != nil {
+            throw DebugError("debug.arrangeDrag 'deltaBeats' needs a 'clipId' anchor")
+        }
+
+        var starts: [String: JSONValue] = [:]
+        var lengths: [String: JSONValue] = [:]
+        var noteCounts: [String: JSONValue] = [:]
+        for track in store.tracks {
+            for clip in track.clips {
+                let key = clip.id.uuidString
+                starts[key] = .number(clip.startBeat)
+                lengths[key] = .number(clip.lengthBeats)
+                noteCounts[key] = .number(Double(clip.notes?.count ?? 0))
+            }
+        }
+        var object: [String: JSONValue] = [
+            "snap": .string(clipSnap.rawValue),
+            "effectiveSnap": .string(effectiveClipSnap.rawValue),
+            "ppb": .number(Double(arrangePPB)),
+            "selectedIds": .array(arrangeSelection.ids.map { .string($0.uuidString) }
+                .sorted { a, b in (a.stringValue ?? "") < (b.stringValue ?? "") }),
+            "focusClipId": arrangeSelection.focusID.map { .string($0.uuidString) } ?? .null,
+            "starts": .object(starts),
+            "lengths": .object(lengths),
+            "noteCounts": .object(noteCounts),
+            "renderSeq": .number(Double(arrangeClipLayoutRenderSeq)),
+            "undoDepth": .number(Double(store.undoHistory().undo.count)),
+            "undoLabel": store.undoHistory().undo.first.map { .string($0) } ?? .null,
+        ]
+        if let outcome {
+            object["anchorId"] = params["clipId"].map { $0 } ?? .null
+            object["movedIds"] = .array(outcome.movedIDs.map { .string($0.uuidString) }
+                .sorted { a, b in (a.stringValue ?? "") < (b.stringValue ?? "") })
+            object["anchorStart"] = .number(outcome.anchorStart)
+            object["requestedDeltaBeats"] = .number(outcome.requestedDeltaBeats)
+            object["effectiveDeltaBeats"] = .number(outcome.effectiveDeltaBeats)
+            // `clamped` is the union — "the requested landing was reduced",
+            // whichever stage did it. The two stage flags ride alongside so a
+            // diagnosis made THROUGH this echo can tell WHERE, and so the
+            // `requested == effective` case (gesture floor, store had nothing
+            // left to clamp) reads as an explanation instead of a paradox.
+            object["clamped"] = .bool(outcome.clamped)
+            object["storeClamped"] = .bool(outcome.storeClamped)
+            object["gestureFlooredAtZero"] = .bool(outcome.gestureFlooredAtZero)
+            object["trimmedIds"] = .array(outcome.trimmedIDs.map { .string($0.uuidString) })
+            object["removedIds"] = .array(outcome.removedIDs.map { .string($0.uuidString) })
+            object["refusal"] = outcome.refusal.map { .string($0) } ?? .null
+        }
+        return .object(object)
+    }
+
+    /// Spins the main runloop, BOUNDED, until the LANES have run the staged
+    /// marquee step and reported back — the `awaitPointerStageApplied` contract
+    /// (m23-e echo-seam law). Without it the echo answers with the PREVIOUS
+    /// step's band and selection, which does not merely fail a gate: a stale
+    /// echo poisons every diagnosis made through it. Bounded twice over: it
+    /// stops the instant the lanes report, and hard-stops at the deadline when
+    /// no lanes instance exists to report at all (the Mix workspace, a
+    /// not-yet-created arrange surface).
+    private func awaitMarqueeApplied(after reportsBefore: Int) {
+        let deadline = Date().addingTimeInterval(0.30)
+        while arrangeMarqueeReportSeq == reportsBefore, Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+        }
+    }
+
+    /// `debug.arrangeMarquee {act?, x?, y?, shift?, command?}` — the m23-g3
+    /// staging seam for the arrange RUBBER BAND. App-level, debug tier ONLY (off
+    /// `allCommands`/MCP — ZERO wire growth, matching m23-g1 and m23-g2: the
+    /// selection is UI state, and the marquee's only domain effect is the
+    /// selection it produces, which `debug.arrangeSelection` already echoes).
+    ///
+    /// PHASED, not one-shot. A one-shot "select this rect" seam structurally
+    /// cannot observe "the band is VISIBLE during the drag" — it would have
+    /// begun and ended inside one call, leaving nothing standing to look at:
+    ///
+    ///   - `{}` — READ-ONLY (the m11-a bare-read law). Answers the LADDER too,
+    ///     which is the point: `laneTops` + `rowHeight` are what a caller needs
+    ///     to compute a band, and both are unknowable from outside (the ladder
+    ///     is non-uniform, `rowHeight` is user-adjustable — beta m10-d). A
+    ///     caller MUST derive its fixture from these, never from 34/6/64.
+    ///   - `{act:"begin", x, y, shift?|command?}` — press. Freezes the band
+    ///     origin and the pre-drag selection; applies the (degenerate) band, so
+    ///     a plain begin clears the selection exactly as the live gesture does
+    ///     the instant it arms.
+    ///   - `{act:"changed", x, y}` — drag the band's free corner. Re-decides the
+    ///     whole selection from the frozen base, so shrinking gives clips back.
+    ///   - `{act:"end", x, y}` — release: apply the final band, then clear it.
+    ///
+    /// A synthesized gesture carries no real `NSEvent.modifierFlags`, so the
+    /// chord is passed EXPLICITLY (the `debug.arrangeSelection` convention); the
+    /// one line the seam therefore cannot exercise is the live
+    /// `ArrangeClickModifiers.current` read, exactly as recorded there.
+    ///
+    /// Echoes GROUND TRUTH throughout — `bandRect` is the rect the LANES are
+    /// drawing (reported up), never the seam's input, and `selectedIds`/`focusId`
+    /// are the model's own `ArrangeSelection`.
+    private func arrangeMarqueeDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if let act = params["act"]?.stringValue {
+            guard let action = ArrangeMarqueeStage.Action(rawValue: act) else {
+                throw DebugError(
+                    "unknown act \"\(act)\" — expected \"begin\", \"changed\", or \"end\"")
+            }
+            guard let xv = params["x"]?.doubleValue, let yv = params["y"]?.doubleValue else {
+                throw DebugError(
+                    "act \"\(act)\" needs content-space x and y (points; x = beats · ppb, "
+                    + "y measured against the laneTops this command echoes)")
+            }
+            workspaceMode = .arrange
+            let additive = params["shift"]?.boolValue == true
+                || params["command"]?.boolValue == true
+            let reportsBefore = arrangeMarqueeReportSeq
+            arrangeMarqueeStage = ArrangeMarqueeStage(
+                action: action, x: CGFloat(xv), y: CGFloat(yv), additive: additive,
+                nonce: (arrangeMarqueeStage?.nonce ?? 0) + 1)
+            awaitMarqueeApplied(after: reportsBefore)
+        } else if params["x"] != nil || params["y"] != nil {
+            throw DebugError("debug.arrangeMarquee 'x'/'y' need an 'act'")
+        }
+
+        return .object([
+            // The LADDER — the ground truth a fixture must be computed FROM.
+            "laneTops": .array(arrangeLaneGeometry.laneTops.map { .number(Double($0)) }),
+            "rowHeight": .number(Double(arrangeLaneGeometry.rowHeight)),
+            "laneCount": .number(Double(arrangeLaneGeometry.laneTops.count)),
+            "ppb": .number(Double(arrangePPB)),
+            // The band the LANES are drawing — null exactly when none is in
+            // flight. Non-null mid-drag is the only positive proof the band
+            // exists; "gone after" alone passes vacuously against an
+            // implementation that never draws one.
+            "bandRect": arrangeMarqueeBand.map {
+                .object([
+                    "x": .number(Double($0.minX)), "y": .number(Double($0.minY)),
+                    "width": .number(Double($0.width)), "height": .number(Double($0.height)),
+                ])
+            } ?? .null,
+            // What the last reported band TOUCHED — distinct from the selection,
+            // which under the shift chord is base ∪ hits.
+            "hitIds": .array(arrangeMarqueeHits.map { .string($0.uuidString) }
+                .sorted { a, b in (a.stringValue ?? "") < (b.stringValue ?? "") }),
+            "selectedIds": .array(arrangeSelection.ids.map { .string($0.uuidString) }
+                .sorted { a, b in (a.stringValue ?? "") < (b.stringValue ?? "") }),
+            "count": .number(Double(arrangeSelection.count)),
+            // `focusId` is the name m23-g3 specifies; `focusClipId` is the name
+            // the three sibling arrange seams already use. Both, so neither a
+            // gate written to the item nor one written to the house convention
+            // has to guess.
+            "focusId": arrangeSelection.focusID.map { .string($0.uuidString) } ?? .null,
+            "focusClipId": arrangeSelection.focusID.map { .string($0.uuidString) } ?? .null,
+            // The m23-e instrument: the clip the piano roll is ACTUALLY open on.
+            // A marquee must never open it (see `ArrangeSelection.replace`).
+            "editorClipId": openEditorClip.map { .string($0.id.uuidString) } ?? .null,
+            "reportSeq": .number(Double(arrangeMarqueeReportSeq)),
+        ])
+    }
+
+    /// Bounded wait for the TRACK LIST to confirm it applied a staged drag step
+    /// (the `awaitMarqueeApplied` twin, m23-e echo-seam law). Stops the instant
+    /// the list reports; hard-stops at the deadline when no list exists to
+    /// report at all (the Mix workspace, or a session with no tracks).
+    private func awaitTrackReorderApplied(after reportsBefore: Int) {
+        let deadline = Date().addingTimeInterval(0.30)
+        while trackReorderReportSeq == reportsBefore, Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+        }
+    }
+
+    /// `debug.trackHeaderDrag {act?, trackId?, y?}` — the m23-h staging seam for
+    /// the ARRANGE track-header reorder drag. App-level, debug tier ONLY (off
+    /// `allCommands`/MCP — ZERO wire growth: the drag's only domain effect is
+    /// `track.reorder`, which IS on the wire, so a second agent-facing verb here
+    /// would be a duplicate ordering authority).
+    ///
+    ///   - `{}` — READ-ONLY (the m11-a bare-read law). Answers the LADDER, which
+    ///     is the point: `rowTops`/`rowHeights` are what a caller needs to
+    ///     compute a drag, and both are unknowable from outside (a row grows
+    ///     with its takes/automation sections; `rowHeight` is user-adjustable).
+    ///     A caller MUST derive its fixture from these. A bare read NEVER stages
+    ///     anything — a read that applied a degenerate drag would make a gate
+    ///     vacuously green.
+    ///   - `{act:"begin", trackId, y}` — pick that row up at pointer y.
+    ///   - `{act:"changed", y}` — move the pointer; the landing is re-decided
+    ///     every step, and NOTHING is committed (the order in `order` must not
+    ///     move until release — that is the leg a one-shot seam cannot test).
+    ///   - `{act:"end", y}` — release: commit the landing as ONE undo step.
+    ///
+    /// `y` is in the TRACK LIST's coordinate space — the same space the ladder
+    /// is measured in and the live `DragGesture` reports in, so a fixture
+    /// computed from `rowTops` is SCROLL-INVARIANT (the space scrolls with the
+    /// rows). A staged step runs through the list's own `dragUpdate`/`dragEnd`,
+    /// i.e. the very handlers the mouse drives; there is no seam-only path.
+    ///
+    /// Echoes GROUND TRUTH throughout: `order` is read back off the STORE,
+    /// `targetIndex`/`indicatorY` are the landing the LIST resolved and is
+    /// drawing, and the answer waits (bounded) for the list to confirm it
+    /// applied before returning.
+    private func trackHeaderDragDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if let act = params["act"]?.stringValue {
+            guard let action = TrackReorderStage.Action(rawValue: act) else {
+                throw DebugError(
+                    "unknown act \"\(act)\" — expected \"begin\", \"changed\", or \"end\"")
+            }
+            guard let yv = params["y"]?.doubleValue else {
+                throw DebugError(
+                    "act \"\(act)\" needs a track-list-space y (points, measured "
+                    + "against the rowTops this command echoes)")
+            }
+            var stagedTrackID: UUID?
+            if action == .begin {
+                guard let raw = params["trackId"]?.stringValue else {
+                    throw DebugError("act \"begin\" needs a 'trackId' — which row is picked up")
+                }
+                guard let parsed = UUID(uuidString: raw) else {
+                    throw DebugError("'trackId' is not a valid UUID: \(raw)")
+                }
+                guard store.tracks.contains(where: { $0.id == parsed }) else {
+                    throw DebugError("no track with id \(raw)")
+                }
+                stagedTrackID = parsed
+            } else if params["trackId"] != nil {
+                throw DebugError(
+                    "only act \"begin\" takes a 'trackId' — \"changed\"/\"end\" "
+                    + "continue the drag already in flight")
+            }
+            workspaceMode = .arrange
+            let reportsBefore = trackReorderReportSeq
+            trackReorderStage = TrackReorderStage(
+                action: action, trackID: stagedTrackID, y: CGFloat(yv),
+                nonce: (trackReorderStage?.nonce ?? 0) + 1)
+            awaitTrackReorderApplied(after: reportsBefore)
+        } else if params["y"] != nil || params["trackId"] != nil {
+            throw DebugError("debug.trackHeaderDrag 'y'/'trackId' need an 'act'")
+        }
+
+        let drag = trackReorderDrag
+        return .object([
+            // The LADDER — the ground truth a fixture must be computed FROM.
+            "rowTops": .array(trackRowLadder.tops.map { .number(Double($0)) }),
+            "rowHeights": .array(trackRowLadder.heights.map { .number(Double($0)) }),
+            "rowCount": .number(Double(trackRowLadder.count)),
+            // The ORDER, read off the store — the only thing that finally
+            // matters, and the leg that must NOT move until an "end".
+            "order": .array(store.tracks.map { .string($0.id.uuidString) }),
+            "names": .array(store.tracks.map { .string($0.name) }),
+            // The drag in flight, as the LIST sees it. Null when idle.
+            "dragTrackId": drag.map { .string($0.trackID.uuidString) } ?? .null,
+            "fromIndex": drag?.drop.map { .number(Double($0.from)) } ?? .null,
+            "targetIndex": drag?.drop.map { .number(Double($0.index)) } ?? .null,
+            "moves": .bool(drag?.drop?.moves ?? false),
+            // The line the list is DRAWING — non-null mid-drag is the only
+            // positive proof the affordance exists; "gone after" alone passes
+            // vacuously against an implementation that never drew one.
+            "indicatorY": drag?.drop?.indicatorY.map { .number(Double($0)) } ?? .null,
+            "offsetY": drag.map { .number(Double($0.offsetY)) } ?? .null,
+            // Undo depth, so a gate can prove the whole gesture is ONE step
+            // without a second round trip to `edit.history`.
+            "undoDepth": .number(Double(store.undoHistory().undo.count)),
+            "undoLabel": store.undoLabel.map { .string($0) } ?? .null,
+            "reportSeq": .number(Double(trackReorderReportSeq)),
+        ])
+    }
+
+    /// Bounded wait for the CONSOLE to confirm it applied a staged drag step
+    /// (the `awaitTrackReorderApplied` twin). Stops the instant the console
+    /// reports; hard-stops at the deadline when no console exists to report at
+    /// all (the Arrange workspace, or a project with no tracks).
+    private func awaitMixerStripDragApplied(after reportsBefore: Int) {
+        let deadline = Date().addingTimeInterval(0.30)
+        while mixerStripDragReportSeq == reportsBefore, Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+        }
+    }
+
+    /// `debug.mixerStripDrag {act?, trackId?, x?}` — the m23-z staging seam for
+    /// the MIXER strip reorder drag. App-level, debug tier ONLY (off
+    /// `allCommands`/MCP — ZERO wire growth: the drag's only domain effect is
+    /// `track.reorder`, which IS on the wire, so a second agent-facing verb here
+    /// would be a duplicate ordering authority).
+    ///
+    ///   - `{}` — READ-ONLY (the m11-a bare-read law). Answers the LADDER and
+    ///     the VISUAL order, which is the point: `stripLefts`/`stripWidths` are
+    ///     what a caller needs to compute a drag and are unknowable from outside
+    ///     (the bus divider's width is its caption's INTRINSIC width, so exactly
+    ///     one gap in the rack is not 10 pt). A caller MUST derive its fixture
+    ///     from these. A bare read NEVER stages anything.
+    ///   - `{act:"begin", trackId, x}` — pick that strip up at pointer x.
+    ///   - `{act:"changed", x}` — move the pointer; the landing is re-decided
+    ///     every step and NOTHING is committed (`order` must not move until
+    ///     release — the leg a one-shot seam cannot test).
+    ///   - `{act:"end", x}` — release: commit the landing as ONE undo step, or
+    ///     commit NOTHING when the landing is visually inert.
+    ///
+    /// THE CONSOLE ONLY MEASURES ITSELF WHILE IT IS ON SCREEN, so a caller runs
+    /// `ui.showMixer {show:true}` first. This command deliberately does NOT
+    /// switch the workspace itself, not even on a staged step: the arrange twin's
+    /// `workspaceMode = .arrange` is there because the arrange IS the default
+    /// tab, whereas silently flipping the user's window into Mix would be a
+    /// mutation hiding inside a debug read. Instead `workspaceMode` is echoed, so
+    /// an empty ladder is diagnosable ("not rendered") rather than ambiguous with
+    /// "no tracks".
+    ///
+    /// Echoes GROUND TRUTH throughout: `order` is read off the STORE,
+    /// `visualOrder` off `MixerLayout`, and `targetVisualIndex`/
+    /// `targetArrayIndex`/`indicatorX`/`partingOffsets` are what the console
+    /// RESOLVED and is drawing. The answer waits (bounded) for the console to
+    /// confirm it applied before returning.
+    private func mixerStripDragDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if let act = params["act"]?.stringValue {
+            guard let action = MixerStripDragStage.Action(rawValue: act) else {
+                throw DebugError(
+                    "unknown act \"\(act)\" — expected \"begin\", \"changed\", or \"end\"")
+            }
+            guard let xv = params["x"]?.doubleValue else {
+                throw DebugError(
+                    "act \"\(act)\" needs a strip-rack-space x (points, measured "
+                    + "against the stripLefts this command echoes)")
+            }
+            var stagedTrackID: UUID?
+            if action == .begin {
+                guard let raw = params["trackId"]?.stringValue else {
+                    throw DebugError("act \"begin\" needs a 'trackId' — which strip is picked up")
+                }
+                guard let parsed = UUID(uuidString: raw) else {
+                    throw DebugError("'trackId' is not a valid UUID: \(raw)")
+                }
+                guard store.tracks.contains(where: { $0.id == parsed }) else {
+                    throw DebugError("no track with id \(raw)")
+                }
+                stagedTrackID = parsed
+            } else if params["trackId"] != nil {
+                throw DebugError(
+                    "only act \"begin\" takes a 'trackId' — \"changed\"/\"end\" "
+                    + "continue the drag already in flight")
+            }
+            let reportsBefore = mixerStripDragReportSeq
+            mixerStripDragStage = MixerStripDragStage(
+                action: action, trackID: stagedTrackID, x: CGFloat(xv),
+                nonce: (mixerStripDragStage?.nonce ?? 0) + 1)
+            awaitMixerStripDragApplied(after: reportsBefore)
+        } else if params["x"] != nil || params["trackId"] != nil {
+            throw DebugError("debug.mixerStripDrag 'x'/'trackId' need an 'act'")
+        } else if !mixerStripLadder.isWellFormed {
+            // A read taken in the same turn as `ui.showMixer` would otherwise
+            // answer "no strips" before the console's first layout has reported.
+            // Waiting is not staging: nothing is mutated, the deadline is the
+            // same 300 ms, and a genuinely empty project still returns promptly
+            // ambiguity-free thanks to the `workspaceMode` echo.
+            awaitMixerStripDragApplied(after: mixerStripDragReportSeq)
+        }
+
+        let drag = mixerStripDrag
+        let visual = MixerLayout.orderedStrips(store.tracks)
+        return .object([
+            // The LADDER — the ground truth a fixture must be computed FROM.
+            "stripLefts": .array(mixerStripLadder.lefts.map { .number(Double($0)) }),
+            "stripWidths": .array(mixerStripLadder.widths.map { .number(Double($0)) }),
+            "stripCount": .number(Double(mixerStripLadder.count)),
+            // The console's VISUAL order (channels, then buses) — the thing the
+            // user actually sees, and the order a mixer drag is judged against.
+            "visualOrder": .array(visual.map { .string($0.id.uuidString) }),
+            "visualNames": .array(visual.map { .string($0.name) }),
+            // The ARRAY order, read off the store — the single ordering both
+            // surfaces read, and the leg that must NOT move until an "end".
+            "order": .array(store.tracks.map { .string($0.id.uuidString) }),
+            "names": .array(store.tracks.map { .string($0.name) }),
+            // Which tab is up: an empty ladder from Arrange means "not
+            // rendered", not "no tracks".
+            "workspaceMode": .string(workspaceMode.rawValue),
+            // The drag in flight, as the CONSOLE sees it. Null when idle.
+            "dragTrackId": drag.map { .string($0.trackID.uuidString) } ?? .null,
+            "fromIndex": drag?.drop.map { .number(Double($0.from)) } ?? .null,
+            "fromVisualIndex": drag?.drop.map { .number(Double($0.fromSlot)) } ?? .null,
+            // THE INDEX TRANSLATION, both halves: the visual slot the pointer is
+            // over, and the ARRAY index that slot's strip occupies. On an
+            // all-channels-first project they are equal — which is exactly why a
+            // gate needs a bus BETWEEN two channels.
+            "targetVisualIndex": drag?.drop.map { .number(Double($0.targetSlot)) } ?? .null,
+            "targetArrayIndex": drag?.drop.map { .number(Double($0.targetIndex)) } ?? .null,
+            // Where the strip will actually END UP visually if released now —
+            // the slot the line marks, which differs from `targetVisualIndex`
+            // only when the landing crosses the channel/bus divider.
+            "landingVisualIndex": drag?.drop?.landing.map { .number(Double($0.slot)) } ?? .null,
+            // MOVES IS A VISUAL-ORDER FACT ON THIS SURFACE, not `index != from`:
+            // an array move that leaves `channels ++ buses` reading the same is
+            // inert, and draws no line, commits nothing, spends no undo step.
+            "moves": .bool(drag?.drop?.moves ?? false),
+            // The line the console is DRAWING — non-null mid-drag is the only
+            // positive proof the affordance exists.
+            "indicatorX": drag?.drop?.landing.map { .number(Double($0.indicatorX)) } ?? .null,
+            "offsetX": drag.map { .number(Double($0.offsetX)) } ?? .null,
+            // The parting distances the resting strips are rendered with, keyed
+            // by VISUAL slot — straight out of `MixerStripReorder.partingOffsets`,
+            // the same array the view offsets by. This is the only observable of
+            // the per-index gap work other than a pixel.
+            "partingOffsets": .array((drag?.partingOffsets ?? []).map { .number(Double($0)) }),
+            // Undo depth, so a gate can prove the whole gesture is ONE step —
+            // and that an inert landing is ZERO steps — without a second round
+            // trip to `edit.history`.
+            "undoDepth": .number(Double(store.undoHistory().undo.count)),
+            "undoLabel": store.undoLabel.map { .string($0) } ?? .null,
+            "reportSeq": .number(Double(mixerStripDragReportSeq)),
         ])
     }
 
@@ -2039,6 +3777,186 @@ final class AppModel {
         ])
     }
 
+    /// `debug.referenceSeed {slot?, name?, path?, offsetSeconds?, trimDb?,
+    /// analysis?, integratedLufs?, truePeakDbtp?, loudnessRangeLu?,
+    /// monitoring?, matchGainDb?, matchBasis?, ceilingLimited?,
+    /// wouldMatchGainDb?, fileMissing?, mix?, mixLufs?, mixTruePeakDbtp?,
+    /// mixLra?, panel?, clear?}` — stages the master strip's REFERENCE row and
+    /// the REFERENCE panel for a capture / E2E (m22-g P3, the `debug.scopeSeed`
+    /// / `debug.grSeed` staging precedent). App-level, **debug tier ONLY** —
+    /// off `allCommands`/MCP: agents drive the real `reference.*` commands, and
+    /// this only overrides what the two VIEWS read. The STORE and the ENGINE
+    /// are never touched: seeding creates no journaled edit, no dirty flag, no
+    /// undo entry — which is what makes an unseeded capture honest evidence
+    /// that the live polls tick.
+    ///
+    /// A **bare call is READ-ONLY** (the m11-a law): it echoes the current
+    /// staging state and never opens the panel or invents a slot.
+    ///
+    /// Calls are **INCREMENTAL**: every staged field is carried forward from the
+    /// previous seed unless the new call overrides it, so a gate can stage the
+    /// facts in one call and the view state in the next. This holds for the
+    /// analysis loudness (`integratedLufs`/`truePeakDbtp`/`loudnessRangeLu`) and
+    /// the mix loudness (`mixLufs`/`mixTruePeakDbtp`/`mixLra`) exactly as it
+    /// does for the slot's `name`/`path`/`offsetSeconds`/`trimDb`. Only `slot:
+    /// false`, `analysis: false`, `mix: false` and `clear: true` DROP state, and
+    /// each says so by name.
+    ///
+    /// - `slot` (bool, default true once any slot field is given): `false`
+    ///   stages the EMPTY state even when the project holds a real reference.
+    ///   `name`/`path`/`offsetSeconds`/`trimDb` shape it.
+    /// - `analysis` (bool, default true): `false` stages the never-analyzed
+    ///   slot; the three loudness overrides tune the deterministic sample
+    ///   curve from `ReferenceSeed.sampleAnalysis`.
+    /// - `monitoring` + `matchGainDb`/`matchBasis`/`ceilingLimited`/
+    ///   `wouldMatchGainDb` stage the A/B chip and the match readout.
+    /// - `mix` (bool, default true when `monitoring` or any mix field is set)
+    ///   stages the mix side of the comparison from
+    ///   `ReferenceSeed.sampleMixAnalysis`; `mixLufs`/`mixTruePeakDbtp`/`mixLra`
+    ///   fill the loudness deltas that no live meter would supply in a silent
+    ///   staged app. `mix: false` stages the no-evidence case (every loudness
+    ///   delta reads the honest em-dash).
+    /// - `fileMissing` stages the missing-file phase without touching disk.
+    /// - `panel` opens/closes the card. `{clear: true}` drops the override back
+    ///   to the live store polls (and closes the panel).
+    private func setReferenceSeed(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["clear"]?.boolValue == true {
+            referenceSeed = nil
+            referencePanel.close()
+            return .object(["cleared": .bool(true)])
+        }
+        let stagingKeys: Set<String> = [
+            "slot", "name", "path", "offsetSeconds", "trimDb", "analysis",
+            "integratedLufs", "truePeakDbtp", "loudnessRangeLu", "monitoring",
+            "matchGainDb", "matchBasis", "ceilingLimited", "wouldMatchGainDb",
+            "fileMissing", "mix", "mixLufs", "mixTruePeakDbtp", "mixLra", "panel",
+        ]
+        // Unknown keys teach FIRST — before the bare-read fallthrough, or a
+        // typo'd param would be silently swallowed as "no staging keys given"
+        // and answered with a read-only echo (caught by the P3 gate's C7 leg).
+        for key in params.keys where !stagingKeys.contains(key) && key != "clear" {
+            throw DebugError("debug.referenceSeed: unknown key \"\(key)\" — valid keys: "
+                             + stagingKeys.sorted().joined(separator: ", ") + ", clear")
+        }
+        // Bare call: read-only echo (the m11-a law).
+        guard params.keys.contains(where: { stagingKeys.contains($0) }) else {
+            return referenceSeedResponse()
+        }
+
+        var seed = referenceSeed ?? ReferenceSeed()
+        let wantsSlot = params["slot"]?.boolValue ?? true
+        if wantsSlot {
+            let wantsAnalysis = params["analysis"]?.boolValue ?? true
+            var analysis: ReferenceAnalysis?
+            if wantsAnalysis {
+                // Carried forward exactly like the slot's name/path/offset/trim
+                // below: param → the previously seeded analysis → the literal
+                // default. Rebuilding from defaults would make a two-step stage
+                // (facts first, then panel/mix keys) silently discard the facts.
+                let previous = seed.slot?.analysis
+                analysis = ReferenceSeed.sampleAnalysis(
+                    integratedLufs: params["integratedLufs"]?.doubleValue
+                        ?? previous?.integratedLufs ?? -9.4,
+                    truePeakDbtp: params["truePeakDbtp"]?.doubleValue
+                        ?? previous?.truePeakDbtp ?? -0.9,
+                    loudnessRangeLu: params["loudnessRangeLu"]?.doubleValue
+                        ?? previous?.loudnessRangeLu ?? 5.2)
+            }
+            seed.slot = ReferenceSlot(
+                id: seed.slot?.id ?? UUID(),
+                name: params["name"]?.stringValue ?? seed.slot?.name ?? "Seeded Reference",
+                sourcePath: params["path"]?.stringValue ?? seed.slot?.sourcePath
+                    ?? "/Users/Shared/DAWPro/References/Seeded Reference.wav",
+                offsetSeconds: params["offsetSeconds"]?.doubleValue ?? seed.slot?.offsetSeconds ?? 0,
+                trimDb: params["trimDb"]?.doubleValue ?? seed.slot?.trimDb ?? 0,
+                analysis: analysis)
+        } else {
+            seed.slot = nil
+        }
+
+        let monitoring = params["monitoring"]?.boolValue ?? seed.status.monitoring
+        let ceilingLimited = params["ceilingLimited"]?.boolValue
+            ?? (monitoring ? (seed.status.ceilingLimited ?? false) : nil)
+        let matchGainDb = params["matchGainDb"]?.doubleValue
+            ?? (monitoring ? (seed.status.matchGainDb ?? -4.6) : nil)
+        let matchBasis = params["matchBasis"]?.stringValue
+            ?? (monitoring ? (seed.status.matchBasis ?? "liveIntegrated") : nil)
+        seed.status = ReferenceStatus(
+            reference: seed.slot,
+            monitoring: monitoring,
+            wouldMatchGainDb: params["wouldMatchGainDb"]?.doubleValue
+                ?? matchGainDb ?? seed.status.wouldMatchGainDb,
+            matchGainDb: matchGainDb,
+            matchBasis: matchBasis,
+            ceilingLimited: ceilingLimited)
+
+        seed.fileMissing = params["fileMissing"]?.boolValue ?? seed.fileMissing
+
+        let mixFieldGiven = params["mixLufs"] != nil || params["mixTruePeakDbtp"] != nil
+            || params["mixLra"] != nil
+        let wantsMix = params["mix"]?.boolValue
+            ?? (mixFieldGiven || monitoring || seed.mixAnalysis != nil)
+        if wantsMix {
+            // Same three-deep carry as the analysis above, computed ONCE per
+            // field — repeating the chain inline is how the earlier
+            // rebuild-from-defaults inconsistency got in.
+            let mixLufs = params["mixLufs"]?.doubleValue
+                ?? seed.mixLive?.integratedLufs ?? -12.8
+            let mixLra = params["mixLra"]?.doubleValue
+                ?? seed.mixLive?.loudnessRangeLu ?? 7.6
+            let mixTruePeak = params["mixTruePeakDbtp"]?.doubleValue
+                ?? seed.mixLive?.truePeakDbtp ?? -2.4
+            seed.mixAnalysis = ReferenceSeed.sampleMixAnalysis()
+            seed.mixLive = LiveLoudnessSnapshot(
+                momentaryLufs: mixLufs,
+                shortTermLufs: mixLufs,
+                integratedLufs: mixLufs,
+                loudnessRangeLu: mixLra,
+                truePeakDbtp: mixTruePeak,
+                secondsAnalyzed: 42)
+        } else {
+            seed.mixAnalysis = nil
+            seed.mixLive = nil
+        }
+
+        referenceSeed = seed
+        if let open = params["panel"]?.boolValue {
+            open ? referencePanel.open() : referencePanel.close()
+        }
+        // Re-evaluate the staged file state for an already-open panel.
+        referencePanel.refreshFileState()
+        return referenceSeedResponse()
+    }
+
+    /// The `debug.referenceSeed` echo — the staged facts a capture gate asserts
+    /// on, deliberately WITHOUT the two 24-value band arrays (the `scopeSeed`
+    /// slimming rule).
+    private func referenceSeedResponse() -> JSONValue {
+        guard let seed = referenceSeed else {
+            return .object([
+                "seeded": .bool(false),
+                "panel": .bool(referencePanel.isOpen),
+                "phase": .string(referencePanel.phase.rawValue),
+            ])
+        }
+        return .object([
+            "seeded": .bool(true),
+            "panel": .bool(referencePanel.isOpen),
+            "phase": .string(referencePanel.phase.rawValue),
+            "slot": seed.slot.map { JSONValue.string($0.name) } ?? .null,
+            "analyzed": .bool(seed.slot?.analysis != nil),
+            "offsetSeconds": .number(seed.slot?.offsetSeconds ?? 0),
+            "trimDb": .number(seed.slot?.trimDb ?? 0),
+            "monitoring": .bool(seed.status.monitoring),
+            "matchGainDb": seed.status.matchGainDb.map { JSONValue.number($0) } ?? .null,
+            "matchBasis": seed.status.matchBasis.map { JSONValue.string($0) } ?? .null,
+            "ceilingLimited": seed.status.ceilingLimited.map { JSONValue.bool($0) } ?? .null,
+            "fileMissing": .bool(seed.fileMissing),
+            "mixIntegratedLufs": seed.mixLive?.integratedLufs.map { JSONValue.number($0) } ?? .null,
+            "mixBands": .bool(seed.mixAnalysis != nil),
+        ])
+    }
+
     /// `debug.onboardingState {set?, signal?}` — stages the onboarding tour for a
     /// capture / E2E (the `debug.vibeSeed` / `debug.explainMode` idiom: app-level,
     /// debug tier ONLY — off `allCommands`/MCP, since the tour is UI chrome and
@@ -2123,32 +4041,40 @@ final class AppModel {
         return .object(["visible": .bool(recoveryOffer != nil)])
     }
 
-    // MARK: - Audio import (beta m10-k) — File→Import + drag-drop shared pipeline
+    // MARK: - File import (beta m10-k; MIDI m23-k4b) — File→Import + drag-drop
 
-    /// The ONE execution path behind BOTH human import affordances (the File→Import
-    /// menu and the arrange drag-drop) and the `debug.importAudio` staging command.
-    /// Builds the headless `AudioImportPlan` from the live grid + the given context,
-    /// maps its actions onto `store.importAudioBatch` (ONE undo step), and returns
-    /// per-file results (imported clip/track, or a readable error) in input order.
+    /// The ONE execution path behind EVERY human import affordance (File→Import
+    /// Audio… / Import MIDI…, the arrange drag-drop) and the `debug.importAudio`
+    /// staging command. Builds the headless `AudioImportPlan` from the live grid +
+    /// the given context, maps its audio actions onto `store.importAudioBatch`
+    /// (ONE undo step) and its MIDI members onto `store.importMIDIFile`, and
+    /// returns per-file results (imported clip/track, or a readable error) in
+    /// input order.
     ///
     /// `targetTrackID` is the hovered/target track (its KIND is resolved here from
     /// the store, so callers pass only the id); a nil / non-audio target routes to
     /// new tracks, and multiple files always fan out — all decided by the plan.
-    /// `atBeatRaw` is the unsnapped landing beat (drop-x or the playhead); the plan
-    /// snaps it with the arrange EFFECTIVE snap (Bar in Simple).
+    /// `startBeat` is ALREADY resolved (m23-f): the arrange drop passes the very
+    /// value its drop line was drawn at, and the menu / `debug.importAudio` paths
+    /// build theirs through `resolvedImportBeat(...)` — the same one home, with no
+    /// magnets, since neither has a lane under a pointer. A `.mid` in the set
+    /// lands on that SAME beat (m23-k4b), carried in `MIDIImportAction`.
+    ///
+    /// UNDO COST, stated because it is observable: the audio members cost ONE
+    /// step for the whole batch, and EACH MIDI file costs one more —
+    /// `importMIDIFile` owns its own `performEdit` (it has to: tempo/meter
+    /// adoption folds into that same edit). A mixed `.wav` + `.mid` drop is
+    /// therefore TWO undo steps, not one. Folding them would mean reopening
+    /// k3's transaction boundary, which m23-g1's atomicity work sits on.
     @discardableResult
-    func importAudioFiles(urls: [URL], targetTrackID: UUID?,
-                          atBeatRaw: Double) -> [AudioImportFileResult] {
+    func importFiles(urls: [URL], targetTrackID: UUID?,
+                     startBeat: ResolvedDropBeat) -> [AudioImportFileResult] {
         let targetKind = targetTrackID.flatMap { id in
             store.tracks.first(where: { $0.id == id })?.kind
         }
-        let snap = ClipSnap.effective(
-            density: panelDensity.density(forPanel: TimelineLanesView.panelID),
-            picked: clipSnap)
         let context = AudioImportContext(
             targetTrackID: targetTrackID, targetTrackKind: targetKind,
-            atBeatRaw: atBeatRaw, snap: snap,
-            meterMap: store.transport.meterMap)
+            startBeat: startBeat)
         let plan = AudioImportPlan(urls: urls, context: context)
 
         let requests: [AudioImportRequest] = plan.actions.map { action in
@@ -2164,10 +4090,35 @@ final class AppModel {
 
         var outcomeByURL: [URL: AudioImportOutcome] = [:]
         var batchError: String?
-        do {
-            for outcome in try store.importAudioBatch(requests) { outcomeByURL[outcome.url] = outcome }
-        } catch {
-            batchError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        // Skipped entirely for a MIDI-ONLY import: `importAudioBatch` returns []
+        // for an empty request list, but only AFTER its `mediaServiceUnavailable`
+        // precondition — so calling it with nothing to do could manufacture an
+        // error for an import that has no audio in it at all.
+        if !requests.isEmpty {
+            do {
+                for outcome in try store.importAudioBatch(requests) { outcomeByURL[outcome.url] = outcome }
+            } catch {
+                batchError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
+        }
+
+        // Each MIDI file is its own store call, and its own undo step — see the
+        // note above. The report's FIRST imported part supplies the anchor ids;
+        // `tracksCreated` carries the rest of the truth.
+        var midiResultByURL: [URL: AudioImportFileResult] = [:]
+        for midi in plan.midiImports {
+            do {
+                let report = try store.importMIDIFile(path: midi.url.path, atBeat: midi.startBeat)
+                let landed = report.parts.first { $0.imported && $0.clipID != nil }
+                midiResultByURL[midi.url] = AudioImportFileResult(
+                    path: midi.url.path, clipID: landed?.clipID, trackID: landed?.trackID,
+                    trackName: landed?.name, tracksCreated: report.tracksCreated)
+            } catch {
+                midiResultByURL[midi.url] = AudioImportFileResult(
+                    path: midi.url.path,
+                    error: (error as? LocalizedError)?.errorDescription
+                        ?? error.localizedDescription)
+            }
         }
 
         var rejectedByURL: [URL: String] = [:]
@@ -2178,6 +4129,7 @@ final class AppModel {
             if let reason = rejectedByURL[url] {
                 return AudioImportFileResult(path: url.path, error: reason)
             }
+            if let midiResult = midiResultByURL[url] { return midiResult }
             if let outcome = outcomeByURL[url] {
                 return AudioImportFileResult(path: url.path, clipID: outcome.clip?.id,
                                              trackID: outcome.trackID,
@@ -2188,6 +4140,23 @@ final class AppModel {
             return AudioImportFileResult(path: url.path,
                                          error: batchError ?? "import did not run")
         }
+    }
+
+    /// Resolves a NON-DROP import beat (the File→Import menu at the playhead, or
+    /// `debug.importAudio`'s `atBeat`) through the SAME one home the arrange drop
+    /// uses — the arrange effective snap (Bar in Simple), the live meter map, the
+    /// live zoom, and NO magnets, because neither caller has a lane under a
+    /// pointer to magnetise to. Routing every caller through `resolve` is what
+    /// keeps `ResolvedDropBeat`'s private initializer meaningful rather than
+    /// decorative.
+    func resolvedImportBeat(rawBeat: Double) -> ResolvedDropBeat {
+        ArrangeDropSnap.resolve(
+            rawBeat: rawBeat,
+            snap: ClipSnap.effective(
+                density: panelDensity.density(forPanel: TimelineLanesView.panelID),
+                picked: clipSnap),
+            meterMap: store.transport.meterMap,
+            pixelsPerBeat: Double(arrangePPB))
     }
 
     /// `debug.importAudio {paths: [string], trackId?, atBeat?}` — runs the SAME
@@ -2212,15 +4181,25 @@ final class AppModel {
         }
         let targetTrackID = params["trackId"]?.stringValue.flatMap { UUID(uuidString: $0) }
         let atBeat = params["atBeat"]?.doubleValue ?? store.transport.positionBeats
-        let results = importAudioFiles(urls: urls, targetTrackID: targetTrackID, atBeatRaw: atBeat)
-        return .object(["results": .array(results.map { result in
-            var object: [String: JSONValue] = ["path": .string(result.path)]
-            if let clipID = result.clipID { object["clipId"] = .string(clipID.uuidString) }
-            if let trackID = result.trackID { object["trackId"] = .string(trackID.uuidString) }
-            if let trackName = result.trackName { object["trackName"] = .string(trackName) }
-            if let error = result.error { object["error"] = .string(error) }
-            return .object(object)
-        })])
+        let results = importFiles(urls: urls, targetTrackID: targetTrackID,
+                                  startBeat: resolvedImportBeat(rawBeat: atBeat))
+        return .object(["results": .array(results.map(Self.encodeImportResult))])
+    }
+
+    /// One encoding for a per-file import result, shared by `debug.importAudio`
+    /// and `debug.arrangeDrop` so the two seams cannot describe the same value
+    /// differently. `tracksCreated` appears only for a MIDI member (m23-k4b),
+    /// where the anchor `trackId`/`clipId` name just the first imported part.
+    private static func encodeImportResult(_ result: AudioImportFileResult) -> JSONValue {
+        var object: [String: JSONValue] = ["path": .string(result.path)]
+        if let clipID = result.clipID { object["clipId"] = .string(clipID.uuidString) }
+        if let trackID = result.trackID { object["trackId"] = .string(trackID.uuidString) }
+        if let trackName = result.trackName { object["trackName"] = .string(trackName) }
+        if let error = result.error { object["error"] = .string(error) }
+        if let tracksCreated = result.tracksCreated {
+            object["tracksCreated"] = .number(Double(tracksCreated))
+        }
+        return .object(object)
     }
 
     /// Debug master-bus sample capture (m14-d, the C5 live gate): start/stop
@@ -3519,6 +5498,297 @@ final class AppModel {
             "grooveLocked": .bool(quantizeModel.gridIsGrooveLocked),
             "savedGrooveCount": .number(Double(quantizeModel.savedGrooves.count)),
             "extractExpanded": .bool(quantizeModel.isExtractExpanded),
+        ])
+    }
+
+    // MARK: - Export dialog (m23-m3)
+
+    /// `debug.exportDialog {open?, close?, mode?, bitDepth?, container?,
+    /// exclude?[], excludeNamed?[], includeAll?, normalize?, lufsTarget?,
+    /// truePeakCeilingDb?, includeMixdown?, includeMasteredMixdown?,
+    /// masteredNormalize?, masteredLufsTarget?, masteredTruePeakCeilingDb?,
+    /// exportToPath?, exportToDirectory?}` — drives the Export dialog headlessly
+    /// for captures + gates (the `debug.quantizePanel` precedent; app tier ONLY,
+    /// off `allCommands` and off MCP, so it costs ZERO agent-facing wire
+    /// surface). A BARE call is READ-ONLY (echoes state, never re-opens — the
+    /// m11-a law).
+    ///
+    /// `exportToPath` runs the export through **`ExportDialogModel.export` — the
+    /// exact method the sheet's button calls**, bypassing only the NSSavePanel
+    /// (which no headless run can drive). A render is seconds-class, so it kicks
+    /// a Task and echoes `exporting: true`; poll with a bare call and read
+    /// `lastExport` / `lastError` (the `debug.voicePanel convertGo` cadence).
+    ///
+    /// `exportToDirectory` is its STEMS sibling (m23-m3c), running
+    /// `ExportDialogModel.exportStems` — a directory rather than a path, because
+    /// that call writes a SET. It is the only way a headless gate can reach the
+    /// stems surface at all (`NSOpenPanel` is as undriveable as `NSSavePanel`),
+    /// and it is what lets a gate compare the `plannedFiles` echo against the
+    /// directory listing afterwards. It does NOT set the mode — the mode decides
+    /// which button the sheet shows, and a seam that silently switched it would
+    /// hide the very wiring under test.
+    ///
+    /// `bitDepth` accepts a number or the string "float"/"32f" for the default;
+    /// an unknown value is REFUSED by the model, so the echo shows what actually
+    /// stands rather than what was asked for.
+    private func exportDialogDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["close"]?.boolValue == true {
+            showExportSheet = false
+            return exportDialogStateResponse()
+        }
+        if params["open"]?.boolValue == true {
+            // Deliberately does NOT force `workspaceMode` (unlike the
+            // clip-scoped `debug.voicePanel` / `debug.quantizePanel` seams).
+            // Export is app-level and its overlay sits OUTSIDE the workspace
+            // switch, so it is reachable from the Mix console too — forcing
+            // arrange here would render a backdrop the user path never
+            // produces, and a capture must show what a person actually sees.
+            openExportSheet()
+        }
+
+        // The mode (m23-m3c) — refused rather than defaulted on an unknown
+        // value, the same rule the depth picker follows.
+        if let raw = params["mode"]?.stringValue {
+            guard let mode = ExportMode(rawValue: raw) else {
+                throw DebugError(
+                    "debug.exportDialog mode must be one of "
+                    + ExportMode.allCases.map { "'\($0.rawValue)'" }.joined(separator: ", "))
+            }
+            exportDialog.mode = mode
+        }
+
+        // Format staging — through the model's resolve-only setters, so an
+        // out-of-vocabulary depth cannot reach a render.
+        if let raw = params["bitDepth"] {
+            switch raw {
+            case .null:
+                exportDialog.setBitDepth(nil)
+            case .string(let text) where ["float", "32f", "float32", "default"].contains(text):
+                exportDialog.setBitDepth(nil)
+            case .number(let value):
+                exportDialog.setBitDepth(Int(value))
+            default:
+                throw DebugError(
+                    "debug.exportDialog bitDepth must be 16, 24, 32, null or \"float\"")
+            }
+        }
+        if let raw = params["container"]?.stringValue {
+            guard let container = DeliveryContainer(rawValue: raw) else {
+                throw DebugError(
+                    "debug.exportDialog container must be one of "
+                    + DeliveryContainer.allCases.map { "'\($0.rawValue)'" }.joined(separator: ", "))
+            }
+            exportDialog.setContainer(container)
+        }
+
+        // Exclusions — by id, or by NAME for a readable gate script. Both drive
+        // the same toggle the checkbox rows call.
+        if params["includeAll"]?.boolValue == true { exportDialog.clearExclusions() }
+        if case .array(let ids)? = params["exclude"] {
+            for entry in ids {
+                guard let raw = entry.stringValue, let id = UUID(uuidString: raw) else {
+                    throw DebugError("debug.exportDialog exclude entries must be track UUIDs")
+                }
+                guard exportDialog.tracks.contains(where: { $0.id == id }) else {
+                    throw DebugError("debug.exportDialog exclude: no such track in the dialog's list — \(raw)")
+                }
+                if !exportDialog.isExcluded(id) { exportDialog.toggleExcluded(id) }
+            }
+        }
+        if case .array(let names)? = params["excludeNamed"] {
+            for entry in names {
+                guard let name = entry.stringValue,
+                      let match = exportDialog.tracks.first(where: { $0.name == name }) else {
+                    throw DebugError("debug.exportDialog excludeNamed: no track named \(entry.stringValue ?? "?")")
+                }
+                if !exportDialog.isExcluded(match.id) { exportDialog.toggleExcluded(match.id) }
+            }
+        }
+
+        // Normalization. Setting a value does NOT switch the toggle on — the
+        // request only carries a target when `normalize` is true, and a staging
+        // seam that silently enabled it would hide exactly that rule.
+        if let normalize = params["normalize"]?.boolValue { exportDialog.normalize = normalize }
+        if let target = params["lufsTarget"]?.doubleValue { exportDialog.lufsTarget = target }
+        if let ceiling = params["truePeakCeilingDb"]?.doubleValue {
+            exportDialog.truePeakCeilingDb = ceiling
+        }
+
+        // Stems staging (m23-m3c). Same rule as normalization above: setting a
+        // mastered target does NOT switch its toggle on, because the request
+        // only carries one when the toggle is on and a seam that flipped it
+        // would hide exactly that rule.
+        if let value = params["includeMixdown"]?.boolValue { exportDialog.includeMixdown = value }
+        if let value = params["includeMasteredMixdown"]?.boolValue {
+            exportDialog.includeMasteredMixdown = value
+        }
+        if let value = params["masteredNormalize"]?.boolValue {
+            exportDialog.masteredNormalize = value
+        }
+        if let target = params["masteredLufsTarget"]?.doubleValue {
+            exportDialog.masteredLufsTarget = target
+        }
+        if let ceiling = params["masteredTruePeakCeilingDb"]?.doubleValue {
+            exportDialog.masteredTruePeakCeilingDb = ceiling
+        }
+
+        if let path = params["exportToPath"]?.stringValue {
+            let expanded = (path as NSString).expandingTildeInPath
+            Task { @MainActor in
+                _ = await self.exportDialog.export(store: self.store, toPath: expanded)
+            }
+        }
+        if let directory = params["exportToDirectory"]?.stringValue {
+            let expanded = (directory as NSString).expandingTildeInPath
+            Task { @MainActor in
+                _ = await self.exportDialog.exportStems(store: self.store, toDirectory: expanded)
+            }
+        }
+        return exportDialogStateResponse()
+    }
+
+    /// Read-only snapshot of the Export dialog so a capture/gate flow can poll.
+    /// Deliberately carries NO loudness numbers — for the same reason the card
+    /// shows none (the m23-m2 pre-quantization hazard).
+    private func exportDialogStateResponse() -> JSONValue {
+        let format = exportDialog.format
+        var response: [String: JSONValue] = [
+            "visible": .bool(showExportSheet),
+            "mode": .string(exportDialog.mode.rawValue),
+            "bitDepth": format.bitDepth.map { JSONValue.number(Double($0)) } ?? .null,
+            "container": .string(format.container.rawValue),
+            "fileExtension": .string(format.fileExtension),
+            "formatLabel": .string(format.label),
+            "suggestedFileName": .string(
+                exportDialog.suggestedFileName(projectName: store.projectName)),
+            "tracks": .array(exportDialog.tracks.map { .string($0.name) }),
+            "excluded": .array(exportDialog.excludedNames.map { .string($0) }),
+            "normalize": .bool(exportDialog.normalize),
+            "lufsTarget": .number(exportDialog.lufsTarget),
+            "truePeakCeilingDb": .number(exportDialog.truePeakCeilingDb),
+            "exporting": .bool(exportDialog.isExporting),
+            "renderCompletedCount": .number(Double(store.renderCompletedCount)),
+        ]
+        // The REQUEST as it stands — what `renderBounce` would actually receive.
+        // Absence is meaningful here (nil = the shipped default), so nil fields
+        // encode as JSON null rather than being omitted.
+        let request = exportDialog.request()
+        response["request"] = .object([
+            "bitDepth": request.bitDepth.map { JSONValue.number(Double($0)) } ?? .null,
+            "container": request.container.map { JSONValue.string($0) } ?? .null,
+            "excludeTrackIds": request.excludeTrackIds
+                .map { JSONValue.array($0.map { .string($0.uuidString) }) } ?? .null,
+            "lufsTarget": request.lufsTarget.map { JSONValue.number($0) } ?? .null,
+            "truePeakCeilingDb": .number(request.truePeakCeilingDb),
+        ])
+        // The stems side (m23-m3c): the toggles as controls, the request as
+        // `renderStems` would receive it, and the PLANNED file set — which is
+        // `StemPlan.fileSet`, the same list the card renders, so a gate can
+        // compare the promise against the directory afterwards.
+        response["includeMixdown"] = .bool(exportDialog.includeMixdown)
+        response["includeMasteredMixdown"] = .bool(exportDialog.includeMasteredMixdown)
+        response["masteredNormalize"] = .bool(exportDialog.masteredNormalize)
+        response["masteredLufsTarget"] = .number(exportDialog.masteredLufsTarget)
+        response["masteredTruePeakCeilingDb"] = .number(exportDialog.masteredTruePeakCeilingDb)
+        response["plannedFiles"] = .array(exportDialog.plannedStemFiles.map { .string($0) })
+        let stemRequest = exportDialog.stemRequest()
+        response["stemRequest"] = .object([
+            "trackIds": stemRequest.trackIds
+                .map { JSONValue.array($0.map { .string($0.uuidString) }) } ?? .null,
+            "includeMixdown": .bool(stemRequest.includeMixdown),
+            "includeMasteredMixdown": .bool(stemRequest.includeMasteredMixdown),
+            "masteredLufsTarget": stemRequest.masteredLufsTarget
+                .map { JSONValue.number($0) } ?? .null,
+            "masteredTruePeakCeilingDb": .number(stemRequest.masteredTruePeakCeilingDb),
+            "bitDepth": stemRequest.bitDepth.map { JSONValue.number(Double($0)) } ?? .null,
+            "container": stemRequest.container.map { JSONValue.string($0) } ?? .null,
+        ])
+        if let error = exportDialog.lastError { response["lastError"] = .string(error) }
+        if let outcome = exportDialog.lastExport {
+            response["lastExport"] = .object([
+                "path": .string(outcome.path),
+                "durationSeconds": .number(outcome.durationSeconds),
+                "formatLabel": .string(outcome.formatLabel),
+                "excludedTracks": .array(outcome.excludedTracks.map { .string($0) }),
+                "limitedByCeiling": .bool(outcome.limitedByCeiling),
+            ])
+        }
+        // The stems run's own outcome — the files that ACTUALLY landed, read off
+        // the result's paths. Carries no loudness number, for the same
+        // pre-quantization reason the bounce outcome carries none.
+        if let outcome = exportDialog.lastStemExport {
+            response["lastStemExport"] = .object([
+                "directory": .string(outcome.directory),
+                "files": .array(outcome.fileNames.map { .string($0) }),
+                "durationSeconds": .number(outcome.durationSeconds),
+                "formatLabel": .string(outcome.formatLabel),
+                "limitedByCeiling": .bool(outcome.limitedByCeiling),
+                "masterChainExcluded": .bool(outcome.masterChainExcluded),
+            ])
+        }
+        return .object(response)
+    }
+
+    // MARK: - Track-header context menu (m23-m3b)
+
+    /// The arrange track-header context menu's items for one track — **the ONE
+    /// binding of live app state to `TrackHeaderMenu`** (m23-m3b).
+    ///
+    /// Both the SwiftUI row and `debug.trackMenu` call THIS, which is the half
+    /// the headless echo can actually reach: a seam that re-derived the inputs
+    /// for itself could agree with the pure rule while the row read a different
+    /// expanded set or a stale sidebar width, and no test would see it.
+    func trackHeaderMenuItems(for track: Track) -> [TrackHeaderMenuItem] {
+        TrackHeaderMenu.items(
+            track: track,
+            sidebarWidth: panelLayout.sidebarWidth,
+            isAutomationExpanded: expandedAutomationTrackIDs.contains(track.id))
+    }
+
+    /// `debug.trackMenu {trackId}` — echoes the arrange track-header context
+    /// menu's ITEM LIST for one track.
+    ///
+    /// An AppKit context-menu popup cannot be opened by `debug.captureUI`, so
+    /// this is the only way the menu's CONTENTS are assertable at all; the row
+    /// renders from the same `trackHeaderMenuItems(for:)` call above, so the two
+    /// agreeing is structural rather than a coincidence a refactor could break.
+    ///
+    /// **Parameter-thin on purpose.** Both inputs that shape the list already
+    /// have live seams — `debug.panelLayout {sidebarWidth}` and the
+    /// `ui.showAutomation {trackId}` verb — so staging them here would invent a
+    /// second way to set state that the real menu never reads. A gate drives the
+    /// app, then asks what the menu says.
+    ///
+    /// Debug tier ONLY: off `allCommands` and off MCP, so this costs ZERO
+    /// agent-facing wire surface. A menu's contents are not an invokable
+    /// capability — every action in it already has (or is) a wire verb.
+    private func trackMenuDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        guard let raw = params["trackId"]?.stringValue, let id = UUID(uuidString: raw) else {
+            throw DebugError("debug.trackMenu requires trackId (a track UUID)")
+        }
+        guard let track = store.tracks.first(where: { $0.id == id }) else {
+            throw DebugError("debug.trackMenu: no such track — \(raw)")
+        }
+        let items = trackHeaderMenuItems(for: track)
+        return .object([
+            "trackId": .string(track.id.uuidString),
+            "name": .string(track.name),
+            "kind": .string(track.kind.rawValue),
+            // The INPUTS the list was computed from, echoed beside it so a
+            // surprising list can be read without a second round trip.
+            "sidebarWidth": .number(Double(panelLayout.sidebarWidth)),
+            "automationExpanded": .bool(expandedAutomationTrackIDs.contains(track.id)),
+            "canExportMIDI": .bool(track.canExportMIDI),
+            // Bare identifiers for a one-line assertion, plus the full entries
+            // (titles carry state — "Show" vs "Hide" — so they are worth seeing).
+            "actions": .array(items.map { .string($0.action.rawValue) }),
+            "items": .array(items.map {
+                .object([
+                    "action": .string($0.action.rawValue),
+                    "title": .string($0.title),
+                    "destructive": .bool($0.isDestructive),
+                ])
+            }),
         ])
     }
 

@@ -274,8 +274,16 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // (the reference-track slot + one-time analysis) took it 147 -> 151.
   // m22-g P2's reference_set_monitor/reference_set_offset/reference_set_trim/
   // reference_compare (the level-matched A/B monitor + mix-vs-reference
-  // deltas) took it 151 -> 155.
-  assert.equal(result.tools.length, 155);
+  // deltas) took it 151 -> 155. m23-d's note_audition (sound notes NOW on an
+  // instrument track, outside the timeline — the piano-roll drag's engine seam
+  // exposed to agents) took it 155 -> 156. m23-h's track_reorder (the ONE
+  // track-ordering verb the arrange header drag commits through) took it
+  // 156 -> 157. m23-k3's project_import_midi/clip_import_midi (Standard MIDI
+  // File import as new tracks, or into an existing MIDI clip) took it
+  // 157 -> 159. m23-k4a's project_export_midi/track_export_midi (Standard
+  // MIDI File export, project-or-selection and single-track) took it
+  // 159 -> 161.
+  assert.equal(result.tools.length, 161);
 });
 
 // ---------------------------------------------------------------------------

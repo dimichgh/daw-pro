@@ -297,7 +297,7 @@ public enum CopilotToolCatalog {
             schema: schemaObject([])
         ),
 
-        // MARK: track (7)
+        // MARK: track (8, m23-h added reorder)
 
         CopilotTool(
             command: "track.add",
@@ -350,6 +350,16 @@ public enum CopilotToolCatalog {
                 ("trackId", stringSchema("Id of the track, from project.snapshot.")),
                 ("soloed", booleanSchema("True to solo the track, false to unsolo it.")),
             ], required: ["trackId", "soloed"])
+        ),
+        CopilotTool(
+            command: "track.reorder",
+            description: "Move a track to a different position in the track list — how you group a session (all the drums together, vocals under them) instead of leaving tracks in the order they happened to be created. `index` is the FINAL position the track ends up at, counting from 0 at the TOP: with tracks [Kick, Snare, Bass, Vox], moving Kick to index 2 gives [Snare, Bass, Kick, Vox]. Out-of-range values clamp (a huge index means \"last\", a negative one means \"first\"), and moving a track to the position it already occupies changes nothing. Order is purely visual/organizational: it never changes what anything sounds like, never touches routing, sends, effects, clips or automation, and is the same order the arrange page, the mixer and the saved project all use. Reversible with edit.undo as a single step. Returns the index the track landed at plus the whole resulting track order.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track to move, from project.snapshot.")),
+                ("index", integerSchema(
+                    "The FINAL position the track should end up at, 0 = top. Clamped into range.",
+                    minimum: 0)),
+            ], required: ["trackId", "index"])
         ),
         CopilotTool(
             command: "track.setInstrument",
@@ -409,6 +419,23 @@ public enum CopilotToolCatalog {
                     "Notes to write into the clip, up to 4096. Each note's startBeat is relative to the clip's own start. Omit (or pass an empty array) for an empty clip.",
                     items: noteItemSchema)),
             ], required: ["trackId"])
+        ),
+        CopilotTool(
+            command: "note.audition",
+            description: "Sound notes RIGHT NOW on an instrument track so the user can hear a pitch, a chord voicing, or how a patch responds — a preview, NOT an edit. Nothing is written to any clip and nothing is recorded; the notes release themselves after durationMs. Works with the transport stopped AND while the song is playing, and it never disturbs the notes already playing back. Use it to answer 'what does this chord sound like' or to check an instrument makes sound before composing into it. If the answer comes back with audible:false it is a real answer, not an error — `reason` says why nothing will be heard (trackMuted, instrumentNotReady while a plugin is still loading, engineStopped, engineRebuilding) and the fix is named there. It deliberately IGNORES the user's in-app 'audition notes while editing' preference, because that preference means 'don't sound notes while I drag', not 'never make sound'. Refused while a take is recording — stop the take first.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the INSTRUMENT track to sound the notes on, from project.snapshot. Audio and bus tracks have no instrument and are refused.")),
+                ("pitches", arraySchema(
+                    "MIDI note numbers to sound together, 1 to 8 of them (60 = middle C). One entry is a single note; several make a chord.",
+                    items: integerSchema("A MIDI note number, 0-127 (60 = middle C).",
+                                         minimum: 0, maximum: 127))),
+                ("velocity", integerSchema(
+                    "How hard the notes are struck, 1-127. Defaults to 100.",
+                    minimum: 1, maximum: 127)),
+                ("durationMs", integerSchema(
+                    "How long to hold the notes in milliseconds, 10-5000. Defaults to 500. Returns immediately — the release happens on its own.",
+                    minimum: 10, maximum: 5_000)),
+            ], required: ["trackId", "pitches"])
         ),
         CopilotTool(
             command: "clip.setNotes",
@@ -633,6 +660,43 @@ public enum CopilotToolCatalog {
                 ("reset", booleanSchema(
                     "Optional, default false. true = restart the running measurement (integrated/LRA/peaks) and return the fresh, empty snapshot.")),
             ])
+        ),
+
+        // MARK: reference (4, m22-g)
+        //
+        // CURATED FOUR, not all eight (orchestrator §12 decision 3): import /
+        // status / setMonitor / compare are the verbs a "compare my mix to the
+        // reference" turn actually needs. The other four — reference.remove,
+        // reference.analyze, reference.setOffset, reference.setTrim — stay off
+        // the catalog and are TAUGHT INSIDE these descriptions, so the model
+        // still knows they exist (and can tell the user to reach for them)
+        // without four more schemas on every turn. They remain fully available
+        // over the wire and through MCP.
+
+        CopilotTool(
+            command: "reference.import",
+            description: "Load a finished song the user trusts into the project's REFERENCE slot — the record their mix gets compared against. The file is COPIED into the project (the original is never moved), and one-time analysis measures its loudness, true peak, loudness range, average 24-band spectrum, and stereo image. Importing over an existing reference REPLACES it in a single undoable step. A reference is NOT a track: it never appears in the mixer and is excluded from every bounce, stem, and mixdown by construction. Sibling verbs that are NOT in this tool list but exist over the control protocol: reference.remove (clear the slot), reference.analyze (re-run the measurement if it failed or the file changed), reference.setOffset {seconds} (slide the reference in time so its chorus lines up with the user's), reference.setTrim {db} (a personal +/-24 offset on top of level matching). Tell the user to run those if they ask.",
+            schema: schemaObject([
+                ("path", stringSchema("Absolute path to an audio file on this Mac. A non-audio file is refused with the importer's own message.")),
+                ("name", stringSchema("Optional display name for the reference. Defaults to the file's base name.")),
+            ], required: ["path"])
+        ),
+        CopilotTool(
+            command: "reference.status",
+            description: "Read the reference slot's state WITHOUT changing anything: whether a reference is loaded, its name/path/offset/trim, whether it was analyzed, whether the A/B monitor is currently on, and the level-match gain that a toggle-on would apply (wouldMatchGainDb). Call this FIRST in any reference workflow — an absent \"reference\" field means nothing is loaded (offer reference.import), and a slot whose \"analysis\" is missing needs reference.analyze before it can be auditioned or compared. Never throws.",
+            schema: schemaObject([])
+        ),
+        CopilotTool(
+            command: "reference.setMonitor",
+            description: "Turn the A/B monitor ON or OFF. ON mutes the mix and plays the reference instead — bypassing the master effect chain and LEVEL-MATCHED to the mix's own measured loudness (or -14 LUFS when nothing has been measured yet), so the comparison is not won by whichever is simply louder. The reference follows the transport, so start playback to hear it; toggling mid-play re-anchors it in place. The match gain is snapshotted at toggle-on and never drifts during the audition; reference.setTrim {db} adjusts it deliberately. Master meters keep reading the MIX while monitoring, on purpose. Refusals teach the fix: no slot (reference.import), not analyzed (reference.analyze), a silent file, a file missing from disk, or no live audio engine. Offer this after reference.compare so the human HEARS the difference the numbers describe.",
+            schema: schemaObject([
+                ("on", booleanSchema("true = hear the reference, false = hear the mix. Transient state — never saved with the project, never undoable.")),
+            ], required: ["on"])
+        ),
+        CopilotTool(
+            command: "reference.compare",
+            description: "Compare the mix that is playing RIGHT NOW against the loaded reference and get per-field deltas. Returns {mix, reference, delta} where every delta is reference MINUS mix: a POSITIVE \"lufs\" delta means the user's mix is quieter than the reference; positive band deltas in \"bandsDb\" (24 geometric bands, 40 Hz to 16 kHz, low to high) name where the reference has more energy than the mix. Any field is omitted when either side lacks evidence — never read an absent field as zero. THE WORKFLOW: reference.status (is one loaded and analyzed?) -> have the user play a representative section (a chorus, not an intro) so the mix side has real evidence -> reference.compare -> read the deltas -> suggest CONCRETE moves (eq bands via fx.add/fx.setParam, the built-in limiter for loudness) -> offer reference.setMonitor so the human hears the level-matched A/B for themselves. Refuses when no reference is loaded, when it was never analyzed, or when there is no live audio engine to measure the mix — a faked delta would be worse than none.",
+            schema: schemaObject([])
         ),
 
         // MARK: fx (5, m13-d)

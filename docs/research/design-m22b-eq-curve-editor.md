@@ -322,6 +322,14 @@ neutral white; NO violet anywhere (nothing here is AI content).
 
 ### 4.3 The FUTURE per-insert tap seam (named now, NOT built)
 
+> **SUPERSEDED 2026-07-27 by `docs/research/design-m23r-per-insert-spectrum-tap.md`.**
+> Two corrections there, both load-bearing: the hook point below is WRONG
+> (`processActive` misses the bypassed and crossfading walk paths — it must go in the
+> walk loop body), and the FFT-on-the-render-thread premise in (b) is invalid (only the
+> sample capture must be render-side; the analysis runs on the consumer). The cost
+> argument itself was honest and is confirmed.
+
+
 ```swift
 /// DAWEngine (follow-up m22-b-2). One per opted-in insert instance.
 protocol InsertAnalysisTapping: AnyObject {

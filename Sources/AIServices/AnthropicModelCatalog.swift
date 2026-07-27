@@ -4,8 +4,8 @@ import Foundation
 /// model (Anthropic docs, cached 2026-07). `display` only affects the
 /// VISIBILITY of the returned thinking text — never behavior or billing.
 public enum AnthropicThinkingConfig: Sendable, Equatable {
-    /// `{"type":"adaptive","display":"summarized"}` — Sonnet 5 / Opus 4.7 /
-    /// Opus 4.8 / Fable 5 / Mythos 5 default to `display: "omitted"` (an
+    /// `{"type":"adaptive","display":"summarized"}` — Sonnet 5 / Opus 5 /
+    /// Opus 4.8 / 4.7 / Fable 5 / Mythos 5 default to `display: "omitted"` (an
     /// empty thinking text, present but never shown); this opts into a
     /// human-readable summary instead, so the copilot's live transcript can
     /// surface real reasoning (M10-p-6).
@@ -74,10 +74,13 @@ public enum AnthropicModelCatalog {
             id: "claude-sonnet-5", name: "Sonnet 5", note: "balanced — the default",
             maxOutputTokens: 128_000, thinking: .adaptiveSummarized),
         AnthropicModelInfo(
-            id: "claude-opus-4-8", name: "Opus 4.8", note: "flagship reasoning, higher cost",
+            id: "claude-opus-5", name: "Opus 5", note: "flagship reasoning, higher cost",
             maxOutputTokens: 128_000, thinking: .adaptiveSummarized),
         AnthropicModelInfo(
-            id: "claude-opus-4-7", name: "Opus 4.7", note: "previous flagship",
+            id: "claude-opus-4-8", name: "Opus 4.8", note: "previous flagship",
+            maxOutputTokens: 128_000, thinking: .adaptiveSummarized),
+        AnthropicModelInfo(
+            id: "claude-opus-4-7", name: "Opus 4.7", note: "older flagship",
             maxOutputTokens: 128_000, thinking: .adaptiveSummarized),
         AnthropicModelInfo(
             id: "claude-sonnet-4-6", name: "Sonnet 4.6", note: "previous-generation balanced",

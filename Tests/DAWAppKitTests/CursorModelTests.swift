@@ -37,8 +37,9 @@ struct CursorModelTests {
             _ = role.dragCursor
         }
         // 12 → 13 in m17-c: the arrange playhead grab strip joined the movable
-        // bodies (drag scrub-seeks the transport).
-        #expect(CursorAffordance.allCases.count == 13)
+        // bodies (drag scrub-seeks the transport). 13 → 14 in m23-h: the arrange
+        // TRACK HEADER joined them too (drag reorders the track list).
+        #expect(CursorAffordance.allCases.count == 14)
     }
 
     @Test("value adjusters keep their resize cursor for the whole drag")
@@ -62,7 +63,8 @@ struct CursorModelTests {
 
     @Test("movable bodies open the hand at rest and close it while dragging")
     func bodiesGrabThenGrabbing() {
-        for role in [CursorAffordance.clipBody, .noteBody, .automationPoint, .playhead] {
+        for role in [CursorAffordance.clipBody, .noteBody, .automationPoint, .playhead,
+                     .trackHeader] {
             #expect(role.restCursor == .grab)
             #expect(role.dragCursor == .grabbing)
         }

@@ -107,8 +107,12 @@ extension ProjectStore {
             do {
                 let info = try media.audioFileInfo(at: request.url)
                 let placedStart = max(0, request.startBeat)
-                let lengthBeats = tempoMap.beat(
-                    from: placedStart, elapsedSeconds: info.durationSeconds) - placedStart
+                // FLOORED at `minClipLengthBeats` (m23-f) — see the same clamp in
+                // `ProjectStore.importAudio`: a zero-frame file reports
+                // `durationSeconds == 0` rather than throwing, and a zero-length
+                // clip is an un-grabbable, un-deletable zero-width block.
+                let lengthBeats = max(ProjectStore.minClipLengthBeats, tempoMap.beat(
+                    from: placedStart, elapsedSeconds: info.durationSeconds) - placedStart)
                 let name = request.url.deletingPathExtension().lastPathComponent
                 let clip = Clip(name: name, startBeat: placedStart,
                                 lengthBeats: lengthBeats, audioFileURL: request.url)

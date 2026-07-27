@@ -37,7 +37,7 @@ public enum CopilotContentBlock: Sendable, Equatable {
     /// user-visible). `summary` is the block's user-VISIBLE thinking text —
     /// `""` for a `redacted_thinking` block (its real content is `data`,
     /// never shown) or a `thinking` block whose `display` mode is "omitted"
-    /// (Sonnet 5 / Opus 4.7 / 4.8 / Fable 5's DEFAULT — see
+    /// (Sonnet 5 / Opus 5 / 4.8 / 4.7 / Fable 5's DEFAULT — see
     /// `AnthropicModelCatalog`; the copilot requests `display: "summarized"`
     /// to get non-empty text). `rawJSON` is the block's COMPLETE wire object,
     /// carried VERBATIM (including `signature`) for `wireContent`'s history

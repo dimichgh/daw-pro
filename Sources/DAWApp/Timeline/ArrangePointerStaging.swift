@@ -16,7 +16,10 @@ struct ArrangePointerStage: Equatable {
     enum Action: String {
         case hover        // classify + show/hide the ghost line
         case click        // the empty-lane click-seek path
-        case doubleClick  // the double-click split path (Pro; same store method)
+        /// Over a clip: the split path (Pro; same store method). Over EMPTY lane
+        /// space: the m23-e "start writing notes here" path — creates a bar-long
+        /// MIDI clip and opens the editor on it (both densities).
+        case doubleClick
         case clear        // end the hover (ghost off, zone → outside)
     }
 
@@ -27,13 +30,33 @@ struct ArrangePointerStage: Equatable {
     var nonce: Int
 }
 
-/// A clip-edit refusal to surface in the arrange UI (m17-c): the store's
+/// A refused arrange edit to surface in the UI (m17-c): the store's
 /// LocalizedError message VERBATIM — the same string the wire returns for the
-/// same call — anchored on the refused clip as a transient amber bubble.
+/// same call — anchored as a transient amber bubble on the thing that refused.
 struct ArrangeSplitRefusal: Equatable {
-    /// The clip whose block shows the bubble (nil if it could not be resolved).
-    var clipID: UUID?
+    /// Where the bubble hangs. A clip edit anchors on the refused BLOCK; the
+    /// m23-e empty-lane create has no clip to hang on (that is the whole point
+    /// of the refusal), so it anchors on the LANE + beat it was attempted at.
+    enum Anchor: Equatable {
+        case clip(UUID)
+        case lane(trackID: UUID, beat: Double)
+    }
+
+    var anchor: Anchor?
     var message: String
     /// Monotonic sequence so the auto-clear task never clears a NEWER refusal.
     var seq: Int
+
+    /// The refused clip, when the anchor names one (the pre-m23-e accessor the
+    /// clip blocks and the `debug.arrangePointer` echo read).
+    var clipID: UUID? {
+        if case .clip(let id) = anchor { return id }
+        return nil
+    }
+
+    /// The lane the refusal hangs on, when it is a lane refusal.
+    var laneAnchor: (trackID: UUID, beat: Double)? {
+        if case .lane(let trackID, let beat) = anchor { return (trackID, beat) }
+        return nil
+    }
 }

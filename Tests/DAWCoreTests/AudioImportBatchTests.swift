@@ -163,4 +163,52 @@ struct AudioImportBatchTests {
         #expect(outcomes.isEmpty)
         #expect(store.canUndo == false)
     }
+
+    // MARK: Zero-duration files (m23-f)
+
+    @Test("a zero-duration file never places a ZERO-LENGTH clip")
+    func zeroDurationClampsToMinLength() throws {
+        // A header-only / zero-frame WAV is a VALID audio file:
+        // `AudioFileImporter` only guards `sampleRate > 0`, so it returns
+        // `durationSeconds == 0` instead of throwing. Unclamped, that placed a
+        // zero-length clip — a zero-width block that cannot be selected,
+        // trimmed, moved or deleted, which is exactly the un-removable visual
+        // m23-f exists to eliminate. Reproduced live before the fix: a real
+        // 44-byte WAV dropped on the arrange produced `[startBeat 4, length 0]`.
+        let store = makeStore(media: MapMedia(
+            defaultInfo: AudioFileInfo(durationSeconds: 0, sampleRate: 44100, channelCount: 1)))
+        let outcomes = try store.importAudioBatch([
+            AudioImportRequest(url: url("empty.wav"), destination: .newTrack(name: "empty"),
+                               startBeat: 4)
+        ])
+        #expect(outcomes[0].error == nil)
+        let clip = try #require(store.tracks.first?.clips.first)
+        #expect(clip.startBeat == 4)
+        #expect(clip.lengthBeats == ProjectStore.minClipLengthBeats)
+        #expect(clip.lengthBeats > 0, "a zero-length clip is unreachable by every clip gesture")
+    }
+
+    @Test("the single-file import path clamps a zero-duration file too")
+    func zeroDurationClampsInSingleImport() throws {
+        // `ProjectStore.importAudio` is the OTHER placement site (the
+        // `clip.addAudio` wire verb); it had the same unclamped conversion.
+        let store = makeStore(media: MapMedia(
+            defaultInfo: AudioFileInfo(durationSeconds: 0, sampleRate: 44100, channelCount: 1)))
+        let track = store.addTrack(name: "Audio", kind: .audio)
+        let clip = try store.importAudio(url: url("empty.wav"), toTrack: track.id, atBeat: 2)
+        #expect(clip.startBeat == 2)
+        #expect(clip.lengthBeats == ProjectStore.minClipLengthBeats)
+    }
+
+    @Test("a normal-duration file is untouched by the clamp")
+    func normalDurationUnaffected() throws {
+        let store = makeStore()
+        try store.setTempo(120)  // 2.0 s → 4 beats
+        let outcomes = try store.importAudioBatch([
+            AudioImportRequest(url: url("tone.wav"), destination: .newTrack(name: "tone"),
+                               startBeat: 0)
+        ])
+        #expect(outcomes[0].error == nil)
+        #expect(store.tracks[0].clips[0].lengthBeats == 4)
+    }
 }

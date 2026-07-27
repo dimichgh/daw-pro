@@ -837,7 +837,7 @@ struct AnthropicModelCatalogTests {
         for model in [
             "claude-sonnet-5", "claude-sonnet-5-20260115",
             "claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
-            "claude-fable-5", "claude-mythos-5",
+            "claude-opus-5", "claude-fable-5", "claude-mythos-5",
         ] {
             #expect(AnthropicModelCatalog.maxOutputTokens(forModel: model) == 128_000, "\(model)")
         }
@@ -855,9 +855,12 @@ struct AnthropicModelCatalogTests {
         #expect(AnthropicModelCatalog.maxOutputTokens(forModel: "") == 64_000)
     }
 
-    @Test("sonnet-5/opus-4-7/opus-4-8/fable-5/mythos-5 request adaptive thinking with display:summarized")
+    @Test("sonnet-5/opus-5/opus-4-8/opus-4-7/fable-5/mythos-5 request adaptive thinking with display:summarized")
     func summarizedDisplayModels() {
-        for model in ["claude-sonnet-5", "claude-opus-4-7", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5"] {
+        for model in [
+            "claude-sonnet-5", "claude-opus-5", "claude-opus-4-7", "claude-opus-4-8",
+            "claude-fable-5", "claude-mythos-5",
+        ] {
             #expect(AnthropicModelCatalog.thinkingConfig(forModel: model) == .adaptiveSummarized, "\(model)")
         }
     }
@@ -875,13 +878,14 @@ struct AnthropicModelCatalogTests {
         #expect(AnthropicModelCatalog.thinkingConfig(forModel: "claude-nonexistent-9") == .omit)
     }
 
-    @Test("curated is a strict, name-bearing subset of all — the 6 picker-offered models, with the default among them")
+    @Test("curated is a strict, name-bearing subset of all — the 7 picker-offered models, with the default among them")
     func curatedIsSubsetOfAll() {
         let curatedIDs = Set(AnthropicModelCatalog.curated.map(\.id))
         let allIDs = Set(AnthropicModelCatalog.all.map(\.id))
         #expect(curatedIDs.isSubset(of: allIDs))
         #expect(AnthropicModelCatalog.curated.allSatisfy { $0.name != nil })
-        #expect(curatedIDs.count == 6)
+        #expect(curatedIDs.count == 7)
+        #expect(curatedIDs.contains("claude-opus-5"))
         #expect(curatedIDs.contains(AnthropicModelCatalog.defaultModelID))
         // Lookup-only rows are deliberately excluded from the picker.
         #expect(!curatedIDs.contains("claude-opus-4-6"))

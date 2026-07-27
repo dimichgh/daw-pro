@@ -58,6 +58,31 @@ public struct MixdownFile: Codable, Sendable, Equatable {
     }
 }
 
+/// The optional `includeMasteredMixdown` sibling file ("00 Mastered Mix.wav",
+/// m23-m1) — the real MASTERED mix, rendered exactly the way `render.bounce`
+/// renders: full session, real master chain, real master automation lane, real
+/// master volume, optionally loudness-normalized.
+///
+/// It is a SIBLING of the stems, never a transformation of them, and this is
+/// the whole point of the shape (research §4.3): for a nonlinear master chain
+/// `M`, `Σᵢ M(sᵢ) ≠ M(Σᵢ sᵢ)`, so printing the shared chain onto each stem
+/// would NOT add back up to this file. The stems stay chain-EXCLUDED (S-3′) and
+/// keep nulling against `MixdownFile`; this file is what a listener hears.
+/// Carries the same `BounceLoudnessReport` `render.bounce` returns — no
+/// parallel report type — so an agent reads loudness/true-peak off the mastered
+/// deliverable the same way everywhere.
+public struct MasteredMixdownFile: Codable, Sendable, Equatable {
+    public var path: String
+    /// Input/output loudness, applied gain, target echo, ceiling-clamp flag —
+    /// `output` is RE-MEASURED from the buffer that hit disk.
+    public var report: BounceLoudnessReport
+
+    public init(path: String, report: BounceLoudnessReport) {
+        self.path = path
+        self.report = report
+    }
+}
+
 /// Result of `ProjectStore.renderStems` (spec §4.2). Every file shares one
 /// duration/rate/channel shape — summation requires it, so the window is
 /// computed once per call.
@@ -74,10 +99,32 @@ public struct StemExportResult: Codable, Sendable, Equatable {
     /// deliverables. nil (key omitted on the wire) for a chain-free project,
     /// keeping pre-m13-d results byte-identical.
     public var masterChain: String?
+    /// The optional `includeMasteredMixdown` sibling (m23-m1) — nil (key
+    /// omitted) unless it was asked for, so every pre-m23-m1 response stays
+    /// byte-identical. Independent of `mixdown`: the two are different files
+    /// with different, non-overlapping meanings (chain-EXCLUDED null anchor vs
+    /// the real mastered deliverable) and both may be requested at once. Never
+    /// a shared flag with a "which chain" switch — that shape is the Ableton
+    /// footgun research §4.3 rejects.
+    public var masteredMixdown: MasteredMixdownFile?
+    /// Output format echo (m23-m2): the INTEGER bit depth written, or nil (key
+    /// omitted) for the Float32 default — absence means "the default", so every
+    /// pre-m23-m2 payload stays byte-identical.
+    public var bitDepth: Int?
+    /// Output format echo (m23-m2): `"aiff"`, or nil (key omitted) for the WAV
+    /// default. Same absence rule as `bitDepth`.
+    public var container: String?
+    /// Present only where dithering could apply (an integer depth), and always
+    /// `false` in v0 (m23-m2): the quantizer is undithered, and saying so is
+    /// better than implying a noise-shaped dither we do not perform.
+    public var ditherApplied: Bool?
 
     public init(directory: String, sampleRate: Double, durationSeconds: Double,
                 channels: Int, stems: [StemFile], mixdown: MixdownFile? = nil,
-                masterChain: String? = nil) {
+                masterChain: String? = nil,
+                masteredMixdown: MasteredMixdownFile? = nil,
+                bitDepth: Int? = nil, container: String? = nil,
+                ditherApplied: Bool? = nil) {
         self.directory = directory
         self.sampleRate = sampleRate
         self.durationSeconds = durationSeconds
@@ -85,6 +132,10 @@ public struct StemExportResult: Codable, Sendable, Equatable {
         self.stems = stems
         self.mixdown = mixdown
         self.masterChain = masterChain
+        self.masteredMixdown = masteredMixdown
+        self.bitDepth = bitDepth
+        self.container = container
+        self.ditherApplied = ditherApplied
     }
 }
 
@@ -109,7 +160,8 @@ public enum StemPlan {
     /// or `.stemNotMasterInput` for a bus-routed source track id (its signal
     /// is part of the destination bus's stem — the message says so verbatim).
     public static func descriptors(tracks: [Track],
-                                   including ids: [UUID]?) throws -> [StemDescriptor] {
+                                   including ids: [UUID]?,
+                                   format: DeliveryFormat = .default) throws -> [StemDescriptor] {
         // Validate the request BEFORE filtering, so a bus-routed id rejects
         // readably instead of silently vanishing from the export.
         if let ids {
@@ -117,7 +169,12 @@ public enum StemPlan {
                 guard let track = tracks.first(where: { $0.id == id }) else {
                     throw ProjectError.trackNotFound(id)
                 }
-                if track.kind != .bus, let busID = track.outputBusID {
+                // `Track.isMasterInput` (m23-m3c) — the SAME predicate the
+                // filter below uses, so the refusal and the selection can never
+                // answer differently for one track. `outputBusID` cannot be nil
+                // inside this branch by construction (a nil one IS a master
+                // input), so the bind is a read, not a second condition.
+                if !track.isMasterInput, let busID = track.outputBusID {
                     let busName = tracks.first(where: { $0.id == busID })?.name
                         ?? busID.uuidString
                     throw ProjectError.stemNotMasterInput(
@@ -128,8 +185,10 @@ public enum StemPlan {
         }
         let requested = ids.map(Set.init)
         let selected = tracks.filter { track in
-            let isMasterInput = track.kind == .bus || track.outputBusID == nil
-            guard isMasterInput else { return false }
+            // `Track.isMasterInput` (m23-m3c): the ONE home for the rule, shared
+            // with the refusal above and with the arrange row's "Bounce in
+            // Place" item.
+            guard track.isMasterInput else { return false }
             return requested?.contains(track.id) ?? true
         }
         var taken = Set<String>()
@@ -138,9 +197,59 @@ public enum StemPlan {
             return StemDescriptor(
                 id: track.id, kind: kind, name: track.name,
                 fileName: fileName(index: index + 1, name: track.name,
-                                   kind: kind, taken: &taken)
+                                   kind: kind, taken: &taken, format: format)
             )
         }
+    }
+
+    // MARK: - The two sibling files (m23-m3c)
+
+    /// Base name of the optional `includeMixdown` reference file — the
+    /// chain-EXCLUDED null anchor Σ stems compares against.
+    ///
+    /// A CONSTANT, not a literal at the write site, because m23-m3c gave the
+    /// export dialog a preview of the planned set: the name now has a reader as
+    /// well as a writer, and two spellings of it would let the dialog promise a
+    /// file the render does not write. Carries no extension — the container is
+    /// `DeliveryFormat`'s to decide (m23-m2), so every use goes through
+    /// `format.fileName(...)`.
+    public static let mixdownBaseName = "00 Mixdown"
+
+    /// Base name of the optional `includeMasteredMixdown` sibling (m23-m1) — the
+    /// real mastered deliverable, rendered the way `render.bounce` renders. Same
+    /// one-home reasoning and the same no-extension rule as `mixdownBaseName`.
+    public static let masteredMixdownBaseName = "00 Mastered Mix"
+
+    /// Every file a `renderStems` call will write, in the order the set reads
+    /// on disk (m23-m3c) — the ONE producer of the planned set.
+    ///
+    /// **The export dialog's stems preview renders exactly this**, and a test
+    /// asserts it equals what `renderStems` ACTUALLY wrote. That equality is the
+    /// point: a preview that mirrored the numbering, the sanitizing or the
+    /// collision suffixes would be a second implementation, and the day one of
+    /// them changed the dialog would start naming files nobody gets.
+    ///
+    /// Order: the two optional siblings first (both are `00 …`, mixdown before
+    /// mastered — the order `renderStems` writes them), then the partition in
+    /// track-list order. Throws exactly what `descriptors` throws, so an
+    /// explicit id list is validated the same way in the preview as in the
+    /// render; `including: nil` (every master input — what the dialog asks for)
+    /// cannot throw.
+    public static func fileSet(tracks: [Track],
+                               including ids: [UUID]? = nil,
+                               includeMixdown: Bool = false,
+                               includeMasteredMixdown: Bool = false,
+                               format: DeliveryFormat = .default) throws -> [String] {
+        let stems = try descriptors(tracks: tracks, including: ids, format: format)
+        // An empty partition writes NOTHING — not even the siblings.
+        // `renderStems` guards `descriptors.isEmpty` with `nothingToRender`
+        // BEFORE it creates the directory, so a set of two "00 …" files here
+        // would promise an export that throws instead of writing them.
+        guard !stems.isEmpty else { return [] }
+        var names: [String] = []
+        if includeMixdown { names.append(format.fileName(mixdownBaseName)) }
+        if includeMasteredMixdown { names.append(format.fileName(masteredMixdownBaseName)) }
+        return names + stems.map(\.fileName)
     }
 
     /// The solo transform: the subset track list whose master input is EXACTLY
@@ -242,13 +351,18 @@ public enum StemPlan {
         }
     }
 
-    /// "NN Name.wav" builder (spec §2): strip control characters and
+    /// "NN Name.<ext>" builder (spec §2): strip control characters and
     /// `/\:?%*|"<>`, trim whitespace/dots off the ends, empty → "Track"/"Bus";
     /// 2-digit 1-based index prefix in partition order; duplicate names get
     /// " 2", " 3"… suffixes (the media-copy collision precedent), compared
     /// case-insensitively because the default APFS volume is.
+    ///
+    /// The extension comes from `format` (m23-m2), never a literal: it selects
+    /// the container the writer produces, so a hardcoded ".wav" here would ship
+    /// AIFF stems under WAV names.
     static func fileName(index: Int, name: String, kind: StemKind,
-                         taken: inout Set<String>) -> String {
+                         taken: inout Set<String>,
+                         format: DeliveryFormat = .default) -> String {
         let illegal = Set("/\\:?%*|\"<>")
         var sanitized = String(name.unicodeScalars.filter {
             !CharacterSet.controlCharacters.contains($0) && !illegal.contains(Character($0))
@@ -266,6 +380,6 @@ public enum StemPlan {
             suffix += 1
         }
         taken.insert(candidate.lowercased())
-        return String(format: "%02d %@.wav", index, candidate)
+        return format.fileName(String(format: "%02d %@", index, candidate))
     }
 }

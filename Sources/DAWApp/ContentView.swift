@@ -66,10 +66,11 @@ struct ContentView: View {
                     VStack(spacing: 10) {
                         switch model.workspaceMode {
                         case .arrange:
-                            arrangeWorkspace(geo)
+                            arrangeDeleteKeyScope(geo)
                         case .mix:
                             mixToolbar
-                            MixerView(densityStore: model.panelDensity)
+                            MixerView(densityStore: model.panelDensity,
+                                      layoutStore: model.panelLayout)
                                 .frame(maxHeight: .infinity)
                         }
                     }
@@ -127,6 +128,22 @@ struct ContentView: View {
                     clipID: clipID,
                     clipName: voiceConvertClipName(clipID),
                     onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeVoiceConvert() } }
+                )
+            }
+        }
+        // Export dialog (m23-m3): a centered dark-glass modal over a scrim (the
+        // Quantize idiom) — rendered INSIDE the window so `debug.captureUI` can
+        // snapshot it. Opened by the transport EXPORT chip, the onboarding tour's
+        // export step, and `debug.exportDialog`. The bounce runs through
+        // `ExportDialogModel.export`, the same method the debug seam and the
+        // suites drive, so the button can never diverge from the gate.
+        .overlay {
+            if model.showExportSheet {
+                ExportSheet(
+                    model: model.exportDialog,
+                    projectName: store.projectName,
+                    onExport: { model.runExportFromDialog() },
+                    onClose: { model.closeExportSheet() }
                 )
             }
         }
@@ -366,6 +383,19 @@ struct ContentView: View {
                 onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeEffectEditor() } }
             )
         }
+        // REFERENCE panel (m22-g P3): the comparison surface, opened by the
+        // master strip's REFERENCE row (or `debug.referenceSeed {panel:true}`).
+        // Declared in this always-present overlay builder — NOT inside the Mix
+        // workspace — so the root body chain gains no new modifier link (the
+        // ⌘= alias rule) and a wire-driven capture can stage it from either
+        // workspace. NO VIOLET: a reference is user material, not AI content.
+        if model.referencePanel.isOpen {
+            ReferencePanelView(
+                model: model.referencePanel,
+                compare: { model.referenceCompareForUI() },
+                onClose: { model.closeReferencePanel() }
+            )
+        }
         // Unified generation-progress card (m17-h): the canonical violet status
         // surface — EVERY generation job (Sketchpad, wire/MCP, import paths)
         // reports here. An IN-WINDOW card floated bottom-trailing above the
@@ -383,6 +413,24 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .transition(.opacity)
         }
+    }
+
+    /// The arrange workspace with the DELETE-key scope wrapped around it — the
+    /// ONLY place `ArrangeDeleteKey` is mounted (see that type for why placement
+    /// is the entire safety argument).
+    ///
+    /// THE `VStack` IS LOAD-BEARING, not cosmetic. `arrangeWorkspace` is a
+    /// `@ViewBuilder`, so it returns a `TupleView` of three children (toolbar,
+    /// timeline row, optional editor pane). A modifier applied to a multi-view
+    /// builder result DISTRIBUTES to each child — which would give this modifier
+    /// three independent `@FocusState`s all asserting focus on the same nonce, i.e.
+    /// a focus fight. Collapsing the tuple into one view first makes the modifier
+    /// apply exactly once. The `spacing: 10` matches the enclosing `VStack`, so
+    /// the three children keep byte-identical spacing (the gate re-derives the
+    /// lane pitch from pixels and would fail loudly if this shifted anything).
+    private func arrangeDeleteKeyScope(_ geo: GeometryProxy) -> some View {
+        VStack(spacing: 10) { arrangeWorkspace(geo) }
+            .modifier(ArrangeDeleteKey(model: model))
     }
 
     /// The Arrange surface: track list + timeline, with the piano roll docked
@@ -465,6 +513,22 @@ struct ContentView: View {
                 .onChange(of: lanesViewportW, initial: true) { _, w in
                     model.arrangeViewportWidth = w
                 }
+                // FOLLOW THE PLAYHEAD (m23-c2) — driven from the TRANSPORT
+                // observation path, never from a geometry callback: a `scrollTo`
+                // issued inside a layout transaction moves layout but does not
+                // durably update the scroller's position (m17-b, measured), and
+                // `debug.captureUI`'s `cacheDisplay` forces exactly the re-render
+                // that would then jump. `positionBeats` is plain `@Observable`
+                // state pushed by the engine's playhead handler (~30 Hz), so this
+                // fires on real playback and on nothing else.
+                .onChange(of: store.transport.positionBeats) { _, _ in
+                    model.followArrangeTick()
+                }
+                // Pressing play is the moment a user expects the view to take
+                // charge again, so a start clears any manual-scroll suspension.
+                .onChange(of: store.transport.isPlaying) { _, playing in
+                    if playing { model.rearmFollow() }
+                }
             }
 
             if model.showSketchpad {
@@ -505,10 +569,16 @@ struct ContentView: View {
                 // The SAME transport source the arrange timeline consumes (no second
                 // ticker) — the piano roll playhead is a rendering of this state.
                 positionBeats: store.transport.positionBeats,
+                // m23-c2: follow keeps the playhead in frame during PLAYBACK only.
+                isPlaying: store.transport.isPlaying,
                 densityStore: model.panelDensity,
                 // m21-c: the shared layout store carries the persisted
-                // piano-roll zoom slot (`pianoRollPPB`) the editor scales by.
+                // piano-roll zoom slot (`pianoRollPPB`) the editor scales by, and
+                // (m23-c2) the ONE `followPlayhead` flag both surfaces read.
                 layout: model.panelLayout,
+                // m23-c2: the roll's follow runtime, held by the app so it survives
+                // a clip switch and `debug.followPlayhead` can echo it.
+                follow: model.pianoRollFollow,
                 onCommit: { notes in _ = try? store.setClipNotes(clipID: clip.id, notes: notes) },
                 // Scrub seeks through the app's store seek (the existing transport.seek
                 // path), NOT the WebSocket. Refused mid-record → try? swallows it.
@@ -529,6 +599,17 @@ struct ContentView: View {
                     try? store.setControllerLane(clipID: clip.id, type: type, points: points)
                 },
                 onClose: { selectedClipID = nil },
+                // m23-d: hear the pitch you drag, and the key you press in the
+                // gutter. The defeat switch is checked HERE rather than in the
+                // view, so the view keeps zero audition policy — and the
+                // `note.audition` wire verb, which does not come through here,
+                // deliberately ignores it.
+                onAudition: { pitches, velocity in
+                    guard model.panelLayout.auditionEnabled else { return }
+                    guard let trackID = trackID(ofClip: clip.id) else { return }
+                    _ = try? store.auditionPitches(trackID: trackID, pitches: pitches,
+                                                   velocity: velocity)
+                },
                 // m21-c: while the editor holds key focus, the View-menu
                 // ⌘+/⌘−/⌘0 zoom THIS editor instead of the arrange timeline.
                 onFocusChange: { model.pianoRollEditorFocused = $0 }
@@ -549,8 +630,11 @@ struct ContentView: View {
         TimelineLanesView(
             tracks: store.tracks,
             positionBeats: store.transport.positionBeats,
-            selectedClipID: selectedClipID,
+            selection: model.arrangeSelection,
             onSelectClip: selectClip,
+            onSelectionRendered: { model.arrangeSelectionRenderSeq &+= 1 },
+            // m23-g2: the group-drag seam's "the lanes have run" signal.
+            onClipLayoutRendered: { model.arrangeClipLayoutRenderSeq &+= 1 },
             expandedTrackIDs: model.expandedAutomationTrackIDs,
             selectedLaneByTrack: model.automationLaneSelection,
             onCommitPoints: { trackID, laneID, points in
@@ -577,8 +661,16 @@ struct ContentView: View {
             onPinchZoomEnded: { model.arrangePinchEnded() },
             // The shared-scroll viewport height (m10-j): the lanes fill it when short.
             availableHeight: viewport,
-            onMoveClip: { trackID, clip, toStart in
-                _ = try? store.moveClip(trackId: trackID, clipId: clip.id, toStartBeat: toStart)
+            // m23-g2: a body drag goes through the group verb, ALWAYS — there is
+            // no count==1 special case, so a single-clip drag and a three-clip
+            // drag are the same code path (and `moveClipsLabel` keeps the
+            // single-clip undo entry reading exactly as it did before).
+            // `trackID` is unused: the move is id-addressed and same-track by
+            // construction (there is no cross-track drag — see `moveClips`).
+            onMoveClip: { _, clip, anchorOriginalStart, rawDragDeltaBeats in
+                model.dragArrangeClips(anchorClipID: clip.id,
+                                       anchorOriginalStart: anchorOriginalStart,
+                                       rawDragDeltaBeats: rawDragDeltaBeats).anchorStart
             },
             onTrimClip: { trackID, clip, newStart, newLength in
                 _ = try? store.trimClip(trackId: trackID, clipId: clip.id,
@@ -664,12 +756,67 @@ struct ContentView: View {
             onPointerState: { zone, ghost in
                 model.arrangePointerZone = zone.rawValue
                 model.arrangeGhostBeat = ghost
+                // m23-e: the seam's "the view has run" signal — see
+                // `arrangePointerReportSeq`. Bumped LAST so the zone/ghost it
+                // announces are already stored.
+                model.arrangePointerReportSeq &+= 1
             },
             splitRefusal: model.arrangeSplitRefusal,
-            // Audio import via drag-drop (beta m10-k).
-            onImportAudio: { urls, targetTrackID, atBeatRaw in
-                model.importAudioFiles(urls: urls, targetTrackID: targetTrackID,
-                                       atBeatRaw: atBeatRaw)
+            // m23-e: an empty-lane double-click is the beginner's path from a
+            // fresh instrument track to a writable grid. ONE store call — the
+            // same `ProjectStore.addMIDIClip` the `clip.addMIDI` wire verb uses,
+            // so it is one undo step — then select the new clip, which is what
+            // OPENS the piano roll on it. On an audio/bus lane the store refuses
+            // with `midiClipsRequireInstrumentTrack` and the message surfaces
+            // VERBATIM on that lane: never a silent no-op, since "nothing
+            // happened and nothing said why" is the very complaint this fixes.
+            onCreateMIDIClip: { trackID, beat, length in
+                do {
+                    let clip = try store.addMIDIClip(toTrack: trackID, atBeat: beat,
+                                                     lengthBeats: length)
+                    model.noteCreatedClip(clip.id)
+                } catch {
+                    model.presentArrangeLaneRefusal(error, trackID: trackID, beat: beat)
+                }
+            },
+            // Rubber band (m23-g3): the staged step flows down; the band + its
+            // hits flow back up so `debug.arrangeMarquee` echoes ground truth,
+            // and the RESOLVED lane ladder flows up on its own path so a BARE
+            // seam read can answer it before any drag exists.
+            stageMarquee: model.arrangeMarqueeStage,
+            onMarqueeSelect: { hits, base, additive in
+                model.applyArrangeMarquee(hits: hits, base: base, additive: additive)
+            },
+            onMarqueeState: { band, hits in
+                model.arrangeMarqueeBand = band
+                model.arrangeMarqueeHits = hits
+                // Bumped LAST so the state it announces is already stored (the
+                // `arrangePointerReportSeq` rule).
+                model.arrangeMarqueeReportSeq &+= 1
+            },
+            onLaneGeometry: { geometry in model.arrangeLaneGeometry = geometry },
+            // Audio import via drag-drop (beta m10-k). m23-f: the per-file
+            // results are RETAINED (not discarded) so the drop seam can echo
+            // what actually landed — the drop path used to throw them away, so a
+            // file the store refused vanished without a trace.
+            onImportFiles: { urls, targetTrackID, landing in
+                model.arrangeDropImportResults = model.importFiles(
+                    urls: urls, targetTrackID: targetTrackID, startBeat: landing)
+            },
+            // Drop staging (m23-f): the staged drag phase flows down; the live
+            // hover + the handler's decision flow back up so `debug.arrangeDrop`
+            // echoes ground truth.
+            stageDrop: model.arrangeDropStage,
+            onDropState: { live, decided in
+                model.arrangeDropHover = live
+                model.arrangeDropDecided = decided
+                // Bumped LAST so the state it announces is already stored (the
+                // `arrangePointerReportSeq` rule).
+                model.arrangeDropReportSeq &+= 1
+            },
+            onDropHoverChange: { live in
+                model.arrangeDropHover = live
+                model.arrangeDropReportSeq &+= 1
             },
             // Tempo + meter maps (m12-d): the RESOLVED maps flow in by value.
             meterMap: store.transport.meterMap,
@@ -680,16 +827,19 @@ struct ContentView: View {
             content: content,
             hScrollOffset: arrangeHScroll,
             onHScrollChange: {
-                // The preference is ground truth: it drives the ruler mirror AND
-                // the `reported` copy the debug seam echoes (m17-b — a zoom's
-                // analytic write touches only the mirror, so `reported` can't lie).
-                model.arrangeHScroll = $0
-                model.arrangeHScrollReported = $0
+                // The live report is ground truth: it drives the ruler mirror, the
+                // `reported` copy the debug seams echo (m17-b — a zoom's analytic
+                // write touches only the mirror, so `reported` can't lie), and
+                // follow's manual-scroll detector (m23-c2).
+                model.reportArrangeHScroll($0)
             },
-            // Zoom's anchor-preserving scroll request (m17-b) — applied by the
-            // lanes' AppKit bridge in the same update as the scale change.
-            hScrollApplyTarget: model.arrangeZoomScrollTarget,
-            hScrollApplyNonce: model.arrangeZoomScrollNonce
+            // The programmatic scroll request: a zoom's anchor-preserving offset
+            // (m17-b) or a follow page turn (m23-c2), applied by the lanes'
+            // `ScrollViewReader` in the same update as whatever drove it.
+            hScrollApplyTarget: model.arrangeHScrollApplyTarget,
+            hScrollApplyNonce: model.arrangeHScrollApplyNonce,
+            // The laid-out content width — follow's clamp ceiling (m23-c2).
+            onContentWidthChange: { model.arrangeContentWidth = $0 }
         )
     }
 
@@ -723,8 +873,13 @@ struct ContentView: View {
     /// A tap selects any clip (brightening it and revealing its gain readout);
     /// only a MIDI clip additionally opens the piano roll (`selectedMIDIClip`
     /// filters audio out, so the panel stays closed for audio selections).
-    private func selectClip(_ clip: Clip) {
-        selectedClipID = clip.id
+    ///
+    /// m23-g1: shift/⌘ toggles instead of replacing. The decision and the state
+    /// change both live on `AppModel.clickClip`, which the
+    /// `debug.arrangeSelection` seam calls too — this is the thin view edge, not
+    /// a second copy of the rule.
+    private func selectClip(_ clip: Clip, _ modifiers: ArrangeClickModifiers) {
+        model.clickClip(id: clip.id, modifiers: modifiers)
     }
 
     /// Arrange-header strip: label + (in Pro) the grid-snap picker, then the
@@ -745,6 +900,15 @@ struct ContentView: View {
                 clipFixToggle
                     .explainable(.aiFix)
             }
+            // FOLLOW (m23-c2) — seated with the zoom cluster because both are view
+            // NAVIGATION, and shown in both densities for the same reason. ONE chip
+            // governs both following surfaces: the piano roll is docked INSIDE this
+            // workspace, so this toolbar is on screen whenever either surface is,
+            // and a second copy in the roll's header would be one value wearing two
+            // faces. It is deliberately absent from the Mix console's toolbar —
+            // there is no playhead to follow there.
+            followChip
+                .explainable(.arrangeFollow)
             // Arrange zoom cluster (m17-b) — seated beside the SNAP chip; shown in
             // BOTH densities (zoom is view navigation, not Pro edit chrome).
             zoomCluster
@@ -763,6 +927,54 @@ struct ContentView: View {
             .explainable(.panelDensity)   // shared density id (ex-b)
         }
         .padding(.horizontal, 4)
+    }
+
+    /// FOLLOW chip (m23-c2): keeps the playhead in frame during playback, on the
+    /// arrange lanes AND the piano-roll bands. THREE faces, because two would lie:
+    ///
+    /// - **off** — neutral chrome (Rule 3: no accent at rest).
+    /// - **following** — cyan + glow. `playback` is the playhead's own colour and
+    ///   following is an earned active state, so the glow is earned too.
+    /// - **paused** — cyan outline, NO fill and NO glow: the user scrolled during
+    ///   playback and follow stood down. A chip that kept glowing here would be
+    ///   claiming to follow while the view sits still, which is the dishonest-
+    ///   readout class this project keeps closing. A click resumes.
+    private var followChip: some View {
+        let following = model.isFollowingPlayhead
+        let paused = model.isFollowSuspended
+        let lit = following && !paused
+        return Button {
+            model.toggleFollowPlayhead()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: paused ? "location.slash" : "location.north.line.fill")
+                    .font(.system(size: 9, weight: .bold))
+                Text("FOLLOW")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+            }
+            .foregroundStyle(following ? DAWTheme.playback : DAWTheme.textDim)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(lit ? DAWTheme.playback.opacity(0.14) : DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(paused ? DAWTheme.playback.opacity(0.6) : Color.clear, lineWidth: 1)
+            )
+            .glow(DAWTheme.playback, radius: 5, intensity: lit ? 0.5 : 0)
+        }
+        .buttonStyle(.plain)
+        .help(followHelp)
+    }
+
+    private var followHelp: String {
+        if model.isFollowSuspended {
+            return "Following paused — you scrolled. Click to resume, or press play again"
+        }
+        return model.isFollowingPlayhead
+            ? "Following the playhead — the view keeps it in frame while you play"
+            : "Keep the playhead in frame while you play"
     }
 
     /// HISTORY chip: opens the Undo-history panel. Shown in BOTH densities — undo
@@ -963,15 +1175,16 @@ struct ContentView: View {
     }
 
     /// The open clip resolved against the live store, or nil when it's gone or
-    /// isn't MIDI (which auto-closes the panel).
-    private var selectedMIDIClip: Clip? {
-        guard let id = selectedClipID else { return nil }
-        for track in store.tracks {
-            if let clip = track.clips.first(where: { $0.id == id }), clip.isMIDI {
-                return clip
-            }
-        }
-        return nil
+    /// isn't MIDI (which auto-closes the panel). Lives on the AppModel (m23-e)
+    /// so the `debug.arrangePointer` echo reports the SAME resolution the editor
+    /// branch gates on — an echo that could disagree with the screen would be
+    /// worse than no echo.
+    private var selectedMIDIClip: Clip? { model.openEditorClip }
+
+    /// The id of the track owning `clipID` (m23-d) — the `selectedMIDIClip`
+    /// iteration, returning the OWNER rather than the clip.
+    private func trackID(ofClip clipID: UUID) -> UUID? {
+        store.tracks.first { $0.clips.contains { $0.id == clipID } }?.id
     }
 
     /// The selected clip when it's a plain AUDIO clip, paired with its track id —
@@ -1280,5 +1493,69 @@ struct ContentView: View {
     private var selectedInputDeviceName: String {
         guard let uid = store.selectedInputDeviceUID else { return "Default" }
         return store.listInputDevices().first { $0.uid == uid }?.name ?? "Default"
+    }
+}
+
+/// DELETE removes the arrange selection (m23-g1). A `ViewModifier` rather than
+/// five modifiers inline on ContentView's body — that body is already at the
+/// type-checker's limit, and a 1-line call site keeps it there.
+///
+/// PLACEMENT IS THE WHOLE SAFETY ARGUMENT. This is applied to the ARRANGE
+/// WORKSPACE (via `ContentView.arrangeDeleteKeyScope`) — not to the lanes, and
+/// deliberately NOT to the window root:
+///
+///   • NOT THE WINDOW ROOT. Every modal in this app (instrument picker, quantize
+///     panel, Settings, undo history, voice-convert sheet, engine notices) is
+///     rendered as an `.overlay` on ContentView's root, i.e. INSIDE that root's
+///     subtree. Mounted there, this modifier would be an ancestor of all of them:
+///     with three clips selected, focusing any non-text control in a modal and
+///     pressing DELETE would silently destroy the clips behind it as one
+///     journaled edit. The Mix console would have been live for the same key.
+///     Scoping to the arrange workspace closes the PROPAGATION path: this is no
+///     longer an ancestor of the overlays, so a key ignored inside a modal can no
+///     longer bubble here. It does NOT by itself close the RETAINED-FOCUS path —
+///     the workspace can still hold focus from an earlier clip click while a modal
+///     is open, and then the key arrives here directly. `handleArrangeDeleteKey`
+///     guards that case explicitly (`isModalPresented`), and the Mix case twice
+///     over (`workspaceMode`), because those are the halves a gate can OBSERVE;
+///     the scoping is what makes them defence in depth rather than the only line.
+///   • Scoping also contains `.focusEffectDisabled()`, which propagates down the
+///     environment: at the window root it suppressed focus rings for every rename
+///     field, Copilot input and Settings control in the app.
+///
+///   • The piano roll (`PianoRollView.onKeyPress(.delete)`) and the automation
+///     lane editor own the key on their OWN surfaces and are DESCENDANTS of the
+///     view this wraps. SwiftUI offers a key press to the focused descendant
+///     first, so a focused roll with notes selected consumes it and this never
+///     runs — the m23-e/m23-d note path cannot regress through here
+///     STRUCTURALLY, not by a guard someone has to remember to maintain. A roll
+///     with NO notes selected returns `.ignored`, and the key then falls through
+///     to the clips, which is what a user pressing DELETE with clips selected
+///     means.
+///   • It is NOT a menu key equivalent, on purpose: those are checked BEFORE
+///     text insertion, so an Edit-menu item with `.keyboardShortcut(.delete)`
+///     would steal Backspace from every rename field in the app — the exact trap
+///     m17-d documented for the space bar.
+///   • `AppModel.handleArrangeDeleteKey` re-checks the field-editor case with
+///     the m17-d responder classifier ANYWAY, so a Backspace that somehow
+///     reached here while the user is typing still cannot delete their clips.
+///     Delivery order is SwiftUI's business; that guard does not depend on it.
+private struct ArrangeDeleteKey: ViewModifier {
+    var model: AppModel
+    /// Keyboard focus on the workspace root — what makes the key press eligible
+    /// at all. Asserted on every arrange clip click (via
+    /// `AppModel.arrangeKeyFocusNonce`) so DELETE works immediately after
+    /// selecting clips, with no separate "click the background first" step.
+    @FocusState private var focused: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .focusable()
+            .focused($focused)
+            // No focus ring on the workspace root — the selected clips ARE the
+            // cue (docs/DESIGN-LANGUAGE.md: one accent per meaning).
+            .focusEffectDisabled()
+            .onKeyPress(.delete) { model.handleArrangeDeleteKey() ? .handled : .ignored }
+            .onChange(of: model.arrangeKeyFocusNonce) { _, _ in focused = true }
     }
 }

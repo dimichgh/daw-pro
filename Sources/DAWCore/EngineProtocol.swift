@@ -295,6 +295,31 @@ public struct TakeResult: Sendable {
     }
 }
 
+/// Why a note audition did or did not reach the speakers (m23-d). REPORTING,
+/// not policy: the events are delivered in every `inaudible*` case — the strip
+/// is simply silent for a reason the caller can act on. Only `noRenderer` and
+/// `unsupported` mean nothing was delivered.
+public enum AuditionOutcome: String, Sendable, Equatable, Codable {
+    /// Delivered to a live renderer on an audible strip.
+    case sounded
+    /// Muted, or excluded by an active solo. The strip is the mute authority,
+    /// so the events go out anyway and the mixer swallows them.
+    case inaudibleMuted
+    /// A hosted AU is still preparing — the strip renders the silent
+    /// placeholder, so the events land on nothing that makes sound yet.
+    case inaudibleNotReady
+    /// The audio engine is not running and would not start.
+    case inaudibleEngineStopped
+    /// No live renderer for that track (unknown id, an audio/bus track, or a
+    /// mid-rebuild gap); nothing was delivered.
+    case noRenderer
+    /// The engine has no audition support at all (fakes, headless).
+    case unsupported
+
+    /// The wire's `audible` flag — `.sounded` is the only audible outcome.
+    public var isAudible: Bool { self == .sounded }
+}
+
 /// The contract between the domain layer and the real-time audio engine.
 /// DAWCore (and everything above it) never sees AVFoundation types.
 @MainActor
@@ -503,6 +528,33 @@ public protocol AudioEngineControlling: AnyObject {
     /// stance; > 0 dBFS content survives to disk).
     func writeAudioFile(_ audio: RenderedAudio, to url: URL) throws -> AudioFileInfo
 
+    /// `writeAudioFile` at a chosen output format (m23-m2) — bit depth and
+    /// container, resolved by `DeliveryFormat.resolve`. `.default` (Float32
+    /// WAV) is byte-for-byte the writer above.
+    ///
+    /// A SEPARATE requirement rather than a defaulted parameter because Swift
+    /// forbids default arguments in protocol requirements. The
+    /// protocol-extension default below therefore exists, and it is the reason
+    /// **any test asserting an ON-DISK format must run through the real
+    /// `AudioEngine`**: a double that implements only the legacy writer
+    /// inherits that default, and a store-level on-disk assertion made through
+    /// one would pass on an implementation that never plumbs the format at all.
+    /// The default REFUSES a non-default format instead of discarding it
+    /// silently — an engine that cannot write 24-bit AIFF says so.
+    func writeAudioFile(_ audio: RenderedAudio, to url: URL,
+                        format: DeliveryFormat) throws -> AudioFileInfo
+
+    /// `renderMixdown` at a chosen output format (m23-m2). The SECOND seam the
+    /// format has to cross: here the ENGINE both renders and writes, so an
+    /// implementation that plumbs only `writeAudioFile` gets `render.mixdown`
+    /// wrong while `render.bounce`/`render.stems` look right. Same refusing
+    /// default, same reason.
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       fromBeat: Double, durationSeconds: Double,
+                       to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo
+
     /// Total fixed algorithmic latency of the track's insert-effect chain, in
     /// samples at the engine rate — the sum of the chain's non-bypassed
     /// effects (e.g. the limiter's 5 ms lookahead = 240 @ 48 kHz); M4 (viii)
@@ -655,6 +707,27 @@ public protocol AudioEngineControlling: AnyObject {
     /// activity; the UI reads it as a cheap blinking-LED source.
     func midiEventCount() -> Int
 
+    /// Sounds EXACTLY `pitches` on `trackID`'s instrument RIGHT NOW, outside the
+    /// sequencer schedule and independent of transport state (m23-d note
+    /// audition). SET semantics and idempotent: pitches already sounding are
+    /// left alone, pitches no longer in the set are released, and an EMPTY set
+    /// silences the track's audition entirely. Every call — including one whose
+    /// set is unchanged — is also a LIVENESS HEARTBEAT: the render side kills
+    /// any audition voice that goes 3 s without one, so a caller holding a note
+    /// must keep calling (`AuditionController` does this every 500 ms). Never
+    /// throws; the outcome reports why nothing will be heard when that is the
+    /// case. Delivery is by renderer IDENTITY — the note-off reaches the SAME
+    /// renderer object that got the on, so a node rebuild mid-hold can never
+    /// leave a voice stranded on a dead instrument.
+    @discardableResult
+    func setAuditionPitches(trackID: UUID, pitches: [UInt8], velocity: UInt8) -> AuditionOutcome
+
+    /// Releases every audition voice on every track and requests an
+    /// all-notes-off on each renderer that held one. Called at engine
+    /// shutdown, project boundary, and app resign-active — the paths where the
+    /// main actor is about to stop being able to send note-offs.
+    func stopAllAudition()
+
     /// Latest master-mix analysis snapshot (M8 vm-a, session vibe meter):
     /// 24 log-spaced spectral bands (40 Hz → 16 kHz, dB, −80 floor),
     /// short-term RMS level, held peak, spectral centroid, normalized
@@ -743,6 +816,17 @@ extension AudioEngineControlling {
     /// fakes and headless engines have no once-rendered hardware graph to
     /// protect, so the default is a no-op.
     public func projectWillReplace() {}
+
+    /// Note audition is optional capability (m23-d, the `masterEffectsChanged`
+    /// precedent): fakes and headless engines have no instrument renderers, so
+    /// the default reports `.unsupported` and existing conformers compile
+    /// unchanged.
+    public func setAuditionPitches(trackID: UUID, pitches: [UInt8],
+                                   velocity: UInt8) -> AuditionOutcome { .unsupported }
+
+    /// The audition all-stop is optional capability (m23-d): an engine with no
+    /// audition support holds no voices, so the default is a no-op.
+    public func stopAllAudition() {}
 
     /// Live click toggling is optional capability (m14-c): engines without a
     /// click player pick the change up from the TransportState handed to the
@@ -912,5 +996,39 @@ extension AudioEngineControlling {
     /// File writing is optional capability alongside `renderOffline`.
     public func writeAudioFile(_ audio: RenderedAudio, to url: URL) throws -> AudioFileInfo {
         throw ProjectError.engineUnavailable
+    }
+
+    /// Format-aware writing is optional capability (m23-m2). The DEFAULT format
+    /// forwards to the legacy writer, so every existing conformance — the
+    /// engine, the app's fakes, and the 4+ test doubles — keeps behaving
+    /// exactly as it did. A NON-default format REFUSES rather than silently
+    /// writing Float32 WAV and letting a response claim otherwise: the whole
+    /// defect class this item exists to close is a file whose bytes disagree
+    /// with what was reported, and a silently-discarding default would
+    /// reintroduce it inside every test double at once.
+    public func writeAudioFile(_ audio: RenderedAudio, to url: URL,
+                               format: DeliveryFormat) throws -> AudioFileInfo {
+        guard format.isDefault else {
+            throw ProjectError.invalidOutputFormat(
+                "this engine cannot write \(format.label) — only 32-bit float WAV")
+        }
+        return try writeAudioFile(audio, to: url)
+    }
+
+    /// Format-aware mixdown — same rule, same reason (m23-m2).
+    public func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              fromBeat: Double, durationSeconds: Double,
+                              to url: URL,
+                              format: DeliveryFormat) async throws -> AudioFileInfo {
+        guard format.isDefault else {
+            throw ProjectError.invalidOutputFormat(
+                "this engine cannot write \(format.label) — only 32-bit float WAV")
+        }
+        return try await renderMixdown(
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            fromBeat: fromBeat, durationSeconds: durationSeconds, to: url)
     }
 }

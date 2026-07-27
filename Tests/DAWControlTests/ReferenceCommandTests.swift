@@ -112,14 +112,21 @@ struct ReferenceCommandTests {
         return (CommandRouter(store: store), store, source.path)
     }
 
-    @Test("the eight verbs are advertised at the END of allCommands, in order; count 144 -> 148 (P1) -> 152 (P2)")
+    @Test("the eight verbs are advertised in order at the end of the m22-g block; count 144 -> 148 (P1) -> 152 (P2) -> 153 (m23-d note.audition) -> 154 (m23-h track.reorder) -> 156 (m23-k3 MIDI import)")
     func advertisedAtEnd() {
-        let tail = Array(CommandRouter.allCommands.suffix(8))
+        // m23-d appended `note.audition`, m23-h `track.reorder`, and m23-k3
+        // `project.importMIDI` + `clip.importMIDI` after these under the same
+        // additive-at-end law, so the reference block is now the eight verbs
+        // BEFORE that four-verb tail — still contiguous, still in order.
+        // m23-k4a appended `project.exportMIDI` + `track.exportMIDI` too, so
+        // the tail after the reference block is now SIX verbs, not four.
+        let tail = Array(CommandRouter.allCommands.dropLast(6).suffix(8))
         #expect(tail == ["reference.import", "reference.remove",
                          "reference.status", "reference.analyze",
                          "reference.setMonitor", "reference.setOffset",
                          "reference.setTrim", "reference.compare"])
-        #expect(CommandRouter.allCommands.count == 152)
+        #expect(CommandRouter.allCommands.count == 158)
+        #expect(CommandRouter.allCommands.last == "track.exportMIDI")
         // Additive: earlier neighbors untouched.
         #expect(CommandRouter.allCommands.contains("mixer.liveLoudness"))
         #expect(CommandRouter.allCommands.contains("clip.analyzeAudio"))

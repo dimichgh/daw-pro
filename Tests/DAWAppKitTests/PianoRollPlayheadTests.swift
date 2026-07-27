@@ -90,4 +90,110 @@ struct PianoRollPlayheadTests {
         #expect(PianoRollPlayhead.scrubProjectBeat(localX: 96, clipStartBeat: start,
                                                    lengthBeats: len, pixelsPerBeat: ppb) == 3)
     }
+
+    // MARK: - Off-clip edge cue (m23-c1)
+
+    // 6. THE load-bearing invariant: the cue and the line are complementary, at
+    //    the inclusive edges included. If this ever fails the two objects can
+    //    double-draw (both on) or the band can go silent again (both off).
+    @Test("offClipCue is non-nil EXACTLY when lineX is nil, edges included")
+    func cueComplementsTheLine() {
+        let start = 8.0, len = 4.0   // clip occupies project beats 8...12
+        // A dense sweep across and well past both edges, hitting the exact edges.
+        var position = 0.0
+        while position <= 24.0 {
+            let line = PianoRollPlayhead.lineX(position: position, clipStartBeat: start,
+                                               lengthBeats: len, pixelsPerBeat: ppb)
+            let cue = PianoRollPlayhead.offClipCue(position: position, clipStartBeat: start,
+                                                   lengthBeats: len, beatsPerBar: 4)
+            #expect((line == nil) == (cue != nil),
+                    "line and cue must never both draw or both vanish at beat \(position)")
+            position += 0.25
+        }
+        // The exact inclusive edges belong to the LINE — no cue there.
+        #expect(PianoRollPlayhead.offClipCue(position: 8, clipStartBeat: start,
+                                             lengthBeats: len, beatsPerBar: 4) == nil)
+        #expect(PianoRollPlayhead.offClipCue(position: 12, clipStartBeat: start,
+                                             lengthBeats: len, beatsPerBar: 4) == nil)
+        // One tick outside either edge the cue takes over.
+        #expect(PianoRollPlayhead.offClipCue(position: 7.999, clipStartBeat: start,
+                                             lengthBeats: len, beatsPerBar: 4) != nil)
+        #expect(PianoRollPlayhead.offClipCue(position: 12.001, clipStartBeat: start,
+                                             lengthBeats: len, beatsPerBar: 4) != nil)
+    }
+
+    // 7. Side + distance are measured to the clip's NEAR edge, both directions.
+    @Test("offClipCue reports the direction and the distance to the near edge")
+    func cueSideAndDistance() {
+        let start = 8.0, len = 4.0
+        let before = PianoRollPlayhead.offClipCue(position: 0, clipStartBeat: start,
+                                                  lengthBeats: len, beatsPerBar: 4)
+        #expect(before?.side == .before)
+        #expect(before?.beatsAway == 8)          // 8 beats before the clip start
+        #expect(before?.label == "2 BARS")
+        let after = PianoRollPlayhead.offClipCue(position: 20, clipStartBeat: start,
+                                                 lengthBeats: len, beatsPerBar: 4)
+        #expect(after?.side == .after)
+        #expect(after?.beatsAway == 8)           // 8 beats past the clip END (beat 12)
+        #expect(after?.label == "2 BARS")
+    }
+
+    // 8. The proximity ramp: 0 at/beyond the approach window, 1 at the edge, and
+    //    monotonically rising in between (this is the motion the user reported
+    //    missing, so it has to actually change with position).
+    @Test("proximity ramps from 0 at approachBars away up to 1 at the edge")
+    func cueProximityRamp() {
+        let start = 16.0, len = 8.0, bpb = 4
+        let window = Double(bpb) * PianoRollPlayhead.approachBars   // 16 beats
+        func proximity(at position: Double) -> Double {
+            PianoRollPlayhead.offClipCue(position: position, clipStartBeat: start,
+                                         lengthBeats: len, beatsPerBar: bpb)?.proximity ?? -1
+        }
+        #expect(proximity(at: start - window) == 0)          // exactly one window out
+        #expect(proximity(at: start - window - 40) == 0)     // clamped, never negative
+        #expect(abs(proximity(at: start - window / 2) - 0.5) < 1e-9)
+        // Approaching the clip raises it, and it stays under 1 until the edge.
+        let near = proximity(at: start - 0.5)
+        #expect(near > 0.9 && near < 1)
+        // Same ramp on the far side, measured from the clip END.
+        #expect(proximity(at: start + len + window) == 0)
+        #expect(abs(proximity(at: start + len + window / 2) - 0.5) < 1e-9)
+    }
+
+    // 9. Label formatting: unit choice, singular/plural, one decimal, and the
+    //    floor that keeps it from ever claiming a zero distance.
+    @Test("distanceLabel reads in bars, falls back to beats, never says 0")
+    func cueDistanceLabel() {
+        // Bars once it rounds to a bar or more.
+        #expect(PianoRollPlayhead.distanceLabel(beatsAway: 32, beatsPerBar: 4) == "8 BARS")
+        #expect(PianoRollPlayhead.distanceLabel(beatsAway: 4, beatsPerBar: 4) == "1 BAR")
+        #expect(PianoRollPlayhead.distanceLabel(beatsAway: 6, beatsPerBar: 4) == "1.5 BARS")
+        // Unit is picked from the ROUNDED bar count, so no flicker at the edge
+        // of the boundary: 3.97 beats in 4/4 reads as one bar, not four beats.
+        #expect(PianoRollPlayhead.distanceLabel(beatsAway: 3.97, beatsPerBar: 4) == "1 BAR")
+        // Below that, beats.
+        #expect(PianoRollPlayhead.distanceLabel(beatsAway: 3, beatsPerBar: 4) == "3 BEATS")
+        #expect(PianoRollPlayhead.distanceLabel(beatsAway: 1, beatsPerBar: 4) == "1 BEAT")
+        #expect(PianoRollPlayhead.distanceLabel(beatsAway: 0.5, beatsPerBar: 4) == "0.5 BEATS")
+        // Never 0 — that would read as "at the edge", the parked-playhead claim.
+        #expect(PianoRollPlayhead.distanceLabel(beatsAway: 0.01, beatsPerBar: 4) == "0.1 BEATS")
+        // Meter-aware: 7 beats is one bar in 7/8, not quite two in 4/4.
+        #expect(PianoRollPlayhead.distanceLabel(beatsAway: 7, beatsPerBar: 7) == "1 BAR")
+        #expect(PianoRollPlayhead.distanceLabel(beatsAway: 7, beatsPerBar: 4) == "1.8 BARS")
+        // A degenerate meter can't divide by zero.
+        #expect(PianoRollPlayhead.distanceLabel(beatsAway: 3, beatsPerBar: 0) == "3 BARS")
+    }
+
+    // 10. A clip at the timeline origin can only ever be overshot — there is no
+    //     "before" side to be on, since the transport floors at beat 0.
+    @Test("a clip at beat 0 only ever shows an AFTER cue")
+    func cueAtOrigin() {
+        let start = 0.0, len = 8.0
+        #expect(PianoRollPlayhead.offClipCue(position: 0, clipStartBeat: start,
+                                             lengthBeats: len, beatsPerBar: 4) == nil)
+        let past = PianoRollPlayhead.offClipCue(position: 12, clipStartBeat: start,
+                                                lengthBeats: len, beatsPerBar: 4)
+        #expect(past?.side == .after)
+        #expect(past?.label == "1 BAR")
+    }
 }

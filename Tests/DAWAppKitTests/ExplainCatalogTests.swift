@@ -31,8 +31,17 @@ struct ExplainCatalogTests {
         // AI panels, and Settings. The floor is the landed count; adding is fine,
         // dropping a registered control below it fails here (docs/DESIGN-LANGUAGE.md
         // "every NEW control ships with a catalog entry").
-        #expect(ExplainID.allCases.count >= 43,
-                "explain coverage shrank below the ex-b floor: \(ExplainID.allCases.count)")
+        //
+        // The floor is RAISED to the landed count at each coverage-adding item —
+        // otherwise a stale floor (43, set at ex-b) lets a whole feature's entries
+        // go missing and still pass green. m22-g P3 added four reference-track
+        // entries (.referenceRow / .referencePanel / .referenceABToggle /
+        // .referenceSpectrum), taking the surface to 88; m23-a added the channel
+        // strip's round volume knob (.mixerVolumeKnob) → 89; m23-c2 added the
+        // arrange toolbar's FOLLOW chip (.arrangeFollow) → 90; m23-m3 added the
+        // export dialog (.exportDialog) → 91.
+        #expect(ExplainID.allCases.count >= 91,
+                "explain coverage shrank below the m23-m3 floor: \(ExplainID.allCases.count)")
     }
 
     @Test("ExplainID round-trips its raw value; unknown raw is nil (debug.explainMode focus)")
@@ -116,6 +125,16 @@ struct ExplainCatalogTests {
         #expect(ExplainCatalog.entry(for: .panelDensity)?.title == "Simple / Pro")
         #expect(ExplainCatalog.entry(for: .settingsApiKey)?.body.contains("Keychain") == true)
         #expect(ExplainCatalog.entry(for: .clipBlock)?.title == "Clip")
+        // m22-g: the A/B toggle's body carries the feature's core teaching
+        // moment — WHY the level-matched reference sounds quieter here than on
+        // a streaming service. The completeness test only checks that copy
+        // EXISTS, so the answer itself is pinned here.
+        let abToggle = ExplainCatalog.entry(for: .referenceABToggle)
+        #expect(abToggle?.title == "Mix / Reference A-B")
+        #expect(abToggle?.body.contains("quieter") == true)
+        #expect(abToggle?.body.contains("streaming") == true)
+        #expect(abToggle?.body.contains("loudness") == true)
+        #expect(ExplainCatalog.entry(for: .referenceSpectrum)?.body.contains("white") == true)
     }
 
     // MARK: - ExplainModel state

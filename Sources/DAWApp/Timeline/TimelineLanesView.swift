@@ -45,8 +45,20 @@ enum ArrangeContent: Equatable {
 struct TimelineLanesView: View {
     var tracks: [Track]
     var positionBeats: Double
-    var selectedClipID: UUID?
-    var onSelectClip: (Clip) -> Void
+    /// The arrange's clip selection (m23-g1): the selected SET plus the focus
+    /// clip. Every block reads membership for its selected state and focus for
+    /// its single-target editing affordances (see `ClipBlock.isFocused`).
+    var selection: ArrangeSelection
+    var onSelectClip: (Clip, ArrangeClickModifiers) -> Void
+    /// Fires after the lanes have re-rendered with a CHANGED selection — the
+    /// `debug.arrangeSelection` seam's "the view has run" signal (the
+    /// `onDropHoverChange` contract, m23-e echo-seam law). Only the lane-bearing
+    /// instance reports; the pinned `.ruler` block draws no clip blocks.
+    var onSelectionRendered: (() -> Void)?
+    /// Fires after the lanes have re-rendered with CHANGED clip geometry — the
+    /// `debug.arrangeDrag` seam's "the view has run" signal (m23-g2). Separate
+    /// from `onSelectionRendered` because a group move changes no selection.
+    var onClipLayoutRendered: (() -> Void)?
     /// Tracks whose automation lane is expanded (shared with the sidebar via
     /// AppModel, so both columns grow the same row and stay aligned).
     var expandedTrackIDs: Set<UUID> = []
@@ -105,7 +117,15 @@ struct TimelineLanesView: View {
     /// legacy non-shared-scroll path) falls back to the natural content height.
     var availableHeight: CGFloat = 0
     /// Clip edits — each wired to one of the five `ProjectStore` clip methods.
-    var onMoveClip: (_ trackID: UUID, _ clip: Clip, _ toStartBeat: Double) -> Void = { _, _, _ in }
+    /// A body drag reports the ANCHOR clip's drag-origin start plus the RAW,
+    /// PRE-SNAP pointer translation, and gets back the ACHIEVED anchor start
+    /// (m23-g2). It does NOT report a snapped target: snapping is a property of
+    /// the gesture as a whole (the anchor snaps once, the selection translates
+    /// rigidly), and a per-clip snapped target is exactly the shape that welds a
+    /// group together — see `ArrangeGroupDrag`.
+    var onMoveClip: (_ trackID: UUID, _ clip: Clip,
+                     _ anchorOriginalStart: Double,
+                     _ rawDragDeltaBeats: Double) -> Double = { _, _, s, _ in s }
     var onTrimClip: (_ trackID: UUID, _ clip: Clip, _ newStart: Double, _ newLength: Double) -> Void = { _, _, _, _ in }
     /// Fits a clip's length to its content (m21-d, Pro clip menu; wired to
     /// `ProjectStore.fitClipToContent` — MIDI: last note end, audio: remaining
@@ -209,17 +229,75 @@ struct TimelineLanesView: View {
     /// the AppModel so `debug.arrangePointer` echoes ground truth. Real hovers
     /// and staged events feed the same callback.
     var onPointerState: ((_ zone: ArrangePointerZone, _ ghostBeat: Double?) -> Void)? = nil
-    /// A clip-split refusal to surface (m17-c): the store's message VERBATIM as
-    /// a transient amber bubble on the refused clip's block.
+    /// A refused arrange edit to surface (m17-c): the store's message VERBATIM
+    /// as a transient amber bubble on the refused clip's block — or (m23-e) on
+    /// the lane an empty-lane create was refused on.
     var splitRefusal: ArrangeSplitRefusal? = nil
+    /// m23-e: an empty-lane double-click asks for a new MIDI clip on that lane.
+    /// The view resolves the LANE and the SNAPPED beat (the same beat a single
+    /// click seeks to) and the meter-aware, gap-clamped length; the parent makes
+    /// the one `ProjectStore.addMIDIClip` call and opens the editor on the
+    /// result — or surfaces the store's refusal verbatim for an audio/bus lane.
+    var onCreateMIDIClip: (_ trackID: UUID, _ atBeat: Double, _ lengthBeats: Double) -> Void = { _, _, _ in }
 
-    // MARK: Audio import drag-drop (beta m10-k)
+    // MARK: Rubber band (m23-g3)
 
-    /// Imports dropped audio file URLs (wired to `AppModel.importAudioFiles`, which
-    /// runs the shared `AudioImportPlan` pipeline). `targetTrackID` is the lane under
-    /// the pointer (its kind + the file count decide routing in the plan); `atBeatRaw`
-    /// is the unsnapped drop-x beat (the plan snaps it with the effective grid).
-    var onImportAudio: (_ urls: [URL], _ targetTrackID: UUID?, _ atBeatRaw: Double) -> Void = { _, _, _ in }
+    /// Staged marquee step from `debug.arrangeMarquee` (nil in normal use). Runs
+    /// through the SAME handlers the real `DragGesture` runs — a real mouse drag
+    /// is not injectable on the unbundled staging binary (the m17-b
+    /// Accessibility measurement), so the seam stages and this view mirrors.
+    var stageMarquee: ArrangeMarqueeStage? = nil
+    /// Asks the parent to apply a marquee's outcome to the selection. THREE
+    /// values, not one: `hits` is what the band touches RIGHT NOW, `base` is the
+    /// selection as it stood when the drag began, and `additive` is the chord.
+    /// The base is required because a marquee re-decides on every update — a
+    /// shrinking band must give clips back, which is impossible if the handler
+    /// can only see the selection it has already been growing.
+    var onMarqueeSelect: ((_ hits: Set<UUID>, _ base: Set<UUID>, _ additive: Bool) -> Void)? = nil
+    /// Reports the band layer's live state UP so `debug.arrangeMarquee` echoes
+    /// ground truth, never its own input (the `onDropState` discipline). `band`
+    /// is nil exactly when no marquee is in flight — which is the ONLY honest
+    /// way to prove "the band is standing mid-drag and gone after".
+    var onMarqueeState: ((_ band: CGRect?, _ hits: Set<UUID>) -> Void)? = nil
+    /// Reports the RESOLVED lane ladder (tops + the live clip-lane height) UP,
+    /// on first render and whenever it changes. Separate from `onMarqueeState`
+    /// on purpose: a caller must be able to read the ladder from a BARE seam
+    /// call — before any drag exists — or it is back to hardcoding a pitch the
+    /// app does not use (see `ArrangeLaneGeometry`).
+    var onLaneGeometry: ((ArrangeLaneGeometry) -> Void)? = nil
+
+    // MARK: File import drag-drop (beta m10-k; MIDI m23-k4b)
+
+    /// Imports dropped file URLs — audio AND `.mid` (wired to
+    /// `AppModel.importFiles`, which runs the shared `AudioImportPlan` pipeline).
+    /// `targetTrackID` is the lane under the pointer (its kind + the file count +
+    /// whether the drag carries MIDI decide routing in the plan); `landing` is
+    /// the beat ALREADY resolved by the same `ArrangeDropSnap.resolve` call that
+    /// drew the drop line (m23-f) — nothing downstream re-snaps it, and the MIDI
+    /// import lands on that very value too.
+    var onImportFiles: (_ urls: [URL], _ targetTrackID: UUID?, _ landing: ResolvedDropBeat) -> Void = { _, _, _ in }
+
+    /// Staged drop event from `debug.arrangeDrop` (m23-f; nil in normal use).
+    /// Runs through the SAME `AudioLaneDropCore` a real Finder drag runs —
+    /// `DropInfo` has no public initializer, so the seam drives the core, not a
+    /// fake OS event (the `stagePointer` precedent).
+    var stageDrop: ArrangeDropStage? = nil
+    /// Reports the drop layer's state UP to the AppModel so `debug.arrangeDrop`
+    /// echoes ground truth, never the seam's own input. TWO values on purpose:
+    /// `live` is the hover `@State` as it stands after the handler ran (i.e.
+    /// whether a drop line is actually standing — the report-(2) measurement),
+    /// `decided` is what the handler itself resolved (never re-read, the
+    /// `onPointerState` discipline). They differ exactly where the interesting
+    /// bug is: a drop DECIDES a landing and must leave NO live hover.
+    var onDropState: ((_ live: AudioDropHover?, _ decided: AudioDropHover?) -> Void)? = nil
+    /// Reports the LIVE drop hover whenever it changes for ANY reason — notably
+    /// the ordinary-pointer dismissal, which is not a drag event and so never
+    /// reaches `onDropState`. Without this the seam's mirror would keep
+    /// answering with a hover the view had already cleared: the stale-echo class
+    /// that does not merely fail a gate but poisons every diagnosis made
+    /// through it. (It caught exactly that here — the dismissal was working and
+    /// the echo was lying about it.)
+    var onDropHoverChange: ((AudioDropHover?) -> Void)? = nil
 
     // MARK: Tempo + meter maps (m12-d)
 
@@ -252,17 +330,21 @@ struct TimelineLanesView: View {
     /// mirrors it (the m10-j shared-scroll discipline, on the horizontal axis).
     var onHScrollChange: ((CGFloat) -> Void)? = nil
     /// `.lanes` only (m17-b): a programmatic horizontal scroll request — the
-    /// anchor-preserving offset a zoom computed. Applied via `ScrollViewReader`
-    /// against a layout-real 1 pt marker at that content x (`scrollTo` with a
-    /// `.leading` anchor lands the viewport edge exactly on it — the
-    /// `debug.arrangeScroll` vertical precedent; SwiftUI's native scroller has no
-    /// pixel-precise offset API on the macOS 14 floor). `hScrollApplyNonce`
-    /// bumps per request so a repeat of the same offset still applies.
+    /// anchor-preserving offset a zoom computed, or (m23-c2) a follow page turn.
+    /// Applied via `ScrollViewReader` against a layout-real 1 pt marker at that
+    /// content x (`scrollTo` with a `.leading` anchor lands the viewport edge
+    /// exactly on it — the `debug.arrangeScroll` vertical precedent; SwiftUI's
+    /// native scroller has no pixel-precise offset API on the macOS 14 floor).
+    /// `hScrollApplyNonce` bumps per request so a repeat of the same offset still
+    /// applies. Plain SwiftUI throughout — there is no AppKit bridge here.
     var hScrollApplyTarget: CGFloat? = nil
     var hScrollApplyNonce: Int = 0
+    /// `.lanes` only (m23-c2): reports the laid-out content width, so follow can
+    /// clamp its target to the real timeline instead of forking `totalBeats`.
+    var onContentWidthChange: ((CGFloat) -> Void)? = nil
 
     /// The scroll-anchor marker's identity for `scrollTo` (m17-b).
-    private static let zoomScrollMarkerID = "arrangeZoomScrollMarker"
+    private static let hScrollMarkerID = "arrangeHScrollMarker"
 
     /// Stationary content coordinate space — clip drags measure against this so a
     /// block moving under the cursor never feeds its own translation back.
@@ -458,13 +540,14 @@ struct TimelineLanesView: View {
     /// set once a press crosses the click slop. Drives the live band preview.
     @State private var loopDrag: LoopDragState?
 
-    /// A zoom scroll request not yet confirmed against laid-out geometry (m17-b):
-    /// set when `hScrollApplyNonce` bumps, cleared when the width preference
-    /// confirms the rescaled layout and the final `scrollTo` is issued.
-    @State private var zoomScrollPending = false
+    /// A programmatic scroll request not yet confirmed against laid-out geometry
+    /// (m17-b): set when `hScrollApplyNonce` bumps, cleared when the width report
+    /// confirms the layout and the final `scrollTo` is issued.
+    @State private var hScrollApplyPending = false
     /// The last laid-out `.lanes` content width (reported by the content
     /// GeometryReader's `.onChange`, same delivery as the h-offset mirror) —
-    /// the signal that a pending zoom scroll can land exactly.
+    /// the signal that a pending programmatic scroll can land exactly, and the
+    /// ceiling follow clamps its page targets to (m23-c2).
     @State private var laidOutContentWidth: CGFloat = 0
 
     /// The marker-flag drag in flight (m11-c): nil at rest / during a click, set
@@ -481,6 +564,11 @@ struct TimelineLanesView: View {
     /// which lane it targets, so the arrange paints the cyan target affordance. nil
     /// when nothing is hovering a valid audio drop.
     @State private var dropHover: AudioDropHover?
+    /// The drag-session phase behind that hover (m23-f). A `DropDelegate` hover
+    /// is armed and cleared only by drag callbacks, so it needs an owner that
+    /// knows whether a drag is still in flight — without it, a post-drop
+    /// `update` re-arms an overlay nothing will ever clear again.
+    @State private var dropSession = ArrangeDropSession()
 
     /// The snapped beat the lanes hover ghost line previews (m17-c) — nil unless
     /// the pointer is over EMPTY timeline space (never over a clip, the extras
@@ -490,6 +578,38 @@ struct TimelineLanesView: View {
     /// hand for the whole drag and makes a movement-free press a no-op (grabbing
     /// the playhead without moving must not jump it to a snapped beat).
     @State private var playheadScrubbing = false
+
+    // MARK: Rubber band state (m23-g3)
+
+    /// The marquee in flight (nil at rest). Holds the band ORIGIN and the
+    /// selection as it stood at press, so every update re-decides from the same
+    /// base instead of accumulating.
+    @State private var marqueeSession: MarqueeSession?
+    /// The band the view DRAWS — the single source for the visual and for the
+    /// `onMarqueeState` report, so the seam can never claim a band the user
+    /// cannot see.
+    @State private var marqueeBand: CGRect?
+    /// When a marquee last ENDED. Consumed by the single-tap handler to swallow
+    /// the tap SwiftUI may synthesize from the same mouse-up — see
+    /// `consumeMarqueeClickSuppression`.
+    @State private var marqueeEndedAt: Date?
+
+    /// A live marquee's immutable inputs.
+    private struct MarqueeSession: Equatable {
+        /// Content-space point the press landed on (the band's fixed corner).
+        var origin: CGPoint
+        /// The selection at press — what a shift-marquee unions ONTO, and what a
+        /// shrinking band gives back to.
+        var base: Set<UUID>
+        /// shift/⌘ held at press: union rather than replace.
+        var additive: Bool
+    }
+
+    /// How long after a marquee release a single tap is treated as that
+    /// release's echo rather than a fresh click. Chosen well under a
+    /// double-click interval, and the suppression is CONSUMED by the first tap
+    /// either way, so a stale flag can never eat a later deliberate click.
+    private static let marqueeClickSuppressWindow: TimeInterval = 0.25
 
     var body: some View {
         Group {
@@ -509,6 +629,66 @@ struct TimelineLanesView: View {
         // reacts — the pinned `.ruler` block has no pointer layer.
         .onChange(of: stagePointer) { _, stage in applyPointerStage(stage) }
         .onAppear { applyPointerStage(stagePointer) }
+        // Drop staging (m23-f): same discipline as the pointer seam — the staged
+        // event runs through the SAME AudioLaneDropCore a real Finder drag runs.
+        .onChange(of: stageDrop) { _, stage in applyDropStage(stage) }
+        .onAppear { applyDropStage(stageDrop) }
+        // Keep the seam's mirror honest for hover changes that did NOT come from
+        // a staged drag phase (the pointer dismissal). Belt-and-braces with the
+        // synchronous report in `handlePointerHover`.
+        .onChange(of: dropHover) { _, hover in onDropHoverChange?(hover) }
+        // Selection render report (m23-g1). `.onChange` runs AFTER the body has
+        // been re-evaluated with the new selection, which is exactly the claim
+        // the seam needs before it answers or a gate captures. The `.ruler`
+        // instance is excluded so exactly one reporter exists.
+        .onChange(of: selection) { _, _ in
+            if content != .ruler { onSelectionRendered?() }
+        }
+        // Clip-layout render report (m23-g2), the selection report's twin for a
+        // GROUP MOVE — which changes no selection at all, so the report above
+        // would never fire for it and a seam waiting on it would time out.
+        .onChange(of: clipLayoutSignature) { _, _ in
+            if content != .ruler { onClipLayoutRendered?() }
+        }
+        // Marquee staging (m23-g3): same discipline as the pointer and drop
+        // seams — the staged step runs through the SAME handlers the real
+        // `DragGesture` runs, so the seam cannot drift from the gesture.
+        .onChange(of: stageMarquee) { _, stage in applyMarqueeStage(stage) }
+        .onAppear { applyMarqueeStage(stageMarquee) }
+        // The RESOLVED lane ladder, reported on first render and on every change
+        // (a track expanding its automation row, a row-height change, a track
+        // added/removed). `initial: true` is what makes a BARE
+        // `debug.arrangeMarquee {}` able to answer before any drag exists.
+        .onChange(of: laneGeometry, initial: true) { _, geometry in
+            if content != .ruler { onLaneGeometry?(geometry) }
+        }
+    }
+
+    /// The lanes' resolved ladder, built from `laneTop` — the ONE producer of
+    /// arrange row positions. Nothing here multiplies out a pitch; that is the
+    /// whole point (see `ArrangeMarquee`).
+    private var laneGeometry: ArrangeLaneGeometry {
+        ArrangeLaneGeometry(laneTops: tracks.indices.map { laneTop($0) }, rowHeight: rowHeight)
+    }
+
+    /// A compact hash of every clip's identity + horizontal geometry — the
+    /// change signal behind `onClipLayoutRendered`.
+    ///
+    /// Deliberately NOT `.onChange(of: tracks)`: `Track` equality walks notes,
+    /// controller lanes, automation and take groups, i.e. a deep compare of the
+    /// whole arrangement on every body pass. This walks the clip list only —
+    /// which the body already walks to lay out the blocks — so the report costs
+    /// asymptotically nothing next to the render it is reporting on.
+    private var clipLayoutSignature: Int {
+        var hasher = Hasher()
+        for track in tracks {
+            for clip in track.clips {
+                hasher.combine(clip.id)
+                hasher.combine(clip.startBeat)
+                hasher.combine(clip.lengthBeats)
+            }
+        }
+        return hasher.finalize()
     }
 
     /// The `.lanes` viewport-filling height: fill the shared-scroll viewport when
@@ -532,9 +712,11 @@ struct TimelineLanesView: View {
                 takeLanes
                 automationLanes
                 dropAffordance
+                marqueeBandView
                 ghostLine
                 playhead
                 playheadGrabStrips
+                laneRefusalBubble
                 loopRuler
                 markerLane
                 tempoLaneView
@@ -562,10 +744,12 @@ struct TimelineLanesView: View {
                     takeLanes
                     automationLanes
                     dropAffordance
+                    marqueeBandView
                     ghostLine
                     playhead
                     playheadGrabStrips
-                    zoomScrollMarker
+                    laneRefusalBubble
+                    hScrollMarker
                 }
                 .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
                 .coordinateSpace(name: Self.contentSpace)
@@ -595,34 +779,42 @@ struct TimelineLanesView: View {
                         }
                         .onChange(of: width, initial: true) { _, v in
                             laidOutContentWidth = v
+                            onContentWidthChange?(v)
                         }
                 })
                 .onDrop(of: [.fileURL], delegate: laneDropDelegate)
             }
             .coordinateSpace(name: Self.hScrollSpace)
-            // A zoom's anchor-preserving scroll (m17-b): jump the viewport's
-            // leading edge onto the layout-real marker. `scrollTo` consults LIVE
-            // layout, so the request lands in two stages: a best-effort jump now
-            // (exact whenever the rescaled content is already laid out), and the
-            // confirming jump once `laidOutContentWidth` reports the new width
-            // (without it, a zoom-in clamps against the OLD, shorter content
-            // and lands short). Never animated — a zoom must not glide.
+            // A programmatic horizontal scroll (m17-b zoom anchor / m23-c2 follow
+            // page turn): jump the viewport's leading edge onto the layout-real
+            // marker. `scrollTo` consults LIVE layout, so the request lands in two
+            // stages: a best-effort jump now (exact whenever the content is
+            // already laid out at this width), and the confirming jump once
+            // `laidOutContentWidth` reports the new width (without it, a zoom-in
+            // clamps against the OLD, shorter content and lands short). Never
+            // animated — neither a zoom nor a page turn may glide.
             .onChange(of: hScrollApplyNonce) { _, _ in
                 guard hScrollApplyTarget != nil else { return }
-                zoomScrollPending = true
-                proxy.scrollTo(Self.zoomScrollMarkerID, anchor: .leading)
-                confirmZoomScroll(proxy)
+                hScrollApplyPending = true
+                proxy.scrollTo(Self.hScrollMarkerID, anchor: .leading)
+                confirmHScrollApply(proxy)
             }
             .onChange(of: laidOutContentWidth) { _, _ in
-                confirmZoomScroll(proxy)
+                confirmHScrollApply(proxy)
             }
         }
         .frame(height: laneHeight, alignment: .topLeading)
     }
 
-    /// Issues the CONFIRMING zoom scroll once the rescaled content's laid-out
-    /// width matches the width this view computed — from then on `scrollTo`
-    /// resolves the marker against fresh geometry, so the landing is exact.
+    /// Issues the CONFIRMING scroll once the content's laid-out width matches the
+    /// width this view computed — from then on `scrollTo` resolves the marker
+    /// against fresh geometry, so the landing is exact.
+    ///
+    /// The width guard exists for ZOOM, which changes content width; a FOLLOW page
+    /// turn does not (its target is clamped to `contentWidth − viewport`, so the
+    /// `totalBeats` padding is a no-op), so for follow the guard is already true
+    /// and the confirm fires immediately. That is deliberate, not wasted: the
+    /// deferred re-issue is what makes the landing DURABLE.
     ///
     /// The confirm lands TWICE (m17-b, measured): once right here — inside the
     /// layout-driven `onChange` — so the very next frame presents at the target
@@ -630,31 +822,32 @@ struct TimelineLanesView: View {
     /// `scrollTo` issued from within a layout callback moves the real layout
     /// (geometry reports the target and holds it) but does NOT durably update
     /// the ScrollView's internal position state — any later forced re-render
-    /// (window snapshot, resize) re-resolved from the stale internal value and
-    /// visibly jumped the viewport. The deferred re-issue runs outside the
-    /// layout transaction and makes the landing stick.
-    private func confirmZoomScroll(_ proxy: ScrollViewProxy) {
-        guard zoomScrollPending, hScrollApplyTarget != nil,
+    /// (window snapshot, resize — `debug.captureUI`'s `cacheDisplay` is exactly
+    /// such a re-render) re-resolved from the stale internal value and visibly
+    /// jumped the viewport. The deferred re-issue runs outside the layout
+    /// transaction and makes the landing stick.
+    private func confirmHScrollApply(_ proxy: ScrollViewProxy) {
+        guard hScrollApplyPending, hScrollApplyTarget != nil,
               abs(laidOutContentWidth - contentWidth) < 0.5 else { return }
-        zoomScrollPending = false
-        proxy.scrollTo(Self.zoomScrollMarkerID, anchor: .leading)
+        hScrollApplyPending = false
+        proxy.scrollTo(Self.hScrollMarkerID, anchor: .leading)
         Task { @MainActor in
-            proxy.scrollTo(Self.zoomScrollMarkerID, anchor: .leading)
+            proxy.scrollTo(Self.hScrollMarkerID, anchor: .leading)
         }
     }
 
-    /// The zoom scroll anchor (m17-b): a 1 pt, layout-real, hit-test-inert marker
-    /// whose LEADING edge sits exactly at the requested offset — `scrollTo(...,
-    /// anchor: .leading)` then lands the viewport edge on it precisely. Built
-    /// with real frames (never `.offset`) so `scrollTo` reads a true layout
-    /// position.
-    private var zoomScrollMarker: some View {
+    /// The programmatic scroll anchor (m17-b): a 1 pt, layout-real, hit-test-inert
+    /// marker whose LEADING edge sits exactly at the requested offset —
+    /// `scrollTo(..., anchor: .leading)` then lands the viewport edge on it
+    /// precisely. Built with real frames (never `.offset`) so `scrollTo` reads a
+    /// true layout position.
+    private var hScrollMarker: some View {
         HStack(spacing: 0) {
             Color.clear
                 .frame(width: max(0, hScrollApplyTarget ?? 0), height: 1)
             Color.clear
                 .frame(width: 1, height: 1)
-                .id(Self.zoomScrollMarkerID)
+                .id(Self.hScrollMarkerID)
         }
         .allowsHitTesting(false)
     }
@@ -697,10 +890,37 @@ struct TimelineLanesView: View {
     /// The Finder audio-drop delegate — maps the live drop location → target lane +
     /// snapped beat and routes loaded URLs through the shared plan pipeline (m10-k).
     private var laneDropDelegate: AudioLaneDropDelegate {
-        AudioLaneDropDelegate(
+        AudioLaneDropDelegate(core: laneDropCore)
+    }
+
+    /// The `DropInfo`-free drop core (m23-f) — the ONE object both the real
+    /// `DropDelegate` adapter and the `debug.arrangeDrop` staging seam drive.
+    private var laneDropCore: AudioLaneDropCore {
+        AudioLaneDropCore(
             hover: $dropHover,
-            resolve: { point, fileCount in resolveDropHover(at: point, fileCount: fileCount) },
-            onImport: onImportAudio)
+            session: $dropSession,
+            resolve: { point, contents in resolveDropHover(at: point, contents: contents) },
+            onImport: onImportFiles)
+    }
+
+    /// Runs a debug-staged drop event through the live drop core. `.ruler`
+    /// instances carry no drop surface, so they ignore the stage (exactly one
+    /// instance reacts per staging) — the `applyPointerStage` rule.
+    private func applyDropStage(_ stage: ArrangeDropStage?) {
+        guard let stage, content != .ruler else { return }
+        let core = laneDropCore
+        let point = CGPoint(x: stage.x, y: stage.y)
+        let contents = stage.contents
+        let decided: AudioDropHover?
+        switch stage.action {
+        case .enter:  decided = core.enter(at: point, contents: contents)
+        case .update: decided = core.update(at: point, contents: contents)
+        case .exit:   decided = core.exit()
+        case .drop:   decided = core.drop(at: point, urls: stage.urls)
+        }
+        // `dropHover` is re-read deliberately here: the whole of report (2) is
+        // "is a drop line left standing", and only the live state answers that.
+        onDropState?(dropHover, decided)
     }
 
     // MARK: - Grid + ruler (Canvas — no per-frame allocation beyond Paths)
@@ -809,7 +1029,8 @@ struct TimelineLanesView: View {
                     clip: clip,
                     trackID: track.id,
                     tint: tint(clip),
-                    isSelected: clip.id == selectedClipID,
+                    isSelected: selection.contains(clip.id),
+                    isFocused: selection.isFocus(clip.id),
                     width: width,
                     height: rowHeight,
                     laneOriginY: laneTop(index),
@@ -824,8 +1045,8 @@ struct TimelineLanesView: View {
                         isMIDI: clip.isMIDI, tempoMap: tempoMap),
                     waveformPeaks: clip.audioFileURL.flatMap { waveformStore.peaks(for: $0) },
                     renderVisual: ClipStretch.renderVisual(for: stretchStatus(clip)),
-                    onSelect: { onSelectClip(clip) },
-                    onMove: { onMoveClip(track.id, clip, $0) },
+                    onSelect: { mods in onSelectClip(clip, mods) },
+                    onMove: { onMoveClip(track.id, clip, $0, $1) },
                     onTrim: { onTrimClip(track.id, clip, $0, $1) },
                     onFitToContent: { onFitClipToContent(track.id, clip) },
                     onSplit: { onSplitClip(track.id, clip, $0) },
@@ -1015,21 +1236,42 @@ struct TimelineLanesView: View {
         return nil
     }
 
-    /// Resolves a live drop point into its hover preview: the snapped landing beat +
-    /// the target lane (highlighted only when a SINGLE file lands on an existing
-    /// audio lane — the plan's routing rule, shared so the preview never drifts from
-    /// what the drop will actually do). `rawBeat` is fed to the callback unsnapped.
-    private func resolveDropHover(at point: CGPoint, fileCount: Int) -> AudioDropHover {
-        let rawBeat = max(0, Double(point.x / pixelsPerBeat))
-        let snapped = effectiveSnap.snap(beat: rawBeat, meterMap: meterMap)
+    /// Resolves a live drop point into its hover preview: the landing beat + the
+    /// target lane (highlighted only when a SINGLE file lands on an existing
+    /// audio lane — the plan's routing rule, shared so the preview never drifts
+    /// from what the drop will actually do).
+    ///
+    /// m23-f: the ONE `ArrangeDropSnap.resolve` call. Its result is what the drop
+    /// line paints AND what the import lands on — the same `ResolvedDropBeat`
+    /// value travels into `AudioImportContext`, so there is no second
+    /// computation to disagree with. Magnet targets are the TARGET LANE's clip
+    /// edges (plus bar 1, which `ArrangeDropSnap` always offers): a drop onto a
+    /// lane should be able to butt exactly against what is already on that lane,
+    /// including edges the grid cannot express.
+    private func resolveDropHover(at point: CGPoint,
+                                  contents: ArrangeDragContents) -> AudioDropHover {
+        let rawBeat = max(0, Double(point.x / max(pixelsPerBeat, 0.0001)))
         let index = trackIndex(atContentY: point.y)
         let kind = index.map { tracks[$0].kind }
+        let edges: [Double] = index.map { i in
+            ArrangeDropSnap.clipEdgeBeats(
+                startBeats: tracks[i].clips.map(\.startBeat),
+                lengthBeats: tracks[i].clips.map(\.lengthBeats))
+        } ?? []
+        let landing = ArrangeDropSnap.resolve(
+            rawBeat: rawBeat, snap: effectiveSnap, meterMap: meterMap,
+            pixelsPerBeat: Double(pixelsPerBeat), clipEdgeBeats: edges)
+        // m23-k4b: `dragCarriesMIDI` flows into the SAME predicate the plan
+        // executes with — a MIDI-carrying drag shows no lane highlight (a `.mid`
+        // makes its own instrument tracks) while the drop LINE still shows,
+        // because the landing beat is real either way.
         let landsOnLane = AudioImportPlan.routesToExistingAudioTrack(
-            fileCount: fileCount, targetKind: kind)
+            fileCount: contents.fileCount, targetKind: kind,
+            dragCarriesMIDI: contents.carriesMIDI)
         return AudioDropHover(
             targetTrackID: index.map { tracks[$0].id },
             targetLaneIndex: landsOnLane ? index : nil,
-            snappedBeat: snapped,
+            landing: landing,
             rawBeat: rawBeat)
     }
 
@@ -1130,14 +1372,211 @@ struct TimelineLanesView: View {
                 case .ended: endPointerHover()
                 }
             }
+            // Two tap counts on ONE surface (m23-e). Apple's documented idiom is
+            // to declare the HIGHER count FIRST — SwiftUI then gives the
+            // double-tap its chance before the single tap claims the event
+            // (`ExclusiveGesture` semantics, expressed with the plain modifiers
+            // this file already uses for the seek). Chosen over a hand-rolled
+            // `SpatialTapGesture(count: 2).exclusively(before:)` because that
+            // composition delays EVERY seek by the double-click interval, and
+            // click-to-seek is the far more frequent gesture; here the create
+            // path is deliberately built to be correct whether or not the single
+            // tap also fires (see `handleDoubleClick` — the seek and the clip
+            // start read the same `pointerBeat(forX:)`).
+            .onTapGesture(count: 2, coordinateSpace: .named(Self.contentSpace)) { location in
+                handleDoubleClick(at: location)
+            }
             .onTapGesture(coordinateSpace: .named(Self.contentSpace)) { location in
+                // m23-g3: swallow the tap a marquee's own mouse-up can
+                // synthesize, so releasing a rubber band never also seeks. The
+                // check lives HERE, in the gesture closure, and deliberately NOT
+                // inside `handleEmptyClick` — the staged path
+                // (`applyPointerStage` → `handleEmptyClick`) must keep testing
+                // the handler, not inherit a gesture-layer workaround it can
+                // neither cause nor observe.
+                if consumeMarqueeClickSuppression() { return }
                 handleEmptyClick(at: location)
             }
+            // The rubber band (m23-g3). SIMULTANEOUS, which is the whole
+            // regression story of this item: `pointerHoverSurface` already
+            // carries two tap counts whose declaration ORDER was chosen
+            // deliberately (see above), and a competing `.gesture` here would
+            // re-enter exactly the arbitration this file avoided on purpose. A
+            // simultaneous drag does not compete with either tap — the
+            // `pinchZoomGesture` precedent on the lanes ZStack, same reasoning —
+            // and its `minimumDistance` means a click never arms it at all, so
+            // click-to-seek (m17-c) and double-click-create (m23-e) keep their
+            // events. Content space, matching both taps and `playheadScrubGesture`:
+            // `laneTop` returns content-space y, and `.local` would be silently
+            // right in `.lanes` (rulerInset == 0) and wrong in `.full`.
+            .simultaneousGesture(marqueeGesture)
             .offset(y: rulerInset)
             .explainable(.arrangePlayhead)
     }
 
+    // MARK: - Rubber band (m23-g3)
+
+    /// The lane bands the marquee intersects — built from the SAME `laneTop` /
+    /// `rowHeight` math the layout uses (the `pointerLanes` discipline), so the
+    /// band's idea of where track 3 is can never drift from where track 3 is
+    /// drawn. Clip lanes ONLY: a track's expanded take/automation rows hold no
+    /// clips and are not part of the intersect surface.
+    private var marqueeLanes: [ArrangeMarqueeLane] {
+        tracks.indices.map { i in
+            ArrangeMarqueeLane(
+                clipTop: laneTop(i),
+                clipBottom: laneTop(i) + rowHeight,
+                clips: tracks[i].clips.map {
+                    ArrangeMarqueeClip(id: $0.id, startBeat: $0.startBeat,
+                                       lengthBeats: $0.lengthBeats)
+                })
+        }
+    }
+
+    /// Sweep a band over empty timeline space to select the clips it touches.
+    ///
+    /// `minimumDistance` = `ArrangeMarquee.dragSlop`, so the band ARMS only once
+    /// the pointer has actually travelled: below it SwiftUI never begins this
+    /// gesture, the taps run untouched, and no band is ever drawn for a click.
+    ///
+    /// NO ZONE GUARD, deliberately — the m23-e lesson one gesture over. Empty
+    /// space within the playhead's grab tolerance classifies `.playheadGrab`, so
+    /// a `pointerZone(at:) == .empty` guard would refuse a band started right
+    /// where the user had just clicked (which SEEKS the playhead onto that
+    /// point). The surface's own contract already guarantees emptiness —
+    /// everything interactive, `playheadGrabStrips` included, hit-tests above
+    /// it — so a guard here would be a second, disagreeing computation.
+    private var marqueeGesture: some Gesture {
+        DragGesture(minimumDistance: ArrangeMarquee.dragSlop,
+                    coordinateSpace: .named(Self.contentSpace))
+            .onChanged { value in
+                if marqueeSession == nil {
+                    // The chord is read at ARM time from the global flags — a
+                    // `DragGesture` hands its handler no event, the same
+                    // constraint (and the same remedy) as
+                    // `ArrangeClickModifiers.current`. Routed through the ONE
+                    // chord→intent mapping, so shift/⌘ mean the same thing on a
+                    // band as on a click and there is no second chord table.
+                    beginMarquee(
+                        at: value.startLocation,
+                        additive: ArrangeClickIntent.intent(for: .current) == .toggle)
+                }
+                updateMarquee(to: value.location)
+            }
+            .onEnded { value in endMarquee(at: value.location) }
+    }
+
+    /// Arms a marquee: fix the band's origin corner and freeze the selection the
+    /// gesture measures against.
+    private func beginMarquee(at origin: CGPoint, additive: Bool) {
+        marqueeSession = MarqueeSession(origin: origin, base: selection.ids, additive: additive)
+    }
+
+    /// Re-decides the selection for the band's current free corner. Runs on
+    /// EVERY update, from the frozen base — so growing the band adds clips and
+    /// shrinking it gives them back.
+    @discardableResult
+    private func updateMarquee(to point: CGPoint) -> Set<UUID> {
+        guard let session = marqueeSession else { return [] }
+        let band = ArrangeMarquee.band(from: session.origin, to: point)
+        let hits = ArrangeMarquee.hits(band: band, lanes: marqueeLanes,
+                                       pixelsPerBeat: pixelsPerBeat)
+        marqueeBand = band
+        onMarqueeSelect?(hits, session.base, session.additive)
+        // Reported LAST, so the state it announces is already stored (the
+        // `arrangePointerReportSeq` rule).
+        onMarqueeState?(band, hits)
+        return hits
+    }
+
+    /// Commits the final band and puts the band layer away.
+    private func endMarquee(at point: CGPoint) {
+        guard let session = marqueeSession else { return }
+        let band = ArrangeMarquee.band(from: session.origin, to: point)
+        let hits = ArrangeMarquee.hits(band: band, lanes: marqueeLanes,
+                                       pixelsPerBeat: pixelsPerBeat)
+        onMarqueeSelect?(hits, session.base, session.additive)
+        marqueeSession = nil
+        marqueeBand = nil
+        // Arm the click suppression ONLY for a band that actually swept area.
+        // A degenerate release drew nothing and selected nothing, so there is no
+        // stray seek to swallow — and swallowing one anyway would eat the user's
+        // next click for a gesture that did nothing. NOT OBSERVABLE FROM ANY
+        // SEAM, and recorded here rather than left to be rediscovered: the
+        // staged pointer path calls `handleEmptyClick` directly and never runs
+        // the tap closure this flag lives in, so a gate leg for it could only
+        // pass vacuously.
+        if band.width > 0 || band.height > 0 { marqueeEndedAt = Date() }
+        // ONE final report: band gone, selection final. A gate reading this
+        // cannot mistake "the band was never drawn" for "the band is put away",
+        // because the mid-drag reports carried a non-nil rect.
+        onMarqueeState?(nil, hits)
+    }
+
+    /// True when this tap is the echo of a marquee release and must not seek.
+    /// CONSUMED on the first tap either way, and time-bounded, so a stale flag
+    /// can never swallow a later deliberate click.
+    private func consumeMarqueeClickSuppression() -> Bool {
+        guard let endedAt = marqueeEndedAt else { return false }
+        marqueeEndedAt = nil
+        return Date().timeIntervalSince(endedAt) < Self.marqueeClickSuppressWindow
+    }
+
+    /// Runs a debug-staged marquee step through the live handlers. `.ruler`
+    /// instances carry no pointer layer, so they ignore the stage (exactly one
+    /// instance reacts per staging).
+    private func applyMarqueeStage(_ stage: ArrangeMarqueeStage?) {
+        guard let stage, content != .ruler else { return }
+        let p = CGPoint(x: stage.x, y: stage.y)
+        switch stage.action {
+        case .begin:
+            beginMarquee(at: p, additive: stage.additive)
+            // Apply immediately, exactly as the real gesture does the instant it
+            // arms: a degenerate band selects nothing, so a plain marquee
+            // clears the previous selection at press.
+            updateMarquee(to: p)
+        case .changed:
+            updateMarquee(to: p)
+        case .end:
+            endMarquee(at: p)
+        }
+    }
+
+    /// The band itself: a translucent cyan wash with a thin bright edge and an
+    /// earned glow (docs/DESIGN-LANGUAGE.md — cyan is active state, the glow
+    /// recipe is core + bloom, and nothing static ever glows; this exists only
+    /// while a gesture is live). Hit-test-inert, so it can never eat the drag
+    /// that is drawing it.
+    @ViewBuilder
+    private var marqueeBandView: some View {
+        if let band = marqueeBand, band.width > 0, band.height > 0 {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(DAWTheme.playback.opacity(0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 2)
+                        .stroke(DAWTheme.playback.opacity(0.85), lineWidth: 1))
+                .glow(DAWTheme.playback, radius: 6, intensity: 0.35)
+                .frame(width: band.width, height: band.height)
+                .offset(x: band.minX, y: band.minY)
+                .allowsHitTesting(false)
+        }
+    }
+
     private func handlePointerHover(at p: CGPoint) {
+        // m23-f: an ordinary pointer event over the lanes dismisses a STRANDED
+        // drop overlay. A drop line is armed and cleared only by OS drag
+        // callbacks; if a terminating one never arrives (measured: the app
+        // deactivating with a hover in flight strands it permanently) the line
+        // is hit-test-inert and the user has no way to remove it. This gives
+        // them one: move the mouse. Guarded on the mouse button inside the core,
+        // so it can never cancel a preview during a live drag.
+        if laneDropCore.dismissStrandedHover(pressedMouseButtons: NSEvent.pressedMouseButtons) {
+            // Reported SYNCHRONOUSLY, not left to the `.onChange` above: the
+            // seam answers as soon as the pointer stage has run, and a mirror
+            // that updates a SwiftUI pass later would still be showing the
+            // dismissed line at that moment.
+            onDropHoverChange?(nil)
+        }
         let zone = pointerZone(at: p)
         let ghost = zone == .empty ? pointerBeat(forX: p.x) : nil
         if ghostBeat != ghost { ghostBeat = ghost }
@@ -1158,28 +1597,55 @@ struct TimelineLanesView: View {
         onSeek(pointerBeat(forX: p.x))
     }
 
-    /// The staged twin of `ClipBlock`'s double-click split (debug seam only —
-    /// a real double-click runs the block's own gesture): locates the topmost
-    /// clip under the point and routes through the SAME `ClipEdit.snappedSplit`
-    /// math and the SAME `onSplitClip` callback (→ `ProjectStore.splitClip`,
-    /// the `clip.split` wire method). Pro-only, exactly like the gesture.
-    private func handleStagedDoubleClick(at p: CGPoint) {
-        guard isPro else { return }
-        guard let laneIndex = tracks.indices.first(where: {
-            p.y >= laneTop($0) && p.y < laneTop($0) + rowHeight
-        }) else { return }
+    /// Double-click in the lanes. TWO destinations, decided by what is under the
+    /// point — and deliberately NOT by `pointerZone`:
+    ///
+    ///   - over a CLIP → split at the snapped beat (m17-c). Pro-only, exactly
+    ///     like `ClipBlock`'s own gesture; this is the staged twin of it (a real
+    ///     double-click on a block runs the block's gesture, since the block
+    ///     hit-tests above the pointer surface), routed through the SAME
+    ///     `ClipEdit.snappedSplit` math and the SAME `onSplitClip` callback
+    ///     (→ `ProjectStore.splitClip`, the `clip.split` wire method).
+    ///   - over EMPTY lane space → create a MIDI clip there and open the note
+    ///     editor on it (m23-e). Available in BOTH densities: this is the
+    ///     beginner's only path from a fresh instrument track to a writable
+    ///     grid, so gating it on Pro would defeat the item.
+    ///
+    /// Why not `pointerZone(at:) == .empty` for the create: inside a clip band
+    /// the classifier checks the playhead-grab tolerance BEFORE the clip lookup,
+    /// so empty space within 4 pt of the playhead reads `.playheadGrab`. A real
+    /// double-click whose first tap also seeks (see `pointerHoverSurface`) MOVES
+    /// the playhead onto the pointer — a zone guard would then refuse exactly
+    /// the beat the user just clicked, while the staged path (which never seeks)
+    /// passed. Resolving the lane band + asking `clipIndex` directly is
+    /// independent of both the playhead and SwiftUI's gesture arbitration.
+    private func handleDoubleClick(at p: CGPoint) {
+        guard let laneIndex = ArrangePointer.clipLaneIndex(atY: p.y, in: pointerLanes) else { return }
         let track = tracks[laneIndex]
         let beatRaw = Double(p.x / max(pixelsPerBeat, 0.0001))
         let spans = track.clips.map {
             ArrangeClipSpan(startBeat: $0.startBeat, lengthBeats: $0.lengthBeats)
         }
-        guard let clipIndex = ArrangePointer.clipIndex(atBeat: beatRaw, in: spans) else { return }
-        let clip = track.clips[clipIndex]
-        if let beat = ClipEdit.snappedSplit(
-            timelineBeatRaw: beatRaw, clipStart: clip.startBeat,
-            clipLength: clip.lengthBeats, snap: effectiveSnap, meterMap: meterMap) {
-            onSplitClip(track.id, clip, beat)
+        if let clipIndex = ArrangePointer.clipIndex(atBeat: beatRaw, in: spans) {
+            guard isPro else { return }
+            let clip = track.clips[clipIndex]
+            if let beat = ClipEdit.snappedSplit(
+                timelineBeatRaw: beatRaw, clipStart: clip.startBeat,
+                clipLength: clip.lengthBeats, snap: effectiveSnap, meterMap: meterMap) {
+                onSplitClip(track.id, clip, beat)
+            }
+            return
         }
+        // Empty space: start writing notes here. The start beat comes from the
+        // SAME `pointerBeat(forX:)` a single click seeks with — so however
+        // SwiftUI arbitrates the two tap counts (double only, or single-then-
+        // double), the clip start and the playhead agree by construction.
+        let beat = pointerBeat(forX: p.x)
+        guard let length = ArrangePointer.createClipLength(
+            startBeat: beat,
+            beatsPerBar: meterMap.beatsPerBar(atBeat: beat),
+            spans: spans) else { return }
+        onCreateMIDIClip(track.id, beat, length)
     }
 
     /// Runs a debug-staged pointer event through the live handlers. `.ruler`
@@ -1195,8 +1661,27 @@ struct TimelineLanesView: View {
             handleEmptyClick(at: p)
         case .doubleClick:
             handlePointerHover(at: p)
-            handleStagedDoubleClick(at: p)
+            handleDoubleClick(at: p)
         case .clear: endPointerHover()
+        }
+    }
+
+    /// The LANE-anchored refusal bubble (m23-e): a double-click that asked for a
+    /// MIDI clip on a lane that cannot hold one (audio/bus) surfaces the store's
+    /// message VERBATIM — the SAME string `clip.addMIDI` returns over the wire —
+    /// right where it was attempted. There is no clip to hang it from (that is
+    /// precisely what was refused), so it hangs on the lane at the attempted
+    /// beat, clamped into the content so the message is never pushed off-screen.
+    /// A silent no-op here would be the bug the item exists to fix, one surface
+    /// over: nothing happens and nothing says why.
+    @ViewBuilder
+    private var laneRefusalBubble: some View {
+        if let refusal = splitRefusal, let anchor = refusal.laneAnchor,
+           let index = tracks.firstIndex(where: { $0.id == anchor.trackID }) {
+            let rawX = CGFloat(anchor.beat) * pixelsPerBeat
+            let maxX = max(0, contentWidth - ArrangeRefusalBubble.width - 24)
+            ArrangeRefusalBubble(message: refusal.message)
+                .offset(x: min(max(0, rawX), maxX), y: laneTop(index) + rowHeight / 2)
         }
     }
 
@@ -1719,7 +2204,18 @@ private struct ClipBlock: View {
     var clip: Clip
     var trackID: UUID
     var tint: Color
+    /// A MEMBER of the arrange selection — drives the selected LOOK only (fill,
+    /// stroke, glow). True on every clip of a multi-selection.
     var isSelected: Bool
+    /// The FOCUS clip — drives the single-target editing affordances (the gain
+    /// chip and the gain-envelope breakpoint overlay), never the look.
+    ///
+    /// Split from `isSelected` at m23-g1 for a concrete reason: those two
+    /// affordances are EDITABLE overlays that take a single target. Letting them
+    /// follow set membership would paint three draggable breakpoint lines the
+    /// moment a user selects three audio clips — visually confusing, and an
+    /// invitation to edit a curve on a clip the editor isn't pointed at.
+    var isFocused: Bool
     var width: CGFloat
     var height: CGFloat
     /// This clip lane's top y in content space — lets a drag classify its start
@@ -1748,8 +2244,11 @@ private struct ClipBlock: View {
     /// Coarse offline-stretch render state (M5 ii-e): shimmer while pending, red
     /// accent on failure, nothing otherwise.
     var renderVisual: ClipRenderVisual
-    var onSelect: () -> Void
-    var onMove: (_ toStartBeat: Double) -> Void
+    var onSelect: (ArrangeClickModifiers) -> Void
+    /// A body drag (m23-g2): reports this clip's start at DRAG BEGIN plus the
+    /// RAW, pre-snap pointer translation, and returns the ACHIEVED anchor start
+    /// so the readout can show what happened rather than what was asked for.
+    var onMove: (_ anchorOriginalStart: Double, _ rawDragDeltaBeats: Double) -> Double
     var onTrim: (_ newStart: Double, _ newLength: Double) -> Void
     /// Fits the clip's length to its content (m21-d, Pro context menu — MIDI:
     /// last note end, audio: remaining source). One store call, no gesture math.
@@ -1842,7 +2341,7 @@ private struct ClipBlock: View {
     private var ppb: CGFloat { geometry.pixelsPerBeat }
     private var clipOriginX: CGFloat { CGFloat(clip.startBeat) * ppb }
     /// Pro-only (sp-c): the gain dB chip and its drag are a clip-edit affordance.
-    private var showGain: Bool { pro && width > 40 && (clip.gainDb != 0 || hovering || isSelected) }
+    private var showGain: Bool { pro && width > 40 && (clip.gainDb != 0 || hovering || isFocused) }
 
     // MARK: - Gain envelope overlay (m13-e)
 
@@ -1851,7 +2350,7 @@ private struct ClipBlock: View {
     /// clip-edit chrome). Selecting the clip IS the envelope-edit mode; the
     /// overlay only hit-tests its breakpoint dots, so the clip body's
     /// move/split/trim/select gestures pass through untouched between dots.
-    private var showGainEnvelope: Bool { pro && !clip.isMIDI && isSelected }
+    private var showGainEnvelope: Bool { pro && !clip.isMIDI && isFocused }
     /// Points rendered right now: the live drag draft when dragging, else the
     /// canonical model envelope.
     private var envPoints: [ClipGainPoint] { envDraft ?? clip.gainEnvelope }
@@ -1974,7 +2473,13 @@ private struct ClipBlock: View {
             .gesture(clipDrag)
             .simultaneousGesture(doubleClickSplit, including: pro ? .all : .subviews)
             .simultaneousGesture(optionClickFadeToggle, including: pro ? .all : .subviews)
-            .onTapGesture { onSelect() }
+            // m23-g1: a plain click replaces the selection; shift/⌘ toggles this
+            // block in or out of it. `TapGesture` carries no event, so the chord
+            // is read from the live modifier state at mouse-up — the same
+            // `NSEvent.modifierFlags` read `startFlagsMonitor` uses for the ⌥
+            // cue (see `ArrangeClickModifiers.current` for what that does and
+            // does not prove).
+            .onTapGesture { onSelect(.current) }
             .onHover { h in
                 hovering = h
                 // The ⌥ flags monitor only drives the Pro stretch-grip cue — never
@@ -2449,33 +2954,15 @@ private struct ClipBlock: View {
         }
     }
 
-    /// The edit-refusal bubble (m17-c): the store's refusal message VERBATIM in
-    /// an amber (warning — the edit didn't happen, nothing was destroyed) chip
-    /// above the block. Prose, so SF Pro (SF Mono is reserved for numeric
-    /// readouts); soft amber glow at the warning intensity; transient — the
-    /// parent auto-clears it.
+    /// The clip-anchored edit-refusal bubble (m17-c): the shared
+    /// `ArrangeRefusalBubble`, hung above this block. The empty-lane create's
+    /// refusal (m23-e) uses the SAME component on the lane — one chip design,
+    /// two anchors.
     @ViewBuilder
     private var refusalBubble: some View {
         if let refusalMessage {
-            Text(refusalMessage)
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(DAWTheme.record)
-                .multilineTextAlignment(.leading)
-                // The overlay is proposed the CLIP's width, which can be a
-                // sliver — claim a readable wrap width instead so the verbatim
-                // message is never truncated (it must read exactly as the wire
-                // returns it).
-                .frame(width: 300, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(DAWTheme.panel)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-                .overlay(RoundedRectangle(cornerRadius: 4)
-                    .stroke(DAWTheme.record.opacity(0.6), lineWidth: 1))
-                .glow(DAWTheme.record, radius: 3, intensity: 0.3)
+            ArrangeRefusalBubble(message: refusalMessage)
                 .offset(y: -30)
-                .allowsHitTesting(false)
         }
     }
 
@@ -2558,11 +3045,19 @@ private struct ClipBlock: View {
     private func applyDrag(_ active: ActiveDrag, translationBeats dxBeats: Double) {
         switch active.zone {
         case .body:
-            let newStart = ClipEdit.movedStartBeat(
-                originalStart: active.originStart, dragDeltaBeats: dxBeats,
-                snap: snap, meterMap: meterMap)
-            onMove(newStart)
-            readout = "start " + fmt(newStart)
+            // m23-g2: the gesture hands over its RAW translation and its own
+            // drag-origin start; `AppModel.dragArrangeClips` snaps the ANCHOR
+            // once and translates the whole selection rigidly. The block does
+            // NOT snap here — a per-clip snap is what welds a group together
+            // (`ArrangeGroupDrag`), and having the block compute a target the
+            // store might clamp would give the app two producers of the same
+            // number.
+            //
+            // The readout shows the ACHIEVED start, not the requested one. In
+            // the beat-0 clamp case — the exact case this item is about — they
+            // differ, and a bubble reading "start 0.0" while the clip sits at
+            // 2.0 would be the honesty violation the design language forbids.
+            readout = "start " + fmt(onMove(active.originStart, dxBeats))
         case .trimStart:
             let (s, l) = ClipEdit.trimStart(
                 originalStart: active.originStart, originalLength: active.originLength,

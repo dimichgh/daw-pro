@@ -202,14 +202,81 @@ struct PanelLayoutStoreTests {
         store.setEditorFraction(0.6)
         store.setRowHeight(60)
 
+        store.setMixerInsertsCollapsed(true)
+        store.setFollowPlayhead(true)
+
         store.reset()
         #expect(store.sidebarWidth == 260)
         #expect(store.editorFraction == 0.45)
         #expect(store.rowHeight == 34)
+        // m23-a: the mixer disclosure is a dimension too — reset must not leave it
+        // behind (a half-reset is the bug this line exists to catch).
+        #expect(store.mixerInsertsCollapsed == false)
+        // m23-c2: follow is a dimension too — same half-reset guard.
+        #expect(store.followPlayhead == false)
         // The reset is written through, so a relaunch sees the defaults too.
         #expect(backing.storage[PanelLayoutStore.sidebarWidthKey] == 260)
         #expect(backing.storage[PanelLayoutStore.editorFractionKey] == 0.45)
         #expect(backing.storage[PanelLayoutStore.rowHeightKey] == 34)
+        #expect(backing.storage[PanelLayoutStore.mixerInsertsCollapsedKey] == 0)
+        #expect(backing.storage[PanelLayoutStore.followPlayheadKey] == 0)
+    }
+
+    // MARK: - Follow the playhead (m23-c2)
+
+    @Test("follow-the-playhead defaults OFF, round-trips, persists as 1/0, and is sticky")
+    func followPlayhead() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        // OPT-IN: a view that moves on its own has to be asked for.
+        #expect(store.followPlayhead == false)
+        #expect(PanelLayoutStore.defaultFollowPlayhead == false)
+
+        store.setFollowPlayhead(true)
+        #expect(store.followPlayhead)
+        #expect(backing.storage[PanelLayoutStore.followPlayheadKey] == 1)
+
+        // Sticky across a store rebuild — the relaunch path.
+        #expect(PanelLayoutStore(backing: backing).followPlayhead)
+
+        store.setFollowPlayhead(false)
+        #expect(backing.storage[PanelLayoutStore.followPlayheadKey] == 0)
+        // A stored 0 reads as OFF, not as "never set".
+        #expect(PanelLayoutStore(backing: backing).followPlayhead == false)
+    }
+
+    // MARK: - Mixer inserts disclosure (m23-a)
+
+    @Test("mixer inserts default to EXPANDED, round-trip, and persist as 1/0")
+    func mixerInsertsCollapsed() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        // Default EXPANDED — a persisted "collapsed" default would make an existing
+        // user's insert chains vanish the first time they open the update.
+        #expect(store.mixerInsertsCollapsed == false)
+        #expect(PanelLayoutStore.defaultMixerInsertsCollapsed == false)
+
+        store.setMixerInsertsCollapsed(true)
+        #expect(store.mixerInsertsCollapsed)
+        // The Double backing encodes the Bool as 1/0; the encoding never escapes
+        // the store's API.
+        #expect(backing.storage[PanelLayoutStore.mixerInsertsCollapsedKey] == 1)
+
+        store.setMixerInsertsCollapsed(false)
+        #expect(store.mixerInsertsCollapsed == false)
+        #expect(backing.storage[PanelLayoutStore.mixerInsertsCollapsedKey] == 0)
+    }
+
+    @Test("a fresh store reads the mixer disclosure back from the backing (sticky)")
+    func mixerInsertsCollapsedIsSticky() {
+        let backing = SpyBacking()
+        PanelLayoutStore(backing: backing).setMixerInsertsCollapsed(true)
+        #expect(PanelLayoutStore(backing: backing).mixerInsertsCollapsed)
+
+        // A stored 0 must read as expanded, not as "never set" — the `object(forKey:)`
+        // nil-vs-0 distinction the UserDefaults backing makes.
+        PanelLayoutStore(backing: backing).setMixerInsertsCollapsed(false)
+        #expect(PanelLayoutStore(backing: backing).mixerInsertsCollapsed == false)
     }
 
     // MARK: - Backing conformances

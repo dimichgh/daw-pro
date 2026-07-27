@@ -30,6 +30,10 @@ struct FileCommands: Commands {
             // one new audio track per file at the playhead (the stems fan-out).
             Button("Import Audio…") { importAudio() }
                 .keyboardShortcut("i", modifiers: .command)
+            // Standard MIDI Files (m23-k4b) — the first way to reach m23-k3/k4a
+            // without an agent on the control port.
+            Button("Import MIDI…") { importMIDI() }
+            Button("Export MIDI…") { exportMIDI() }
             Divider()
             Button("Save") { save() }
                 .keyboardShortcut("s", modifiers: .command)
@@ -60,6 +64,13 @@ struct FileCommands: Commands {
     /// execution path (one undo step for the whole set). Any per-file failure surfaces
     /// verbatim, the store-error idiom. A menu import has no drop target, so a single
     /// file makes a new audio track and multiple files fan out to one track each.
+    ///
+    /// m23-k4b NARROWED the panel: it used to say `[.audio]`, and because
+    /// `public.midi-audio` conforms to `public.audio` a `.mid` was SELECTABLE
+    /// here and then died in the plan with "isn't a supported audio file". The
+    /// derived list names the concrete types this app actually reads, so the
+    /// refusal happens at the panel — where "this file is greyed out" is the
+    /// whole message — and MIDI has its own menu item below.
     @MainActor
     private func importAudio() {
         let panel = NSOpenPanel()
@@ -67,11 +78,60 @@ struct FileCommands: Commands {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
         panel.prompt = "Import"
-        panel.allowedContentTypes = [.audio]
+        panel.allowedContentTypes = AudioImportPlan.audioContentTypes
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        let results = model.importAudioFiles(
-            urls: panel.urls, targetTrackID: nil,
-            atBeatRaw: store.transport.positionBeats)
+        runImport(urls: panel.urls)
+    }
+
+    /// File→Import MIDI… (m23-k4b): import one or more Standard MIDI Files as new
+    /// instrument tracks, landing at the playhead — resolved through
+    /// `resolvedImportBeat`, the SAME one home ⌘I uses, never a bare
+    /// `positionBeats` (a menu import snaps to the arrange grid like a drop does).
+    ///
+    /// Two things worth knowing, both inherited from `project.importMIDI` (m23-k3)
+    /// rather than decided here: the default tempo policy is `.auto`, so a file
+    /// dropped into a project that has NO clips yet brings its own tempo and meter
+    /// map with it; and each file is its own undo step.
+    @MainActor
+    private func importMIDI() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Import"
+        panel.allowedContentTypes = AudioImportPlan.midiContentTypes
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        runImport(urls: panel.urls)
+    }
+
+    /// File→Export MIDI… (m23-k4b): write the WHOLE project out as a Standard
+    /// MIDI File. The single-track verb (`track.exportMIDI`) got its own surface
+    /// at m23-m3b, and deliberately NOT here: this menu still has no track
+    /// selection to read (the app has no track-selection domain at all —
+    /// selecting a track selects its clips), so the per-track item lives in the
+    /// track-header context menu, which has the track identity in hand.
+    ///
+    /// Export mutates nothing, so there is no undo step and no success alert;
+    /// only a refusal (a project with no instrument content, an unwritable
+    /// destination) surfaces, verbatim.
+    @MainActor
+    private func exportMIDI() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = store.projectName
+        panel.prompt = "Export"
+        panel.allowedContentTypes = AudioImportPlan.midiContentTypes
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try store.exportMIDIFile(path: url.path) } catch { present(error) }
+    }
+
+    /// The shared tail of both import menu items: run the URLs through the ONE
+    /// execution path (`AudioImportPlan` → store) and report per-file failures.
+    /// Both items call it, so neither can drift from the drag-drop's behaviour.
+    @MainActor
+    private func runImport(urls: [URL]) {
+        let results = model.importFiles(
+            urls: urls, targetTrackID: nil,
+            startBeat: model.resolvedImportBeat(rawBeat: store.transport.positionBeats))
         let failures = results.filter { $0.error != nil }
         if !failures.isEmpty { presentImportFailures(failures) }
     }

@@ -8,14 +8,23 @@ import Foundation
 ///
 /// Memory-order contract (existing CAtomics suffice): the producer writes the
 /// slot, then release-stores head; the consumer acquire-loads head, reads the
-/// slot, then release-stores tail. The producer is the CoreMIDI receive thread
-/// (one per port ⇒ single producer for every ring); the consumer is the render
-/// thread (thru rings) or the main actor (the capture ring) — never both.
+/// slot, then release-stores tail. **Every ring has exactly ONE producer and
+/// ONE consumer for its whole lifetime, and which thread plays each role is
+/// fixed at the ring's construction site:** thru rings are produced by the
+/// CoreMIDI receive thread (one thread per port) and consumed by the render
+/// thread; the capture ring is produced by the receive thread and consumed by
+/// the main actor; **audition rings are produced by the MAIN ACTOR (m23-d,
+/// through the `@MainActor InstrumentRenderer.pushAudition`) and consumed by
+/// the render thread.** No ring is ever produced by two threads, and the main
+/// actor never pushes to a thru ring.
 ///
 /// Overflow policy: **drop-newest** — `push` returns false when full and
-/// release-stores `droppedFlag` (drop-oldest would race the consumer). The
-/// render side answers a set flag with `instrument.reset()` so a dropped
-/// note-off can never leave a stuck voice.
+/// release-stores `droppedFlag` (drop-oldest would race the consumer). What the
+/// consumer does about a set flag belongs to the ring's OWNER, not to the ring:
+/// a thru drop is answered with a global `instrument.reset()` (no per-voice
+/// bookkeeping exists there, and stuck is worse than cut), while an AUDITION
+/// drop cuts only the open audition voices — audition shares its renderer with
+/// the sequencer, so a global all-notes-off would kill scheduled playback.
 final class LiveEventRing: @unchecked Sendable {
     private let capacity: UInt32
     private let mask: UInt32

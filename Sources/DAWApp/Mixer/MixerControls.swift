@@ -92,6 +92,128 @@ struct VerticalFader: View {
     }
 }
 
+/// Shared 270°-sweep knob geometry — the ONE home for turning a `MixerMath`
+/// fraction into a point / arc on a knob cap, so `PanKnob` and `VolumeKnob`
+/// cannot draw two subtly different dials (the "one home for the maths"
+/// convention: `MixerMath.knobAngleDegrees` owns the angle, this owns the path).
+/// `nonisolated` statics so they are callable from a `@Sendable` Canvas renderer.
+enum KnobGeometry {
+    static nonisolated func point(_ center: CGPoint, _ radius: CGFloat, _ f: Double) -> CGPoint {
+        let radians = MixerMath.knobAngleDegrees(forFraction: f) * .pi / 180
+        return CGPoint(x: center.x + radius * CGFloat(cos(radians)),
+                       y: center.y + radius * CGFloat(sin(radians)))
+    }
+
+    static nonisolated func arc(_ center: CGPoint, _ radius: CGFloat,
+                                from f0: Double, to f1: Double) -> Path {
+        var path = Path()
+        let steps = 20
+        for i in 0...steps {
+            let f = f0 + (f1 - f0) * Double(i) / Double(steps)
+            let pt = point(center, radius, f)
+            if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
+        }
+        return path
+    }
+
+    /// A short radial detent tick at `f` — the rotary twin of the fader's unity
+    /// line, drawn just inside the value track.
+    static nonisolated func tick(_ center: CGPoint, _ radius: CGFloat,
+                                 _ f: Double, length: CGFloat) -> Path {
+        var path = Path()
+        path.move(to: point(center, radius - length, f))
+        path.addLine(to: point(center, radius, f))
+        return path
+    }
+}
+
+/// Round **volume** knob (m23-a): the compact rotary twin of `VerticalFader`, for
+/// the times the fader's throw is short — a busy Pro strip, or a small window.
+/// It is strictly ADDITIVE: the fader stays, it keeps the `.mixerFader` explain
+/// binding, and both controls drive the SAME `ProjectStore.setTrackVolume`, so
+/// they can never disagree (and a knob drag still reads as a mixer move to the
+/// onboarding tour, which classifies on the store's `track.volume:` edit key).
+///
+/// **Cyan, not `PanKnob`'s neutral white.** Pan has no meaning-color, but volume
+/// does: the fader's level fill, the dB readout, and the arrange VOLUME
+/// automation lane are all `playback` cyan (docs/DESIGN-LANGUAGE.md — "volume
+/// lanes track the fader's cyan, pan lanes stay neutral white"). The knob is
+/// another face of that same value, so it wears the same accent.
+///
+/// **Unipolar arc + a unity detent tick**, not the bipolar centre-out fill of a
+/// ±dB gain knob: the fader beside it fills from the BOTTOM of the range and
+/// marks unity with a tick, and two controls showing one value must not disagree
+/// about where zero is. Glow follows level, exactly like the fader (a strip
+/// fader's glow encodes magnitude; the hover-only arc glow is the effect editor's
+/// knob-grid rule, a different surface).
+struct VolumeKnob: View {
+    var gain: Double
+    var range: ClosedRange<Double> = Track.volumeRange
+    var accent: Color = DAWTheme.playback
+    var onChange: (Double) -> Void
+
+    /// Travel fraction captured at drag start, for relative (hardware-feel) drag.
+    @State private var dragStart: Double?
+
+    var body: some View {
+        // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+        // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+        let fraction = MixerMath.fraction(forGain: gain, in: range)
+        let unity = MixerMath.unityFraction(in: range)
+        let accent = accent
+        return Canvas { @Sendable ctx, size in
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let radius = min(size.width, size.height) / 2 - 3
+            let cap = Path(ellipseIn: CGRect(x: center.x - radius, y: center.y - radius,
+                                             width: radius * 2, height: radius * 2))
+            ctx.fill(cap, with: .color(DAWTheme.panelRaised))
+            ctx.stroke(cap, with: .color(DAWTheme.hairline), lineWidth: 1)
+
+            // Faint full sweep, then the lit value arc from the range MINIMUM
+            // (the fader's bottom-up fill in rotary form).
+            ctx.stroke(KnobGeometry.arc(center, radius - 2, from: 0, to: 1),
+                       with: .color(DAWTheme.textDim.opacity(0.25)),
+                       style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            ctx.stroke(KnobGeometry.arc(center, radius - 2, from: 0, to: fraction),
+                       with: .color(accent.opacity(0.85)),
+                       style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+
+            // Unity ("0 dB") detent tick — the fader's unity line, one control over.
+            ctx.stroke(KnobGeometry.tick(center, radius - 1, unity, length: 4),
+                       with: .color(DAWTheme.textPrimary.opacity(0.55)),
+                       style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+
+            var pointer = Path()
+            pointer.move(to: center)
+            pointer.addLine(to: KnobGeometry.point(center, radius - 3, fraction))
+            ctx.stroke(pointer, with: .color(DAWTheme.textPrimary),
+                       style: StrokeStyle(lineWidth: 2, lineCap: .round))
+        }
+        .contentShape(Circle())
+        // A rotary knob is a vertical value drag → resizeUpDown (docs/DESIGN-
+        // LANGUAGE.md "Pointer affordances"), same family as the faders.
+        .hoverCursor(.resizeUpDown)
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    DragCursor.set(.resizeUpDown)
+                    let start = dragStart ?? MixerMath.fraction(forGain: gain, in: range)
+                    if dragStart == nil { dragStart = start }
+                    let fine = NSEvent.modifierFlags.contains(.option) ? 0.25 : 1.0
+                    let moved = -Double(value.translation.height) * fine
+                    let newFraction = MixerMath.adjustedFraction(
+                        start: start, dragPoints: moved, throwPoints: 120)
+                    onChange(MixerMath.gain(forFraction: newFraction, in: range))
+                }
+                .onEnded { _ in dragStart = nil; DragCursor.clear() }
+        )
+        .simultaneousGesture(TapGesture(count: 2).onEnded { onChange(1.0) })
+        .glow(accent, radius: 5, intensity: 0.15 + 0.4 * MixerMath.fraction(forGain: gain, in: range))
+        .accessibilityLabel("Volume")
+        .accessibilityValue("\(MixerFormat.dbString(forGain: gain)) decibels")
+    }
+}
+
 /// Neon pan knob: dark cap, faint 270° track, a bright neutral value arc from
 /// the center-up detent to the current position, plus a pointer. Vertical drag
 /// changes it (⌥ fine); double-click re-centers. Neutral white so it never
@@ -103,23 +225,6 @@ struct PanKnob: View {
     @State private var dragStart: Double?
 
     private var fraction: Double { (pan + 1) / 2 }
-
-    private nonisolated static func point(_ center: CGPoint, _ radius: CGFloat, _ f: Double) -> CGPoint {
-        let radians = MixerMath.knobAngleDegrees(forFraction: f) * .pi / 180
-        return CGPoint(x: center.x + radius * CGFloat(cos(radians)),
-                       y: center.y + radius * CGFloat(sin(radians)))
-    }
-
-    private nonisolated static func arc(_ center: CGPoint, _ radius: CGFloat, from f0: Double, to f1: Double) -> Path {
-        var path = Path()
-        let steps = 20
-        for i in 0...steps {
-            let f = f0 + (f1 - f0) * Double(i) / Double(steps)
-            let pt = point(center, radius, f)
-            if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
-        }
-        return path
-    }
 
     var body: some View {
         // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
@@ -133,16 +238,16 @@ struct PanKnob: View {
             ctx.fill(cap, with: .color(DAWTheme.panelRaised))
             ctx.stroke(cap, with: .color(DAWTheme.hairline), lineWidth: 1)
 
-            ctx.stroke(Self.arc(center, radius - 2, from: 0, to: 1),
+            ctx.stroke(KnobGeometry.arc(center, radius - 2, from: 0, to: 1),
                        with: .color(DAWTheme.textDim.opacity(0.25)),
                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
-            ctx.stroke(Self.arc(center, radius - 2, from: 0.5, to: fraction),
+            ctx.stroke(KnobGeometry.arc(center, radius - 2, from: 0.5, to: fraction),
                        with: .color(DAWTheme.textPrimary.opacity(0.85)),
                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
 
             var pointer = Path()
             pointer.move(to: center)
-            pointer.addLine(to: Self.point(center, radius - 3, fraction))
+            pointer.addLine(to: KnobGeometry.point(center, radius - 3, fraction))
             ctx.stroke(pointer, with: .color(DAWTheme.textPrimary),
                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
         }

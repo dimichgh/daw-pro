@@ -10,12 +10,26 @@ import DAWCore
 struct AudioImportPlanTests {
     private let audioTrackID = UUID()
 
+    /// m23-f: the plan no longer snaps — the landing beat arrives already
+    /// resolved by `ArrangeDropSnap`, the one home the drop PREVIEW also uses.
+    /// So these tests hand it an explicit beat and assert routing / fan-out /
+    /// naming / rejection, which is all the plan still decides. The snap
+    /// behaviour they used to cover moved WITH the behaviour, to
+    /// `ArrangeDropSnapTests` — it was not dropped.
+    ///
+    /// Note the beat is built through `resolve` with snap OFF, so it passes
+    /// through verbatim: these cases assert the beat the plan was GIVEN comes out
+    /// unchanged, which would be a tautology if the helper re-snapped.
     private func context(target: UUID? = nil, kind: TrackKind? = nil,
-                         atBeatRaw: Double = 0, snap: ClipSnap = .bar,
-                         beatsPerBar: Int = 4) -> AudioImportContext {
+                         atBeat: Double = 0) -> AudioImportContext {
         AudioImportContext(targetTrackID: target, targetTrackKind: kind,
-                           atBeatRaw: atBeatRaw, snap: snap,
-                           meterMap: MeterMap(constant: TimeSignature(beatsPerBar: beatsPerBar)))
+                           startBeat: beat(atBeat))
+    }
+
+    private func beat(_ value: Double) -> ResolvedDropBeat {
+        ArrangeDropSnap.resolve(rawBeat: value, snap: .off,
+                                meterMap: MeterMap(constant: TimeSignature()),
+                                pixelsPerBeat: 80)
     }
 
     private func url(_ name: String) -> URL { URL(fileURLWithPath: "/tmp/\(name)") }
@@ -79,7 +93,7 @@ struct AudioImportPlanTests {
     func multiFanOut() {
         let plan = AudioImportPlan(
             urls: [url("drums.wav"), url("bass.aiff"), url("vox.mp3")],
-            context: context(atBeatRaw: 8))
+            context: context(atBeat: 8))
         #expect(plan.actions.count == 3)
         let names = plan.actions.map { action -> String in
             guard case .newTrack(let name, _, _) = action else { return "?" }
@@ -137,53 +151,40 @@ struct AudioImportPlanTests {
         #expect(plan.rejected.isEmpty)
     }
 
-    // MARK: Snap
+    // MARK: The resolved landing beat is USED VERBATIM (m23-f)
 
-    @Test("Bar snap rounds the landing beat to the meter")
-    func barSnap() {
-        // atBeatRaw 5 at 4/4 → nearest bar = beat 4.
-        let plan = AudioImportPlan(urls: [url("a.wav")], context: context(atBeatRaw: 5, snap: .bar, beatsPerBar: 4))
-        guard case .newTrack(_, let beat, _) = plan.actions[0] else { Issue.record("shape"); return }
-        #expect(beat == 4)
-    }
-
-    @Test("Bar snap follows an odd meter")
-    func barSnapOddMeter() {
-        // 3/4: bars at 0,3,6 — raw 5 → nearest bar 6.
-        let plan = AudioImportPlan(urls: [url("a.wav")], context: context(atBeatRaw: 5, snap: .bar, beatsPerBar: 3))
-        guard case .newTrack(_, let beat, _) = plan.actions[0] else { Issue.record("shape"); return }
-        #expect(beat == 6)
-    }
-
-    @Test("Bar snap follows a meter change across the boundary (m13-h)")
-    func barSnapAcrossMeterChange() {
-        // 4/4 → 6/8 @ beat 16 (bpb 6): barlines …12,16,22,28…
-        let m = try! MeterMap(changes: [
-            .init(startBeat: 0, beatsPerBar: 4, beatUnit: 4),
-            .init(startBeat: 16, beatsPerBar: 6, beatUnit: 8),
-        ])
-        // A drop at raw beat 20 (in 6/8) snaps to the 6/8 barline 22, NOT a 4-beat grid.
-        let ctx = AudioImportContext(atBeatRaw: 20, snap: .bar, meterMap: m)
-        let plan = AudioImportPlan(urls: [url("a.wav")], context: ctx)
-        guard case .newTrack(_, let beat, _) = plan.actions[0] else { Issue.record("shape"); return }
-        #expect(beat == 22)
-        // Just left of the boundary (4/4) snaps to the shared barline 16.
-        let ctxLeft = AudioImportContext(atBeatRaw: 15, snap: .bar, meterMap: m)
-        guard case .newTrack(_, let beatL, _) = AudioImportPlan(urls: [url("a.wav")], context: ctxLeft).actions[0]
-        else { Issue.record("shape"); return }
-        #expect(beatL == 16)
-    }
-
-    @Test("Off snap keeps the raw beat (floored at zero)")
-    func offSnap() {
-        let plan = AudioImportPlan(urls: [url("a.wav")], context: context(atBeatRaw: 5.37, snap: .off))
+    @Test("the plan places the clip at exactly the beat it was handed")
+    func landingBeatIsUsedVerbatim() {
+        // 5.37 is deliberately OFF every grid the arrange offers. Before m23-f
+        // the plan re-snapped its input, so a beat like this could not survive;
+        // now the plan has no grid at all and must place it untouched.
+        let plan = AudioImportPlan(urls: [url("a.wav")], context: context(atBeat: 5.37))
         guard case .newTrack(_, let beat, _) = plan.actions[0] else { Issue.record("shape"); return }
         #expect(beat == 5.37)
     }
 
+    @Test("a magnetised landing beat survives into the action unchanged")
+    func magnetisedBeatSurvives() {
+        // The invariant m23-f exists for: the beat the drop LINE was drawn at is
+        // the beat the clip lands on. A magnet target off the grid is the case
+        // that would have been destroyed by a second snap downstream.
+        let landing = ArrangeDropSnap.resolve(
+            rawBeat: 7.45, snap: .bar,
+            meterMap: MeterMap(constant: TimeSignature()),
+            pixelsPerBeat: 80, clipEdgeBeats: [7.4])
+        #expect(landing.beat == 7.4)
+        #expect(landing.source == .magnetClipEdge)
+        let plan = AudioImportPlan(
+            urls: [url("a.wav")],
+            context: AudioImportContext(targetTrackID: audioTrackID, targetTrackKind: .audio,
+                                        startBeat: landing))
+        guard case .existingTrack(_, let beat, _) = plan.actions[0] else { Issue.record("shape"); return }
+        #expect(beat == 7.4, "a second snap downstream would have pulled this to 8")
+    }
+
     @Test("negative landing beat clamps to zero")
     func negativeClamps() {
-        let plan = AudioImportPlan(urls: [url("a.wav")], context: context(atBeatRaw: -12, snap: .off))
+        let plan = AudioImportPlan(urls: [url("a.wav")], context: context(atBeat: -12))
         guard case .newTrack(_, let beat, _) = plan.actions[0] else { Issue.record("shape"); return }
         #expect(beat == 0)
     }

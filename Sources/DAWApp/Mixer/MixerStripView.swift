@@ -23,6 +23,24 @@ struct MixerChannelStrip: View {
     /// plain value input — a preview can pass a `PanelDensityStore()` with an
     /// in-memory backing.
     var densityStore: PanelDensityStore
+    /// The console's shared layout store (m23-a) — read for ONE value here, the
+    /// INSERTS disclosure flag. Console-wide like density (the mixer is one panel),
+    /// app-sticky, never project data. A plain value input: a preview can pass a
+    /// `PanelLayoutStore()` with the in-memory backing.
+    var layoutStore: PanelLayoutStore
+
+    // MARK: Reorder drag (m23-z) — owned by the CONSOLE, driven from here
+
+    /// How far this strip is displaced while it is the one being dragged; nil on
+    /// every other strip (and on all of them when no drag is in flight). One
+    /// value carries both "am I lifted" and "by how much".
+    var dragOffsetX: CGFloat?
+    /// Pointer moved, in the strip rack's coordinate space.
+    var onReorderChanged: (CGFloat) -> Void = { _ in }
+    /// Pointer released, in the strip rack's coordinate space.
+    var onReorderEnded: (CGFloat) -> Void = { _ in }
+
+    private var isDragging: Bool { dragOffsetX != nil }
 
     private var isBus: Bool { track.kind == .bus }
     /// True when this track hosts an Audio Unit instrument — the only instrument
@@ -39,61 +57,141 @@ struct MixerChannelStrip: View {
     private var isPro: Bool { densityStore.density(forPanel: MixerView.panelID) == .pro }
 
     var body: some View {
-        VStack(spacing: 8) {
-            header
-            // Pro-only signal-flow sections. In Simple they hide WHOLE and the
-            // freed vertical space flows into `faderAndMeter` (maxHeight: .infinity),
-            // giving beginners a longer fader throw / finer level control.
-            if isPro {
-                MixerInsertsSection(
-                    store: store,
-                    trackID: track.id,
-                    effects: track.effects,
-                    onAddBuiltIn: { kind in
-                        // The UI add funnel (m17-a): store add + AUTO-OPEN of the
-                        // effect editor card (wire fx.add never auto-opens).
-                        model.addBuiltInInsert(trackID: track.id, kind: kind)
-                    },
-                    onAddAudioUnit: { model.openEffectPicker(trackID: track.id) },
-                    onOpenWindow: { effectID in
-                        model.openPluginWindow(trackID: track.id, effectID: effectID)
-                    },
-                    onOpenEditor: { effectID in
-                        model.toggleEffectEditor(trackID: track.id, effectID: effectID)
-                    },
-                    gainReductionFor: { effectID in
-                        model.gainReductionDb(trackID: track.id, effectID: effectID)
-                    }
-                )
-                .explainable(.mixerInserts)
-                if !isBus {
-                    sendsSection
-                        .explainable(.mixerSends)
-                    outputSection
-                        .explainable(.mixerOutput)
-                }
-            }
-            // Header/controls separator — present in both modes so the strip reads
-            // as designed (not amputated) when the Pro sections are hidden.
-            Divider().overlay(DAWTheme.hairline)
-            panSection
-                .explainable(.mixerPan)
-            faderAndMeter
-                .explainable(.mixerFader)
-            controlButtons
+        // The strip reads its OWN available height (m23-a) for two reasons.
+        // (1) It bounds the Pro signal-flow region against `MixerStripLayout`'s
+        // reserved budget, so inserts can never push the fader / dB readout /
+        // Mute-Solo-Arm row out of the strip. (2) A `GeometryReader` has no
+        // intrinsic minimum, so the strip stops exporting a tall minimum height to
+        // the console — which is what used to shove the app header row and the
+        // transport bar clean off the window at a short window with a full chain.
+        GeometryReader { proxy in
+            stripBody(available: proxy.size.height)
         }
-        .padding(10)
         .frame(width: 132)
         .frame(maxHeight: .infinity)
         .background(isBus ? DAWTheme.panel.opacity(0.55) : DAWTheme.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(track.isAIGenerated ? DAWTheme.ai.opacity(0.4) : DAWTheme.hairline, lineWidth: 1)
+                .stroke(
+                    isDragging
+                        ? DAWTheme.playback.opacity(0.7)
+                        : (track.isAIGenerated ? DAWTheme.ai.opacity(0.4) : DAWTheme.hairline),
+                    lineWidth: 1)
         )
+        // Picked up: the strip LIFTS off the rack — a cyan rim, a soft glow and
+        // a cast shadow, all earned by the drag and gone the instant it ends
+        // (Rule 3: nothing static glows). The offset follows the pointer so the
+        // strip is literally the thing being moved, not a proxy for it.
+        .glow(DAWTheme.playback, radius: 6, intensity: isDragging ? 0.45 : 0)
+        .shadow(color: .black.opacity(isDragging ? 0.45 : 0),
+                radius: isDragging ? 10 : 0, x: isDragging ? 4 : 0)
+        .offset(x: dragOffsetX ?? 0)
         .contextMenu {
             // m13-c: refused mid-recording (transportBusy) — safe no-op here.
             Button("Remove Track", role: .destructive) { _ = try? store.removeTrack(id: track.id) }
+        }
+    }
+
+    /// The strip's stack, laid out against the height it actually has.
+    ///
+    /// **The reserved cluster never yields.** Everything from the separator down —
+    /// the VOL|PAN knob row, the fader + meter + dB readout, and Mute/Solo/Arm — is
+    /// fixed-intrinsic apart from the fader region, which is greedy upward and only
+    /// compresses to `MixerStripLayout.faderRegionFloor` (a valve, not the target).
+    /// The ONE yielding element is the Pro signal-flow region.
+    private func stripBody(available: CGFloat) -> some View {
+        VStack(spacing: MixerStripLayout.stripSpacing) {
+            header
+            // Pro-only signal-flow sections. In Simple they hide WHOLE and the
+            // freed vertical space flows into `faderAndMeter` (maxHeight: .infinity),
+            // giving beginners a longer fader throw / finer level control.
+            if isPro {
+                signalFlow(room: MixerStripLayout.signalFlowRoom(available: available))
+            }
+            // Header/controls separator — present in both modes so the strip reads
+            // as designed (not amputated) when the Pro sections are hidden.
+            Divider().overlay(DAWTheme.hairline)
+            knobSection
+            faderAndMeter
+                .explainable(.mixerFader)
+            controlButtons
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    /// The Pro signal-flow block (inserts · sends · output) — the strip's ONE
+    /// yielding region, bounded by `room`.
+    ///
+    /// **The yield mechanism is an internal vertical scroller with a computed
+    /// cap, sized to HUG its content until it hits that cap.** The alternative
+    /// considered and rejected was a max-visible-rows cut with a "+N more"
+    /// affordance: it hides rows at a count threshold rather than at the height
+    /// that actually matters, so it would still clip on a short window and still
+    /// hide rows needlessly on a tall one.
+    ///
+    /// The three modifiers are one mechanism and must be read together:
+    ///
+    /// * `.fixedSize(vertical:)` makes the region take its IDEAL height instead of
+    ///   the height the `VStack` offers. Without it a `maxHeight` frame stretches
+    ///   to whatever it is proposed, so a two-insert strip held a ~200 pt void and
+    ///   the fader sat crammed at the bottom — the exact failure this item exists
+    ///   to remove, reintroduced by the guard rail.
+    /// * A `ScrollView`'s ideal height is its CONTENT's height, so hugging and
+    ///   scrolling come from the same view: no `ViewThatFits`, no duplicated
+    ///   subtree (which would also duplicate the `.explainable` anchors inside).
+    /// * `.frame(maxHeight: room)` is the bound: the ideal is clamped to `room`,
+    ///   and past that the content scrolls inside a region that never grows. This
+    ///   is what guarantees the reserved cluster, because `room` is already
+    ///   `available − reserved`.
+    ///
+    /// Net effect: the region is INFLEXIBLE at `min(content, room)`, so the greedy
+    /// fader below takes every remaining point. Chain first up to the bound, fader
+    /// throw with the rest. Strips therefore hug independently and their dividers
+    /// do NOT line up across the console — that is deliberate (see DESIGN-LANGUAGE):
+    /// a uniform divider costs every strip the tallest strip's chain height.
+    private func signalFlow(room: CGFloat) -> some View {
+        ScrollView(.vertical) { signalFlowContent }
+            .scrollIndicators(.visible)
+            .frame(maxHeight: max(0, room))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private var signalFlowContent: some View {
+        VStack(spacing: MixerStripLayout.stripSpacing) {
+            MixerInsertsSection(
+                store: store,
+                trackID: track.id,
+                effects: track.effects,
+                onAddBuiltIn: { kind in
+                    // The UI add funnel (m17-a): store add + AUTO-OPEN of the
+                    // effect editor card (wire fx.add never auto-opens).
+                    model.addBuiltInInsert(trackID: track.id, kind: kind)
+                },
+                onAddAudioUnit: { model.openEffectPicker(trackID: track.id) },
+                onOpenWindow: { effectID in
+                    model.openPluginWindow(trackID: track.id, effectID: effectID)
+                },
+                onOpenEditor: { effectID in
+                    model.toggleEffectEditor(trackID: track.id, effectID: effectID)
+                },
+                gainReductionFor: { effectID in
+                    model.gainReductionDb(trackID: track.id, effectID: effectID)
+                },
+                isCollapsed: layoutStore.mixerInsertsCollapsed,
+                onToggleCollapsed: {
+                    layoutStore.setMixerInsertsCollapsed(!layoutStore.mixerInsertsCollapsed)
+                }
+            )
+            .explainable(.mixerInserts)
+            if !isBus {
+                sendsSection
+                    .explainable(.mixerSends)
+                outputSection
+                    .explainable(.mixerOutput)
+            }
         }
     }
 
@@ -113,6 +211,17 @@ struct MixerChannelStrip: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // The NAME ROW is the reorder handle (m23-z) — not the whole header
+            // (which also carries the plugin-window button and the instrument
+            // chip's opener) and not the strip (which carries a context menu and
+            // every fader/knob gesture). `contentShape` makes the whole row
+            // grabbable rather than just the glyphs: without it the drag is
+            // nearly dead in the hand while every headless test and the seam stay
+            // green. A 6 pt minimum distance means a press that doesn't travel is
+            // never a drag — every click the strip already has stays reachable.
+            .contentShape(Rectangle())
+            .gesture(reorderDrag)
+            .help("Drag to reorder this strip")
             HStack(spacing: 4) {
                 KindBadge(kind: track.kind)
                     .explainable(.mixerKindBadge)
@@ -149,6 +258,23 @@ struct MixerChannelStrip: View {
             }
             .frame(height: 25)
         }
+    }
+
+    /// The reorder gesture. Reports the pointer in the RACK's coordinate space
+    /// (never `.local`), which is the space the strip ladder is measured in — so
+    /// the landing is right at any horizontal scroll offset.
+    private var reorderDrag: some Gesture {
+        DragGesture(minimumDistance: 6, coordinateSpace: .named(MixerView.stripSpace))
+            .onChanged { value in
+                // Hold the closed hand for the whole drag, even when the pointer
+                // leaves the strip (the m10-c gesture-driven cursor idiom).
+                DragCursor.set(CursorAffordance.trackHeader.dragCursor)
+                onReorderChanged(value.location.x)
+            }
+            .onEnded { value in
+                DragCursor.clear()
+                onReorderEnded(value.location.x)
+            }
     }
 
     // MARK: Sends
@@ -261,23 +387,67 @@ struct MixerChannelStrip: View {
         }
     }
 
-    // MARK: Pan
+    // MARK: Volume knob + pan
 
-    private var panSection: some View {
-        HStack(spacing: 8) {
-            PanKnob(pan: track.pan, onChange: { store.setTrackPan(id: track.id, pan: $0) })
-                .frame(width: 38, height: 38)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("PAN")
-                    .font(.system(size: 8, weight: .semibold))
-                    .tracking(1.2)
-                    .foregroundStyle(DAWTheme.textDim)
-                Text(MixerFormat.panString(track.pan))
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(DAWTheme.textPrimary)
+    /// The VOL | PAN knob row (m23-a). The round `VolumeKnob` is ADDITIVE — it
+    /// sits beside the pan knob and drives the same `setTrackVolume` the fader
+    /// below does, so a squeezed fader is never the only way to set a level.
+    ///
+    /// It renders in **BOTH densities** (a deliberate, reported decision): volume
+    /// is the most beginner-primary control on a strip, and a Pro-only volume knob
+    /// would be indefensible. The cost is honest — the row grows 38 → 52 pt, so a
+    /// Simple strip's fader throw shortens by that much; at the measured window
+    /// floor the reserved budget still fits with ~130 pt to spare
+    /// (`MixerStripLayoutTests`).
+    ///
+    /// The VOL cell deliberately carries **no readout of its own**: the strip's dB
+    /// number is the glowing `DbReadout` under the fader, and one value never gets
+    /// two copies on one strip. PAN keeps its readout because it has no other — but
+    /// it sits **on the label line**, not on a third line under the cap: a whole
+    /// text line under the knobs cost 13 pt of every strip's vertical budget, which
+    /// at the default window was the difference between a chain that fits and a
+    /// chain that scrolls.
+    private var knobSection: some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(spacing: 3) {
+                knobLabel("VOL")
+                VolumeKnob(
+                    gain: track.volume,
+                    onChange: { store.setTrackVolume(id: track.id, volume: $0) }
+                )
+                .frame(width: 36, height: 36)
             }
+            .explainable(.mixerVolumeKnob)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4) {
+                    knobLabel("PAN")
+                    Text(MixerFormat.panString(track.pan))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(DAWTheme.textPrimary)
+                        .lineLimit(1)
+                        // Pinned, never scaled (docs/DESIGN-LANGUAGE.md m22-g law).
+                        // The widest string is 4 glyphs (`L100`) ≈ 24 pt; the row is
+                        // 36 + 8 + (22 + 4 + 24) = 94 pt inside a 112 pt content box,
+                        // so it can grow a glyph without touching the strip edge.
+                        .fixedSize()
+                }
+                PanKnob(pan: track.pan, onChange: { store.setTrackPan(id: track.id, pan: $0) })
+                    .frame(width: 36, height: 36)
+            }
+            .explainable(.mixerPan)
             Spacer(minLength: 0)
         }
+        .frame(height: MixerStripLayout.knobRowHeight, alignment: .top)
+    }
+
+    /// A knob's micro-label — above the cap, the channel-strip convention.
+    private func knobLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 8, weight: .semibold))
+            .tracking(1.2)
+            .foregroundStyle(DAWTheme.textDim)
+            .lineLimit(1)
+            .fixedSize()
     }
 
     // MARK: Fader + meter
@@ -297,7 +467,14 @@ struct MixerChannelStrip: View {
             DbReadout(gain: track.volume)
         }
         .frame(maxHeight: .infinity)
-        .frame(minHeight: 150)
+        // The floor dropped 150 → `faderRegionFloor` in m23-a. 150 was a HARD
+        // minimum that the strip exported to the whole console, so a tall chain
+        // made the console demand more height than the window had — pushing the
+        // app header and transport off-window and clipping this readout away. The
+        // lower floor is the degradation valve: the fader compresses a little
+        // before anything is ever lost, and the room maths above hands it every
+        // point the signal-flow region doesn't take.
+        .frame(minHeight: MixerStripLayout.faderRegionFloor)
     }
 
     // MARK: Mute / Solo / Arm
@@ -361,14 +538,37 @@ struct MixerInsertsSection: View {
     /// seam). This section hands it only to compressor/limiter/gate rows, so
     /// a reverb chip never even polls.
     var gainReductionFor: (UUID) -> Double?
+    /// Whether the chain's ROWS are folded away (m23-a). A plain value input —
+    /// the host owns the state (the console-wide `PanelLayoutStore` flag in the
+    /// app, a `@State` in a preview) — so this component stays reusable.
+    var isCollapsed: Bool = false
+    /// Flips `isCollapsed`. nil = no disclosure at all (a host that never folds).
+    var onToggleCollapsed: (() -> Void)?
+
+    /// Collapsed hides the ROWS, never the header: the section label, the count of
+    /// what's hidden, and the "+" add menu stay reachable, so a folded chain can
+    /// still be unfolded and added to.
+    private var showsRows: Bool { !isCollapsed }
 
     var body: some View {
         VStack(spacing: 4) {
-            HStack {
+            HStack(spacing: 4) {
+                if let onToggleCollapsed {
+                    disclosure(onToggleCollapsed)
+                }
                 StripSectionLabel(text: "Inserts")
+                // The chain LENGTH, always — not just while collapsed. The section
+                // is bounded now (m23-a), so a long chain can be showing only its
+                // first few rows; the count is what tells the truth about how many
+                // there are, folded away or merely scrolled past.
+                if !effects.isEmpty {
+                    countBadge
+                }
                 addMenu
             }
-            if effects.isEmpty {
+            if !showsRows {
+                EmptyView()
+            } else if effects.isEmpty {
                 Text("No inserts")
                     .font(.system(size: 9))
                     .foregroundStyle(DAWTheme.textSecondary)
@@ -405,6 +605,41 @@ struct MixerInsertsSection: View {
                 }
             }
         }
+    }
+
+    /// The fold/unfold chevron (m23-a). NEUTRAL chrome per Rule 3 — a disclosure
+    /// is not an earned active state, so no accent and no glow at rest, only the
+    /// standard hover brighten (the `PluginWindowButton` idiom).
+    private func disclosure(_ toggle: @escaping () -> Void) -> some View {
+        Button(action: toggle) {
+            Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(DAWTheme.textDim)
+                .frame(width: 14, height: 14)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isCollapsed
+              ? "Show this track's effects again"
+              : "Fold the effects away to give the volume fader more room")
+    }
+
+    /// How many effects the chain holds — so a folded (or merely scrolled) chain
+    /// never reads as a shorter one. SF Mono (it is a number) on quiet chrome;
+    /// neutral, because a count is information, not an earned active state.
+    private var countBadge: some View {
+        Text("\(effects.count)")
+            .font(.system(size: 8, weight: .semibold, design: .monospaced))
+            .foregroundStyle(DAWTheme.textDim)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(DAWTheme.panelRaised)
+            .clipShape(Capsule())
+            // Pinned, never scaled (the m22-g law) — at most 2 glyphs.
+            .fixedSize()
+            .help(isCollapsed
+                  ? "\(effects.count) effect\(effects.count == 1 ? "" : "s") folded away"
+                  : "\(effects.count) effect\(effects.count == 1 ? "" : "s") in this chain")
     }
 
     private var addMenu: some View {
@@ -471,11 +706,61 @@ struct MixerMasterStrip: View {
     /// the master strip reveals its inserts only in Pro, exactly like the
     /// channel strips.
     var densityStore: PanelDensityStore
+    /// The console's shared layout store (m23-a) — the INSERTS disclosure flag,
+    /// shared with every channel strip (the console is ONE panel).
+    var layoutStore: PanelLayoutStore
 
     /// Pro density reveals the master insert chain (Simple: fader + meters only).
     private var isPro: Bool { densityStore.density(forPanel: MixerView.panelID) == .pro }
 
     var body: some View {
+        // ONE internal vertical scroller (m23-a) — the m17-f F4 compression law
+        // for a fixed-width panel, applied to the master strip.
+        //
+        // **Why the master needs a different answer than a channel strip.** A
+        // channel strip can reserve its fader cluster and yield the chain, because
+        // its content fits. The master's cannot: since m22-c/d/g it carries the
+        // chain, the automation lane, the fader, LOUDNESS, STEREO IMAGE and the
+        // REFERENCE row — ~690 pt together, more than the ~430 pt a strip gets at
+        // the measured window floor. Before m23-a that intrinsic minimum was
+        // exported to the console, which has no vertical scroll, so it shoved the
+        // app header row and the transport bar clean off the window and then let
+        // the strip's own `clipShape` cut whatever still didn't fit — unreachable.
+        // Now it scrolls: nothing is lost, everything is reachable.
+        //
+        // **`minHeight: viewport` on the content** is the arrange shared-scroll
+        // idiom: when the content is SHORTER than the viewport it stretches to fill
+        // (the greedy fader absorbs the slack and keeps its long throw), and only
+        // when it is taller does the scroller actually scroll. At the app's default
+        // 1440×900 that means the strip renders exactly as it did before m23-a.
+        //
+        // **The identity block scrolls with everything else** — a deliberate
+        // deviation from F4's "pinned header". Pinning it would cost 52 pt of
+        // viewport, which is enough to turn a strip that fits at the DEFAULT window
+        // into one that scrolls; and unlike the Sketchpad/ClipFix panels F4 was
+        // written for, this header holds no controls (no close, no toggle) and the
+        // strip is unmistakable anyway by its cyan accent border and glow.
+        GeometryReader { proxy in
+            ScrollView(.vertical) {
+                masterBody
+                    .frame(minHeight: proxy.size.height)
+            }
+            .scrollIndicators(.visible)
+        }
+        .padding(12)
+        .frame(width: 156)
+        .frame(maxHeight: .infinity)
+        .background(DAWTheme.panelRaised)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(DAWTheme.playback.opacity(0.4), lineWidth: 1.5)
+        )
+        .glow(DAWTheme.playback, radius: 8, intensity: 0.12)
+    }
+
+    /// The whole strip's anatomy — the scroller's content.
+    private var masterBody: some View {
         VStack(spacing: 10) {
             VStack(spacing: 5) {
                 Text("MASTER")
@@ -507,6 +792,10 @@ struct MixerMasterStrip: View {
                     },
                     gainReductionFor: { effectID in
                         model.gainReductionDb(trackID: nil, effectID: effectID)
+                    },
+                    isCollapsed: layoutStore.mixerInsertsCollapsed,
+                    onToggleCollapsed: {
+                        layoutStore.setMixerInsertsCollapsed(!layoutStore.mixerInsertsCollapsed)
                     }
                 )
                 .explainable(.mixerMasterInserts)
@@ -528,7 +817,7 @@ struct MixerMasterStrip: View {
                 }
             }
             .frame(maxHeight: .infinity)
-            .frame(minHeight: 180)
+            .frame(minHeight: MixerStripLayout.masterFaderRegionFloor)
             .explainable(.mixerMaster)
             DbReadout(gain: store.masterVolume)
             Divider().overlay(DAWTheme.playback.opacity(0.25))
@@ -555,17 +844,17 @@ struct MixerMasterStrip: View {
                     return store.masterAnalysis()
                 }
             )
+            // Reference track (m22-g): rendered ONLY when the project carries a
+            // reference slot, so every project without one pays exactly zero —
+            // no row, no poll, no divider. Both densities: an A/B listening
+            // check is beginner-relevant (the stereo block's "phone speaker"
+            // argument). The seed override comes first, the `scopeSeed` idiom.
+            if model.referenceRowSlot != nil {
+                Divider().overlay(DAWTheme.playback.opacity(0.25))
+                MasterReferenceRow(model: model.referencePanel,
+                                   onOpen: { model.openReferencePanel() })
+            }
         }
-        .padding(12)
-        .frame(width: 156)
-        .frame(maxHeight: .infinity)
-        .background(DAWTheme.panelRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(DAWTheme.playback.opacity(0.4), lineWidth: 1.5)
-        )
-        .glow(DAWTheme.playback, radius: 8, intensity: 0.12)
     }
 }
 
@@ -726,6 +1015,111 @@ struct MasterAutomationSection: View {
         }
         .buttonStyle(.plain)
         .help("Delete the master volume automation lane")
+    }
+}
+
+/// The master strip's compact **REFERENCE row** (m22-g P3, design §7.1) —
+/// rendered only when the project carries a reference slot (the caller gates
+/// it), in BOTH densities.
+///
+/// Anatomy: a `REF` micro-label with the reference's tail-truncating name over
+/// the shared MIX|REF chip pair and the SF Mono match-gain readout. Clicking
+/// the name row opens the REFERENCE panel; the whole block carries
+/// `.explainable(.referenceRow)` and the chip carries the SHARED
+/// `.referenceABToggle` id it also carries in the panel.
+///
+/// **Two lines, ≈32 pt — an argued deviation from §7.1's "one compact 25 pt
+/// row"**: the master strip is 156 pt wide with 12 pt padding, leaving 132 pt
+/// of content width, and the chip + readout pair below already claims 114 of
+/// it. One line would need label + name + chip + readout in 132 pt — 18 pt
+/// left over, which cannot even hold the `REF` label (≈20 pt), let alone a
+/// name. It would either truncate the name to nothing or fork the chip into a
+/// narrower second copy — and a second copy is exactly what the "ONE shared
+/// control" rule forbids. Stacking costs ≈7 pt over the design's budget and
+/// keeps both the name and the chip's pixel identity.
+///
+/// **Line 2's width budget (measured, m22-g P3 fix):** chip 65 pt + 6 pt
+/// spacing + the widest possible readout 43 pt (`-24.0 dB`, 8 glyphs — the
+/// match gain is bounded by `ReferenceSlot.trimRangeDb` = ±24) = 114 pt inside
+/// 132, so `Spacer(minLength: 0)` absorbs ≈18 pt. Both the chip and the readout
+/// therefore PIN their widths (`fixedSize`) instead of competing: HStack's
+/// proposal split, not a real overflow, was collapsing the chip to `M… | R…`
+/// whenever the readout grew a glyph. Line 1's tail-truncating NAME stays the
+/// row's one honest place to lose characters.
+///
+/// Poll cadence: 5 Hz UNPAUSED `.periodic` (the `MasterLoudnessReadout`
+/// pattern) — the monitor state and match gain both move from the wire, so the
+/// row must keep reading them while the app is not frontmost (the m22-e law).
+struct MasterReferenceRow: View {
+    var model: ReferencePanelModel
+    var onOpen: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Button(action: onOpen) {
+                HStack(spacing: 5) {
+                    Text("REF")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundStyle(DAWTheme.textSecondary)
+                    Text(model.slot?.name ?? "")
+                        .font(.system(size: 9))
+                        .foregroundStyle(DAWTheme.textDim)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Open the reference panel — compare your mix to \(model.slot?.name ?? "the reference").")
+            TimelineView(.periodic(from: .now, by: 0.2)) { _ in
+                let status = model.status
+                HStack(spacing: 6) {
+                    ReferenceABToggle(isMonitoring: status.monitoring) {
+                        model.setMonitor($0)
+                    }
+                    .explainable(.referenceABToggle)
+                    Spacer(minLength: 0)
+                    matchGain(status)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .explainable(.referenceRow)
+    }
+
+    /// Cyan while monitoring (dB readouts are cyan), AMBER when the ceiling
+    /// clamp reduced the gain — the same honesty the panel shows, one surface
+    /// over. A faint dash when there is nothing to match yet.
+    private func matchGain(_ status: ReferenceStatus) -> some View {
+        let db = ReferencePanelModel.displayedMatchGainDb(status)
+        let clamped = status.ceilingLimited == true
+        let tint: Color = db == nil ? DAWTheme.textFaint
+            : (clamped ? DAWTheme.record : DAWTheme.playback)
+        return HStack(spacing: 2) {
+            Text(ReferencePanelModel.matchGainText(db))
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(tint)
+                .glow(tint, radius: 3, intensity: (db == nil || !status.monitoring) ? 0 : 0.35)
+            if db != nil {
+                Text("dB")
+                    .font(.system(size: 7, weight: .semibold))
+                    .foregroundStyle(DAWTheme.textDim)
+            }
+        }
+        .lineLimit(1)
+        // Pinned, NOT scaled. `ReferenceSlot.trimRangeDb` bounds the match gain
+        // at ±24 dB, so the widest string this can ever render is 8 glyphs
+        // (`-24.0 dB`) ≈ 43 pt — which fits beside the 65 pt chip inside the
+        // strip's 132 pt of content width with ~18 pt to spare. A
+        // `minimumScaleFactor` here would turn any future squeeze into a
+        // silently-shrunken primary number that no pixel gate would flag;
+        // pinning keeps a genuine overflow VISIBLE.
+        .fixedSize(horizontal: true, vertical: false)
+        .help(clamped
+              ? "The reference is turned down further than a level match asks for, so it cannot clip."
+              : "How much the reference is turned up or down to sit at your mix's loudness.")
     }
 }
 

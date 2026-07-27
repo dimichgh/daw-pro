@@ -12,8 +12,22 @@ enum DAWTheme {
     static let gridEmphasis = Color.white.opacity(0.14)
 
     // Piano-roll keyboard-gutter key rows (no raw hex in views — Theme owns color).
+    // The gutter is the app's ONE light surface (m23-b): `keyWhite` is a real
+    // ivory key, so it is also the one place where the house light-on-dark chrome
+    // tokens invert. Everything drawn ON a key takes its polarity from that key —
+    // black rows keep `hairline`/`gridEmphasis`, ivory rows take the three
+    // `…OnWhite` inks below. Ratios are measured against `keyWhite` #D9D5CA.
     static let keyBlack = Color(hex: 0x11141C)   // black-key row
-    static let keyWhite = Color(hex: 0x2C3242)   // white-key row
+    static let keyWhite = Color(hex: 0xD9D5CA)   // white-key row — ivory (12.6:1 vs keyBlack)
+    /// Row separator on an ivory key — `hairline`'s dark twin (1.7:1). Between two
+    /// adjacent white keys (the E|F and B|C gaps) this line is the ONLY thing that
+    /// makes them read as two keys, so it is a real key gap, not a whisper.
+    static let keyEdgeOnWhite = Color.black.opacity(0.24)
+    /// Octave marker on an ivory key — `gridEmphasis`' dark twin (2.5:1).
+    static let keyOctaveOnWhite = Color.black.opacity(0.38)
+    /// Octave-label ink on an ivory key (10.1:1) — the inverted counterpart of
+    /// `textPrimary`, which is unreadable there.
+    static let keyLabelOnWhite = Color(hex: 0x232833)
 
     // Semantic accents — one meaning each, never decorative.
     static let playback = Color(hex: 0x3EE6FF)   // cyan: playback/position/active
@@ -23,6 +37,10 @@ enum DAWTheme {
     static let ai = Color(hex: 0xB48CFF)         // violet: AI-generated/AI-touched
 
     // Text hierarchy — measured against base #0B0D12 / raised #12151D / chip #181C27.
+    // These are DARK-SURFACE ratios and hold everywhere except the piano-roll
+    // keyboard gutter, the app's one light surface: on `keyWhite` #D9D5CA every
+    // row below inverts (textDim measures 2.2:1 there), which is why that surface
+    // has its own measured ink, `keyLabelOnWhite`.
     static let textPrimary = Color(hex: 0xE8ECF4)     // primary content (14.4–16.4:1)
     static let textSecondary = Color(hex: 0x9FA9BC)   // legible secondary labels (7.2–8.2:1, ≥4.5)
     static let textDim = Color(hex: 0x8A93A6)         // muted micro-labels/captions (5.5–6.3:1, ≥4.5)

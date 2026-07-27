@@ -499,18 +499,25 @@ public final class OfflineRenderer {
             masterEffects: masterEffects,
             masterAutomation: masterAutomation
         )
-        return try Self.writeWAV(audio, to: url)
+        return try Self.writeAudioFile(audio, to: url)
     }
 
-    /// The WAV writer, split out of `renderToWAV` (M5 iv-b, spec §5) so the
-    /// engine seam can persist any `RenderedAudio` — gained bounces, stem
-    /// buffers — with the exact same frame-exact Float32 semantics.
-    static func writeWAV(_ audio: RenderedAudio, to url: URL) throws -> AudioFileInfo {
-        guard let format = AVAudioFormat(
+    /// The audio-file writer, split out of `renderToWAV` (M5 iv-b, spec §5) so
+    /// the engine seam can persist any `RenderedAudio` — gained bounces, stem
+    /// buffers — with the exact same frame-exact semantics.
+    ///
+    /// `format` (m23-m2) selects bit depth and container; `.default` is Float32
+    /// WAV and produces byte-identical files to the pre-m23-m2 writer (the
+    /// settings dictionary is untouched on that path, by construction). It was
+    /// named `writeWAV` until m23-m2 — a name that would now be a lie on an
+    /// AIFF export.
+    static func writeAudioFile(_ audio: RenderedAudio, to url: URL,
+                               format: DeliveryFormat = .default) throws -> AudioFileInfo {
+        guard let bufferFormat = AVAudioFormat(
             standardFormatWithSampleRate: audio.sampleRate,
             channels: AVAudioChannelCount(audio.channelData.count)
         ), let buffer = AVAudioPCMBuffer(
-            pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, audio.frameCount))
+            pcmFormat: bufferFormat, frameCapacity: AVAudioFrameCount(max(1, audio.frameCount))
         ), let destination = buffer.floatChannelData else {
             throw EngineError.renderFailed(
                 "could not allocate a \(audio.frameCount)-frame write buffer"
@@ -525,11 +532,7 @@ public final class OfflineRenderer {
         }
         buffer.frameLength = AVAudioFrameCount(audio.frameCount)
 
-        // File settings come straight from the manual-rendering format
-        // (Float32 linear PCM); WAV payloads are interleaved on disk, so that
-        // single key is overridden.
-        var settings = format.settings
-        settings[AVLinearPCMIsNonInterleaved] = false
+        let settings = Self.fileSettings(base: bufferFormat.settings, format: format)
 
         do {
             try FileManager.default.createDirectory(
@@ -537,12 +540,19 @@ public final class OfflineRenderer {
             )
             // Scoped so the AVAudioFile deallocates (flushes and closes)
             // before anyone reads the file back.
+            //
+            // `commonFormat: .pcmFormatFloat32` describes the BUFFER handed in,
+            // NOT the file: `settings` alone governs what lands on disk
+            // (measured, m23-m2), and the converter in between does the
+            // quantization. The CONTAINER comes from neither — it is inferred
+            // from `url`'s path extension, which is why `DeliveryFormat` owns
+            // that extension (see `applyingExtension`).
             let file = try AVAudioFile(forWriting: url, settings: settings,
                                        commonFormat: .pcmFormatFloat32, interleaved: false)
             try file.write(from: buffer)
         } catch {
             throw EngineError.renderFailed(
-                "could not write WAV to \(url.path): \(error.localizedDescription)"
+                "could not write \(format.label) to \(url.path): \(error.localizedDescription)"
             )
         }
 
@@ -551,5 +561,38 @@ public final class OfflineRenderer {
             sampleRate: audio.sampleRate,
             channelCount: audio.channelData.count
         )
+    }
+
+    /// `DeliveryFormat` → the `AVAudioFile(forWriting:settings:)` dictionary —
+    /// the ONE place DAWCore's engine-free format value becomes AVFoundation
+    /// keys (m23-m2). Split out of the writer so it is directly testable.
+    ///
+    /// `base` is the manual-rendering format's own settings (Float32 linear
+    /// PCM). Two overrides, and every one of them was measured:
+    ///
+    /// 1. `AVLinearPCMIsNonInterleaved = false` — payloads are interleaved on
+    ///    disk. Pre-m23-m2 behaviour, untouched.
+    /// 2. For an integer depth, `AVLinearPCMBitDepthKey` AND
+    ///    `AVLinearPCMIsFloatKey = false`. **THE DEPTH KEY ALONE IS SILENTLY
+    ///    IGNORED**: `base` carries `AVLinearPCMIsFloatKey = 1`, and with it
+    ///    left in place a `bitDepth: 24` request writes 32-bit FLOAT — WAV on a
+    ///    `.wav` path, 32-bit big-endian float (AIFF-C) on a `.aiff` one — and
+    ///    **no error is raised**. Both containers, same trap.
+    ///
+    /// `AVLinearPCMIsBigEndianKey` is deliberately NOT set: it is INERT in both
+    /// directions (measured — `wav` + `true` still wrote little-endian, `aiff`
+    /// with the key absent still wrote big-endian). The CONTAINER dictates
+    /// endianness, and the container comes from the URL extension. Setting the
+    /// key would be decoration that a test could then pin, and such a test
+    /// passes on a build that deletes it.
+    static func fileSettings(base: [String: Any],
+                             format: DeliveryFormat) -> [String: Any] {
+        var settings = base
+        settings[AVLinearPCMIsNonInterleaved] = false
+        if let bitDepth = format.bitDepth {
+            settings[AVLinearPCMBitDepthKey] = bitDepth
+            settings[AVLinearPCMIsFloatKey] = false
+        }
+        return settings
     }
 }

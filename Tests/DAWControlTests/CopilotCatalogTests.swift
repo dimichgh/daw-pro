@@ -44,7 +44,7 @@ struct CopilotCatalogTests {
         #expect(Set(commands).count == commands.count)
     }
 
-    @Test("catalog carries the m22-c live-loudness verb; count now 61")
+    @Test("catalog carries the m22-g reference verbs; count now 65")
     func catalogCountPin() {
         // m12-g seeded the fx section with fx.setSidechain alone (47). m13-d
         // added fx.add / fx.remove / fx.setParam / fx.setBypass — each teaching
@@ -57,10 +57,42 @@ struct CopilotCatalogTests {
         // clip.fitToContent took it 58 → 59. m21-e's clip.analyzeAudio took it
         // 59 → 60. m22-c's mixer.liveLoudness (the m21-b2 law: new
         // capabilities must be visible to the in-app copilot) took it 60 → 61.
-        // A silent add/drop fails here.
-        #expect(CopilotToolCatalog.v1.count == 61)
+        // m22-g P3's reference workflow took it 61 → 65: the CURATED FOUR
+        // (import/status/setMonitor/compare) per the orchestrator's §12
+        // decision 3 — NOT all eight. reference.remove / reference.analyze /
+        // reference.setOffset / reference.setTrim are deliberately absent from
+        // the catalog and taught inside the four entries' descriptions instead
+        // (asserted below, so a future edit can't quietly drop the teaching).
+        // A silent add/drop fails here. m23-d's note.audition took it 65 -> 66.
+        // m23-h's track.reorder — the ONE track-ordering verb, and the m21-b2
+        // law that a new user-facing capability must be visible to the in-app
+        // copilot — took it 66 -> 67.
+        #expect(CopilotToolCatalog.v1.count == 67)
+        #expect(CopilotToolCatalog.tool(command: "track.reorder") != nil,
+                "track.reorder missing from the catalog")
         #expect(CopilotToolCatalog.tool(command: "mixer.liveLoudness") != nil,
                 "mixer.liveLoudness missing from the catalog")
+        for command in ["reference.import", "reference.status",
+                        "reference.setMonitor", "reference.compare"] {
+            #expect(CopilotToolCatalog.tool(command: command) != nil,
+                    "\(command) missing from the catalog")
+        }
+        // The curated-four decision, pinned from BOTH sides.
+        for command in ["reference.remove", "reference.analyze",
+                        "reference.setOffset", "reference.setTrim"] {
+            #expect(CopilotToolCatalog.tool(command: command) == nil,
+                    "\(command) joined the catalog — the m22-g decision was a curated four")
+        }
+        // …and each absent verb is TAUGHT somewhere in the curated four, so an
+        // agent still knows it exists.
+        let referenceCopy = CopilotToolCatalog.v1
+            .filter { $0.command.hasPrefix("reference.") }
+            .map(\.description).joined(separator: " ")
+        for taught in ["reference.remove", "reference.analyze",
+                       "reference.setOffset", "reference.setTrim"] {
+            #expect(referenceCopy.contains(taught),
+                    "\(taught) is neither a catalog entry nor taught inside one")
+        }
         #expect(CopilotToolCatalog.tool(command: "clip.analyzeAudio") != nil,
                 "clip.analyzeAudio missing from the catalog")
         #expect(CopilotToolCatalog.tool(command: "clip.fitToContent") != nil,

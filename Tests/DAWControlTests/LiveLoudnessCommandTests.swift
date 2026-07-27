@@ -75,7 +75,7 @@ struct LiveLoudnessCommandTests {
         #expect(CommandRouter.allCommands.contains("mixer.liveLoudness"))
         // m22-g's reference.* quartet appended after it — no longer LAST,
         // but the additive-at-end law held at ITS landing.
-        #expect(CommandRouter.allCommands.count == 152)
+        #expect(CommandRouter.allCommands.count == 158)   // 156 -> 158 at m23-k4a
         // Additive: the mixer.* neighbors are untouched.
         #expect(CommandRouter.allCommands.contains("mixer.setMasterVolume"))
         #expect(CommandRouter.allCommands.contains("mixer.masterAnalysis"))

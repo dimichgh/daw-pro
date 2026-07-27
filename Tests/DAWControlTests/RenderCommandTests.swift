@@ -39,8 +39,23 @@ final class FakeRenderEngine: AudioEngineControlling {
                        masterAutomation: [AutomationLane],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL) async throws -> AudioFileInfo {
-        AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
+        handedTracks.append(tracks)
+        duringRender?()
+        return AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
     }
+
+    /// The track array each render pass was HANDED (m23-m1) — the discriminator
+    /// for `excludeTrackIds`: a before/after snapshot cannot tell a
+    /// render-local mute-copy from a mutate-render-restore, but the handed
+    /// array carrying `isMuted` while the STORE's array does not, at the same
+    /// instant, can.
+    private(set) var handedTracks: [[Track]] = []
+    /// Invoked DURING each render pass, on the main actor — tests read the
+    /// live store from inside the render here.
+    var duringRender: (@MainActor () -> Void)?
+    /// Master chain each `renderOffline` pass was handed (m23-m1): the stems'
+    /// passes get `[]`, the mastered sibling gets the real chain.
+    private(set) var renderOfflineMasterEffects: [[EffectDescriptor]] = []
 
     /// Every `renderOffline` call (measureLoudness/bounce/each stem pass)
     /// returns this buffer, regardless of the requested tracks/window — good
@@ -55,6 +70,9 @@ final class FakeRenderEngine: AudioEngineControlling {
                        fromBeat: Double, durationSeconds: Double,
                        forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
         renderOfflineCalls.append(forcedCompensationTargets)
+        handedTracks.append(tracks)
+        renderOfflineMasterEffects.append(masterEffects)
+        duringRender?()
         return renderOfflineStub
     }
 
@@ -382,5 +400,286 @@ struct RenderCommandTests {
         #expect(CommandRouter.allCommands.contains("render.measureLoudness"))
         #expect(CommandRouter.allCommands.contains("render.bounce"))
         #expect(CommandRouter.allCommands.contains("render.stems"))
+    }
+
+    // MARK: - m23-m1: includeMasteredMixdown
+
+    @Test("includeMasteredMixdown writes a SECOND file with the REAL master chain; stems stay chain-excluded")
+    func stemsMasteredSibling() async throws {
+        let engine = FakeRenderEngine()
+        let (router, store) = makeRouter(engine: engine)
+        _ = await router.handle(ControlRequest(
+            id: "a", command: "track.add", params: ["kind": .string("audio")]))
+        // A real, NONLINEAR master insert — the whole point of the sibling.
+        let saturator = try store.addMasterEffect(kind: .saturator)
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "render.stems",
+            params: ["durationSeconds": .number(1.0),
+                     "includeMixdown": .bool(true),
+                     "includeMasteredMixdown": .bool(true)]))
+        #expect(response.ok, "stems failed: \(response.error ?? "?")")
+        #expect(response.result?["mixdown"]?["path"]?.stringValue?
+            .hasSuffix("00 Mixdown.wav") == true)
+        #expect(response.result?["masteredMixdown"]?["path"]?.stringValue?
+            .hasSuffix("00 Mastered Mix.wav") == true)
+        // The mastered file carries a full BounceLoudnessReport, not a bare
+        // measurement — the same shape render.bounce returns.
+        #expect(response.result?["masteredMixdown"]?["report"]?["appliedGainDb"]?
+            .doubleValue == 0)
+        #expect(response.result?["masteredMixdown"]?["report"]?["input"]?["integratedLufs"]?
+            .doubleValue != nil)
+        // The stems' honesty string still describes the STEMS.
+        #expect(response.result?["masterChain"]?.stringValue == "excluded")
+        // 1 stem pass + 1 mixdown pass + 1 mastered pass, in that order — and
+        // ONLY the last one carries the master chain (S-3′: the chain is never
+        // printed onto the partition).
+        #expect(engine.renderOfflineCalls.count == 3)
+        #expect(engine.renderOfflineMasterEffects.count == 3)
+        #expect(engine.renderOfflineMasterEffects[0].isEmpty)
+        #expect(engine.renderOfflineMasterEffects[1].isEmpty)
+        #expect(engine.renderOfflineMasterEffects[2].map(\.id) == [saturator.id])
+        #expect(engine.writtenFiles.last?.lastPathComponent == "00 Mastered Mix.wav")
+    }
+
+    @Test("includeMasteredMixdown is INDEPENDENT of includeMixdown; omitted by default")
+    func stemsMasteredIsIndependent() async throws {
+        let engine = FakeRenderEngine()
+        let (router, _) = makeRouter(engine: engine)
+        _ = await router.handle(ControlRequest(
+            id: "a", command: "track.add", params: ["kind": .string("audio")]))
+
+        // Mastered WITHOUT the chain-excluded anchor.
+        let masteredOnly = await router.handle(ControlRequest(
+            id: "1", command: "render.stems",
+            params: ["durationSeconds": .number(1.0),
+                     "includeMasteredMixdown": .bool(true)]))
+        #expect(masteredOnly.ok, "stems failed: \(masteredOnly.error ?? "?")")
+        #expect(masteredOnly.result?["mixdown"] == nil)
+        #expect(masteredOnly.result?["masteredMixdown"]?["path"] != nil)
+
+        // Default: neither file, and the key is OMITTED (pre-m23-m1 shape).
+        let plain = await router.handle(ControlRequest(
+            id: "2", command: "render.stems", params: ["durationSeconds": .number(1.0)]))
+        #expect(plain.ok, "stems failed: \(plain.error ?? "?")")
+        #expect(plain.result?["mixdown"] == nil)
+        #expect(plain.result?["masteredMixdown"] == nil)
+    }
+
+    @Test("masteredLufsTarget normalizes the mastered file; ranges + orphan params are field-named")
+    func stemsMasteredNormalization() async throws {
+        let engine = FakeRenderEngine()   // stub ≈ -20 LUFS
+        let (router, _) = makeRouter(engine: engine)
+        _ = await router.handle(ControlRequest(
+            id: "a", command: "track.add", params: ["kind": .string("audio")]))
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "render.stems",
+            params: ["durationSeconds": .number(1.0),
+                     "includeMasteredMixdown": .bool(true),
+                     "masteredLufsTarget": .number(-14)]))
+        #expect(response.ok, "stems failed: \(response.error ?? "?")")
+        let report = try #require(response.result?["masteredMixdown"]?["report"])
+        let gain = try #require(report["appliedGainDb"]?.doubleValue)
+        #expect(abs(gain - 6) < 0.5, "gain ≈ +6 dB toward -14 from ≈-20 (got \(gain))")
+        #expect(report["lufsTarget"]?.doubleValue == -14)
+        let achieved = try #require(report["output"]?["integratedLufs"]?.doubleValue)
+        #expect(abs(achieved - (-14)) < 0.5)
+        // Stems themselves carry a bare measurement and were NOT normalized.
+        #expect(response.result?["stems"]?.arrayValue?[0]["measurement"]?["integratedLufs"]?
+            .doubleValue.map { abs($0 - (-20)) < 0.5 } == true)
+
+        for bad in [5.0, -80.0] {
+            let ranged = await router.handle(ControlRequest(
+                id: "2", command: "render.stems",
+                params: ["durationSeconds": .number(1.0),
+                         "includeMasteredMixdown": .bool(true),
+                         "masteredLufsTarget": .number(bad)]))
+            #expect(!ranged.ok)
+            #expect(ranged.error?.contains("'masteredLufsTarget' must be between -70 and 0") == true)
+        }
+        let badCeiling = await router.handle(ControlRequest(
+            id: "3", command: "render.stems",
+            params: ["durationSeconds": .number(1.0),
+                     "includeMasteredMixdown": .bool(true),
+                     "masteredTruePeakCeilingDb": .number(-25)]))
+        #expect(!badCeiling.ok)
+        #expect(badCeiling.error?
+            .contains("'masteredTruePeakCeilingDb' must be between -20 and 0") == true)
+
+        // A normalization param with no mastered file to normalize is an
+        // ERROR, never a silent no-op (stems are never normalized).
+        let orphan = await router.handle(ControlRequest(
+            id: "4", command: "render.stems",
+            params: ["durationSeconds": .number(1.0),
+                     "masteredLufsTarget": .number(-14)]))
+        #expect(!orphan.ok)
+        #expect(orphan.error?.contains("'masteredLufsTarget' applies to the mastered mix") == true)
+    }
+
+    // MARK: - m23-m1: excludeTrackIds
+
+    @Test("excludeTrackIds hands the engine a MUTED FULL-SIZE array while the store itself never moves")
+    func bounceExclusionIsRenderLocal() async throws {
+        let engine = FakeRenderEngine()
+        let (router, store) = makeRouter(engine: engine)
+        let vocal = await router.handle(ControlRequest(
+            id: "a", command: "track.add",
+            params: ["kind": .string("audio"), "name": .string("Vocal")]))
+        let vocalID = try #require(vocal.result?["id"]?.stringValue)
+        _ = await router.handle(ControlRequest(
+            id: "b", command: "track.add",
+            params: ["kind": .string("audio"), "name": .string("Keys")]))
+
+        // THE DISCRIMINATOR: read the live store from INSIDE the render. A
+        // mutate-render-restore implementation would show `isMuted` here; a
+        // before/after comparison alone could never tell the two apart.
+        // `track.add` already dirtied the project, so the honest assertion is
+        // "unchanged", not "false" (the clean-baseline case is covered over the
+        // wire by `exclusionNonMutationOverTheWire`).
+        let dirtyBefore = store.isDirty
+        var mutedInsideRender: [Bool] = []
+        var dirtyInsideRender: Bool?
+        engine.duringRender = { [weak store] in
+            mutedInsideRender = store?.tracks.map(\.isMuted) ?? []
+            dirtyInsideRender = store?.isDirty
+        }
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "render.bounce",
+            params: ["durationSeconds": .number(1.0),
+                     "excludeTrackIds": .array([.string(vocalID)])]))
+        #expect(response.ok, "bounce failed: \(response.error ?? "?")")
+        #expect(response.result?["excludedTracks"]?.arrayValue?
+            .compactMap(\.stringValue) == ["Vocal"])
+
+        // The array the ENGINE got: full size, full order, vocal gated.
+        let handed = try #require(engine.handedTracks.first)
+        #expect(handed.count == 2, "a mute-copy, never a subset render (PDC)")
+        #expect(handed.map(\.name) == ["Vocal", "Keys"])
+        #expect(handed[0].isMuted)
+        #expect(!handed[1].isMuted)
+
+        // The array the STORE had, at the same instant.
+        #expect(mutedInsideRender == [false, false],
+                "the project's own mute flags moved during the render")
+        #expect(dirtyInsideRender == dirtyBefore, "the dirty flag moved during the render")
+        #expect(store.tracks.allSatisfy { !$0.isMuted })
+        #expect(store.isDirty == dirtyBefore)
+    }
+
+    @Test("non-mutation holds OVER THE WIRE: project.snapshot is unchanged across an exclusion render")
+    func exclusionNonMutationOverTheWire() async throws {
+        let engine = FakeRenderEngine()
+        let (router, _) = makeRouter(engine: engine)
+        let vocal = await router.handle(ControlRequest(
+            id: "a", command: "track.add",
+            params: ["kind": .string("audio"), "name": .string("Vocal")]))
+        let vocalID = try #require(vocal.result?["id"]?.stringValue)
+        // Save so the project starts CLEAN — otherwise `isDirty` is already
+        // true and "unchanged" would be vacuous on that field.
+        let saveDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("daw-pro-exclusion-\(UUID().uuidString)")
+        let saved = await router.handle(ControlRequest(
+            id: "s", command: "project.save",
+            params: ["path": .string(saveDir.appendingPathComponent("p.dawproj").path)]))
+        #expect(saved.ok, "save failed: \(saved.error ?? "?")")
+
+        func snapshot() async throws -> JSONValue {
+            let response = await router.handle(ControlRequest(id: "snap", command: "project.snapshot"))
+            #expect(response.ok, "snapshot failed: \(response.error ?? "?")")
+            return try #require(response.result)
+        }
+
+        let before = try await snapshot()
+        #expect(before["isDirty"]?.boolValue == false)
+        #expect(before["tracks"]?.arrayValue?.allSatisfy { $0["isMuted"]?.boolValue == false } == true)
+
+        for command in ["render.bounce", "render.mixdown"] {
+            let response = await router.handle(ControlRequest(
+                id: "1", command: command,
+                params: ["durationSeconds": .number(1.0),
+                         "excludeTrackIds": .array([.string(vocalID)])]))
+            #expect(response.ok, "\(command) failed: \(response.error ?? "?")")
+            #expect(response.result?["excludedTracks"]?.arrayValue?
+                .compactMap(\.stringValue) == ["Vocal"])
+        }
+
+        let after = try await snapshot()
+        #expect(after["isDirty"]?.boolValue == false)
+        #expect(after["undoLabel"] == before["undoLabel"])
+        #expect(after["tracks"] == before["tracks"],
+                "an exclusion render changed the project's own tracks")
+    }
+
+    @Test("excludeTrackIds is omitted from responses that did not ask for it")
+    func exclusionEchoIsOmittedByDefault() async throws {
+        let engine = FakeRenderEngine()
+        let (router, _) = makeRouter(engine: engine)
+        _ = await router.handle(ControlRequest(
+            id: "a", command: "track.add", params: ["kind": .string("audio")]))
+        for command in ["render.bounce", "render.mixdown"] {
+            let response = await router.handle(ControlRequest(
+                id: "1", command: command, params: ["durationSeconds": .number(1.0)]))
+            #expect(response.ok, "\(command) failed: \(response.error ?? "?")")
+            #expect(response.result?["excludedTracks"] == nil,
+                    "\(command) grew a key on the default path")
+        }
+    }
+
+    @Test("excludeTrackIds validation is field-named, per-index, and rejects unknown ids before rendering")
+    func exclusionValidation() async throws {
+        let engine = FakeRenderEngine()
+        let (router, _) = makeRouter(engine: engine)
+        _ = await router.handle(ControlRequest(
+            id: "a", command: "track.add", params: ["kind": .string("audio")]))
+
+        for command in ["render.bounce", "render.mixdown"] {
+            let badElement = await router.handle(ControlRequest(
+                id: "1", command: command,
+                params: ["durationSeconds": .number(1.0),
+                         "excludeTrackIds": .array([.string("not-a-uuid")])]))
+            #expect(!badElement.ok)
+            // Names the field the caller actually sent — never `trackIds`.
+            #expect(badElement.error == "excludeTrackIds[0] is not a valid UUID")
+
+            let notArray = await router.handle(ControlRequest(
+                id: "2", command: command,
+                params: ["durationSeconds": .number(1.0),
+                         "excludeTrackIds": .string("nope")]))
+            #expect(!notArray.ok)
+            #expect(notArray.error == "'excludeTrackIds' must be an array of track id strings")
+
+            let stray = UUID()
+            let unknown = await router.handle(ControlRequest(
+                id: "3", command: command,
+                params: ["durationSeconds": .number(1.0),
+                         "excludeTrackIds": .array([.string(stray.uuidString)])]))
+            #expect(!unknown.ok)
+            // `ProjectError.trackNotFound` verbatim — the same rejection
+            // `trackIds` gives everywhere else.
+            #expect(unknown.error == "No track with id \(stray.uuidString).")
+        }
+        #expect(engine.renderOfflineCalls.isEmpty, "invalid params never reach the engine")
+        #expect(engine.handedTracks.isEmpty, "invalid params never reach the engine")
+    }
+
+    @Test("render.stems does NOT accept excludeTrackIds (the partition is expressed by trackIds)")
+    func stemsRejectsExclusion() async throws {
+        let engine = FakeRenderEngine()
+        let (router, _) = makeRouter(engine: engine)
+        _ = await router.handle(ControlRequest(
+            id: "a", command: "track.add", params: ["kind": .string("audio")]))
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "render.stems",
+            params: ["durationSeconds": .number(1.0),
+                     "excludeTrackIds": .array([.string(UUID().uuidString)])]))
+        #expect(!response.ok)
+        #expect(response.error?.contains("excludeTrackIds") == true)
+    }
+
+    @Test("the wire surface is unmoved: m23-m1 added PARAMS, not verbs")
+    func wireCountUnmoved() {
+        #expect(CommandRouter.allCommands.count == 158)   // 156 -> 158 at m23-k4a
     }
 }

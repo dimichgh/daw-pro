@@ -157,11 +157,14 @@ struct ClipFitToContentCommandTests {
     func advertisedAtEnd() {
         #expect(CommandRouter.allCommands.contains("clip.fitToContent"))
         // m21-e's clip.analyzeAudio, then m22-c's mixer.liveLoudness, then
-        // m22-g's reference.* quartets (P1 four + P2 four) appended after it
-        // — clip.fitToContent is no longer LAST, but the additive-at-end law
-        // held at ITS landing; count moved 142 -> 143 -> 144 -> 148 -> 152.
-        #expect(CommandRouter.allCommands.last == "reference.compare")
-        #expect(CommandRouter.allCommands.count == 152)
+        // m22-g's reference.* quartets (P1 four + P2 four), then m23-d's
+        // note.audition, then m23-h's track.reorder appended after it —
+        // clip.fitToContent is no longer LAST, but the additive-at-end law held
+        // at ITS landing; count moved 142 -> 143 -> 144 -> 148 -> 152 -> 153
+        // -> 154.
+        // …and m23-k4a's export pair after that; count 156 -> 158.
+        #expect(CommandRouter.allCommands.last == "track.exportMIDI")
+        #expect(CommandRouter.allCommands.count == 158)
         // The verb is additive: its clip.* neighbors are untouched.
         #expect(CommandRouter.allCommands.contains("clip.trim"))
         #expect(CommandRouter.allCommands.contains("clip.split"))

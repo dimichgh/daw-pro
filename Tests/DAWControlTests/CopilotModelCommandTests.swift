@@ -45,7 +45,7 @@ struct CopilotModelCommandTests {
         #expect(response.ok)
         #expect(response.result?["model"]?.stringValue == "claude-sonnet-5")
         let catalog = try #require(response.result?["catalog"]?.arrayValue)
-        #expect(catalog.count == 6)
+        #expect(catalog.count == 7)
         let ids = catalog.compactMap { $0["id"]?.stringValue }
         #expect(Set(ids) == Set(AnthropicModelCatalog.curated.map(\.id)))
         // Every entry carries a non-empty name/note (never falls back to the

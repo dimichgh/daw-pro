@@ -303,6 +303,21 @@ public final class CommandRouter {
         "reference.setOffset",
         "reference.setTrim",
         "reference.compare",
+        // m23-d: note audition — sound notes NOW on an instrument track,
+        // outside the timeline. Additive at the END (the additive-at-end law).
+        "note.audition",
+        // m23-h: the ONE track-ordering verb (arrange headers drag onto it;
+        // the mixer follows in m23-z). Additive at the END (the same law).
+        "track.reorder",
+        // m23-k3: Standard MIDI File import. Both APPENDED AT THE END (the
+        // additive-at-end law) — no live command renamed or reordered.
+        "project.importMIDI",
+        "clip.importMIDI",
+        // m23-k4a: Standard MIDI File export. Both APPENDED AT THE END (the
+        // additive-at-end law) — no live command renamed or reordered, so
+        // HEAD's list stays an exact PREFIX of this one.
+        "project.exportMIDI",
+        "track.exportMIDI",
     ]
 
     public init(
@@ -599,6 +614,32 @@ public final class CommandRouter {
             guard store.renameTrack(id: id, name: name) else { throw ControlError.noTrack(id) }
             return .success(request.id)
 
+        case "track.reorder":
+            // params: trackId (required), index (required int). m23-h.
+            //
+            // `index` is the FINAL index the track lands at — the `fx.reorder`
+            // convention verb for verb, so the program has ONE reorder
+            // semantics: it clamps into 0 ..< trackCount and the track ends up
+            // AT that index in BOTH directions. (NOT SwiftUI's `onMove`
+            // pre-removal offset, where a down-by-one would be `from + 2`.)
+            // trackNotFound surfaces via the LocalizedError mapping.
+            //
+            // The result echoes GROUND TRUTH read back off the store: the index
+            // the track actually landed at, plus the whole resulting order, so a
+            // caller never has to re-derive it from its own request.
+            try params.rejectUnknownKeys(
+                ["trackId", "index"], verb: "track.reorder",
+                hint: "'index' is the FINAL position the track lands at "
+                    + "(0 = top), clamped into range")
+            let reorderTrackID = try params.requireTrackID()
+            let reorderIndex = try params.require("index", \.doubleValue)
+            let reorderLanded = try store.reorderTrack(
+                id: reorderTrackID, toIndex: Int(reorderIndex))
+            return .success(request.id, .object([
+                "index": .number(Double(reorderLanded)),
+                "order": .array(store.tracks.map { .string($0.id.uuidString) }),
+            ]))
+
         case "track.setVolume":
             try params.rejectUnknownKeys(
                 ["trackId", "volume"], verb: "track.setVolume")
@@ -888,6 +929,226 @@ public final class CommandRouter {
             return .success(request.id, .object([
                 "report": try JSONValue(encoding: sampleLibReport),
                 "applied": .bool(!sampleLibDryRun),
+            ]))
+
+        case "project.importMIDI":
+            // params: path (required, absolute or ~-prefixed; .mid/.midi),
+            // atBeat? (default 0, clamped >= 0 — the TIMELINE beat that file
+            // tick 0 lands on; every created clip starts there and notes stay
+            // clip-relative), tempoPolicy? ("auto" default | "adopt" |
+            // "ignore"), instruments? ("none" default | "gm"), parts? (array of
+            // ints indexing the report's `parts` array — which lists EVERY part,
+            // including skipped ones, so an index means the same thing in a dry
+            // run and a real one; omit for all), dryRun? (default false: full
+            // report, project untouched, no undo entry), force? (default false:
+            // overrides the 32-track refusal). m23-k3.
+            //
+            // Imports a Standard MIDI File as new instrument tracks + one MIDI
+            // clip each. ONE journaled "Import MIDI File" edit — tempo/meter
+            // adoption folds into it, so a single edit.undo restores the tempo
+            // AND removes every track.
+            //
+            // tempoPolicy: "auto" adopts the file's tempo/meter maps only when
+            // the project has no clips yet (so the first import sets the grid
+            // and a later one never silently moves everything); "adopt" always
+            // replaces them; "ignore" never does. The notes land on the SAME
+            // beats either way — a MIDI file's beats come from its ticks, not
+            // from its tempo. "ask" is deliberately not a value: a UI dialog
+            // chooses between "adopt" and "ignore", it is not a third policy.
+            // "adopt" with a non-zero atBeat is a refusal (the maps are
+            // absolute, so there is no honest offset adoption).
+            //
+            // instruments: "gm" assigns General MIDI sound-bank programs from
+            // the file's program changes (channel 10 = the standard drum kit);
+            // "none" (the default) leaves the tracks on the default instrument.
+            // The program each part ASKS for is reported either way.
+            //
+            // The recommended agent workflow is dryRun: true first — read the
+            // report's `parts` array and the resolved tempo policy, then call
+            // again for real with `parts` narrowed. Every fidelity loss is
+            // REPORTED (clamped tempos, dropped meter changes, controller-lane
+            // caps, dropped release velocities…), never silently applied.
+            // Response {report: <MIDIImportReport as JSON>, applied: bool}.
+            // Errors via the LocalizedError mapping: wrong extension, missing
+            // file, any SMF decode error verbatim, recording (transportBusy),
+            // "adopt" + atBeat, the 32-track limit (names force), and a file
+            // whose import would do literally nothing.
+            // TODO(m23-k3, mcp): expose this as the MCP tool `project_import_midi`
+            // in mcp-server/src/server.ts — snake_case mirror, NO `daw_` prefix, so
+            // the `audit-tools` command↔tool bijection stays green (157 -> 159).
+            // The description must name the tempoPolicy values AND the
+            // dryRun -> parts workflow: an agent that cannot discover `parts`
+            // will import 64 tracks.
+            try params.rejectUnknownKeys(
+                ["path", "atBeat", "tempoPolicy", "instruments", "parts", "dryRun", "force"],
+                verb: "project.importMIDI",
+                hint: "run with dryRun: true first to see the file's parts, then "
+                    + "narrow with 'parts'")
+            let midiImportPath = try params.requireAbsolutePath("path")
+            let midiImportAtBeat = params["atBeat"]?.doubleValue ?? 0
+            let midiImportPolicy = try Self.parseMIDITempoPolicy(params["tempoPolicy"])
+            let midiImportInstruments = try Self.parseMIDIImportInstruments(params["instruments"])
+            let midiImportParts = try Self.parseMIDIPartIndices(params["parts"])
+            let midiImportDryRun = params["dryRun"]?.boolValue ?? false
+            let midiImportForce = params["force"]?.boolValue ?? false
+            let midiImportReport = try store.importMIDIFile(
+                path: midiImportPath, atBeat: midiImportAtBeat,
+                tempoPolicy: midiImportPolicy, instruments: midiImportInstruments,
+                parts: midiImportParts, dryRun: midiImportDryRun, force: midiImportForce)
+            return .success(request.id, .object([
+                "report": try JSONValue(encoding: midiImportReport),
+                "applied": .bool(!midiImportDryRun),
+            ]))
+
+        case "clip.importMIDI":
+            // params: clipId (required, an existing MIDI clip), path (required,
+            // absolute or ~-prefixed), part? (int indexing the report's `parts`
+            // array; default = the lowest-indexed part with notes, else the
+            // lowest with controller data), atBeat? (default 0 — a CLIP-RELATIVE
+            // offset for the imported content, NOT a timeline beat), dryRun?
+            // (default false). m23-k3.
+            //
+            // Replaces the clip's notes AND controller lanes wholesale with the
+            // selected part's content (the clip.setNotes whole-array shape). ONE
+            // journaled "Import MIDI into Clip" edit.
+            //
+            // Deliberately narrow, in two ways worth knowing before you call it:
+            // it NEVER touches the project's tempo or time signature (that is
+            // project.importMIDI's job — a clip-level import must not move the
+            // grid, so there is no tempoPolicy param), and it NEVER changes the
+            // clip's length. Content past the clip end is imported and reported
+            // as notesPastClipEnd / controllerPointsPastClipEnd; compose with
+            // clip.fitToContent to grow the clip.
+            // Response {report: <MIDIImportReport as JSON>, applied: bool}.
+            // Errors: clipNotFound, notAMIDIClip, a comp member (flatten
+            // first), wrong extension, missing file, SMF decode errors verbatim,
+            // recording, an out-of-range part, and a part with no content.
+            // TODO(m23-k3, mcp): expose this as the MCP tool `clip_import_midi`
+            // in mcp-server/src/server.ts — snake_case mirror, NO `daw_` prefix
+            // (the `audit-tools` bijection). The description must say that
+            // `atBeat` is CLIP-relative here, or an agent will pass a timeline
+            // beat and wonder where its notes went.
+            try params.rejectUnknownKeys(
+                ["clipId", "path", "part", "atBeat", "dryRun"],
+                verb: "clip.importMIDI",
+                hint: "'atBeat' here is an offset INSIDE the clip; use "
+                    + "project.importMIDI to place content on the timeline")
+            let clipMIDIClipID = try params.requireClipID()
+            let clipMIDIPath = try params.requireAbsolutePath("path")
+            let clipMIDIPart = params["part"]?.doubleValue.map { Int($0) }
+            let clipMIDIAtBeat = params["atBeat"]?.doubleValue ?? 0
+            let clipMIDIDryRun = params["dryRun"]?.boolValue ?? false
+            let clipMIDIReport = try store.importMIDIIntoClip(
+                clipID: clipMIDIClipID, path: clipMIDIPath, part: clipMIDIPart,
+                atBeat: clipMIDIAtBeat, dryRun: clipMIDIDryRun)
+            return .success(request.id, .object([
+                "report": try JSONValue(encoding: clipMIDIReport),
+                "applied": .bool(!clipMIDIDryRun),
+            ]))
+
+        case "project.exportMIDI":
+            // params: path? (absolute or ~-prefixed; ".mid" appended unless the
+            // path already ends in .mid/.midi; parents created; an existing file
+            // is OVERWRITTEN; omit for a unique file under the temp directory),
+            // trackIds? (array of track id strings; omit for every track — the
+            // selection is always written in PROJECT order), division? (ticks
+            // per quarter note, 1…32767, default 9600), format? (1 default | 0),
+            // dryRun? (default false: full report, nothing written). m23-k4a.
+            //
+            // Writes the project out as a Standard MIDI File. It SERIALISES the
+            // model; it does not RENDER it — which is why it is project.* and
+            // not render.* (every render.* command runs the audio engine
+            // offline; this one never touches it, opens no edit, and leaves no
+            // undo entry). Two consequences an agent must know before calling:
+            // MUTED AND SOLOED TRACKS ARE BOTH EXPORTED (pass trackIds for the
+            // audible subset — do not re-implement mute filtering client-side),
+            // and notes past a clip's end are exported at their authored
+            // positions. Both are reported, neither is honoured.
+            //
+            // division defaults to 9600 because it is DERIVED, not conventional:
+            // it is the smallest division that is exact for every dyadic
+            // subdivision to 1/128 beat, every triplet and quintuplet, every
+            // swing preset DAW Pro's own quantizer produces, and content native
+            // to every common source division up to 960 — so a file imported
+            // with project.importMIDI re-exports bit-exactly. 480 and 960 lose
+            // swing. Set 480 if a receiving program insists on the industry
+            // header; anything that then quantizes is named in the report.
+            //
+            // KNOWN GAP, stated rather than smuggled: the exported bytes carry
+            // NO program-change events, so a receiving program uses its own
+            // default sound per part. The GM instrument each track asks for is
+            // in the report's per-track `program`/`programName`, and the count
+            // rides `programChangesNotWritten`.
+            // Response {report: <MIDIExportReport as JSON>, written: bool}.
+            // Errors: a non-absolute path, division/format out of contract
+            // range, an unknown trackId, a project with no instrument track at
+            // all, content past the tick ceiling (names a smaller division), a
+            // failed write, and any SMF encode error verbatim.
+            // TODO(m23-k4a, mcp): expose this as the MCP tool
+            // `project_export_midi` in mcp-server/src/server.ts — snake_case
+            // mirror, NO `daw_` prefix, so the `audit-tools` command↔tool
+            // bijection stays green (159 -> 161). The description MUST name the
+            // 9600 default and why, the dryRun workflow, and the fact that muted
+            // tracks are exported — an agent that does not know the last one
+            // will re-implement mute filtering client-side.
+            try params.rejectUnknownKeys(
+                ["path", "trackIds", "division", "format", "dryRun"],
+                verb: "project.exportMIDI",
+                hint: "run with dryRun: true first to see the per-track ledger and "
+                    + "every fidelity loss before anything is written")
+            let midiExportPath = try Self.parseOptionalAbsolutePath(params["path"],
+                                                                    key: "path")
+            let midiExportTrackIDs = try parseOptionalTrackIDs(params["trackIds"])
+            let midiExportDivision = try Self.parseMIDIExportDivision(params["division"])
+            let midiExportFormat = try Self.parseMIDIExportFormat(params["format"])
+            let midiExportDryRun = params["dryRun"]?.boolValue ?? false
+            let midiExportReport = try store.exportMIDIFile(
+                path: midiExportPath, trackIDs: midiExportTrackIDs,
+                ticksPerQuarterNote: midiExportDivision, format: midiExportFormat,
+                dryRun: midiExportDryRun)
+            return .success(request.id, .object([
+                "report": try JSONValue(encoding: midiExportReport),
+                "written": .bool(midiExportReport.written),
+            ]))
+
+        case "track.exportMIDI":
+            // params: trackId (required — an INSTRUMENT track), path?,
+            // division?, format?, dryRun? — all exactly as project.exportMIDI.
+            // m23-k4a.
+            //
+            // Identical file shape to project.exportMIDI with trackIds: [that
+            // one]: a conductor chunk carrying the project name and the whole
+            // tempo/meter map, plus one track chunk. The two verbs differ only
+            // in selection.
+            //
+            // Unlike the project verb, this one REFUSES an audio or bus track
+            // instead of skipping it — naming a track that cannot carry MIDI in
+            // an explicit single-track request is a mistake worth saying out
+            // loud, and the alternative is writing a file with no notes in it.
+            // Response {report: <MIDIExportReport as JSON>, written: bool}.
+            // TODO(m23-k4a, mcp): expose this as the MCP tool `track_export_midi`
+            // in mcp-server/src/server.ts — snake_case mirror, NO `daw_` prefix
+            // (the `audit-tools` bijection). The description must say that the
+            // file still carries the project's tempo and meter map, or an agent
+            // will assume a single-track export is grid-less.
+            try params.rejectUnknownKeys(
+                ["trackId", "path", "division", "format", "dryRun"],
+                verb: "track.exportMIDI",
+                hint: "use project.exportMIDI with 'trackIds' to export several "
+                    + "tracks into one file")
+            let trackExportID = try params.requireTrackID()
+            let trackExportPath = try Self.parseOptionalAbsolutePath(params["path"],
+                                                                     key: "path")
+            let trackExportDivision = try Self.parseMIDIExportDivision(params["division"])
+            let trackExportFormat = try Self.parseMIDIExportFormat(params["format"])
+            let trackExportDryRun = params["dryRun"]?.boolValue ?? false
+            let trackExportReport = try store.exportTrackMIDIFile(
+                trackID: trackExportID, path: trackExportPath,
+                ticksPerQuarterNote: trackExportDivision, format: trackExportFormat,
+                dryRun: trackExportDryRun)
+            return .success(request.id, .object([
+                "report": try JSONValue(encoding: trackExportReport),
+                "written": .bool(trackExportReport.written),
             ]))
 
         case "fx.add":
@@ -2420,10 +2681,40 @@ public final class CommandRouter {
             // render.bounce / render.measureLoudness / render.stems default to
             // (was an audio-only extent + 0.5 s tail, which falsely refused
             // MIDI-only songs). No clips past fromBeat → nothingToRender,
-            // surfaced verbatim. Response: {path, durationSeconds, sampleRate,
-            // channels}.
+            // surfaced verbatim. excludeTrackIds? (m23-m1) renders the full
+            // session with those tracks SILENCED for this render only — the
+            // instrumental/minus-vocal path — WITHOUT touching the project's
+            // own mute flags, dirty flag or undo stack (that non-mutation is
+            // the whole reason the param exists instead of "mute it by hand,
+            // bounce, un-mute"). An excluded track takes its SENDS with it —
+            // its reverb/delay tail leaves too, which is what makes the result
+            // a genuinely clean instrumental and equally means this param
+            // CANNOT express "instrumental but keep the vocal's reverb" — and
+            // it takes its sidechain key contribution with it, so a ducker
+            // keyed off an excluded vocal stops ducking. Its solo flag leaves
+            // with it too, so excluding the only soloed track yields the
+            // instrumental rather than silence. An unknown id rejects
+            // trackNotFound before anything renders; the render LENGTH still
+            // comes from the whole session. Response: {path, durationSeconds,
+            // sampleRate, channels, excludedTracks?, bitDepth?, container?,
+            // ditherApplied?}.
+            // bitDepth? / container? (m23-m2) pick the OUTPUT FORMAT: bitDepth
+            // 16 | 24 | 32 (integer PCM) — omit for the 32-bit FLOAT default,
+            // which is lossless and preserves > 0 dBFS peaks; container "wav" |
+            // "aiff" — omit for "wav". The FILE EXTENSION is load-bearing (it is
+            // what selects the container), so `path`'s extension is made to
+            // agree with `container` and the returned `path` is where the file
+            // actually landed. Integer depths CLAMP at full scale while the
+            // response's loudness numbers describe the pre-quantization buffer,
+            // so a > 0 dBFS render written at 16-bit is clipped on disk and the
+            // report will not say so — normalize it or keep the default.
+            // Quantization is undithered in v0 and says so (ditherApplied
+            // false). Echo fields are OMITTED when they are the default, so
+            // pre-m23-m2 responses are byte-identical.
             try params.rejectUnknownKeys(
-                ["path", "fromBeat", "durationSeconds"], verb: "render.mixdown")
+                ["path", "fromBeat", "durationSeconds", "excludeTrackIds",
+                    "bitDepth", "container"],
+                verb: "render.mixdown")
             let path = params["path"]?.stringValue
             let fromBeat = params["fromBeat"]?.doubleValue ?? 0
             guard fromBeat >= 0 else {
@@ -2433,8 +2724,13 @@ public final class CommandRouter {
             if let durationSeconds, durationSeconds <= 0 {
                 throw ControlError("'durationSeconds' must be > 0")
             }
+            let mixdownExcludeIDs = try parseOptionalTrackIDs(
+                params["excludeTrackIds"], field: "excludeTrackIds")
+            let mixdownFormat = try parseOutputFormat(params)
             let result = try await store.renderMixdown(
-                toPath: path, fromBeat: fromBeat, durationSeconds: durationSeconds
+                toPath: path, fromBeat: fromBeat, durationSeconds: durationSeconds,
+                excludeTrackIds: mixdownExcludeIDs,
+                bitDepth: mixdownFormat.bitDepth, container: mixdownFormat.container
             )
             return .success(request.id, try JSONValue(encoding: result))
 
@@ -2480,13 +2776,45 @@ public final class CommandRouter {
             // re-bounce to close the gap). Output is RE-MEASURED from the gained
             // buffer, never derived. bounceSilent (gated-silent program + a
             // requested target)/nothingToRender surface via the LocalizedError
-            // mapping. Response: the model's own BounceResult Codable —
-            // {path, durationSeconds, sampleRate, channels, report: {input,
-            // output, appliedGainDb, lufsTarget?, truePeakCeilingDbtp,
-            // limitedByCeiling}}.
+            // mapping. excludeTrackIds? (m23-m1) renders the full session with
+            // those tracks SILENCED for this render only — the
+            // instrumental/minus-vocal path — WITHOUT touching the project's
+            // own mute flags, dirty flag or undo stack (that non-mutation is
+            // the whole reason the param exists instead of "mute it by hand,
+            // bounce, un-mute"). An excluded track takes its SENDS with it —
+            // its reverb/delay tail leaves too, which is what makes the result
+            // a genuinely clean instrumental and equally means this param
+            // CANNOT express "instrumental but keep the vocal's reverb" — and
+            // it takes its sidechain key contribution with it, so a ducker
+            // keyed off an excluded vocal stops ducking. Its solo flag leaves
+            // with it too, so excluding the only soloed track yields the
+            // instrumental rather than silence. An unknown id rejects
+            // trackNotFound before anything renders; the render LENGTH still
+            // comes from the whole session, so an instrumental is exactly as
+            // long as the mix. Loudness normalization measures the EXCLUDED
+            // render, so an instrumental normalized to -14 LUFS is -14 on its
+            // own program, not on the full mix's. Response: the model's own
+            // BounceResult Codable — {path, durationSeconds, sampleRate,
+            // channels, report: {input, output, appliedGainDb, lufsTarget?,
+            // truePeakCeilingDbtp, limitedByCeiling}, excludedTracks?,
+            // bitDepth?, container?, ditherApplied?}.
+            // bitDepth? / container? (m23-m2) pick the OUTPUT FORMAT: bitDepth
+            // 16 | 24 | 32 (integer PCM) — omit for the 32-bit FLOAT default,
+            // which is lossless and preserves > 0 dBFS peaks; container "wav" |
+            // "aiff" — omit for "wav". The FILE EXTENSION is load-bearing (it is
+            // what selects the container), so `path`'s extension is made to
+            // agree with `container` and the returned `path` is where the file
+            // actually landed. Integer depths CLAMP at full scale while the
+            // response's loudness numbers describe the pre-quantization buffer,
+            // so a > 0 dBFS render written at 16-bit is clipped on disk and the
+            // report will not say so — normalize it or keep the default.
+            // Quantization is undithered in v0 and says so (ditherApplied
+            // false). Echo fields are OMITTED when they are the default, so
+            // pre-m23-m2 responses are byte-identical.
             try params.rejectUnknownKeys(
                 ["path", "fromBeat", "durationSeconds", "lufsTarget",
-                    "truePeakCeilingDb"], verb: "render.bounce")
+                    "truePeakCeilingDb", "excludeTrackIds",
+                    "bitDepth", "container"], verb: "render.bounce")
             let bouncePath = params["path"]?.stringValue
             let bounceFromBeat = params["fromBeat"]?.doubleValue ?? 0
             guard bounceFromBeat >= 0 else {
@@ -2507,10 +2835,15 @@ public final class CommandRouter {
             guard (-20...0).contains(truePeakCeilingDb) else {
                 throw ControlError("'truePeakCeilingDb' must be between -20 and 0 dBTP (default -1.0)")
             }
+            let bounceExcludeIDs = try parseOptionalTrackIDs(
+                params["excludeTrackIds"], field: "excludeTrackIds")
+            let bounceFormat = try parseOutputFormat(params)
             let bounceResult = try await store.renderBounce(
                 toPath: bouncePath, fromBeat: bounceFromBeat,
                 durationSeconds: bounceDurationSeconds,
-                lufsTarget: lufsTarget, truePeakCeilingDb: truePeakCeilingDb)
+                lufsTarget: lufsTarget, truePeakCeilingDb: truePeakCeilingDb,
+                excludeTrackIds: bounceExcludeIDs,
+                bitDepth: bounceFormat.bitDepth, container: bounceFormat.container)
             return .success(request.id, try JSONValue(encoding: bounceResult))
 
         case "render.stems":
@@ -2529,14 +2862,49 @@ public final class CommandRouter {
             // stemNotMasterInput verbatim (its signal lives in the destination
             // bus's stem); an unknown id rejects trackNotFound; an empty
             // selection or a project with no clips in the window rejects
-            // nothingToRender — all via the LocalizedError mapping. Response:
+            // nothingToRender — all via the LocalizedError mapping.
+            // includeMasteredMixdown? (default false, m23-m1) adds a SECOND,
+            // independent file "00 Mastered Mix.wav" — the real MASTERED mix,
+            // rendered exactly the way render.bounce renders (full session,
+            // real master chain, real master automation lane, real master
+            // volume), optionally normalized via masteredLufsTarget
+            // (-70...0 LUFS) / masteredTruePeakCeilingDb (-20...0 dBTP,
+            // default -1.0) through the same gain-only policy render.bounce
+            // uses. It is a SIBLING of the stems, never a transformation of
+            // them: for a nonlinear master chain M, Σ M(sᵢ) ≠ M(Σ sᵢ), so
+            // printing the shared chain onto each stem would NOT add back up
+            // to this file (S-3′; research m23-l §4.3). Stems therefore stay
+            // chain-EXCLUDED and keep nulling against "00 Mixdown.wav" —
+            // includeMixdown and includeMasteredMixdown are INDEPENDENT flags
+            // for two different files with non-overlapping meanings, and both
+            // may be requested at once. The mastered pass runs LAST, so a
+            // masteredLufsTarget on a gated-silent program surfaces
+            // bounceSilent AFTER the stem files have already landed. Response:
             // the model's own StemExportResult Codable — {directory,
             // sampleRate, durationSeconds, channels, stems: [{trackId, name,
             // kind: "track"|"bus", path, measurement}], mixdown?: {path,
-            // measurement}}.
+            // measurement}, masterChain?, masteredMixdown?: {path, report},
+            // bitDepth?, container?, ditherApplied?}.
+            // bitDepth? / container? (m23-m2) pick the OUTPUT FORMAT: bitDepth
+            // 16 | 24 | 32 (integer PCM) — omit for the 32-bit FLOAT default,
+            // which is lossless and preserves > 0 dBFS peaks; container "wav" |
+            // "aiff" — omit for "wav". The FILE EXTENSION is load-bearing (it is
+            // what selects the container), so `path`'s extension is made to
+            // agree with `container` and the returned `path` is where the file
+            // actually landed. Integer depths CLAMP at full scale while the
+            // response's loudness numbers describe the pre-quantization buffer,
+            // so a > 0 dBFS render written at 16-bit is clipped on disk and the
+            // report will not say so — normalize it or keep the default.
+            // Quantization is undithered in v0 and says so (ditherApplied
+            // false). Echo fields are OMITTED when they are the default, so
+            // pre-m23-m2 responses are byte-identical.
+            // Every file of the set shares ONE format — they have to sum.
             try params.rejectUnknownKeys(
                 ["trackIds", "directory", "fromBeat", "durationSeconds",
-                    "includeMixdown"], verb: "render.stems")
+                    "includeMixdown", "includeMasteredMixdown",
+                    "masteredLufsTarget", "masteredTruePeakCeilingDb",
+                    "bitDepth", "container"],
+                verb: "render.stems")
             let stemsTrackIDs = try parseOptionalTrackIDs(params["trackIds"])
             let stemsDirectory = params["directory"]?.stringValue
             let stemsFromBeat = params["fromBeat"]?.doubleValue ?? 0
@@ -2548,10 +2916,44 @@ public final class CommandRouter {
                 throw ControlError("'durationSeconds' must be > 0")
             }
             let includeMixdown = params["includeMixdown"]?.boolValue ?? false
+            let includeMasteredMixdown = params["includeMasteredMixdown"]?.boolValue ?? false
+            let masteredLufsTarget = params["masteredLufsTarget"]?.doubleValue
+            if let masteredLufsTarget, !(-70...0).contains(masteredLufsTarget) {
+                throw ControlError(
+                    "'masteredLufsTarget' must be between -70 and 0 LUFS (-14 = streaming "
+                    + "convention, -23 = EBU R128 broadcast; omit for a measured, "
+                    + "un-normalized mastered mix)")
+            }
+            let masteredTruePeakCeilingDb =
+                params["masteredTruePeakCeilingDb"]?.doubleValue ?? -1.0
+            guard (-20...0).contains(masteredTruePeakCeilingDb) else {
+                throw ControlError(
+                    "'masteredTruePeakCeilingDb' must be between -20 and 0 dBTP (default -1.0)")
+            }
+            // A normalization param without the file it normalizes would do
+            // nothing, silently — reject it by name instead (the iv-d
+            // field-named contract). Stems themselves are NEVER normalized.
+            if !includeMasteredMixdown {
+                if params["masteredLufsTarget"] != nil {
+                    throw ControlError(
+                        "'masteredLufsTarget' applies to the mastered mix — pass "
+                        + "'includeMasteredMixdown': true (stems are never normalized)")
+                }
+                if params["masteredTruePeakCeilingDb"] != nil {
+                    throw ControlError(
+                        "'masteredTruePeakCeilingDb' applies to the mastered mix — pass "
+                        + "'includeMasteredMixdown': true (stems are never normalized)")
+                }
+            }
+            let stemsFormat = try parseOutputFormat(params)
             let stemsResult = try await store.renderStems(
                 toDirectory: stemsDirectory, trackIds: stemsTrackIDs,
                 fromBeat: stemsFromBeat, durationSeconds: stemsDurationSeconds,
-                includeMixdown: includeMixdown)
+                includeMixdown: includeMixdown,
+                includeMasteredMixdown: includeMasteredMixdown,
+                masteredLufsTarget: masteredLufsTarget,
+                masteredTruePeakCeilingDb: masteredTruePeakCeilingDb,
+                bitDepth: stemsFormat.bitDepth, container: stemsFormat.container)
             return .success(request.id, try JSONValue(encoding: stemsResult))
 
         case "ai.sidecarStatus":
@@ -3095,6 +3497,53 @@ public final class CommandRouter {
             return .success(request.id, .object([
                 "inputs": try JSONValue(encoding: store.listMIDIInputs()),
             ]))
+
+        case "note.audition":
+            // Sounds notes NOW on an instrument track, outside the timeline
+            // (m23-d). Not an edit: nothing is written to any clip. Works with
+            // the transport stopped AND while playing — scheduled notes keep
+            // sounding untouched, because audition rides its own per-renderer
+            // ring and its own overflow policy.
+            //
+            // Auto-releases after `durationMs` (an agent has no mouse-up), and
+            // the render side runs a 3 s liveness watchdog under that, so no
+            // call can leave a stuck note. There is deliberately NO
+            // `note.auditionStop` verb and no `pitch` singular alias.
+            try params.rejectUnknownKeys(
+                ["trackId", "pitches", "velocity", "durationMs"], verb: "note.audition",
+                hint: "'pitches' is an array of MIDI note numbers (1…8 of them, each 0…127)")
+            let auditionTrackID = try params.requireTrackID()
+            guard case .some(.array(let rawPitches)) = params["pitches"] else {
+                throw ControlError("'pitches' must be an array of MIDI note numbers (0…127)")
+            }
+            var auditionPitches: [Int] = []
+            for entry in rawPitches {
+                guard let number = entry.doubleValue, Self.isInteger(number) else {
+                    throw ControlError("every entry in 'pitches' must be an integer 0…127")
+                }
+                auditionPitches.append(Int(number))
+            }
+            let auditionVelocity = try Self.optionalInteger(params["velocity"], "'velocity'")
+                ?? AuditionController.defaultVelocity
+            let auditionDuration = try Self.optionalInteger(params["durationMs"], "'durationMs'")
+                ?? AuditionController.defaultDurationMs
+            let auditionResult = try store.auditionNote(
+                trackID: auditionTrackID, pitches: auditionPitches,
+                velocity: auditionVelocity, durationMs: auditionDuration)
+            var auditionPayload: [String: JSONValue] = [
+                "trackId": .string(auditionResult.trackID.uuidString),
+                "pitches": .array(auditionResult.pitches.map { .number(Double($0)) }),
+                "velocity": .number(Double(auditionResult.velocity)),
+                "durationMs": .number(Double(auditionResult.durationMs)),
+                "audible": .bool(auditionResult.isAudible),
+            ]
+            if let reason = Self.auditionReason(auditionResult.outcome) {
+                // A real answer, not an error: the notes WERE delivered in
+                // every inaudible* case — the strip is silent for a reason the
+                // caller can act on.
+                auditionPayload["reason"] = .string(reason)
+            }
+            return .success(request.id, .object(auditionPayload))
 
         case "project.snapshot":
             return .success(request.id, try snapshotJSON())
@@ -4228,6 +4677,108 @@ public final class CommandRouter {
         }
     }
 
+    // MARK: - MIDI file export parsing (m23-k4a)
+
+    /// An OPTIONAL path that must still be absolute when present. Absent is a
+    /// legitimate request ("put it wherever you put things"), which is why this
+    /// cannot reuse `requireAbsolutePath`, but a PRESENT relative path is a
+    /// mistake worth naming rather than resolving against whatever directory the
+    /// app happened to launch from.
+    private static func parseOptionalAbsolutePath(_ value: JSONValue?,
+                                                  key: String) throws -> String? {
+        guard let raw = value?.stringValue else { return nil }
+        let expanded = (raw as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else {
+            throw ControlError("'\(key)' must be an absolute path")
+        }
+        return expanded
+    }
+
+    /// Contract-range check on `division`, reading `MIDIExportOptions`' own
+    /// constants so this message and the store's guard can never disagree about
+    /// what is legal (the iv-d contract-range idiom). A clamp is deliberately
+    /// NOT used: silently exporting at 32767 when the caller asked for 100000
+    /// produces a file whose grid is not the one they asked for.
+    private static func parseMIDIExportDivision(_ value: JSONValue?) throws -> Int {
+        guard let raw = value?.doubleValue else {
+            return MIDIExportOptions.defaultTicksPerQuarterNote
+        }
+        let range = MIDIExportOptions.ticksPerQuarterNoteRange
+        let rounded = Int(raw.rounded())
+        guard Double(rounded) == raw, range.contains(rounded) else {
+            throw ControlError(
+                "'division' must be a whole number of ticks per quarter note between "
+                + "\(range.lowerBound) and \(range.upperBound) — got \(raw). The default "
+                + "\(MIDIExportOptions.defaultTicksPerQuarterNote) is exact for every grid "
+                + "DAW Pro can produce, including swing; 480 is the industry default and "
+                + "quantizes swung material.")
+        }
+        return rounded
+    }
+
+    private static func parseMIDIExportFormat(_ value: JSONValue?) throws -> Int {
+        guard let raw = value?.doubleValue else { return 1 }
+        let rounded = Int(raw.rounded())
+        guard Double(rounded) == raw,
+              MIDIExportOptions.legalFormatValues.contains(rounded) else {
+            throw ControlError(
+                "'format' must be 0 (everything merged into one track, which can carry "
+                + "only one track name) or 1 (one track per part, the default) — got \(raw)")
+        }
+        return rounded
+    }
+
+    // MARK: - MIDI file import parsing (m23-k3)
+
+    /// Parses `project.importMIDI`'s optional `tempoPolicy`. An unknown value is
+    /// a teaching error LISTING the legal ones — never a silent fallback to the
+    /// default, which is how an agent's typo becomes "why did my tempo change".
+    private static func parseMIDITempoPolicy(_ value: JSONValue?) throws -> MIDITempoPolicy {
+        guard let raw = value?.stringValue else { return .auto }
+        guard let policy = MIDITempoPolicy(rawValue: raw) else {
+            let legal = MIDITempoPolicy.allCases.map { "\"\($0.rawValue)\"" }
+                .joined(separator: ", ")
+            throw ControlError(
+                "'tempoPolicy' must be one of \(legal) — got \"\(raw)\". \"auto\" adopts the "
+                + "file's tempo map only when the project has no clips yet; there is no \"ask\" "
+                + "(a UI dialog chooses between \"adopt\" and \"ignore\")")
+        }
+        return policy
+    }
+
+    /// Parses `project.importMIDI`'s optional `instruments`, same rule.
+    private static func parseMIDIImportInstruments(_ value: JSONValue?) throws
+        -> MIDIImportInstruments {
+        guard let raw = value?.stringValue else { return .none }
+        guard let mode = MIDIImportInstruments(rawValue: raw) else {
+            let legal = MIDIImportInstruments.allCases.map { "\"\($0.rawValue)\"" }
+                .joined(separator: ", ")
+            throw ControlError(
+                "'instruments' must be one of \(legal) — got \"\(raw)\". \"gm\" assigns General "
+                + "MIDI sound-bank programs from the file's program changes; \"none\" leaves the "
+                + "new tracks on the default instrument")
+        }
+        return mode
+    }
+
+    /// Parses `project.importMIDI`'s optional `parts`. Absent ⇒ nil (import
+    /// every part). An EXPLICIT empty array selects nothing and is left to the
+    /// store's zero-effect refusal to explain — the plain reading of an explicit
+    /// list, and the only one that keeps `parts` idempotent.
+    private static func parseMIDIPartIndices(_ value: JSONValue?) throws -> [Int]? {
+        guard let value else { return nil }
+        guard let raw = value.arrayValue else {
+            throw ControlError(
+                "'parts' must be an array of part indices (run with dryRun: true to see them)")
+        }
+        return try raw.enumerated().map { index, entry in
+            guard let number = entry.doubleValue, number == number.rounded() else {
+                throw ControlError("parts[\(index)] must be a whole-number part index")
+            }
+            return Int(number)
+        }
+    }
+
     /// Resolves a `transport.seek {marker}` token to its beat (m11-c). The token
     /// is a marker id (UUID string) OR its EXACT name. An id wins when it parses
     /// and matches; otherwise an exact-name match is used, and a name shared by
@@ -4867,20 +5418,55 @@ public final class CommandRouter {
     /// (distinct from nil): the store's `StemPlan.descriptors` then selects
     /// zero stems and `renderStems` surfaces `nothingToRender`, the same
     /// single source of truth as a project with no clips.
-    private func parseOptionalTrackIDs(_ value: JSONValue?) throws -> [UUID]? {
+    /// `field` names the parameter in both error messages, defaulted so
+    /// `render.stems`' pinned wording is byte-identical; `render.bounce` /
+    /// `render.mixdown` pass "excludeTrackIds" (m23-m1) so a bad element names
+    /// the field the caller actually sent, never `trackIds`.
+    private func parseOptionalTrackIDs(_ value: JSONValue?,
+                                       field: String = "trackIds") throws -> [UUID]? {
         guard let value else { return nil }
         guard let array = value.arrayValue else {
-            throw ControlError("'trackIds' must be an array of track id strings")
+            throw ControlError("'\(field)' must be an array of track id strings")
         }
         var ids: [UUID] = []
         ids.reserveCapacity(array.count)
         for (i, element) in array.enumerated() {
             guard let raw = element.stringValue, let id = UUID(uuidString: raw) else {
-                throw ControlError("trackIds[\(i)] is not a valid UUID")
+                throw ControlError("\(field)[\(i)] is not a valid UUID")
             }
             ids.append(id)
         }
         return ids
+    }
+
+    /// Parses the optional `bitDepth` / `container` output-format params
+    /// (m23-m2), shared by `render.bounce` / `render.mixdown` / `render.stems`
+    /// so the three verbs can never diverge on what they accept.
+    ///
+    /// Only TYPE and presence are checked here; the VALUE contract (16/24/32,
+    /// wav/aiff) lives in `DeliveryFormat.resolve` — one home, so the store
+    /// API the export UI will drive rejects exactly what the wire rejects
+    /// instead of silently ignoring it. A present-but-wrong-typed value is
+    /// rejected BY NAME rather than parsed to nil: silently falling back to
+    /// Float32 WAV after being asked for 24-bit AIFF is the very defect class
+    /// this item closes.
+    private func parseOutputFormat(_ params: [String: JSONValue])
+        throws -> (bitDepth: Int?, container: String?) {
+        var bitDepth: Int?
+        if let raw = params["bitDepth"] {
+            guard let number = raw.doubleValue, number == number.rounded() else {
+                throw ControlError("'bitDepth' must be an integer — 16, 24 or 32")
+            }
+            bitDepth = Int(number)
+        }
+        var container: String?
+        if let raw = params["container"] {
+            guard let text = raw.stringValue else {
+                throw ControlError("'container' must be a string — 'wav' or 'aiff'")
+            }
+            container = text
+        }
+        return (bitDepth, container)
     }
 
     /// Parses the required `trackNames` param (`ai.extractStems`) into
@@ -5402,6 +5988,26 @@ public final class CommandRouter {
         )
     }
 
+    /// Wire wording for an inaudible audition (m23-d). The events were still
+    /// delivered — this names WHY the strip will be silent so an agent can fix
+    /// it (unmute, wait for the plugin, start the transport) instead of retrying
+    /// blindly. `.sounded` never reaches here.
+    /// `nil` for `.sounded` — an audible answer carries no reason. Note that
+    /// mute and solo-exclusion share one word here because they share one
+    /// outcome: `AuditionOutcome.inaudibleMuted` is deliberately the single
+    /// "the strip's fader is gated" case (design §7.1), so there is no separate
+    /// `soloExcluded` spelling to report.
+    private static func auditionReason(_ outcome: AuditionOutcome) -> String? {
+        switch outcome {
+        case .sounded: return nil
+        case .inaudibleMuted: return "trackMuted"
+        case .inaudibleNotReady: return "instrumentNotReady"
+        case .inaudibleEngineStopped: return "engineStopped"
+        case .noRenderer: return "engineRebuilding"
+        case .unsupported: return "engineStopped"
+        }
+    }
+
     /// An optional integer pitch field: absent → nil; present-but-not-a-whole-
     /// number → a field-path error. Range is left to the model's clamping init.
     private static func optionalPitch(_ value: JSONValue?, _ field: String) throws -> Int? {
@@ -5912,6 +6518,18 @@ extension [String: JSONValue] {
             throw ControlError("'trackId' is not a valid UUID: \(raw)")
         }
         return .track(id)
+    }
+
+    /// A required filesystem path param: `~`-expanded, and refused unless it is
+    /// absolute. The message is the one every path-taking verb already gives
+    /// (`instrument.importSoundBank`, `instrument.importSampleLibrary`), lifted
+    /// here so the two MIDI-import verbs cannot drift from it.
+    func requireAbsolutePath(_ key: String) throws -> String {
+        let expanded = (try require(key, \.stringValue) as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else {
+            throw ControlError("'\(key)' must be an absolute path")
+        }
+        return expanded
     }
 
     func requireClipID() throws -> UUID {

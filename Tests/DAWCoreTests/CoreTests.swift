@@ -512,6 +512,27 @@ final class FakeEngine: AudioEngineControlling {
     func stopRecording() {
         calls.append(.stopRecording)
     }
+
+    /// Note-audition spy (m23-d): every `setAuditionPitches` intent in order —
+    /// including the heartbeat re-asserts, whose pitch set is unchanged. The
+    /// stub lets a test drive the `noRenderer` / `inaudible*` branches.
+    private(set) var auditionCalls: [(trackID: UUID, pitches: [UInt8], velocity: UInt8)] = []
+    private(set) var stopAllAuditionCount = 0
+    var auditionOutcomeStub: AuditionOutcome = .sounded
+
+    func setAuditionPitches(trackID: UUID, pitches: [UInt8], velocity: UInt8) -> AuditionOutcome {
+        auditionCalls.append((trackID, pitches, velocity))
+        return pitches.isEmpty ? .sounded : auditionOutcomeStub
+    }
+
+    func stopAllAudition() {
+        stopAllAuditionCount += 1
+    }
+
+    func clearAuditionCalls() {
+        auditionCalls.removeAll()
+        stopAllAuditionCount = 0
+    }
 }
 
 @MainActor

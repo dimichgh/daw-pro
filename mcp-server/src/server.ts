@@ -589,6 +589,41 @@ registerTool(
 );
 
 registerTool(
+  "track_reorder",
+  {
+    title: "Move a track up or down the track list",
+    description:
+      "Move a track to a different position in the track list — how you group " +
+      "a session (all the drums together, the vocals under them) instead of " +
+      "leaving tracks in whatever order they were created. `index` is the " +
+      "FINAL position the track ends up at, counting from 0 at the TOP: with " +
+      "tracks [Kick, Snare, Bass, Vox], moving Kick to index 2 gives [Snare, " +
+      "Bass, Kick, Vox] (this is NOT an \"insert before\" offset — ask for the " +
+      "slot you want the track to occupy afterwards). Out-of-range values " +
+      "clamp: a huge index means \"last\", a negative one means \"first\". " +
+      "Moving a track to the position it already holds changes nothing and " +
+      "adds no undo step. Track order is organizational only: it never changes " +
+      "what anything sounds like and never touches routing, sends, effects, " +
+      "clips or automation — and because it cannot reach the audio graph, it " +
+      "is allowed even while recording. One undoable step (edit_undo). " +
+      "Returns {index, order} — the index the track landed at, and the ids of " +
+      "every track in the resulting order.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the track to move, from project_snapshot."),
+      index: z
+        .number()
+        .int()
+        .describe(
+          "The FINAL position the track should end up at, 0 = top of the list. " +
+            "Out-of-range values clamp to the first/last slot."
+        ),
+    },
+  },
+  async ({ trackId, index }: { trackId: string; index: number }) =>
+    toToolResult(() => bridge.send("track.reorder", { trackId, index }))
+);
+
+registerTool(
   "track_set_volume",
   {
     title: "Set track volume",
@@ -1393,6 +1428,77 @@ server.registerTool(
       "input to work.",
   },
   async () => toToolResult(() => bridge.send("midi.listInputs"))
+);
+
+registerTool(
+  "note_audition",
+  {
+    title: "Sound notes now (preview, not an edit)",
+    description:
+      "Sound notes RIGHT NOW on an instrument track so the user can hear a " +
+      "pitch, a chord voicing, or how a patch responds. This is a PREVIEW, " +
+      "not an edit: nothing is written to any clip, nothing is recorded, and " +
+      "the notes release themselves after `durationMs` (default 500). It " +
+      "returns immediately — it never blocks for the duration. Works with " +
+      "the transport STOPPED and also WHILE PLAYING, and it never disturbs " +
+      "notes already playing back (audition rides its own path into the " +
+      "instrument, separate from the sequencer). Use it to answer 'what does " +
+      "this voicing sound like' before writing it with clip_add_midi, or to " +
+      "confirm an instrument actually makes sound. `audible:false` in the " +
+      "reply is a REAL ANSWER, not an error: `reason` names why nothing will " +
+      "be heard — `trackMuted` (unmute it, or it is excluded by another " +
+      "track's solo), `instrumentNotReady` (a plugin is still loading — try " +
+      "again in a moment), `engineStopped`, `engineRebuilding`. It " +
+      "deliberately IGNORES the user's in-app 'audition while editing' " +
+      "preference, because that preference means 'do not sound notes while I " +
+      "drag', not 'never make sound'. Refused while a take is recording.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .describe(
+          "Id of the INSTRUMENT track to sound the notes on (from project_snapshot). " +
+            "Audio and bus tracks carry no instrument and are refused."
+        ),
+      pitches: z
+        .array(z.number().int().min(0).max(127))
+        .min(1)
+        .max(8)
+        .describe(
+          "MIDI note numbers to sound together, 1-8 of them (60 = middle C). " +
+            "One entry is a single note; several make a chord."
+        ),
+      velocity: z
+        .number()
+        .int()
+        .min(1)
+        .max(127)
+        .optional()
+        .describe("How hard the notes are struck, 1-127. Defaults to 100."),
+      durationMs: z
+        .number()
+        .int()
+        .min(10)
+        .max(5000)
+        .optional()
+        .describe(
+          "How long to hold the notes, 10-5000 ms. Defaults to 500. The release is automatic."
+        ),
+    },
+  },
+  async ({
+    trackId,
+    pitches,
+    velocity,
+    durationMs,
+  }: {
+    trackId: string;
+    pitches: number[];
+    velocity?: number;
+    durationMs?: number;
+  }) =>
+    toToolResult(() =>
+      bridge.send("note.audition", { trackId, pitches, velocity, durationMs })
+    )
 );
 
 server.registerTool(
@@ -4630,7 +4736,10 @@ registerTool(
       "realtime playback. Returns `{path, durationSeconds, sampleRate, " +
       "channels}`; use the returned absolute `path` to reference the bounced " +
       "audio afterwards (e.g. to import it elsewhere or ship it as a " +
-      "deliverable). Errors only if the render range holds no clips at all — " +
+      "deliverable). Pass `excludeTrackIds` to bounce an INSTRUMENTAL / " +
+      "minus-vocal version — the full session with those tracks silenced for " +
+      "this render only, leaving the project itself completely untouched. " +
+      "Errors only if the render range holds no clips at all — " +
       "of ANY kind, audio or MIDI — and no explicit `durationSeconds` was " +
       "given, since there would be nothing to render and no way to infer a " +
       "render length.",
@@ -4664,10 +4773,70 @@ registerTool(
             "MIDI — plus a 2.0 s tail (the same default window as " +
             "render_bounce, render_measure_loudness, and render_stems)."
         ),
+      excludeTrackIds: z
+        .array(z.string().min(1))
+        .optional()
+        .describe(
+          "Ids of tracks to SILENCE for this render only — e.g. pass the lead " +
+            "vocal's track id to get an instrumental / minus-vocal mix (ids " +
+            "come from project_snapshot). The whole session still renders, at " +
+            "full length and with plugin-delay compensation intact; only these " +
+            "tracks are gated to silence. The PROJECT IS NOT MODIFIED: its own " +
+            "mute/solo flags, its unsaved-changes state and its undo history " +
+            "are left exactly as they were, so this is safe to call while " +
+            "someone is working in the app — never mute/bounce/un-mute by hand. " +
+            "Know what leaves with an excluded track: everything it feeds a " +
+            "SEND leaves too, so its reverb/delay TAIL disappears (that is what " +
+            "makes the instrumental genuinely clean, and it equally means you " +
+            "CANNOT ask for 'instrumental but keep the vocal's reverb' here), " +
+            "and so does its sidechain key signal, so a compressor ducking to " +
+            "that vocal stops ducking. Its solo flag leaves with it as well, so " +
+            "excluding the only soloed track gives the instrumental rather than " +
+            "silence. An unknown id is an error. The result echoes the silenced " +
+            "names in `excludedTracks`."
+        ),
+      bitDepth: z
+        .union([z.literal(16), z.literal(24), z.literal(32)])
+        .optional()
+        .describe(
+          "Bit depth of the written file: 16 (CD / small files), 24 (the " +
+            "standard delivery depth for mixes and stems) or 32 (integer). " +
+            "OMIT IT unless you have a reason — the default is 32-bit FLOAT, " +
+            "which is lossless, is what the engine renders internally, and is " +
+            "the only choice that preserves peaks above 0 dBFS. Every integer " +
+            "depth CLAMPS at full scale, and the loudness numbers in the " +
+            "response describe the buffer BEFORE quantization, so a render " +
+            "that peaks above 0 dBFS will be clipped on disk without the " +
+            "report saying so — normalize first (lufsTarget/truePeakCeilingDb) " +
+            "or stay on the default. Quantization is undithered in v0 and the " +
+            "response says so (`ditherApplied: false`). Echoed back as " +
+            "`bitDepth` only when you asked for one."
+        ),
+      container: z
+        .enum(["wav", "aiff"])
+        .optional()
+        .describe(
+          "File container: 'wav' (default) or 'aiff'. The FILE EXTENSION is " +
+            "what actually selects the container, so the extension of `path` " +
+            "is made to agree with this — always use the `path` the response " +
+            "returns rather than the one you sent. AIFF is written in the " +
+            "AIFF-C form (big-endian, uncompressed) that macOS produces; every " +
+            "DAW reads it. Echoed back as `container` only when you asked for " +
+            "a non-default one."
+        ),
     },
   },
-  async ({ path, fromBeat, durationSeconds }) =>
-    toToolResult(() => bridge.send("render.mixdown", { path, fromBeat, durationSeconds }))
+  async ({ path, fromBeat, durationSeconds, excludeTrackIds, bitDepth, container }) =>
+    toToolResult(() =>
+      bridge.send("render.mixdown", {
+        path,
+        fromBeat,
+        durationSeconds,
+        excludeTrackIds,
+        bitDepth,
+        container,
+      })
+    )
 );
 
 registerTool(
@@ -4747,9 +4916,15 @@ registerTool(
       "at/below the -70 LUFS silence gate. A gated-silent program WITH a " +
       "requested `lufsTarget` errors (there is nothing to normalize toward); " +
       "silence without a target still succeeds, with all-null " +
-      "measurements. Returns `{path, durationSeconds, sampleRate, " +
+      "measurements. Pass `excludeTrackIds` to bounce an INSTRUMENTAL / " +
+      "minus-vocal version — the full session with those tracks silenced for " +
+      "this render only, project untouched; note that normalization then " +
+      "measures the instrumental's OWN loudness, not the full mix's, so a " +
+      "mix and its instrumental normalized to the same target end up at the " +
+      "same LUFS as each other rather than at the same relative level. " +
+      "Returns `{path, durationSeconds, sampleRate, " +
       "channels, report: {input, output, appliedGainDb, lufsTarget?, " +
-      "truePeakCeilingDbtp, limitedByCeiling}}`.",
+      "truePeakCeilingDbtp, limitedByCeiling}, excludedTracks?}`.",
     inputSchema: {
       path: z
         .string()
@@ -4802,11 +4977,80 @@ registerTool(
             "the gain rather than limiting the audio — see the tool " +
             "description for what to do when the clamp bites."
         ),
+      excludeTrackIds: z
+        .array(z.string().min(1))
+        .optional()
+        .describe(
+          "Ids of tracks to SILENCE for this render only — e.g. pass the lead " +
+            "vocal's track id to get an instrumental / minus-vocal mix (ids " +
+            "come from project_snapshot). The whole session still renders, at " +
+            "full length and with plugin-delay compensation intact; only these " +
+            "tracks are gated to silence. The PROJECT IS NOT MODIFIED: its own " +
+            "mute/solo flags, its unsaved-changes state and its undo history " +
+            "are left exactly as they were, so this is safe to call while " +
+            "someone is working in the app — never mute/bounce/un-mute by hand. " +
+            "Know what leaves with an excluded track: everything it feeds a " +
+            "SEND leaves too, so its reverb/delay TAIL disappears (that is what " +
+            "makes the instrumental genuinely clean, and it equally means you " +
+            "CANNOT ask for 'instrumental but keep the vocal's reverb' here), " +
+            "and so does its sidechain key signal, so a compressor ducking to " +
+            "that vocal stops ducking. Its solo flag leaves with it as well, so " +
+            "excluding the only soloed track gives the instrumental rather than " +
+            "silence. An unknown id is an error. The result echoes the silenced " +
+            "names in `excludedTracks`."
+        ),
+      bitDepth: z
+        .union([z.literal(16), z.literal(24), z.literal(32)])
+        .optional()
+        .describe(
+          "Bit depth of the written file: 16 (CD / small files), 24 (the " +
+            "standard delivery depth for mixes and stems) or 32 (integer). " +
+            "OMIT IT unless you have a reason — the default is 32-bit FLOAT, " +
+            "which is lossless, is what the engine renders internally, and is " +
+            "the only choice that preserves peaks above 0 dBFS. Every integer " +
+            "depth CLAMPS at full scale, and the loudness numbers in the " +
+            "response describe the buffer BEFORE quantization, so a render " +
+            "that peaks above 0 dBFS will be clipped on disk without the " +
+            "report saying so — normalize first (lufsTarget/truePeakCeilingDb) " +
+            "or stay on the default. Quantization is undithered in v0 and the " +
+            "response says so (`ditherApplied: false`). Echoed back as " +
+            "`bitDepth` only when you asked for one."
+        ),
+      container: z
+        .enum(["wav", "aiff"])
+        .optional()
+        .describe(
+          "File container: 'wav' (default) or 'aiff'. The FILE EXTENSION is " +
+            "what actually selects the container, so the extension of `path` " +
+            "is made to agree with this — always use the `path` the response " +
+            "returns rather than the one you sent. AIFF is written in the " +
+            "AIFF-C form (big-endian, uncompressed) that macOS produces; every " +
+            "DAW reads it. Echoed back as `container` only when you asked for " +
+            "a non-default one."
+        ),
     },
   },
-  async ({ path, fromBeat, durationSeconds, lufsTarget, truePeakCeilingDb }) =>
+  async ({
+    path,
+    fromBeat,
+    durationSeconds,
+    lufsTarget,
+    truePeakCeilingDb,
+    excludeTrackIds,
+    bitDepth,
+    container,
+  }) =>
     toToolResult(() =>
-      bridge.send("render.bounce", { path, fromBeat, durationSeconds, lufsTarget, truePeakCeilingDb })
+      bridge.send("render.bounce", {
+        path,
+        fromBeat,
+        durationSeconds,
+        lufsTarget,
+        truePeakCeilingDb,
+        excludeTrackIds,
+        bitDepth,
+        container,
+      })
     )
 );
 
@@ -4834,12 +5078,29 @@ registerTool(
       "at/below the -70 LUFS silence gate — e.g. a track that's silent for " +
       "this whole song section). Pass `includeMixdown: true` to also render " +
       "a `00 Mixdown.wav` reference file under the exact same window/" +
-      "settings as every stem, handy for verifying the sum yourself. Files " +
+      "settings as every stem, handy for verifying the sum yourself. Pass " +
+      "`includeMasteredMixdown: true` for a SEPARATE, additional `00 " +
+      "Mastered Mix.wav` — the real mastered mix (full session THROUGH the " +
+      "master effect chain, master automation and master fader, exactly what " +
+      "render_bounce produces), optionally loudness-normalized via " +
+      "`masteredLufsTarget`. That mastered file is a SIBLING of the stems, " +
+      "never a version of them: 'mastered stems' in the sense of printing " +
+      "the shared master chain onto each stem individually is deliberately " +
+      "NOT offered, because a nonlinear master chain (a compressor, limiter " +
+      "or saturator) does not distribute over the stems — the individually " +
+      "processed stems would no longer add back up to the actual mix. So you " +
+      "get true pre-master stems that sum exactly, PLUS the mastered mix as " +
+      "its own file, which is how a mastering/mixing handoff is normally " +
+      "packaged. `includeMixdown` and `includeMasteredMixdown` are " +
+      "independent: the first is the chain-EXCLUDED sum reference, the " +
+      "second is the chain-INCLUDED deliverable, and you can ask for both. " +
+      "Files " +
       "are named `NN Name.wav` (1-based partition order, sanitized, " +
       "collision-suffixed with ' 2', ' 3', ...). Returns `{directory, " +
       "sampleRate, durationSeconds, channels, stems: [{trackId, name, " +
       "kind: \"track\"|\"bus\", path, measurement}], mixdown?: {path, " +
-      "measurement}}`. Errors if `trackIds` names a track that is routed " +
+      "measurement}, masteredMixdown?: {path, report}}`. Errors if " +
+      "`trackIds` names a track that is routed " +
       "into a bus (pass the bus's id instead), an unknown id, or if there " +
       "is nothing to render in the requested window.",
     inputSchema: {
@@ -4888,13 +5149,112 @@ registerTool(
         .default(false)
         .describe(
           "If true, also render a `00 Mixdown.wav` reference file under the " +
-            "same window as the stems, for spot-checking the sum. Defaults to false."
+            "same window as the stems, for spot-checking the sum. This file is " +
+            "the stems' own reference: like the stems, it EXCLUDES the master " +
+            "effect chain and master automation, which is exactly why the " +
+            "stems sum to it. Defaults to false."
+        ),
+      // Deliberately `.optional()` WITHOUT `.default(false)`, unlike its
+      // `includeMixdown` twin above: a defaulted flag is always present in the
+      // outgoing params, so an app build older than m23-m1 would see an
+      // unknown key and reject the whole call. Omitting it keeps the default
+      // request byte-identical to what every shipped app already accepts; the
+      // app's own default is false either way.
+      includeMasteredMixdown: z
+        .boolean()
+        .optional()
+        .describe(
+          "If true, also write `00 Mastered Mix.wav` alongside the stems: the " +
+            "real MASTERED mix — the whole session through the master effect " +
+            "chain, master automation lane and master fader, identical to what " +
+            "render_bounce produces. Independent of `includeMixdown` (that one " +
+            "is the chain-EXCLUDED sum reference; this one is the " +
+            "chain-INCLUDED deliverable) — ask for either, both, or neither. " +
+            "The stems themselves are unaffected either way: they stay " +
+            "pre-master and keep summing to `00 Mixdown.wav`. Defaults to false."
+        ),
+      masteredLufsTarget: z
+        .number()
+        .min(-70)
+        .max(0)
+        .optional()
+        .describe(
+          "Integrated-loudness target in LUFS (-70 to 0) for the mastered " +
+            "mix ONLY — the stems are never normalized. -14 is the common " +
+            "streaming convention, -23 is EBU R128 broadcast. Applies the " +
+            "same single static, true-peak-clamped gain render_bounce " +
+            "applies, and the returned `masteredMixdown.report` says what was " +
+            "actually achieved. Requires `includeMasteredMixdown: true` " +
+            "(passing it without that is an error rather than a silent no-op). " +
+            "Omit for a measured but un-normalized mastered mix."
+        ),
+      masteredTruePeakCeilingDb: z
+        .number()
+        .min(-20)
+        .max(0)
+        .optional()
+        .describe(
+          "True-peak ceiling in dBTP (-20 to 0, default -1.0) that the " +
+            "mastered mix's normalizing gain will never push past. Clamps the " +
+            "gain rather than limiting the audio, exactly like render_bounce's " +
+            "`truePeakCeilingDb`. Requires `includeMasteredMixdown: true`."
+        ),
+      bitDepth: z
+        .union([z.literal(16), z.literal(24), z.literal(32)])
+        .optional()
+        .describe(
+          "Bit depth of the written file: 16 (CD / small files), 24 (the " +
+            "standard delivery depth for mixes and stems) or 32 (integer). " +
+            "OMIT IT unless you have a reason — the default is 32-bit FLOAT, " +
+            "which is lossless, is what the engine renders internally, and is " +
+            "the only choice that preserves peaks above 0 dBFS. Every integer " +
+            "depth CLAMPS at full scale, and the loudness numbers in the " +
+            "response describe the buffer BEFORE quantization, so a render " +
+            "that peaks above 0 dBFS will be clipped on disk without the " +
+            "report saying so — normalize first (lufsTarget/truePeakCeilingDb) " +
+            "or stay on the default. Quantization is undithered in v0 and the " +
+            "response says so (`ditherApplied: false`). Echoed back as " +
+            "`bitDepth` only when you asked for one."
+        ),
+      container: z
+        .enum(["wav", "aiff"])
+        .optional()
+        .describe(
+          "File container: 'wav' (default) or 'aiff'. Applies to EVERY file of " +
+            "the set — the stems and any `00 Mixdown` / `00 Mastered Mix` " +
+            "sibling — since they have to sum; their names carry the matching " +
+            "extension, so read the returned `path`s rather than assuming " +
+            "'.wav'. AIFF is written in the AIFF-C form (big-endian, " +
+            "uncompressed) that macOS produces; every DAW reads it. Echoed " +
+            "back as `container` only when you asked for a non-default one."
         ),
     },
   },
-  async ({ trackIds, directory, fromBeat, durationSeconds, includeMixdown }) =>
+  async ({
+    trackIds,
+    directory,
+    fromBeat,
+    durationSeconds,
+    includeMixdown,
+    includeMasteredMixdown,
+    masteredLufsTarget,
+    masteredTruePeakCeilingDb,
+    bitDepth,
+    container,
+  }) =>
     toToolResult(() =>
-      bridge.send("render.stems", { trackIds, directory, fromBeat, durationSeconds, includeMixdown })
+      bridge.send("render.stems", {
+        trackIds,
+        directory,
+        fromBeat,
+        durationSeconds,
+        includeMixdown,
+        includeMasteredMixdown,
+        masteredLufsTarget,
+        masteredTruePeakCeilingDb,
+        bitDepth,
+        container,
+      })
     )
 );
 
@@ -6598,7 +6958,7 @@ registerTool(
       "turns (an in-flight turn already resolved its provider, so this never " +
       "retargets one mid-flight). `model` must be one of the curated ids from " +
       "ai_copilot_get_model's `catalog` (e.g. \"claude-sonnet-5\" for balanced " +
-      "default use, \"claude-opus-4-8\" for the highest-reasoning flagship, " +
+      "default use, \"claude-opus-5\" for the highest-reasoning flagship, " +
       "\"claude-haiku-4-5\" for the fastest/cheapest option) — an unrecognized " +
       "id errors with the full list of valid ids rather than silently falling " +
       "back. Returns `{model}` echoing the now-effective model.",
@@ -6790,4 +7150,365 @@ server.registerTool(
     },
   },
   async ({ prompt, size }) => toToolResult(() => generateImage({ prompt, size }))
+);
+
+// ---------------------------------------------------------------------------
+// MIDI file import (m23-k3)
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "project_import_midi",
+  {
+    title: "Import a Standard MIDI File as new tracks",
+    description:
+      "Import a Standard MIDI File (.mid/.midi) as new INSTRUMENT tracks, one MIDI clip per " +
+      "imported part, in ONE journaled \"Import MIDI File\" edit — undo removes every created " +
+      "track and reverts any tempo/meter adoption together. RECOMMENDED WORKFLOW: call once " +
+      "with `dryRun: true` first — it parses the file and returns the full report, including " +
+      "the `parts` array (every part in the file, even ones that would be skipped, so an index " +
+      "means the same thing on the dry run and the real one) and the RESOLVED tempo policy, " +
+      "WITHOUT touching the project or creating an undo entry; inspect it, then call again for " +
+      "real, narrowing `parts` to just what you want — a call with no `parts` filter imports " +
+      "every part as its own track, which can be dozens for a full arrangement. `atBeat` " +
+      "(default 0) is the TIMELINE beat that file tick 0 lands on; every created clip starts " +
+      "there and notes stay clip-relative regardless. `tempoPolicy` controls the project's " +
+      "tempo and time-signature maps: `\"auto\"` (default) adopts the file's tempo/meter maps " +
+      "ONLY when the project has no clips yet, so a first import sets the grid and a later one " +
+      "never silently retimes existing material; `\"adopt\"` always replaces the project's " +
+      "maps with the file's (refused when combined with a non-zero `atBeat` — the maps are " +
+      "absolute, so there's no honest offset adoption); `\"ignore\"` never touches them. Note " +
+      "positions land on the same beats under every policy — a MIDI file's beats come from its " +
+      "ticks, not its tempo. `instruments` is `\"none\"` (default: new tracks keep the default " +
+      "instrument) or `\"gm\"` (assigns General MIDI sound-bank programs from the file's " +
+      "program changes, channel 10 as the standard drum kit) — the program each part asks for " +
+      "is reported either way. `force` (default false) overrides the 32-track import-count " +
+      "refusal. The returned report is where every fidelity loss surfaces, never applied " +
+      "silently: clamped out-of-range tempos, dropped or conflicting tempo/meter events, " +
+      "controller lanes dropped or decimated past their cap, dropped release velocities and " +
+      "program changes, plus a plain-English `degradations` list. Response `{report: " +
+      "<MIDIImportReport>, applied}`, where `applied` is true only when `dryRun` was false. " +
+      "Errors readably for a non-.mid/.midi extension, a missing file, any SMF decode problem, " +
+      "a recording in progress, the `\"adopt\"` + non-zero `atBeat` combination, the 32-track " +
+      "limit (raise it with `force`), and a file whose import would do literally nothing.",
+    inputSchema: {
+      path: z
+        .string()
+        .min(1)
+        .describe(
+          "Absolute (or ~-prefixed) path to the .mid/.midi Standard MIDI File to import on " +
+            "this Mac. A relative path or wrong extension is rejected."
+        ),
+      atBeat: z
+        .number()
+        .min(0)
+        .optional()
+        .describe(
+          "Timeline beat (quarter notes) that file tick 0 lands on — every created clip " +
+            "starts here. Must be >= 0. Omit to default to 0."
+        ),
+      tempoPolicy: z
+        .enum(["auto", "adopt", "ignore"])
+        .optional()
+        .describe(
+          "What to do with the file's tempo/time-signature maps. \"auto\" (default) adopts " +
+            "them only when the project has no clips yet. \"adopt\" always replaces the " +
+            "project's maps with the file's (refused with a non-zero atBeat). \"ignore\" never " +
+            "touches them. Note positions are the same under every policy — only playback " +
+            "speed and the grid are affected."
+        ),
+      instruments: z
+        .enum(["none", "gm"])
+        .optional()
+        .describe(
+          "\"none\" (default) leaves new tracks on the default instrument. \"gm\" assigns " +
+            "General MIDI sound-bank programs from the file's program changes (channel 10 = " +
+            "the standard drum kit). The requested program is reported either way."
+        ),
+      parts: z
+        .array(z.number().int())
+        .optional()
+        .describe(
+          "Which of the file's parts to import, as indices into the report's `parts` array " +
+            "(run with dryRun: true first to see them — the array lists every part, including " +
+            "ones that would be skipped, so an index means the same thing on a dry run and a " +
+            "real import). Omit to import every part; an explicit empty array imports nothing. " +
+            "An out-of-range index (including negative) is passed through and rejected by the " +
+            "app with a message naming the file's actual part count — not clamped or " +
+            "pre-validated here."
+        ),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: parse the file and return the full report WITHOUT creating any tracks/clips " +
+            "or touching the project's tempo — use this first to inspect the file. Omit or " +
+            "false: apply it for real. Default false."
+        ),
+      force: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: override the 32-track import-count refusal so a large file can still be " +
+            "imported in full. Omit or false: the limit stands (narrow with `parts` instead). " +
+            "Default false."
+        ),
+    },
+  },
+  async ({ path, atBeat, tempoPolicy, instruments, parts, dryRun, force }) =>
+    toToolResult(() =>
+      bridge.send("project.importMIDI", { path, atBeat, tempoPolicy, instruments, parts, dryRun, force })
+    )
+);
+
+registerTool(
+  "clip_import_midi",
+  {
+    title: "Import a Standard MIDI File into an existing MIDI clip",
+    description:
+      "Import one part of a Standard MIDI File (.mid/.midi) into an EXISTING MIDI clip, " +
+      "replacing its notes AND controller lanes wholesale with that part's content (the " +
+      "clip_set_notes whole-array precedent) in ONE journaled \"Import MIDI into Clip\" edit. " +
+      "Deliberately narrow in two ways: it NEVER touches the project's tempo or time-signature " +
+      "maps — that is project_import_midi's job, so there is no `tempoPolicy` param here — and " +
+      "it NEVER changes the clip's length; content landing past the clip's end is imported " +
+      "anyway and reported via `notesPastClipEnd`/`controllerPointsPastClipEnd` rather than " +
+      "silently dropped (grow the clip first with clip_fit_to_content to make it all audible). " +
+      "`part` selects which of the file's parts to import, indexing the report's `parts` " +
+      "array; omit it to default to the lowest-indexed part with notes, or failing that the " +
+      "lowest with controller data. `atBeat` (default 0) here is CLIP-RELATIVE — an offset " +
+      "from the clip's own start, NOT a timeline beat (use project_import_midi to place " +
+      "content on the timeline). `dryRun: true` (default false) returns the full report " +
+      "without touching the clip or creating an undo entry — inspect a file's parts before " +
+      "committing. Response `{report: <MIDIImportReport>, applied}`, where `applied` is true " +
+      "only when `dryRun` was false. Errors readably for an unknown `clipId`, a non-MIDI clip, " +
+      "a take-group/comp member clip (flatten it first), a non-.mid/.midi extension, a missing " +
+      "file, any SMF decode problem, a recording in progress, an out-of-range `part` index, and " +
+      "a part with no content to import.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the existing MIDI clip to import into, from project_snapshot."),
+      path: z
+        .string()
+        .min(1)
+        .describe(
+          "Absolute (or ~-prefixed) path to the .mid/.midi Standard MIDI File to import on " +
+            "this Mac. A relative path or wrong extension is rejected."
+        ),
+      part: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "Which part of the file to import, as an index into the report's `parts` array (run " +
+            "with dryRun: true first to see them). Omit to default to the lowest-indexed part " +
+            "with notes, or failing that the lowest with controller data. An out-of-range index " +
+            "(including negative) is passed through and rejected by the app with a message " +
+            "naming the file's actual part count — not clamped or pre-validated here."
+        ),
+      atBeat: z
+        .number()
+        .min(0)
+        .optional()
+        .describe(
+          "CLIP-RELATIVE beat offset applied to the imported content — an offset from the " +
+            "clip's own start, NOT a timeline beat. Must be >= 0. Omit to default to 0."
+        ),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: parse the file and return the full report WITHOUT touching the clip — use " +
+            "this first to inspect a file's parts. Omit or false: apply it for real. Default " +
+            "false."
+        ),
+    },
+  },
+  async ({ clipId, path, part, atBeat, dryRun }) =>
+    toToolResult(() => bridge.send("clip.importMIDI", { clipId, path, part, atBeat, dryRun }))
+);
+
+// ---------------------------------------------------------------------------
+// MIDI file export (m23-k4a)
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "project_export_midi",
+  {
+    title: "Export the project (or a track selection) as a Standard MIDI File",
+    description:
+      "Export instrument tracks as a Standard MIDI File (.mid), one MTrk part per exported " +
+      "track plus a conductor chunk carrying the project name and the WHOLE tempo/time-" +
+      "signature map. Non-instrument tracks (audio, bus) are SKIPPED, not refused — each is " +
+      "still listed in the report's per-track ledger with a `skipReason`. Muted tracks ARE " +
+      "exported at their authored content (export serializes the model, not what you'd hear " +
+      "played back) — an agent that wants a muted track left out must filter `trackIds` " +
+      "itself. RECOMMENDED WORKFLOW: call once with `dryRun: true` first — it runs the full " +
+      "export in memory (including encoding) and returns the complete report, with the exact " +
+      "`byteCount` the real write would produce, WITHOUT creating or touching any file; inspect " +
+      "it, then call again for real. `path` (optional, absolute or ~-prefixed) is where to " +
+      "write the file; a non-.mid/.midi extension gets `.mid` appended. Omit it and the file " +
+      "goes to a fresh path under the system temp directory — always read `report.path` (filled " +
+      "on a dry run too) rather than assuming a location. `trackIds` (optional array of track " +
+      "ids) selects which tracks to export, in PROJECT order regardless of the order given; " +
+      "omit it to export every track in the project (still skipping non-instrument ones). An " +
+      "unknown id in `trackIds` is refused rather than silently dropped. `division` (default " +
+      "9600 ticks per quarter note) is DERIVED, not the industry-standard 480: it is exact for " +
+      "every dyadic subdivision to 1/128 of a beat, every triplet/quintuplet, and every DAW Pro " +
+      "swing preset, so round-trip re-imports land bit-exact; lower it only to match a specific " +
+      "target reader, and expect more content to need quantizing (reported, never silent) as a " +
+      "result. `format` is 1 (default: one track per part — keeps every track name) or 0 (all " +
+      "parts merged into a single track, which can carry only one name; the report's " +
+      "`trackNamesLostToFormat0` counts the casualties). IMPORTANT: the exported bytes carry NO " +
+      "General MIDI program-change events in this version, even for tracks on a GM sound bank — " +
+      "the instrument each track asks for is only reported (`program`/`programName` per track, " +
+      "and the total in `programChangesNotWritten`), never written into the file, so a receiving " +
+      "program will use its own default sound for every part. The report is where every other " +
+      "fidelity loss surfaces too: quantized notes/controller points, notes widened to one tick, " +
+      "truncated or dropped same-pitch overlaps, dropped or colliding tempo/meter changes, and a " +
+      "plain-English `degradations` list — a clean project reports all of that as zero/empty. " +
+      "Response `{report: <MIDIExportReport>, written}`, where `written` is false on a dry run. " +
+      "Errors readably for a non-absolute `path`, an out-of-range `division` or invalid " +
+      "`format`, an unknown id in `trackIds`, content too far from the start of the file at the " +
+      "chosen `division` (raise the division or move content earlier), a write failure, and a " +
+      "selection with nothing exportable (only surfaced on a REAL export — a dry run on an " +
+      "all-audio/all-bus selection still returns its report, with `tracksExported: 0`).",
+    inputSchema: {
+      path: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Absolute (or ~-prefixed) path to write the .mid file to. A relative path is " +
+            "rejected; a non-.mid/.midi extension has .mid appended. Omit to export to a fresh " +
+            "path under the system temp directory — read the returned report's `path` field " +
+            "either way."
+        ),
+      trackIds: z
+        .array(z.string().uuid())
+        .optional()
+        .describe(
+          "Track ids to export, from project_snapshot. Exported in PROJECT order regardless " +
+            "of the order given here. Omit to export every track (non-instrument tracks are " +
+            "still skipped and reported). An id that doesn't match any track is refused."
+        ),
+      division: z
+        .number()
+        .int()
+        .min(1)
+        .max(32767)
+        .optional()
+        .describe(
+          "Ticks per quarter note for the file's MThd header, 1-32767. Omit for the default " +
+            "9600 — exact for every dyadic subdivision to 1/128 beat, every triplet/quintuplet, " +
+            "and every DAW Pro swing preset, so a re-import lands bit-exact. The industry-common " +
+            "480 quantizes swung or humanized material; content off the chosen grid is " +
+            "quantized to the nearest tick and reported, never silently dropped."
+        ),
+      format: z
+        .number()
+        .int()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "SMF format: 1 (default) writes one track chunk per exported part, keeping every " +
+            "track name. 0 merges everything into a single chunk, which can carry only one " +
+            "name — the report's trackNamesLostToFormat0 counts the names that were lost."
+        ),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: run the export fully in memory (including encoding, so byteCount is exact) " +
+            "and return the report WITHOUT creating or writing any file. Omit or false: write " +
+            "the file for real. Default false."
+        ),
+    },
+  },
+  async ({ path, trackIds, division, format, dryRun }) =>
+    toToolResult(() => bridge.send("project.exportMIDI", { path, trackIds, division, format, dryRun }))
+);
+
+registerTool(
+  "track_export_midi",
+  {
+    title: "Export one instrument track as a Standard MIDI File",
+    description:
+      "Export a single INSTRUMENT track as a Standard MIDI File (.mid): a conductor chunk " +
+      "carrying the project name and the project's WHOLE tempo/time-signature map, plus one " +
+      "track chunk for that track's notes and controller data — the file still carries the " +
+      "full musical grid, it is only the note content that is narrowed to one track. " +
+      "Identical file shape and options to project_export_midi with `trackIds` narrowed to " +
+      "this one track; the two commands differ only in selection. Unlike project_export_midi, " +
+      "which SKIPS a non-instrument track and reports it, this one REFUSES outright if " +
+      "`trackId` names an audio or bus track — naming a specific track that cannot carry MIDI " +
+      "is a mistake worth surfacing, not silently producing a note-less file (use " +
+      "project_export_midi with `trackIds` to export several tracks, including a mix of kinds, " +
+      "into one file). The track is exported at its authored content even if muted. " +
+      "RECOMMENDED WORKFLOW: call once with `dryRun: true` first — it runs the full export in " +
+      "memory (including encoding, so `byteCount` is exact) and returns the complete report " +
+      "WITHOUT creating or touching any file; inspect it, then call again for real. `path` " +
+      "(optional, absolute or ~-prefixed) is where to write the file; a non-.mid/.midi " +
+      "extension gets `.mid` appended, and omitting it writes to a fresh path under the system " +
+      "temp directory — always read `report.path` (filled on a dry run too). `division` " +
+      "(default 9600 ticks per quarter note, DERIVED to be exact for dyadic subdivisions to " +
+      "1/128 beat, every triplet/quintuplet, and every DAW Pro swing preset) and `format` (1 " +
+      "default = keeps the track name; 0 merges into a single chunk) work exactly as in " +
+      "project_export_midi. IMPORTANT: the exported bytes carry NO General MIDI program-change " +
+      "event in this version even when the track is on a GM sound bank — the requested " +
+      "instrument is only reported (`program`/`programName`, and counted in " +
+      "`programChangesNotWritten`), never written into the file. The report is where every " +
+      "other fidelity loss surfaces: quantized notes/controller points, notes widened to one " +
+      "tick, truncated or dropped same-pitch overlaps, dropped tempo/meter changes, and a " +
+      "plain-English `degradations` list — a clean track reports all of that as zero/empty. " +
+      "Response `{report: <MIDIExportReport>, written}`, where `written` is false on a dry run. " +
+      "Errors readably for an unknown `trackId`, a `trackId` naming an audio or bus track, a " +
+      "non-absolute `path`, an out-of-range `division` or invalid `format`, content too far " +
+      "from the start of the file at the chosen `division`, and a write failure.",
+    inputSchema: {
+      trackId: z.string().uuid().describe("Id of the instrument track to export, from project_snapshot."),
+      path: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Absolute (or ~-prefixed) path to write the .mid file to. A relative path is " +
+            "rejected; a non-.mid/.midi extension has .mid appended. Omit to export to a fresh " +
+            "path under the system temp directory — read the returned report's `path` field " +
+            "either way."
+        ),
+      division: z
+        .number()
+        .int()
+        .min(1)
+        .max(32767)
+        .optional()
+        .describe(
+          "Ticks per quarter note for the file's MThd header, 1-32767. Omit for the default " +
+            "9600 — exact for every dyadic subdivision to 1/128 beat, every triplet/quintuplet, " +
+            "and every DAW Pro swing preset, so a re-import lands bit-exact. The industry-common " +
+            "480 quantizes swung or humanized material; content off the chosen grid is " +
+            "quantized to the nearest tick and reported, never silently dropped."
+        ),
+      format: z
+        .number()
+        .int()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "SMF format: 1 (default) writes the track as its own chunk, keeping its name. 0 " +
+            "merges it with the conductor into a single chunk, which loses the track name."
+        ),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: run the export fully in memory (including encoding, so byteCount is exact) " +
+            "and return the report WITHOUT creating or writing any file. Omit or false: write " +
+            "the file for real. Default false."
+        ),
+    },
+  },
+  async ({ trackId, path, division, format, dryRun }) =>
+    toToolResult(() => bridge.send("track.exportMIDI", { trackId, path, division, format, dryRun }))
 );

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import DAWCore
 import DAWAppKit
@@ -82,6 +83,22 @@ struct TracksHeaderBar: View {
 /// one unit (m10-j), so they stay pixel-locked.
 struct TrackRowsList: View {
     @Environment(ProjectStore.self) private var store
+    @Environment(AppModel.self) private var model
+
+    /// The list's own coordinate space (m23-h). The row frames, the reorder
+    /// drag gesture and the drop indicator ALL live in it, which is what makes
+    /// the drag scroll-invariant: the space scrolls with the rows, so a pointer
+    /// y always means the same row wherever the shared vertical scroll sits.
+    static let rowSpace = "trackRows"
+
+    /// The MEASURED row ladder — the one producer of "where is row i". Never
+    /// recomputed from `rowHeight` + the model: a row's height depends on its
+    /// takes/automation sections and `rowHeight` is user-adjustable, so a second
+    /// computation would be free to agree with the layout only by luck.
+    @State private var ladder = TrackRowLadder.empty
+    /// The drag in flight, or nil. Visual-only until release — the model is NOT
+    /// mutated on every step, so the whole gesture is ONE undo step.
+    @State private var drag: TrackHeaderDragSession?
 
     var body: some View {
         Group {
@@ -120,11 +137,45 @@ struct TrackRowsList: View {
                 // it lines up with lane 0 — which also starts at y = 0 now that the
                 // ruler is pinned separately (m13-g). Both columns flush = aligned.
                 VStack(spacing: 6) {
-                    ForEach(store.tracks) { track in
-                        TrackRow(track: track)
+                    ForEach(Array(store.tracks.enumerated()), id: \.element.id) { index, track in
+                        TrackRow(
+                            track: track,
+                            // Non-nil ONLY on the row being dragged: it is both the
+                            // lift styling's switch and its displacement, so a lifted
+                            // row that isn't moving is unrepresentable.
+                            dragOffsetY: drag?.trackID == track.id ? drag?.offsetY : nil,
+                            onReorderChanged: { y in
+                                dragUpdate(trackID: track.id, pointerY: y)
+                            },
+                            onReorderEnded: { y in dragEnd(pointerY: y) })
                             .id(track.id)   // scroll target (m13-g deep-scroll proof)
+                            // The picked-up row rides ABOVE its neighbours.
+                            .zIndex(drag?.trackID == track.id ? 1 : 0)
+                            // …and every row it passes SLIDES to open the slot it
+                            // is heading for, so the list parts instead of the
+                            // dragged row simply covering its target. STATED
+                            // LIMIT: the preview is the SIDEBAR's alone — the
+                            // timeline lanes read the model, which does not move
+                            // until release, so for the duration of a drag the
+                            // two columns are deliberately out of step. Previewing
+                            // the lanes too would mean threading the drag into
+                            // `TimelineLanesView`; the alternative (no parting)
+                            // hides the very row the user is aiming at.
+                            .offset(y: partingOffset(row: index, track: track))
+                            .animation(.easeOut(duration: 0.12),
+                                       value: partingOffset(row: index, track: track))
+                            .background(rowFrameReporter(track.id))
                     }
                 }
+                .coordinateSpace(name: Self.rowSpace)
+                .overlay(alignment: .top) { dropIndicator }
+                .onPreferenceChange(TrackRowFramesKey.self) { frames in
+                    measureLadder(frames)
+                }
+                // The staging seam (m23-h) drives the SAME two handlers the live
+                // gesture drives — never a private "just reorder it" path, which
+                // could pass a gate the real drag fails.
+                .onChange(of: model.trackReorderStage) { _, stage in applyStage(stage) }
                 .padding(.horizontal, 8)
                 .padding(.bottom, 8)
             }
@@ -132,12 +183,182 @@ struct TrackRowsList: View {
         .frame(maxHeight: .infinity, alignment: .top)
         .glassPanel()
     }
+
+    /// The insertion line: where the picked-up row will land if released now.
+    /// Cyan (the app's "active/where you are" accent) and glowing — earned by
+    /// the drag, never standing at rest. It exists EXACTLY when the drop would
+    /// change the order: `indicatorY` is nil for a no-op landing by
+    /// construction, so "the line lies" is not a reachable state.
+    @ViewBuilder
+    private var dropIndicator: some View {
+        if let y = drag?.drop?.indicatorY {
+            Rectangle()
+                .fill(DAWTheme.playback)
+                .frame(height: 2)
+                .glow(DAWTheme.playback, radius: 5, intensity: 0.8)
+                .offset(y: y - 1)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// How far a resting row slides to open the slot the drag is heading for.
+    /// Zero for the dragged row itself — it follows the pointer instead, and
+    /// the registry refuses to displace its origin row, so the two offsets can
+    /// never both apply.
+    private func partingOffset(row: Int, track: Track) -> CGFloat {
+        guard let drag, track.id != drag.trackID, let drop = drag.drop else { return 0 }
+        return TrackReorderDrag.displacement(row: row, drop: drop, ladder: ladder)
+    }
+
+    /// Reports one row's rect in the list's coordinate space. A transparent
+    /// background probe — it changes no layout.
+    private func rowFrameReporter(_ id: UUID) -> some View {
+        GeometryReader { geo in
+            Color.clear.preference(
+                key: TrackRowFramesKey.self,
+                value: [id: geo.frame(in: .named(Self.rowSpace))])
+        }
+    }
+
+    // MARK: - Drag handlers (the live gesture AND the seam land here)
+
+    /// Collects the measured rects into the ordered ladder. Ignores a
+    /// HALF-measured pass (a row added/removed mid-layout): a ladder that
+    /// described the wrong number of rows would resolve confident, wrong
+    /// landings.
+    ///
+    /// FROZEN FOR THE WHOLE GESTURE, and that is load-bearing rather than
+    /// cautious: the lift and the parting are `offset`s, so a live re-measure
+    /// would report rows at their DISPLACED positions, feed that back into the
+    /// ladder the landing is resolved against, and let the drag chase itself.
+    /// The ladder describes the RESTING slots — which is exactly what a landing
+    /// index means. It re-measures on the next layout after release.
+    private func measureLadder(_ frames: [UUID: CGRect]) {
+        guard drag == nil else { return }
+        let ordered = store.tracks.compactMap { frames[$0.id] }
+        guard ordered.count == store.tracks.count else { return }
+        let next = TrackRowLadder(tops: ordered.map(\.minY), heights: ordered.map(\.height))
+        guard next != ladder else { return }
+        ladder = next
+        publish()
+    }
+
+    /// Press / drag. Begins the session on the first tick (there is no separate
+    /// "press" event in a `DragGesture`), then re-decides the landing every
+    /// step. Visual only — nothing is committed until release.
+    private func dragUpdate(trackID: UUID, pointerY: CGFloat) {
+        defer { publish() }
+        guard let from = store.tracks.firstIndex(where: { $0.id == trackID }) else {
+            drag = nil
+            return
+        }
+        var session = drag?.trackID == trackID
+            ? drag!
+            : TrackHeaderDragSession(trackID: trackID, startPointerY: pointerY,
+                                     pointerY: pointerY, drop: nil)
+        session.pointerY = pointerY
+        session.drop = TrackReorderDrag.resolve(
+            pointerY: pointerY, from: from, ladder: ladder)
+        drag = session
+    }
+
+    /// Release: commit the landing the indicator was showing, then put the row
+    /// down. ONE store call ⇒ ONE undo step for the whole gesture.
+    private func dragEnd(pointerY: CGFloat) {
+        defer { publish() }
+        guard let session = drag else { return }
+        drag = nil
+        guard let from = store.tracks.firstIndex(where: { $0.id == session.trackID }),
+              let drop = TrackReorderDrag.resolve(
+                pointerY: pointerY, from: from, ladder: ladder),
+              drop.moves else { return }
+        commit(trackID: session.trackID, drop: drop)
+    }
+
+    /// The ONE commit path, typed to take a `ResolvedTrackDrop` — which only
+    /// `TrackReorderDrag.resolve` can produce. So the index committed here is
+    /// the very one the indicator was drawn from; they cannot drift apart.
+    /// `try?`: the sole throw is `trackNotFound`, and the index was resolved
+    /// from a live row a moment ago — a race there means the track is gone and
+    /// there is nothing to say about it.
+    private func commit(trackID: UUID, drop: ResolvedTrackDrop) {
+        _ = try? store.reorderTrack(id: trackID, toIndex: drop.index)
+    }
+
+    /// Applies a staged step through the handlers above. Every branch reports
+    /// (the handlers' `defer { publish() }`, or an explicit publish), because
+    /// the seam WAITS on the report seq — a branch that stayed silent would
+    /// leave it echoing the previous call's state.
+    private func applyStage(_ stage: TrackReorderStage?) {
+        guard let stage else { return }
+        switch stage.action {
+        case .begin:
+            drag = nil
+            if let id = stage.trackID, store.tracks.contains(where: { $0.id == id }) {
+                dragUpdate(trackID: id, pointerY: stage.y)
+            } else {
+                publish()
+            }
+        case .changed:
+            if let id = drag?.trackID {
+                dragUpdate(trackID: id, pointerY: stage.y)
+            } else {
+                publish()   // nothing in flight: report, never invent a drag
+            }
+        case .end:
+            dragEnd(pointerY: stage.y)
+        }
+    }
+
+    /// Hands the ladder + the live landing UP to the app model, then bumps the
+    /// report seq LAST so anything waiting on it sees the state it announces
+    /// (the `arrangePointerReportSeq` rule).
+    private func publish() {
+        if model.trackRowLadder != ladder { model.trackRowLadder = ladder }
+        let state = drag.map {
+            TrackReorderDragState(trackID: $0.trackID, drop: $0.drop, offsetY: $0.offsetY)
+        }
+        if model.trackReorderDrag != state { model.trackReorderDrag = state }
+        model.trackReorderReportSeq &+= 1
+    }
+}
+
+/// The drag in flight (view-local). `offsetY` is derived, never stored, so the
+/// lift and the landing can never describe different pointer positions.
+struct TrackHeaderDragSession: Equatable {
+    var trackID: UUID
+    var startPointerY: CGFloat
+    var pointerY: CGFloat
+    var drop: ResolvedTrackDrop?
+
+    var offsetY: CGFloat { pointerY - startPointerY }
+}
+
+/// Per-row measured rects, merged up the tree (m23-h).
+private struct TrackRowFramesKey: PreferenceKey {
+    static let defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
 }
 
 struct TrackRow: View {
     @Environment(ProjectStore.self) private var store
     @Environment(AppModel.self) private var model
     var track: Track
+
+    // MARK: Reorder drag (m23-h) — owned by the LIST, driven from here
+
+    /// How far this row is displaced while it is the one being dragged; nil on
+    /// every other row (and on all of them when no drag is in flight). One
+    /// value carries both "am I lifted" and "by how much".
+    var dragOffsetY: CGFloat?
+    /// Pointer moved, in the list's coordinate space.
+    var onReorderChanged: (CGFloat) -> Void = { _ in }
+    /// Pointer released, in the list's coordinate space.
+    var onReorderEnded: (CGFloat) -> Void = { _ in }
+
+    private var isDragging: Bool { dragOffsetY != nil }
 
     /// The live sidebar width (beta m10-i round 2) — read from the SAME m10-d
     /// layout store the splitter drives, so the row's width-budget decisions
@@ -199,36 +420,93 @@ struct TrackRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .overlay(
             RoundedRectangle(cornerRadius: 7).stroke(
-                track.isAIGenerated ? DAWTheme.ai.opacity(0.35) : DAWTheme.hairline,
+                isDragging
+                    ? DAWTheme.playback.opacity(0.7)
+                    : (track.isAIGenerated ? DAWTheme.ai.opacity(0.35) : DAWTheme.hairline),
                 lineWidth: 1
             )
         )
+        // Picked up: the card LIFTS off the panel — a cyan rim, a soft glow and
+        // a cast shadow, all earned by the drag and gone the instant it ends
+        // (Rule 3: nothing static glows). The offset follows the pointer so the
+        // row is literally the thing being moved, not a proxy for it.
+        .glow(DAWTheme.playback, radius: 6, intensity: isDragging ? 0.45 : 0)
+        .shadow(color: .black.opacity(isDragging ? 0.45 : 0),
+                radius: isDragging ? 10 : 0, y: isDragging ? 4 : 0)
+        .offset(y: dragOffsetY ?? 0)
+        // RENDERED FROM THE MODEL (m23-m3b), never from inline conditions.
+        // `TrackHeaderMenu.items` decides WHICH items exist and what each says;
+        // this builder only binds them to their actions. An AppKit context-menu
+        // popup cannot be opened by `debug.captureUI`, so the item list is only
+        // assertable if it lives somewhere headless — and only HONESTLY
+        // assertable if the menu holds no second opinion. There is deliberately
+        // not one `if` left in this body: "the view ignores the model" would now
+        // have to be a visible edit here, not a silent runtime divergence.
         .contextMenu {
-            // Discoverability twin of the double-click rename (beta m10-i).
-            Button("Rename Track") { beginEditing() }
-            // When the inline automation disclosure has folded away (a take-group row
-            // at a narrow sidebar, m10-j), it stays reachable here so automation is
-            // never lost — just relocated.
-            if !showsInlineAutomation {
-                Button(isExpanded ? "Hide Automation" : "Show Automation") {
-                    model.toggleAutomation(track.id)
+            ForEach(model.trackHeaderMenuItems(for: track)) { item in
+                Button(item.title, role: item.isDestructive ? .destructive : nil) {
+                    perform(item.action)
                 }
             }
-            // Bounce in Place (m11-e): render this track and land it as a new
-            // audio track + clip in one undo step. Offered only for master
-            // inputs (a direct-to-master track or a bus) — the SAME eligibility
-            // render.stems / bounceTrackInPlace enforce; a bus-routed source
-            // has no stem of its own, so the item hides rather than fail. Both
-            // densities (a plain action, no advanced-control split).
-            if track.kind == .bus || track.outputBusID == nil {
-                Button("Bounce in Place") {
-                    Task { try? await store.bounceTrackInPlace(trackId: track.id) }
-                }
-            }
-            Button("Remove Track", role: .destructive) {
-                // m13-c: refused mid-recording (transportBusy) — safe no-op here.
-                _ = try? store.removeTrack(id: track.id)
-            }
+        }
+    }
+
+    /// Runs the action a context-menu item names — the ONE place each item's
+    /// behaviour lives, so the builder above stays a pure rendering of the list.
+    private func perform(_ action: TrackHeaderMenuAction) {
+        switch action {
+        case .rename:
+            beginEditing()
+        case .toggleAutomation:
+            model.toggleAutomation(track.id)
+        case .bounceInPlace:
+            // Both densities (a plain action, no advanced-control split). Lands
+            // a new audio track + clip in one undo step; refused states fail as
+            // safe no-ops, hence `try?`.
+            Task { try? await store.bounceTrackInPlace(trackId: track.id) }
+        case .exportMIDI:
+            exportMIDI()
+        case .removeTrack:
+            // m13-c: refused mid-recording (transportBusy) — safe no-op here.
+            _ = try? store.removeTrack(id: track.id)
+        }
+    }
+
+    /// "Export MIDI…" (m23-m3b): write THIS track out as a Standard MIDI File,
+    /// giving `store.exportTrackMIDIFile` (m23-k4a) its first human surface.
+    ///
+    /// The item is offered only where `Track.canExportMIDI` holds, which is the
+    /// SAME predicate the store refuses on, so the save panel can never open on
+    /// a track the store would then reject. That leaves exactly one reachable
+    /// failure — an unwritable destination — and this is the first action in
+    /// this view that SURFACES its error rather than swallowing it. The `try?`
+    /// sites around it are deliberately left alone: those are operations that
+    /// fail as safe no-ops in known states (a reorder or a remove refused
+    /// mid-recording), whereas an export the user explicitly asked for that
+    /// wrote no file must say so. Same alert shape as `FileCommands.present(_:)`
+    /// for the sibling whole-project verb, surfacing the reason verbatim.
+    ///
+    /// Export mutates nothing, so there is no undo step and no success alert.
+    @MainActor
+    private func exportMIDI() {
+        let panel = NSSavePanel()
+        // The TRACK's name, not the project's — this file is one part.
+        panel.nameFieldStringValue = track.name
+        panel.prompt = "Export"
+        // The SAME list File→Export MIDI… uses (`FileCommands.swift:119`). A
+        // second literal here is how two save panels start disagreeing about
+        // what a MIDI file is.
+        panel.allowedContentTypes = AudioImportPlan.midiContentTypes
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try store.exportTrackMIDIFile(trackID: track.id, path: url.path)
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Couldn't complete that"
+            alert.informativeText = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            alert.runModal()
         }
     }
 
@@ -317,7 +595,32 @@ struct TrackRow: View {
         // Drag the header's bottom edge to resize ALL rows (resizeUpDown, not grab —
         // the macOS glyph for a height adjustment; see DESIGN-LANGUAGE "Panel
         // splitters"). Idle-invisible so N rows don't grow N rest lines.
+        // It is an OVERLAY on this row, so inside its 6 pt strip it wins the
+        // gesture over the reorder drag below — height resize and reorder never
+        // fight for the same pixels.
         .overlay(alignment: .bottom) { rowHeightHandle }
+        // Drag the header ITSELF to reorder the track list (m23-h). A 6 pt
+        // minimum distance keeps every click gesture the row already has — the
+        // double-click rename, the M/S/R chips, the disclosures — reachable: a
+        // press that doesn't travel is never a drag.
+        .gesture(reorderDrag)
+    }
+
+    /// The reorder gesture. Reports the pointer in the LIST's coordinate space
+    /// (never `.local`), which is the space the row ladder is measured in — so
+    /// the landing is right at any scroll position and any row height.
+    private var reorderDrag: some Gesture {
+        DragGesture(minimumDistance: 6, coordinateSpace: .named(TrackRowsList.rowSpace))
+            .onChanged { value in
+                // Hold the closed hand for the whole drag, even when the pointer
+                // leaves the row (the m10-c gesture-driven cursor idiom).
+                DragCursor.set(CursorAffordance.trackHeader.dragCursor)
+                onReorderChanged(value.location.y)
+            }
+            .onEnded { value in
+                DragCursor.clear()
+                onReorderEnded(value.location.y)
+            }
     }
 
     /// The kind icon + name = the track's identity (one shared "Track" card).
@@ -364,6 +667,11 @@ struct TrackRow: View {
         // width — so the row never inflates the sidebar past its 250 pt floor and
         // slides the whole panel off-screen (the m10-i round-2 clip bug).
         .layoutPriority(1)
+        // The open hand advertises the reorder drag where it is most obviously
+        // "the track itself" — the icon + name. The gesture works from anywhere
+        // on the row that isn't a control; the cursor teaches the canonical spot
+        // rather than claiming the chips (m23-h, the movable-body family).
+        .hoverCursor(CursorAffordance.trackHeader.restCursor)
         .explainable(.trackRowIdentity)
     }
 

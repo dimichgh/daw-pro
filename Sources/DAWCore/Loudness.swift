@@ -167,14 +167,38 @@ public struct BounceResult: Codable, Sendable, Equatable {
     public var sampleRate: Double
     public var channels: Int
     public var report: BounceLoudnessReport
+    /// Honesty echo for `excludeTrackIds` (m23-m1): names of the tracks
+    /// silenced for THIS render, in session order. nil (key omitted) when no
+    /// exclusion was requested, keeping every pre-m23-m1 response
+    /// byte-identical; a present, empty array means the caller asked to exclude
+    /// nothing. The project's own mute flags were never touched.
+    public var excludedTracks: [String]?
+    /// Output format echo (m23-m2): the INTEGER bit depth written, or nil (key
+    /// omitted) for the Float32 default — absence means "the default", so every
+    /// pre-m23-m2 payload stays byte-identical.
+    public var bitDepth: Int?
+    /// Output format echo (m23-m2): `"aiff"`, or nil (key omitted) for the WAV
+    /// default. Same absence rule as `bitDepth`.
+    public var container: String?
+    /// Present only where dithering could apply (an integer depth), and always
+    /// `false` in v0 (m23-m2): the quantizer is undithered, and saying so is
+    /// better than implying a noise-shaped dither we do not perform.
+    public var ditherApplied: Bool?
 
     public init(path: String, durationSeconds: Double, sampleRate: Double,
-                channels: Int, report: BounceLoudnessReport) {
+                channels: Int, report: BounceLoudnessReport,
+                excludedTracks: [String]? = nil,
+                bitDepth: Int? = nil, container: String? = nil,
+                ditherApplied: Bool? = nil) {
         self.path = path
         self.durationSeconds = durationSeconds
         self.sampleRate = sampleRate
         self.channels = channels
         self.report = report
+        self.excludedTracks = excludedTracks
+        self.bitDepth = bitDepth
+        self.container = container
+        self.ditherApplied = ditherApplied
     }
 }
 

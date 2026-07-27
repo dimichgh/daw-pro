@@ -48,7 +48,7 @@ Verified 2026-07-05 — full detail in `docs/research/2026-07-05-ace-step-local-
 
 ## Model selection (runtime app features)
 
-- Fast/cheap interactions ("Explain this", naming): Claude Haiku / small models.
-- Lyrics & creative writing: Claude Sonnet.
-- Complex musical reasoning (arrangement critique, mix analysis): Claude Opus-class, only when explicitly invoked.
-Keep the model IDs in one config (`AIServices/AIConfig.swift`) — never scattered in call sites.
+- Fast/cheap interactions ("Explain this", naming): Claude Haiku 4.5 (`claude-haiku-4-5` — there is no Haiku 5).
+- Lyrics & creative writing: Claude Sonnet 5 (`claude-sonnet-5`) — also the copilot's default, and `mcp-server/src/ai.ts`'s single `ANTHROPIC_MODEL`.
+- Complex musical reasoning (arrangement critique, mix analysis): Opus-class, user-selected per copilot session, never the default — `claude-opus-5` is the current flagship row; `claude-fable-5` stays offered as the highest-capability (and priciest) tier above it.
+Keep the model IDs in one config (`AIServices/AIConfig.swift` for defaults, `AIServices/AnthropicModelCatalog.swift` for the per-model picker + request-shaping table) — never scattered in call sites.

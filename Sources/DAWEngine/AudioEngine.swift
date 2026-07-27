@@ -365,6 +365,9 @@ public final class AudioEngine: AudioEngineControlling {
     /// Every start path re-applies parameters from this.
     private var lastTracks: [Track] = []
 
+    /// Per-track note-audition state (m23-d) — see `setAuditionPitches`.
+    private var auditionVoices: [UUID: AuditionVoices] = [:]
+
     /// The tempo tempo-synced delays derive their effective time from
     /// (m22-f): adopted from EVERY transport-carrying intent via
     /// `cacheTransportFlags` — `setTempo` is the store's tempo-change push,
@@ -668,6 +671,9 @@ public final class AudioEngine: AudioEngineControlling {
         watchdogTask?.cancel()
         watchdogTask = nil
         stopTestTone()
+        // m23-d: release held audition voices while the renderers are still
+        // reachable — after this the main actor can no longer send their offs.
+        stopAllAudition()
         if activeTake != nil {
             stopRecording()  // finalizes the take (and stops playback) first
         }
@@ -1023,6 +1029,11 @@ public final class AudioEngine: AudioEngineControlling {
     /// via `rebuildEngine`. Never-run engines (fresh app, headless) keep
     /// the plain reconcile path — nothing to protect, no hardware touched.
     public func projectWillReplace() {
+        // m23-d: every renderer in this project is about to go away — release
+        // held audition voices on the objects that still own them. Runs BEFORE
+        // the engineHasRun guard: a never-run engine can still hold voices
+        // (audition works with the transport stopped, which is the point).
+        stopAllAudition()
         guard graph.engineHasRun else { return }
         graph.needsEngineRebuild = true
     }
@@ -1072,6 +1083,143 @@ public final class AudioEngine: AudioEngineControlling {
 
     public func midiEventCount() -> Int {
         midiInput?.eventCount ?? 0
+    }
+
+    // MARK: - Note audition (m23-d)
+
+    /// Tracks with audition voices in flight. The renderer reference is STRONG
+    /// on purpose (the `LiveEventFanout` precedent): it pins that ring's memory
+    /// across a node teardown, so a note-off pushed after the strip was rebuilt
+    /// can never touch freed memory. Entries are dropped when the last voice
+    /// closes, so nothing is pinned at rest.
+    private struct AuditionVoices {
+        var renderer: InstrumentRenderer
+        var pitches: Set<UInt8>
+    }
+
+    /// Sounds exactly `pitches` on `trackID` right now (m23-d). SET semantics,
+    /// diffed against what this track already holds; every call is also the
+    /// liveness heartbeat the render-side watchdog reads.
+    ///
+    /// ADDRESSING IS BY RENDERER IDENTITY, NOT BY TRACK ARM STATE. The
+    /// hardware-thru fanout only carries ARMED instrument tracks, but audition
+    /// must sound on the track being edited whether or not it is armed — so the
+    /// fanout is not the vehicle. And the OFF FOLLOWS THE ON: it is pushed to
+    /// the same `InstrumentRenderer` object that received the on, never to
+    /// whatever the graph returns at off time. That is what makes a node
+    /// rebuild mid-hold safe (the old renderer's voices are released on the old
+    /// object, then the held set re-triggers on the new one).
+    @discardableResult
+    public func setAuditionPitches(trackID: UUID, pitches: [UInt8],
+                                   velocity: UInt8) -> AuditionOutcome {
+        let wanted = Set(pitches.filter { $0 <= 127 })
+        let held = auditionVoices[trackID]
+
+        // Silencing a track we hold: release on the REMEMBERED renderer (which
+        // may already be detached from the graph) and drop the entry.
+        if wanted.isEmpty {
+            guard let held else { return .noRenderer }
+            for pitch in held.pitches {
+                held.renderer.pushAudition(kind: ScheduledMIDIEvent.noteOff,
+                                           pitch: pitch, velocity: 0)
+            }
+            held.renderer.beatAuditionHeartbeat()
+            auditionVoices[trackID] = nil
+            return .sounded
+        }
+
+        // A cold app has a graph but no running hardware; the transport-stopped
+        // half of this feature depends on starting it here (the `startTake`
+        // idiom). `prepare()` has already posted its own notice on failure.
+        if !isRunning {
+            do { try prepare() } catch { }
+        }
+
+        guard let renderer = graph.instrumentRenderer(forTrack: trackID) else {
+            // No live renderer (unknown/audio/bus track, or a mid-rebuild gap):
+            // release anything we still hold on the OLD object so a rebuild
+            // cannot strand a voice, and report honestly.
+            if let held {
+                for pitch in held.pitches {
+                    held.renderer.pushAudition(kind: ScheduledMIDIEvent.noteOff,
+                                               pitch: pitch, velocity: 0)
+                }
+                held.renderer.beatAuditionHeartbeat()
+                auditionVoices[trackID] = nil
+            }
+            return .noRenderer
+        }
+
+        // Identity check: a rebuilt node is a DIFFERENT object. Release on the
+        // old one, then re-trigger the whole held set on the new one.
+        var current = held
+        if let held, held.renderer !== renderer {
+            for pitch in held.pitches {
+                held.renderer.pushAudition(kind: ScheduledMIDIEvent.noteOff,
+                                           pitch: pitch, velocity: 0)
+            }
+            held.renderer.beatAuditionHeartbeat()
+            current = nil
+        }
+
+        let sounding = current?.pitches ?? []
+        for pitch in sounding.subtracting(wanted) {
+            renderer.pushAudition(kind: ScheduledMIDIEvent.noteOff, pitch: pitch, velocity: 0)
+        }
+        for pitch in wanted.subtracting(sounding).sorted() {
+            renderer.pushAudition(kind: ScheduledMIDIEvent.noteOn, pitch: pitch,
+                                  velocity: max(1, min(127, velocity)))
+        }
+        // ALWAYS bump, including on an unchanged set — that is the 500 ms
+        // refresh that keeps a legitimately held key from being watchdogged.
+        renderer.beatAuditionHeartbeat()
+        auditionVoices[trackID] = AuditionVoices(renderer: renderer, pitches: wanted)
+
+        return auditionAudibility(trackID: trackID)
+    }
+
+    /// Releases every audition voice on every track (m23-d). Also requests a
+    /// flush on each renderer that held one: this runs on the paths where the
+    /// main actor is about to stop being able to send note-offs, and there is
+    /// nothing scheduled to protect at that point.
+    public func stopAllAudition() {
+        for (_, held) in auditionVoices {
+            for pitch in held.pitches {
+                held.renderer.pushAudition(kind: ScheduledMIDIEvent.noteOff,
+                                           pitch: pitch, velocity: 0)
+            }
+            held.renderer.beatAuditionHeartbeat()
+            held.renderer.requestFlush()
+        }
+        auditionVoices.removeAll()
+    }
+
+    /// Test seam: pitches this engine believes are auditioning on a track.
+    var auditionPitchesForTesting: [UUID: Set<UInt8>] {
+        auditionVoices.mapValues(\.pitches)
+    }
+
+    /// Why the delivered audition will or will not be heard. Computed ENGINE
+    /// side, from `lastTracks` plus the SAME solo predicate the graph applies —
+    /// a second copy of that predicate in DAWCore would drift.
+    private func auditionAudibility(trackID: UUID) -> AuditionOutcome {
+        guard let track = lastTracks.first(where: { $0.id == trackID }) else { return .sounded }
+        let soloActive = lastTracks.contains(where: \.isSoloed)
+        let soloedBusIDs = Set(lastTracks.filter { $0.kind == .bus && $0.isSoloed }.map(\.id))
+        let feedsSoloedBus = !soloedBusIDs.isEmpty
+            && (track.outputBusID.map(soloedBusIDs.contains) ?? false
+                || track.sends.contains { soloedBusIDs.contains($0.destinationBusID) })
+        let audibleUnderSolo = track.isSoloed || feedsSoloedBus
+        if track.isMuted || (soloActive && !audibleUnderSolo) { return .inaudibleMuted }
+        if !isRunning { return .inaudibleEngineStopped }
+        // A hosted instrument renders a silent placeholder until its async
+        // prepare lands; readiness is the registry's, synchronously readable.
+        let descriptor = track.instrument ?? .default
+        if descriptor.kind == .audioUnit || descriptor.kind == .soundBank,
+           auRegistry.preparedInstrument(forTrack: trackID) == nil {
+            return .inaudibleNotReady
+        }
+        return .sounded
     }
 
     /// Reconciles the AU registry with the track list: releases instruments
@@ -1371,6 +1519,30 @@ public final class AudioEngine: AudioEngineControlling {
                               masterAutomation: [AutomationLane] = [],
                               fromBeat: Double, durationSeconds: Double,
                               to url: URL) async throws -> AudioFileInfo {
+        try await renderMixdown(
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            to: url, format: .default)
+    }
+
+    /// The format-aware mixdown (m23-m2) — the SECOND seam a delivery format
+    /// has to cross, and the one where the engine writes the file itself, so
+    /// `render.mixdown` needs this override and not just `writeAudioFile`.
+    /// Deliberately NO default argument ANYWHERE in this signature — not on
+    /// `format`, and not on `masterEffects`/`masterAutomation` either, which
+    /// the legacy overload above still defaults to `[]`. Any defaulted
+    /// parameter here would make `renderMixdown(… to: url)` ambiguous against
+    /// that overload, which is the one every existing call site and test double
+    /// uses. The render-class defaults are therefore available only on the
+    /// legacy entry point; a format-aware caller states its class explicitly,
+    /// which is what the protocol layer wanted all along (design §2.1).
+    public func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              fromBeat: Double, durationSeconds: Double,
+                              to url: URL,
+                              format: DeliveryFormat) async throws -> AudioFileInfo {
         // Refactored over the M5 iv-b buffer seam: render to memory (the
         // WYSIWYG stretch await and fresh-renderer rules live there), then
         // write — the exact composition `renderToWAV` performed, behavior
@@ -1384,7 +1556,7 @@ public final class AudioEngine: AudioEngineControlling {
             fromBeat: fromBeat, durationSeconds: durationSeconds,
             forcedCompensationTargets: nil
         )
-        return try writeAudioFile(audio, to: url)
+        return try writeAudioFile(audio, to: url, format: format)
     }
 
     /// `masterEffects` / `masterAutomation` concrete-class defaults — see
@@ -1464,7 +1636,14 @@ public final class AudioEngine: AudioEngineControlling {
     }
 
     public func writeAudioFile(_ audio: RenderedAudio, to url: URL) throws -> AudioFileInfo {
-        try OfflineRenderer.writeWAV(audio, to: url)
+        try OfflineRenderer.writeAudioFile(audio, to: url, format: .default)
+    }
+
+    /// The format-aware writer (m23-m2). No default argument, for the same
+    /// disambiguation reason as `renderMixdown`.
+    public func writeAudioFile(_ audio: RenderedAudio, to url: URL,
+                               format: DeliveryFormat) throws -> AudioFileInfo {
+        try OfflineRenderer.writeAudioFile(audio, to: url, format: format)
     }
 
     // MARK: - Audio Unit hosting surface

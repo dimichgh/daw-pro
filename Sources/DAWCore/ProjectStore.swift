@@ -807,6 +807,14 @@ public final class ProjectStore {
 
         lastRecordingError = nil
         pendingTake = pending
+        // m23-d: a take starts SILENT. `auditionPitches` refuses to START an
+        // audition mid-take, but a note already HELD when record begins would
+        // otherwise keep sounding — the heartbeat re-asserts it every 500 ms
+        // and the watchdog would hold it ~3 s even without one. The capture
+        // ring cannot see it, so it would be heard and not recorded, which is
+        // exactly the lie the refusal exists to prevent. Placed after every
+        // throwing gate above, so a REFUSED record leaves the audition alone.
+        audition.stopAll(engine: engine)
         transport.isRecording = true
         transport.isPlaying = true
         do {
@@ -1239,6 +1247,93 @@ public final class ProjectStore {
     /// headless. First call may lazily create the engine's CoreMIDI client.
     public func listMIDIInputs() -> [MIDIInputDevice] {
         engine?.availableMIDIInputs() ?? []
+    }
+
+    // MARK: - Note audition (m23-d)
+
+    /// THE audition policy home — the piano roll's drag, the keyboard gutter's
+    /// key press and the `note.audition` wire verb all run through it.
+    @ObservationIgnored public let audition = AuditionController()
+
+    /// Sounds exactly `pitches` on `trackID` right now, outside the timeline
+    /// (m23-d). SET semantics: `[]` stops. Held until the caller says otherwise
+    /// (or the render side's 3 s liveness watchdog cuts it, if this actor stops
+    /// heartbeating), so a drag calls this on every tick and the controller
+    /// diffs.
+    ///
+    /// REFUSED while recording: anything a user hears during a take is
+    /// reasonably assumed to be IN the take, and both honest alternatives are
+    /// worse — sounding it without capturing it is a lie, and capturing it would
+    /// fabricate a performance the user never played. Policy, not mechanism (the
+    /// audition ring is structurally unreachable from the capture ring).
+    @discardableResult
+    public func auditionPitches(trackID: UUID, pitches: [Int],
+                               velocity: Int = AuditionController.defaultVelocity) throws
+        -> AuditionOutcome {
+        // Stopping is ALWAYS allowed, including mid-take: a refusal here would
+        // strand a voice if a take started while a note was held.
+        if pitches.isEmpty {
+            audition.set(trackID: trackID, pitches: [], velocity: 0, engine: engine)
+            return .sounded
+        }
+        guard !transport.isRecording else {
+            throw ProjectError.transportBusy("cannot audition while recording — stop the take first")
+        }
+        try validateAuditionTarget(trackID: trackID, pitches: pitches, velocity: velocity)
+        return audition.set(trackID: trackID, pitches: pitches, velocity: velocity, engine: engine)
+    }
+
+    /// One-shot audition that releases itself after `durationMs` — the wire's
+    /// entry, because an agent has no mouse-up. Returns IMMEDIATELY; it never
+    /// blocks the control connection for the duration.
+    @discardableResult
+    public func auditionNote(trackID: UUID, pitches: [Int],
+                             velocity: Int = AuditionController.defaultVelocity,
+                             durationMs: Int = AuditionController.defaultDurationMs) throws
+        -> AuditionResult {
+        guard !transport.isRecording else {
+            throw ProjectError.transportBusy("cannot audition while recording — stop the take first")
+        }
+        try validateAuditionTarget(trackID: trackID, pitches: pitches, velocity: velocity)
+        guard AuditionController.durationRangeMs.contains(durationMs) else {
+            throw ProjectError.invalidAudition(
+                "durationMs must be \(AuditionController.durationRangeMs.lowerBound)…"
+                + "\(AuditionController.durationRangeMs.upperBound) ms — got \(durationMs)")
+        }
+        return audition.oneShot(trackID: trackID, pitches: pitches, velocity: velocity,
+                                durationMs: durationMs, engine: engine)
+    }
+
+    /// Releases every audition voice everywhere. Called on the project boundary
+    /// and by the app on resign-active; idempotent.
+    public func stopAllAudition() {
+        audition.stopAll(engine: engine)
+    }
+
+    /// Shared validation for both audition entry points — every check runs
+    /// BEFORE anything is pushed, so a rejected call sounds nothing.
+    private func validateAuditionTarget(trackID: UUID, pitches: [Int], velocity: Int) throws {
+        guard let track = tracks.first(where: { $0.id == trackID }) else {
+            throw ProjectError.trackNotFound(trackID)
+        }
+        guard track.kind == .instrument else {
+            throw ProjectError.instrumentRequiresInstrumentTrack(track.kind)
+        }
+        guard !pitches.isEmpty else {
+            throw ProjectError.invalidAudition("pitches must name at least one note (0…127)")
+        }
+        guard pitches.count <= AuditionController.maxVoices else {
+            throw ProjectError.invalidAudition(
+                "at most \(AuditionController.maxVoices) pitches can audition at once — got \(pitches.count)")
+        }
+        guard pitches.allSatisfy({ AuditionController.pitchRange.contains($0) }) else {
+            throw ProjectError.invalidAudition("every pitch must be 0…127")
+        }
+        guard AuditionController.velocityRange.contains(velocity) else {
+            throw ProjectError.invalidAudition(
+                "velocity must be \(AuditionController.velocityRange.lowerBound)…"
+                + "\(AuditionController.velocityRange.upperBound) — got \(velocity)")
+        }
     }
 
     /// Pins recording input to the device with `uid`; nil returns to the
@@ -1683,6 +1778,61 @@ public final class ProjectStore {
         return true
     }
 
+    /// Moves a track to a new position in the project's ONE track order (m23-h)
+    /// — the order the arrange lanes, the sidebar headers, the mixer strips and
+    /// the saved `[TrackDocument]` array all read.
+    ///
+    /// FINAL-INDEX SEMANTICS, taken verb-for-verb from `reorderEffect` so the
+    /// program has ONE reorder convention: `toIndex` clamps into
+    /// `0 ... count - 1` and the track ends up AT that index in BOTH directions
+    /// (a down-move's removal shifts the tail left by one, exactly cancelling
+    /// the insert). This is deliberately NOT SwiftUI's `onMove` convention (a
+    /// PRE-removal offset, where moving down by one is `from + 2`); the codebase
+    /// has zero `.onMove`, so nothing forces that on us — but any future
+    /// `List`-based surface must translate. Returns the final index.
+    ///
+    /// NOT guarded by `requireRoutingMutationAllowed`, unlike `removeTrack`, and
+    /// that omission is deliberate rather than an oversight: a reorder is
+    /// AUDIO-INERT and cannot reach the render graph. Every engine-side map is
+    /// UUID-keyed (`trackNodes`/`busNodes`/`instrumentNodes`), `Send`s and
+    /// outputs resolve by id, and `PlaybackGraph`'s rebuild trigger is a
+    /// `[UUID: [ClipKey]]` DICTIONARY — so a pure permutation yields an EQUAL
+    /// signature and reconcile reports no change. Taking the guard here would
+    /// refuse mid-take a change that provably cannot disturb the take.
+    ///
+    /// `engine?.tracksDidChange` IS still called (the `addTrack`/`removeTrack`
+    /// convention), for two reasons: it keeps the engine's `lastTracks` order
+    /// honest for a later cold rebuild, and undo/redo call it unconditionally
+    /// anyway (`restoreEditState`'s `tracksChanged` compares arrays, and a
+    /// permutation differs), so NOT calling it here would only make the forward
+    /// and reverse paths disagree. It is cheap: every stage of
+    /// `tracksDidChangeBody` is id-keyed/set-diffed — the AU instrument and AU
+    /// effect syncs early-`continue` on unchanged prepare keys (no plugin
+    /// re-prepare, so no AU-hosting wedge), the stretch sync diffs a clip-id
+    /// set, and `applyParameters` rewrites the same values.
+    ///
+    /// A same-index move returns early WITHOUT `performEdit`, so it neither
+    /// journals an undo step nor marks the project dirty — a no-op reorder is
+    /// not an unsaved change.
+    @discardableResult
+    public func reorderTrack(id: UUID, toIndex: Int) throws -> Int {
+        guard let from = tracks.firstIndex(where: { $0.id == id }) else {
+            throw ProjectError.trackNotFound(id)
+        }
+        let dest = min(max(0, toIndex), tracks.count - 1)
+        guard dest != from else { return from }
+        let name = tracks[from].name
+        performEdit("Move Track '\(name)'") {
+            // The permutation itself lives in `TrackOrder` (m23-z) so the mixer
+            // drag, which must PREDICT this move to know whether it changes the
+            // console's visible order at all, cannot compute it a second and
+            // differing way.
+            tracks = TrackOrder.applying(tracks, moving: id, to: dest)
+            engine?.tracksDidChange(tracks)
+        }
+        return dest
+    }
+
     // MARK: - Recording guard for routing-topology mutations (m13-c)
 
     /// Refuses an announce-class ROUTING mutation while a take is rolling.
@@ -1727,6 +1877,10 @@ public final class ProjectStore {
     ///     routing change.
     ///   • `reorderEffect` — reordering leaves the key SOURCE set unchanged →
     ///     chain publish, no routing change.
+    ///   • `reorderTrack` (m23-h) — a permutation of the track ARRAY. Every
+    ///     engine map is UUID-keyed and reconcile's signature is a dictionary,
+    ///     so the reconcile is a no-op and nothing announces. Guarding it would
+    ///     refuse mid-take an edit that cannot reach audio at all.
     private func requireRoutingMutationAllowed(_ action: String) throws {
         guard !transport.isRecording else {
             throw ProjectError.transportBusy(
@@ -2802,8 +2956,15 @@ public final class ProjectStore {
         let startBeat = max(0, atBeat ?? appendPosition)
         // File duration → beats via the inverse integral FROM the landing
         // beat (m12-b, design row 11) — the placement decides the conversion.
-        let lengthBeats = transport.tempoMap.beat(
-            from: startBeat, elapsedSeconds: info.durationSeconds) - startBeat
+        // FLOORED at `minClipLengthBeats` (m23-f): a header-only / zero-frame
+        // file reports `durationSeconds == 0` (AudioFileImporter only guards
+        // `sampleRate > 0`, it does not throw), which used to place a
+        // ZERO-LENGTH clip — a zero-width block that cannot be selected,
+        // trimmed, moved or deleted, i.e. exactly the un-removable visual m23-f
+        // exists to eliminate. The floor is the same one a trim drag bottoms
+        // out at, so the clip is reachable by every ordinary clip gesture.
+        let lengthBeats = max(Self.minClipLengthBeats, transport.tempoMap.beat(
+            from: startBeat, elapsedSeconds: info.durationSeconds) - startBeat)
 
         let name = url.deletingPathExtension().lastPathComponent
         let clip = Clip(
@@ -3084,6 +3245,78 @@ public final class ProjectStore {
         let removed = tracks[t].clips[c]
         performEdit("Remove Clip '\(removed.name)'") {
             tracks[t].clips.remove(at: c)
+            engine?.tracksDidChange(tracks)
+        }
+        return removed
+    }
+
+    /// The undo label a group delete journals. Countable and DISTINCT from
+    /// `removeClip`'s `"Remove Clip '<name>'"` on purpose: a gate (and the user's
+    /// Edit menu) can then tell "one atomic group delete" from "a loop of single
+    /// deletes" by the label alone, independently of the stack depth.
+    static func removeClipsLabel(count: Int) -> String {
+        count == 1 ? "Delete 1 Clip" : "Delete \(count) Clips"
+    }
+
+    /// Removes SEVERAL clips as ONE undoable edit (m23-g1) — the group-delete
+    /// verb behind the arrange's multi-selection.
+    ///
+    /// WHY THIS MUTATES `tracks` DIRECTLY INSTEAD OF LOOPING `removeClip`:
+    /// `performEdit` is NOT re-entrant. It captures before-state and journals
+    /// unconditionally (there is no depth counter in this file), so an outer
+    /// `performEdit` wrapped around N `removeClip` calls produces N+1 journal
+    /// entries, not one — and `key:` coalescing cannot rescue it either, because
+    /// the single-clip verbs key per-clip. ONE `performEdit` around a direct
+    /// mutation is the only shape that yields one undo step, and it is exactly
+    /// what `tracks` being `public internal(set)` exists for (see its doc
+    /// comment). `deleteClips(start:end:delta:tempoMap:)` is the prior art.
+    ///
+    /// ALL-OR-NOTHING: every id is located and cleared past `requireNotCompMember`
+    /// BEFORE anything is removed, so a set containing one comp member refuses
+    /// whole and leaves the project untouched. A partial delete hidden inside a
+    /// single journal entry would be worse than a refusal — the undo would look
+    /// complete while the edit never was. Duplicate ids collapse; an empty set is
+    /// a no-op that journals nothing (`performEdit` only records a real change,
+    /// but this returns before it is even entered).
+    ///
+    /// Throws `clipNotFound` for an unknown id — the `removeClip` contract,
+    /// unchanged. The UI path filters the selection against live clips first
+    /// (`ArrangeSelection.resolved(in:)`), so a stale selected id can never reach
+    /// here; an agent calling with a bad id still gets told.
+    ///
+    /// TODO(wire, deliberately not shipped in m23-g1): this verb has no control
+    /// command yet, by the orchestrator's explicit "zero wire growth" direction
+    /// for this item — the arrange SELECTION it serves is UI state and lives on
+    /// the `debug.arrangeSelection` seam (the `debug.arrangeDrop` snap-picker
+    /// precedent). The domain effect is already agent-reachable as N× `clip.remove`;
+    /// the only delta is undo atomicity. When that delta is wanted, the command is
+    /// `clip.removeMany {ids:[uuid]}` in `Sources/DAWControl/Commands.swift` and
+    /// the MCP tool is `daw_clip_remove_many` in `mcp-server/src/server.ts`.
+    @discardableResult
+    public func removeClips(ids: [UUID]) throws -> [Clip] {
+        var seen = Set<UUID>()
+        let unique = ids.filter { seen.insert($0).inserted }
+        guard !unique.isEmpty else { return [] }
+
+        // Phase 1 — locate + validate EVERYTHING. No mutation yet.
+        var located: [(track: Int, clip: Int)] = []
+        located.reserveCapacity(unique.count)
+        for id in unique {
+            guard let loc = locateClip(id) else { throw ProjectError.clipNotFound(id) }
+            try requireNotCompMember(trackIndex: loc.track, clipIndex: loc.clip)
+            located.append(loc)
+        }
+        let removed = located.map { tracks[$0.track].clips[$0.clip] }
+
+        // Phase 2 — one edit. Within each track remove by DESCENDING clip index so
+        // the indices located in phase 1 stay valid as the array shrinks.
+        let byTrack = Dictionary(grouping: located, by: \.track)
+        performEdit(Self.removeClipsLabel(count: unique.count)) {
+            for (t, locs) in byTrack {
+                for c in locs.map(\.clip).sorted(by: >) {
+                    tracks[t].clips.remove(at: c)
+                }
+            }
             engine?.tracksDidChange(tracks)
         }
         return removed
@@ -3467,6 +3700,203 @@ public final class ProjectStore {
         }
         let final = tracks[t].clips.first { $0.id == clipId } ?? moved
         return ClipMoveResult(clip: final, trimmedClipIDs: trimmedIDs, removedClipIDs: removedIDs)
+    }
+
+    // MARK: - Group move (m23-g2)
+
+    /// The undo label a group move journals. A ONE-clip group reproduces
+    /// `moveClip`'s label BYTE-FOR-BYTE on purpose: the arrange drag routes
+    /// EVERY drag through `moveClips` (there is no count==1 special case in the
+    /// gesture), so a single-clip drag must keep reading "Move Clip 'Loop'" in
+    /// the Edit menu and in `edit.history` exactly as it did before m23-g2.
+    /// Above one, the label is countable and DISTINCT, so a gate (and the user)
+    /// can tell one atomic group move from a loop of single moves by the label
+    /// alone — the `removeClipsLabel` precedent.
+    static func moveClipsLabel(count: Int, singleName: String) -> String {
+        count == 1 ? "Move Clip '\(singleName)'" : "Move \(count) Clips"
+    }
+
+    /// The coalescing key a group move journals. Same rule as the label: one
+    /// clip reproduces `moveClip`'s per-clip key verbatim; a real group gets a
+    /// SELECTION-STABLE key (the sorted id list) so the many `moveClips` calls a
+    /// single live drag emits fold into ONE undo entry, while a drag of a
+    /// DIFFERENT selection cannot fold into it.
+    static func moveClipsKey(ids: [UUID]) -> String {
+        ids.count == 1
+            ? "clip.move:\(ids[0].uuidString)"
+            : "clip.moveMany:" + ids.map(\.uuidString).sorted().joined(separator: ",")
+    }
+
+    /// Translates SEVERAL clips RIGIDLY along the timeline as ONE undoable edit
+    /// (m23-g2) — the group-move verb behind the arrange's multi-selection drag.
+    ///
+    /// WHY DELTA-BASED AND NOT ABSOLUTE-TARGET-BASED: a rigid translation IS the
+    /// contract. An absolute `[UUID: Double]` signature would let a caller hand
+    /// in per-clip targets that do not share a delta — i.e. it would make
+    /// "relative offsets are preserved" a caller PROMISE instead of a type-level
+    /// fact. With one `Double` there is nothing to keep in sync: every selected
+    /// clip moves by the same amount because there is only one amount. The
+    /// arrow-key nudge (m23-x) is a thin keyboard layer over this same verb for
+    /// exactly this reason — two verbs computing group geometry would drift.
+    ///
+    /// SNAPPING IS NOT HERE, DELIBERATELY. It is a property of the GESTURE, not
+    /// of each clip: the arrange snaps the ANCHOR clip's absolute start ONCE
+    /// (`ArrangeGroupDrag.plan`) and hands the resulting delta here. Snapping
+    /// each clip's own absolute start — which is what applying
+    /// `ClipEdit.movedStartBeat` per clip does — WELDS a group whose members sit
+    /// at different sub-grid phases (clips at beats 0 and 2.5 under `.bar` snap
+    /// both land on 4). That is the defect m23-g2 exists to prevent, and keeping
+    /// snap out of this verb makes it unreachable from here.
+    ///
+    /// WHOLE-GROUP BEAT-0 CLAMP: `effectiveDelta = max(delta, -minStart)`, where
+    /// `minStart` is the LEFTMOST selected clip's start. Never per-clip — a
+    /// per-clip `max(0, ...)` (which is what `moveClip` does, correctly, for one
+    /// clip) silently breaks offsets the moment the leftmost member hits the
+    /// wall while the others still have room. **When the clamp fires, OFFSETS
+    /// WIN OVER SNAP:** the leftmost clip lands at exactly 0 and every gap is
+    /// preserved, even though the anchor may then sit off-grid. Preserving
+    /// offsets is this item's stated contract; an off-grid anchor in that one
+    /// edge case is the correct trade, and `clamped` reports it honestly.
+    ///
+    /// OVERLAP: resolved through the ONE no-silent-overlap choke point
+    /// (`resolvingOverlaps`, m13-b) — but called ONCE PER MOVING CLIP, with
+    /// `activeIDs` = the FULL moving set, feeding the rebuilt array forward.
+    /// This is the whole reason the verb is not a loop over `moveClip`:
+    /// `resolvingOverlaps` takes a SINGLE CONTIGUOUS window (`start`/`end`), so
+    /// a union window over a non-contiguous group (clips at bar 1 and bar 9)
+    /// would trim residents that NO MOVER ACTUALLY OVERLAPS — data loss created
+    /// by the union, not by the choke point. Per-mover, each contributes only
+    /// its own true window, every mover is exempt from every pass (so movers
+    /// never trim each other), and non-contiguity dissolves.
+    ///
+    /// PASS ORDER IS SORTED (by landing start, then id) so the result cannot
+    /// depend on the caller's id order. For MUTUALLY DISJOINT movers — the
+    /// invariant for ordinary clips — the passes are order-independent anyway
+    /// (each trim keeps the resident's head and cuts at the earliest active
+    /// start, so trims are monotone). For movers that OVERLAP EACH OTHER, which
+    /// only sanctioned audio crossfade pairs (m11-d) can produce, they are NOT:
+    /// resident `[0,10)` with movers landing at `[0,3)` and `[2,4)` survives as
+    /// `[4,10)` in one order and is REMOVED in the other. Sorting does not make
+    /// that case principled, it makes it DETERMINISTIC and reproducible.
+    ///
+    /// ONE `performEdit` for the whole operation, so a single undo restores
+    /// every moved clip AND every resident trim. `performEdit` is NOT re-entrant
+    /// (see `removeClips` for the measurement), which is why this mutates
+    /// `tracks` directly rather than looping the public single-clip verb.
+    ///
+    /// VALIDATE-FIRST: every id is located and cleared past
+    /// `requireNotCompMember` BEFORE anything moves, so a set containing one
+    /// comp member refuses WHOLE and leaves the project untouched. Duplicate ids
+    /// collapse; an empty set is a no-op.
+    ///
+    /// A ZERO effective delta returns BEFORE any mutation — not merely as an
+    /// optimisation. A live drag emits many events that have not yet crossed a
+    /// grid line, and running the overlap pass at the clip's CURRENT position
+    /// would trim a legitimately-overlapping neighbour (a sanctioned crossfade
+    /// partner) for a gesture that moved nothing.
+    ///
+    /// Throws `clipNotFound` for an unknown id (the `removeClips` contract); the
+    /// UI path filters the selection against live clips first
+    /// (`ArrangeSelection.resolved(in:)`).
+    ///
+    /// HORIZONTAL ONLY. There is no cross-track group drag, because there is no
+    /// cross-track drag at all — `moveClip` is same-track by construction
+    /// (`locateClip(trackID:clipID:)`, no `toTrackId` unlike `duplicateClip`)
+    /// and the arrange gesture has never offered one. A MIXED-TRACK selection is
+    /// fully supported and preserves cross-track offsets, because one delta
+    /// applies to all of them; what does not exist is moving a clip to a
+    /// DIFFERENT track.
+    ///
+    /// TODO(wire, deliberately not shipped in m23-g2): filed as roadmap item
+    /// m23-w together with group delete's. The command is
+    /// `clip.moveMany {ids:[uuid], byBeats:Double}` in
+    /// `Sources/DAWControl/Commands.swift` and the MCP tool is
+    /// `daw_clip_move_many` in `mcp-server/src/server.ts`. The domain effect is
+    /// already agent-reachable as N× `clip.move`; the deltas are undo atomicity
+    /// and the non-contiguous overlap handling.
+    @discardableResult
+    public func moveClips(ids: [UUID], byBeats delta: Double) throws -> ClipsMoveResult {
+        var seen = Set<UUID>()
+        let unique = ids.filter { seen.insert($0).inserted }
+        guard !unique.isEmpty else {
+            return ClipsMoveResult(clips: [], requestedDeltaBeats: delta,
+                                   effectiveDeltaBeats: 0, clamped: false)
+        }
+
+        // Phase 1 — locate + validate EVERYTHING. No mutation yet.
+        var located: [(track: Int, clip: Int)] = []
+        located.reserveCapacity(unique.count)
+        for id in unique {
+            guard let loc = locateClip(id) else { throw ProjectError.clipNotFound(id) }
+            try requireNotCompMember(trackIndex: loc.track, clipIndex: loc.clip)
+            located.append(loc)
+        }
+
+        // Phase 2 — the WHOLE-GROUP clamp (never per clip).
+        let minStart = located.map { tracks[$0.track].clips[$0.clip].startBeat }.min() ?? 0
+        let effective = max(delta, -minStart)
+        let clamped = effective != delta
+        guard effective != 0 else {
+            let unchanged = located.map { tracks[$0.track].clips[$0.clip] }
+            return ClipsMoveResult(clips: unchanged, requestedDeltaBeats: delta,
+                                   effectiveDeltaBeats: 0, clamped: clamped)
+        }
+
+        // Phase 3 — one edit. Per track: translate every mover FIRST (the phase-1
+        // indices are only valid against the pre-rebuild array), then run one
+        // overlap pass per mover over the array as it evolves.
+        let byTrack = Dictionary(grouping: located, by: \.track)
+        let anchorName = tracks[located[0].track].clips[located[0].clip].name
+        let tempoMap = transport.tempoMap
+        var trimmed: [UUID] = []
+        var removed: [UUID] = []
+        performEdit(Self.moveClipsLabel(count: unique.count, singleName: anchorName),
+                    key: Self.moveClipsKey(ids: unique)) {
+            for t in byTrack.keys.sorted() {
+                let locs = byTrack[t] ?? []
+                let movingIDs = Set(locs.map { tracks[t].clips[$0.clip].id })
+                // Each mover's TRUE post-move window, captured before anything is
+                // rebuilt. Sorted so the pass order is caller-order-independent.
+                var movers: [(id: UUID, start: Double, end: Double)] = locs.map { loc in
+                    let clip = tracks[t].clips[loc.clip]
+                    let start = clip.startBeat + effective
+                    return (clip.id, start, start + clip.lengthBeats)
+                }
+                movers.sort {
+                    $0.start == $1.start ? $0.id.uuidString < $1.id.uuidString : $0.start < $1.start
+                }
+                for loc in locs {
+                    tracks[t].clips[loc.clip].startBeat += effective
+                }
+                for mover in movers {
+                    let resolved = Self.resolvingOverlaps(
+                        in: tracks[t].clips, activeIDs: movingIDs,
+                        start: mover.start, end: mover.end, tempoMap: tempoMap)
+                    tracks[t].clips = resolved.clips
+                    trimmed.append(contentsOf: resolved.trimmedIDs)
+                    removed.append(contentsOf: resolved.removedIDs)
+                }
+            }
+            engine?.tracksDidChange(tracks)
+        }
+
+        // De-duplicate the aggregate: a resident can be reported by more than one
+        // mover's pass, and a REMOVAL supersedes any earlier trim of the same clip.
+        var seenRemoved = Set<UUID>()
+        let removedOut = removed.filter { seenRemoved.insert($0).inserted }
+        var seenTrimmed = Set<UUID>()
+        let trimmedOut = trimmed.filter {
+            !seenRemoved.contains($0) && seenTrimmed.insert($0).inserted
+        }
+
+        var byID: [UUID: Clip] = [:]
+        for track in tracks {
+            for clip in track.clips { byID[clip.id] = clip }
+        }
+        return ClipsMoveResult(clips: unique.compactMap { byID[$0] },
+                               requestedDeltaBeats: delta, effectiveDeltaBeats: effective,
+                               clamped: clamped, trimmedClipIDs: trimmedOut,
+                               removedClipIDs: removedOut)
     }
 
     /// Rebuilds `clip` under a FRESH identity/position, VALUE-COPYING every
@@ -4308,11 +4738,20 @@ public final class ProjectStore {
     /// A clip may carry at most this many controller lanes (design-m16b §7): one
     /// per distinct controller stream, capped so an adversarial project can't
     /// mint unbounded lanes. Enforced when ADDING a new lane type.
-    public static let maxControllerLanesPerClip = 16
+    ///
+    /// `nonisolated` (m23-k3) so the actor-free `SMFProjectMapper` can honour
+    /// the SAME constant rather than minting a second copy of it: a MIDI import
+    /// builds `Clip` values offline and appends them, bypassing this store
+    /// boundary entirely, which makes the mapper the only enforcement of these
+    /// caps on that path. Reading an immutable `let` off the main actor is
+    /// safe; nothing else about the caps moved.
+    public nonisolated static let maxControllerLanesPerClip = 16
     /// A controller lane may carry at most this many points (design-m16b §7): a
     /// thinned ~200 Hz capture of an ~80 s continuous gesture still round-trips.
-    /// Enforced at the store edit boundary (the notes-cap idiom, but store-side).
-    public static let maxControllerPointsPerLane = 16384
+    /// Enforced at the store edit boundary (the notes-cap idiom, but store-side)
+    /// — and, for an import that never crosses that boundary, in
+    /// `SMFProjectMapper`. `nonisolated` for the same reason as the lane cap.
+    public nonisolated static let maxControllerPointsPerLane = 16384
 
     /// Creates or REPLACES the clip's controller lane of `type` WHOLESALE (the
     /// `setAutomationPoints` / `setClipNotes` precedent) with `points` (m16-b).
@@ -4548,28 +4987,58 @@ public final class ProjectStore {
     /// comment dies with the bug it defends.) No clips past `fromBeat` →
     /// `nothingToRender`. Explicit `durationSeconds` renders that exact window,
     /// untouched (era-pinned byte-identity — the extent seam is bypassed).
+    ///
+    /// `excludeTrackIds` (m23-m1) renders the FULL session with those tracks
+    /// silenced FOR THIS RENDER ONLY — the raw/fast path's mirror of
+    /// `renderBounce`'s instrumental parameter. Never mutates the project's
+    /// mute/solo flags, never dirties it, never adds an undo step; an unknown
+    /// id throws `trackNotFound` before anything renders. An excluded track
+    /// takes its SENDS with it (reverb/delay tail included) and its sidechain
+    /// key contribution — see `RenderExclusion` for the topology and for why
+    /// "instrumental but keep the vocal's reverb" is not expressible here. The
+    /// window still comes from the whole session, so the instrumental is
+    /// exactly as long as the mix.
+    ///
+    /// `bitDepth` / `container` (m23-m2) pick the OUTPUT FORMAT — 16/24/32-bit
+    /// integer or the Float32 default, WAV or AIFF — and `path`'s extension is
+    /// made to agree with the container, since the extension is what actually
+    /// selects it. Integer depths CLAMP at full scale (Float32 keeps > 0 dBFS
+    /// content, the ii-e stance).
     public func renderMixdown(
         toPath path: String? = nil,
         fromBeat: Double = 0,
-        durationSeconds: Double? = nil
+        durationSeconds: Double? = nil,
+        excludeTrackIds: [UUID]? = nil,
+        bitDepth: Int? = nil,
+        container: String? = nil
     ) async throws -> MixdownResult {
         guard let engine else { throw ProjectError.engineUnavailable }
+        // Resolved FIRST, before anything renders (m23-m2) — the
+        // `RenderExclusion.resolve` validate-first precedent.
+        let format = try DeliveryFormat.resolve(bitDepth: bitDepth, container: container)
         let startBeat = max(0, fromBeat)
         // The ONE default-window seam (m16-d): explicit duration wins untouched;
         // nil → the shared all-clips extent + 2.0 s tail, identical to bounce/
         // stems/measure. No clips past `fromBeat` throws `nothingToRender`.
+        // Measured off the FULL session — excluding the longest track must not
+        // shorten the render.
         let duration = try renderWindowSeconds(fromBeat: startBeat, requested: durationSeconds)
+        let exclusion = try RenderExclusion.resolve(session: tracks, excluding: excludeTrackIds)
 
-        let url = Self.mixdownDestination(from: path)
+        let url = Self.mixdownDestination(from: path, format: format)
+        // The format crosses HERE, not at `writeAudioFile`: on this path the
+        // ENGINE renders AND writes (m23-m2), so plumbing only the buffer seam
+        // would leave `render.mixdown` silently Float32 WAV.
         let info = try await engine.renderMixdown(
-            tracks: tracks,
+            tracks: exclusion.tracks,
             tempoMap: transport.tempoMap,
             masterVolume: masterVolume,
             masterEffects: masterEffects,  // MASTERED class (m13-d, design §2)
             masterAutomation: masterAutomation,  // rides the class (m15-c)
             fromBeat: startBeat,
             durationSeconds: duration,
-            to: url
+            to: url,
+            format: format
         )
         // A file landed on disk — tick the render counter for the onboarding
         // signal adapter (ob-b), which fires `renderCompleted` on an increment.
@@ -4578,24 +5047,29 @@ public final class ProjectStore {
             path: url.path,
             durationSeconds: info.durationSeconds,
             sampleRate: info.sampleRate,
-            channels: info.channelCount
+            channels: info.channelCount,
+            excludedTracks: exclusion.excludedNames,
+            bitDepth: format.reportedBitDepth,
+            container: format.reportedContainer,
+            ditherApplied: format.reportedDitherApplied
         )
     }
 
     /// Destination resolution: nil → a unique file under
-    /// NSTemporaryDirectory()/DAWPro/; otherwise `~` expands and `.wav` is
-    /// appended unless the path already carries it (case-insensitive).
-    private static func mixdownDestination(from path: String?) -> URL {
+    /// NSTemporaryDirectory()/DAWPro/; otherwise `~` expands and the FORMAT's
+    /// extension is applied (m23-m2 — the extension selects the container, so
+    /// it cannot be a literal here; `DeliveryFormat.applyingExtension` owns the
+    /// rule, shared with `bounceDestination` and the stem files).
+    static func mixdownDestination(from path: String?,
+                                   format: DeliveryFormat = .default) -> URL {
         guard let path else {
             return URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("DAWPro", isDirectory: true)
-                .appendingPathComponent("mixdown-\(UUID().uuidString.prefix(8)).wav")
+                .appendingPathComponent(
+                    format.fileName("mixdown-\(UUID().uuidString.prefix(8))"))
         }
-        var expanded = (path as NSString).expandingTildeInPath
-        if !expanded.lowercased().hasSuffix(".wav") {
-            expanded += ".wav"
-        }
-        return URL(fileURLWithPath: expanded)
+        let expanded = (path as NSString).expandingTildeInPath
+        return URL(fileURLWithPath: format.applyingExtension(to: expanded))
     }
 
     // MARK: - Persistence
@@ -5023,6 +5497,10 @@ public final class ProjectStore {
         // A new session starts with empty history; prior edits no longer apply.
         journal.clear()
 
+        // m23-d: a project boundary destroys every renderer, so held audition
+        // voices are released HERE, while the objects that own them are still
+        // reachable and the controller's timers can still be cancelled.
+        audition.stopAll(engine: engine)
         // m13-a (A1): a project boundary retires the engine's whole graph —
         // a once-rendered engine rebuilds from the new (empty) model inside
         // the tracksDidChange below instead of tearing nodes down one by one.
@@ -5094,6 +5572,10 @@ public final class ProjectStore {
         // fresh (undo must never reach across a load boundary).
         journal.clear()
 
+        // m23-d: a project boundary destroys every renderer, so held audition
+        // voices are released HERE, while the objects that own them are still
+        // reachable and the controller's timers can still be cancelled.
+        audition.stopAll(engine: engine)
         // m13-a (A1): a project boundary retires the engine's whole graph —
         // a once-rendered engine rebuilds from the opened model inside the
         // tracksDidChange below instead of tearing nodes down one by one.

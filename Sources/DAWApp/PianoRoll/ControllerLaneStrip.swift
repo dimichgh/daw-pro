@@ -24,6 +24,13 @@ struct ControllerLaneStrip: View {
     /// strip previewable. The canvas already draws the extension honestly —
     /// shade + boundary hairline + ghost hold-line run to `size.width` (m18-e).
     var drawnWidth: CGFloat
+    /// Follow-the-playhead (m23-c2): the content x the editor wants at this band's
+    /// leading edge, and the nonce that makes a repeat of the same x still apply.
+    /// The strip carries no playhead of its own (m23-c1), so it does not follow for
+    /// its own sake — it follows so the CC line stays under the notes it belongs
+    /// to. Plain value inputs; a preview passes nothing.
+    var followTargetX: CGFloat = 0
+    var followNonce: Int = 0
     /// Commits the visible lane through `ProjectStore.setControllerLane` (the wire
     /// verb's store call) and reseeds the model from the returned clip.
     var onCommit: () -> Void
@@ -263,16 +270,41 @@ struct ControllerLaneStrip: View {
     private var laneBody: some View {
         HStack(alignment: .top, spacing: 0) {
             sidebarLabel
-            ScrollView(.horizontal, showsIndicators: false) {
-                ControllerLaneCanvas(model: model, accent: accent)
-                    .frame(width: max(drawnWidth, model.contentWidth), height: Self.canvasHeight)
-                    .contentShape(Rectangle())
-                    .hoverCursor(resolve: laneCursor)
-                    .gesture(laneDrag)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    ControllerLaneCanvas(model: model, accent: accent)
+                        .frame(width: max(drawnWidth, model.contentWidth), height: Self.canvasHeight)
+                        .contentShape(Rectangle())
+                        .hoverCursor(resolve: laneCursor)
+                        .gesture(laneDrag)
+                        .overlay(alignment: .topLeading) { followMarker }
+                }
+                // Same target + nonce as the grid and the velocity lane, so all
+                // three bands turn the page together (m23-c2). Never animated; the
+                // deferred re-issue is the m17-b durability rule.
+                .onChange(of: followNonce) { _, _ in
+                    proxy.scrollTo(Self.followMarkerID, anchor: .leading)
+                    Task { @MainActor in
+                        proxy.scrollTo(Self.followMarkerID, anchor: .leading)
+                    }
+                }
             }
         }
         .frame(height: Self.canvasHeight)
     }
+
+    /// This band's follow anchor (m23-c2) — the `PianoRollView.followMarker` idiom:
+    /// a 1 pt, layout-real, hit-test-inert marker at `followTargetX`, sized inside a
+    /// band whose width is pinned, so it can never grow the content.
+    private var followMarker: some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: max(0, followTargetX), height: 1)
+            Color.clear.frame(width: 1, height: 1).id(Self.followMarkerID)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private static let followMarkerID = "controllerLaneFollowMarker"
 
     private var sidebarLabel: some View {
         Text(model.selectedType.map { ControllerStripModel.label(for: $0) } ?? "—")

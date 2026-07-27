@@ -18,10 +18,12 @@ public protocol PanelLayoutBacking: AnyObject {
     func storeValue(_ value: Double, forKey key: String)
 }
 
-/// Adjustable window layout for the arrange workspace (beta m10-d): the track
-/// sidebar width, the bottom editor's height as a fraction of the window, and the
-/// GLOBAL track-row height (one value shared by the sidebar headers and the
-/// timeline lanes, so they stay pixel-aligned at every size). Each dimension is an
+/// Adjustable window layout (beta m10-d): the arrange track-sidebar width, the
+/// bottom editor's height as a fraction of the window, the GLOBAL track-row
+/// height (one value shared by the sidebar headers and the timeline lanes, so
+/// they stay pixel-aligned at every size), the two zoom scales, the mixer
+/// console's INSERTS disclosure (m23-a), and the follow-the-playhead switch
+/// (m23-c2). Each dimension is an
 /// app-side sticky PREFERENCE — never project data — persisted through the injected
 /// `PanelLayoutBacking` under `panelLayout.<dimension>`, so a resized layout
 /// survives close/reopen and relaunch (the `PanelDensityStore` precedent).
@@ -48,6 +50,27 @@ public final class PanelLayoutStore {
     public static let arrangePPBKey = "arrangePPB"
     /// Piano-roll horizontal zoom (m21-c) — the `arrangePPB` sibling slot.
     public static let pianoRollPPBKey = "pianoRollPPB"
+    /// Mixer INSERTS disclosure (m23-a) — collapsed vs expanded, for the whole
+    /// console (the density precedent: the mixer is ONE panel, so its strips do
+    /// not each carry their own chrome state). Stored in the shared `Double`
+    /// backing as 1 = collapsed / 0 = expanded; the public API is a `Bool`, so the
+    /// encoding never escapes this file.
+    public static let mixerInsertsCollapsedKey = "mixerInsertsCollapsed"
+    /// Follow-the-playhead (m23-c2) — the ONE opt-in flag every following surface
+    /// reads (arrange lanes + all three piano-roll bands), so the two surfaces can
+    /// never be in different follow states. Stored in the shared `Double` backing
+    /// as 1 = following / 0 = free, the `mixerInsertsCollapsed` encoding; the
+    /// public API is a `Bool`.
+    public static let followPlayheadKey = "followPlayhead"
+    /// Note audition while editing (m23-d) — whether dragging a note vertically
+    /// and clicking a key in the gutter sound the pitch on the track's
+    /// instrument. Stored in the shared `Double` backing as 1 = on / 0 = off,
+    /// the `followPlayhead` encoding; the public API is a `Bool`. This is a
+    /// VIEW-CHROME preference and rides the debug tier only: the `note.audition`
+    /// wire verb deliberately ignores it (an agent asking to hear something is
+    /// making an explicit request, and this switch means "don't sound notes
+    /// while I edit", not "never make sound").
+    public static let auditionEnabledKey = "auditionEnabled"
 
     // MARK: - Defaults (today's hardcoded values — the pre-m10-d look)
 
@@ -61,6 +84,18 @@ public final class PanelLayoutStore {
     public static let defaultArrangePPB: CGFloat = ArrangeZoom.defaultPixelsPerBeat
     /// Piano-roll pixels-per-beat (m21-c) — the historical fixed 32 pt/beat.
     public static let defaultPianoRollPPB: CGFloat = PianoRollZoom.defaultPixelsPerBeat
+    /// Mixer inserts start EXPANDED (m23-a) — the pre-m23-a look. A persisted
+    /// default of "collapsed" would make every existing user's insert chains
+    /// vanish on the update; the disclosure is an escape hatch, not the norm.
+    public static let defaultMixerInsertsCollapsed = false
+    /// Follow starts OFF (m23-c2). The item is explicitly OPT-IN: a view that
+    /// moves on its own is the kind of surprise that has to be asked for, and a
+    /// persisted default of "on" would start every existing session scrolling.
+    public static let defaultFollowPlayhead = false
+    /// Note audition starts ON (m23-d): hearing the pitch you drag is the
+    /// feature, and the switch exists as an escape hatch for a user who finds
+    /// it noisy — not as an opt-in that leaves the item invisible by default.
+    public static let defaultAuditionEnabled = true
 
     // MARK: - Clamp ranges
     //
@@ -104,6 +139,17 @@ public final class PanelLayoutStore {
     /// so all three bands (note grid, velocity lane, controller strip) rescale
     /// off the ONE value.
     public private(set) var pianoRollPPB: CGFloat
+    /// Whether the mixer console's INSERTS sections are collapsed (m23-a). ONE
+    /// value for the whole console — channel strips, bus strips, and the master
+    /// chain all read it, the way density is read per-console and never per-strip.
+    public private(set) var mixerInsertsCollapsed: Bool
+    /// Whether the arrange lanes and the piano-roll bands keep the playhead in
+    /// frame during playback (m23-c2). ONE value for both surfaces — the follow
+    /// POLICY is shared, so its switch is too.
+    public private(set) var followPlayhead: Bool
+    /// Whether a piano-roll drag / keyboard-gutter click sounds the pitch on
+    /// the track's instrument (m23-d). ONE value for both audition surfaces.
+    public private(set) var auditionEnabled: Bool
 
     @ObservationIgnored private let backing: PanelLayoutBacking
 
@@ -123,6 +169,12 @@ public final class PanelLayoutStore {
                                       default: Self.defaultArrangePPB, range: Self.arrangePPBRange)
         self.pianoRollPPB = Self.loaded(backing, Self.pianoRollPPBKey,
                                         default: Self.defaultPianoRollPPB, range: Self.pianoRollPPBRange)
+        self.mixerInsertsCollapsed = backing.loadValue(forKey: Self.mixerInsertsCollapsedKey)
+            .map { $0 != 0 } ?? Self.defaultMixerInsertsCollapsed
+        self.followPlayhead = backing.loadValue(forKey: Self.followPlayheadKey)
+            .map { $0 != 0 } ?? Self.defaultFollowPlayhead
+        self.auditionEnabled = backing.loadValue(forKey: Self.auditionEnabledKey)
+            .map { $0 != 0 } ?? Self.defaultAuditionEnabled
     }
 
     private static func loaded(_ backing: PanelLayoutBacking, _ key: String,
@@ -156,11 +208,36 @@ public final class PanelLayoutStore {
     }
 
     /// Sets the piano-roll horizontal zoom (m21-c). Clamped like every
-    /// dimension; the roll's plain SwiftUI scroller keeps its own offset, so
-    /// no anchor recompute rides along (unlike `setArrangePPB`'s callers).
+    /// dimension; a zoom does not re-pin an anchor beat under the cursor here,
+    /// so no offset recompute rides along (unlike `setArrangePPB`'s callers).
+    /// The roll DOES have a programmatic scroll seam as of m23-c2 (follow), but
+    /// it is a scroll-into-view, not an anchor re-pin.
     public func setPianoRollPPB(_ value: CGFloat) {
         pianoRollPPB = value.clamped(to: Self.pianoRollPPBRange)
         backing.storeValue(Double(pianoRollPPB), forKey: Self.pianoRollPPBKey)
+    }
+
+    /// Collapses or expands the mixer console's INSERTS sections (m23-a). No clamp
+    /// to apply — a `Bool` has no out-of-range value — but it write-throughs like
+    /// every other dimension, so the disclosure survives relaunch.
+    public func setMixerInsertsCollapsed(_ collapsed: Bool) {
+        mixerInsertsCollapsed = collapsed
+        backing.storeValue(collapsed ? 1 : 0, forKey: Self.mixerInsertsCollapsedKey)
+    }
+
+    /// Turns follow-the-playhead on or off (m23-c2). Write-throughs like every
+    /// other dimension, so an opted-in session is still following after relaunch.
+    public func setFollowPlayhead(_ following: Bool) {
+        followPlayhead = following
+        backing.storeValue(following ? 1 : 0, forKey: Self.followPlayheadKey)
+    }
+
+    /// Turns note audition while editing on or off (m23-d). Write-throughs like
+    /// every other dimension, so a user who silenced it stays silenced after
+    /// relaunch. The wire verb is NOT gated on this by design.
+    public func setAuditionEnabled(_ enabled: Bool) {
+        auditionEnabled = enabled
+        backing.storeValue(enabled ? 1 : 0, forKey: Self.auditionEnabledKey)
     }
 
     /// Restores every dimension to its default (and persists the reset).
@@ -170,6 +247,9 @@ public final class PanelLayoutStore {
         setRowHeight(Self.defaultRowHeight)
         setArrangePPB(Self.defaultArrangePPB)
         setPianoRollPPB(Self.defaultPianoRollPPB)
+        setMixerInsertsCollapsed(Self.defaultMixerInsertsCollapsed)
+        setFollowPlayhead(Self.defaultFollowPlayhead)
+        setAuditionEnabled(Self.defaultAuditionEnabled)
     }
 }
 

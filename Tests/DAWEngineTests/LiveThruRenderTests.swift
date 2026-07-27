@@ -67,7 +67,29 @@ struct LiveThruRenderTests {
         #expect(fired.allSatisfy { $0.firedAtFrame == 0 && $0.renderStart == 0 })
         #expect(fired.map(\.event.pitch) == [60, 64])  // wire (FIFO) order
 
-        // Ring drained: the next pull with nothing queued is silent again.
+        // Ring drained — but BOTH notes are still HELD (no off was sent), so
+        // the node must KEEP rendering. This assertion used to read
+        // `#expect(harness.pull())` ("silent again"), which encoded the m23-d
+        // defect: step 7's fast path returned before `instrument.render`, so an
+        // instrument holding open voices was skipped on every event-free
+        // quantum. `EventCaptureInstrument` writes no audio, which is why this
+        // suite could never see it — see AuditionSustainTests for the audio
+        // proof against a real synth.
+        #expect(!harness.pull())
+
+        // The tail is BOUNDED: an idle node cannot render forever. After
+        // `liveTailSeconds` past the last event the fast path resumes.
+        //
+        // KNOWN RESIDUAL DEFECT (thru only, filed not fixed): the two notes
+        // above are STILL HELD here, so this silence is wrong — it cuts a held
+        // thru voice. Unlike audition (`openAuditionCount`), the thru path
+        // tracks no open-voice count, so the tail expires regardless. In
+        // practice this is masked: `schedule == nil` only holds on a node where
+        // a schedule was never published, and after any playback one stays
+        // published. Fixing it means touching 6b's ID-pairing branches, which
+        // the m16-b3 §4.3 C11 rules govern — out of m23-d's scope.
+        let tailQuanta = Int(InstrumentRenderer.liveTailSeconds * rate) / 512  // `pull()`'s quantum
+        for _ in 0..<tailQuanta { _ = harness.pull() }
         #expect(harness.pull())
     }
 

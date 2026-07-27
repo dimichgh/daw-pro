@@ -1,14 +1,18 @@
 import Foundation
+import UniformTypeIdentifiers
 import DAWCore
 
-/// The routing / fan-out / naming decision for a HUMAN audio import (File→Import
-/// Audio… or a drag-drop onto the arrange, beta m10-k) — HEADLESS and tested, so
-/// the two UI paths and the `debug.importAudio` staging command share one contract
-/// (the `ClipEdit`/`LoopRuler` precedent). Given N file URLs + a drop/import
-/// context it produces per-file ACTIONS (place on an existing audio track, or
-/// create a new audio track) plus the list of REJECTED non-audio files. The store
-/// executes the actions in one undo step (`importAudioBatch`); SNAPPING lives here
-/// (the plan owns the grid), so the store just places clips.
+/// The routing / fan-out / naming decision for a HUMAN file import (File→Import
+/// Audio… / Import MIDI…, or a drag-drop onto the arrange, beta m10-k) — HEADLESS
+/// and tested, so the two UI paths and the `debug.importAudio` staging command
+/// share one contract (the `ClipEdit`/`LoopRuler` precedent). Given N file URLs +
+/// a drop/import context it produces per-file ACTIONS (place on an existing audio
+/// track, or create a new audio track), the MIDI files to hand to
+/// `ProjectStore.importMIDIFile`, and the list of REJECTED files. The store
+/// executes the audio actions in one undo step (`importAudioBatch`). SNAPPING no
+/// longer lives here (m23-f) — it lives in `ArrangeDropSnap`, the one home shared
+/// by the drop PREVIEW and this execution path, and the plan receives the already
+/// resolved beat.
 ///
 /// Routing (single tested rule):
 /// - a **single** file onto an **existing audio** track → a clip on that track at
@@ -16,12 +20,26 @@ import DAWCore
 /// - a **single** file onto empty space / no target / a **MIDI/instrument/bus**
 ///   lane → a NEW audio track + clip (a non-audio lane is not a valid target);
 /// - **multiple** files (the stems case) → one NEW audio track per file, all clips
-///   at the same snapped start beat, each track named from its filename.
-/// Non-audio extensions are filtered out and reported (`rejected`).
+///   at the same snapped start beat, each track named from its filename;
+/// - a **MIDI** file (m23-k4b) is never a clip placement — it goes to
+///   `midiImports` and is imported by `ProjectStore.importMIDIFile` at the SAME
+///   landing beat, creating its own instrument tracks. A drag that carries ANY
+///   MIDI therefore never routes its audio onto the hovered lane either (see
+///   `routesToExistingAudioTrack`).
+/// Everything else is filtered out and reported (`rejected`).
 
-/// The drop/import context: an optional target track (its id + kind), the raw
-/// landing beat (drop-x mapped to beats, or the playhead for a menu import), and
-/// the active grid.
+/// The drop/import context: an optional target track (its id + kind) and the
+/// ALREADY-RESOLVED landing beat.
+///
+/// m23-f: this deliberately carries NO `snap` and NO `meterMap`. It used to
+/// carry a raw beat plus the grid and snap it here, while the drop preview
+/// snapped the same raw beat independently — two computations that agreed only
+/// because their inputs happened to match, which magnetic snap would have
+/// broken (the view knows the target lane's clip edges; this type never could).
+/// The beat now arrives already decided by the single `ArrangeDropSnap.resolve`
+/// call that also drew the drop line, and `ResolvedDropBeat` cannot be
+/// constructed any other way — so preview/landing divergence is not merely
+/// absent, it is unrepresentable.
 public struct AudioImportContext: Sendable, Equatable {
     /// The hovered/target track id, or nil for a drop onto empty space / a menu
     /// import with no target.
@@ -29,21 +47,42 @@ public struct AudioImportContext: Sendable, Equatable {
     /// The target track's kind — only `.audio` is a valid single-file target;
     /// a MIDI/instrument/bus target falls through to new-track routing.
     public var targetTrackKind: TrackKind?
-    /// The raw beat where the import lands (unsnapped); the plan snaps it.
-    public var atBeatRaw: Double
-    /// The active clip-lane snap (the arrange effective snap).
-    public var snap: ClipSnap
-    /// The project meter map (m13-h): governs `.bar` snapping across time-signature
-    /// changes, so a drop into a 6/8 region lands on the 6/8 grid.
-    public var meterMap: MeterMap
+    /// Where the import lands — resolved once, by `ArrangeDropSnap.resolve`.
+    public var startBeat: ResolvedDropBeat
 
     public init(targetTrackID: UUID? = nil, targetTrackKind: TrackKind? = nil,
-                atBeatRaw: Double, snap: ClipSnap, meterMap: MeterMap) {
+                startBeat: ResolvedDropBeat) {
         self.targetTrackID = targetTrackID
         self.targetTrackKind = targetTrackKind
-        self.atBeatRaw = atBeatRaw
-        self.snap = snap
-        self.meterMap = meterMap
+        self.startBeat = startBeat
+    }
+}
+
+/// What a live arrange drag carries, as far as the HOVER can know it (m23-k4b).
+///
+/// A hover runs before the drag's URLs have loaded (`NSItemProvider` is async),
+/// but `DropInfo.hasItemsConforming(to:)` answers synchronously — so this is the
+/// hover's only honest source for "does this drag carry MIDI", and it is the
+/// input `routesToExistingAudioTrack` takes. Headless on purpose: `DropInfo`
+/// never reaches this type, so the staging seam and the tests build the same
+/// value the real drag builds.
+public struct ArrangeDragContents: Sendable, Equatable {
+    /// How many files the drag carries (routing depends on it).
+    public var fileCount: Int
+    /// True when at least one member is a Standard MIDI File.
+    public var carriesMIDI: Bool
+
+    public init(fileCount: Int, carriesMIDI: Bool) {
+        self.fileCount = fileCount
+        self.carriesMIDI = carriesMIDI
+    }
+
+    /// The contents of an ALREADY-RESOLVED url set — the drop half of a real
+    /// drag, and what the staging seam derives from its `paths`. Classifies with
+    /// `AudioImportPlan.isMIDIFile`, the same predicate the plan routes on.
+    public static func of(urls: [URL]) -> ArrangeDragContents {
+        ArrangeDragContents(fileCount: urls.count,
+                            carriesMIDI: urls.contains(where: AudioImportPlan.isMIDIFile))
     }
 }
 
@@ -55,7 +94,28 @@ public enum AudioImportAction: Sendable, Equatable {
     case newTrack(trackName: String, startBeat: Double, url: URL)
 }
 
-/// A file the plan refused (not a supported audio type), with a readable reason.
+/// One planned MIDI-file import (m23-k4b): a `.mid`/`.midi` in the same human
+/// import, landing at the SAME already-resolved beat the audio actions carry.
+///
+/// The beat is BAKED IN for the same reason `AudioImportAction` bakes it in: the
+/// executor must not be handed a bare URL and left to ask "at which beat?" —
+/// there is one landing per import and it was decided by the single
+/// `ArrangeDropSnap.resolve` call that drew the drop line. `ProjectStore.
+/// importMIDIFile(atBeat:)` takes a plain `Double` (unlike `AudioImportContext`,
+/// which is TYPED as a `ResolvedDropBeat`), so this type is what stands in for
+/// the compiler there.
+public struct MIDIImportAction: Sendable, Equatable {
+    public var url: URL
+    public var startBeat: Double
+
+    public init(url: URL, startBeat: Double) {
+        self.url = url
+        self.startBeat = startBeat
+    }
+}
+
+/// A file the plan refused (not a supported audio or MIDI type), with a readable
+/// reason.
 public struct RejectedImportFile: Sendable, Equatable {
     public var url: URL
     public var reason: String
@@ -69,7 +129,10 @@ public struct RejectedImportFile: Sendable, Equatable {
 public struct AudioImportPlan: Sendable, Equatable {
     /// Per-file actions, in input order (audio files only).
     public var actions: [AudioImportAction]
-    /// Non-audio files that were filtered out, with reasons.
+    /// MIDI files in the same import (m23-k4b), in input order — ROUTED, not
+    /// rejected. Each carries the same landing beat the audio actions do.
+    public var midiImports: [MIDIImportAction]
+    /// Files that are neither audio nor MIDI, with reasons.
     public var rejected: [RejectedImportFile]
 
     /// Extensions the app can import (what `AVAudioFile` reads on macOS). Lowercased,
@@ -85,6 +148,49 @@ public struct AudioImportPlan: Sendable, Equatable {
         audioExtensions.contains(url.pathExtension.lowercased())
     }
 
+    /// True when `url` is a Standard MIDI File this app imports (m23-k4b).
+    ///
+    /// Reads `ProjectStore.midiFileExtensions` — the SAME set the importer
+    /// itself gates on — rather than spelling `["mid", "midi"]` a second time
+    /// here. A plan that routed a file the store then refuses as "not a MIDI
+    /// file" is precisely the accept-then-reject shape this item removes.
+    public static func isMIDIFile(_ url: URL) -> Bool {
+        ProjectStore.midiFileExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    /// The open-panel content types for File→**Import Audio…** — exactly the
+    /// extensions this plan accepts, resolved to UTTypes.
+    ///
+    /// Derived rather than simply `[.audio]` because **`.mid` CONFORMS TO
+    /// `public.audio`** (`UTType(filenameExtension: "mid")` is
+    /// `public.midi-audio`, which conforms): under `[.audio]` a `.mid` was
+    /// SELECTABLE in ⌘I and then died downstream with "isn't a supported audio
+    /// file". `NSOpenPanel` can only allow, never subtract, so the fix is to
+    /// name the concrete types (m23-k4b). Dynamic (`dyn.*`) types — what the OS
+    /// hands back for an extension it does not know — are dropped: they enable
+    /// nothing and would only make the list lie about its own contents.
+    public static var audioContentTypes: [UTType] {
+        contentTypes(for: audioExtensions)
+    }
+
+    /// The panel content types for File→**Import MIDI…** / **Export MIDI…**,
+    /// derived from `ProjectStore.midiFileExtensions` the same way.
+    public static var midiContentTypes: [UTType] {
+        contentTypes(for: ProjectStore.midiFileExtensions)
+    }
+
+    /// Extensions → concrete UTTypes, de-duplicated (`mid` and `midi` resolve to
+    /// the same type) and in a stable order so a panel's list does not reshuffle
+    /// between launches.
+    private static func contentTypes(for extensions: Set<String>) -> [UTType] {
+        var seen: Set<UTType> = []
+        return extensions.sorted().compactMap { ext -> UTType? in
+            guard let type = UTType(filenameExtension: ext), !type.isDynamic,
+                  seen.insert(type).inserted else { return nil }
+            return type
+        }
+    }
+
     /// A track name from a file: extension-stripped, whitespace-trimmed; a name
     /// that sanitizes to empty falls back to "Audio Track".
     public static func sanitizedTrackName(from url: URL) -> String {
@@ -96,8 +202,21 @@ public struct AudioImportPlan: Sendable, Equatable {
     /// The single routing rule shared by the plan (execution) and the drag-drop
     /// hover highlight (preview): a lone file lands on the hovered lane ONLY when
     /// that lane is an existing audio track — otherwise it fans out to new tracks.
-    public static func routesToExistingAudioTrack(fileCount: Int, targetKind: TrackKind?) -> Bool {
-        fileCount == 1 && targetKind == .audio
+    ///
+    /// m23-k4b adds ONE input rather than a second rule in the view. A drag that
+    /// carries MIDI never lands on the hovered lane: a `.mid` becomes its own
+    /// instrument tracks, so highlighting an audio lane would promise a landing
+    /// the import cannot honour, and in a MIXED drop the audio member must not
+    /// quietly take the lane the preview said nothing about. The hover reads
+    /// `dragCarriesMIDI` from the drag's UTIs (synchronously available, before
+    /// the URLs load); the plan reads it from the URLs it was handed. Same
+    /// function, same answer.
+    ///
+    /// The parameter is DEFAULTED so every pure-audio caller — and the shipped
+    /// m10-k routing table — reads exactly as it did.
+    public static func routesToExistingAudioTrack(fileCount: Int, targetKind: TrackKind?,
+                                                  dragCarriesMIDI: Bool = false) -> Bool {
+        fileCount == 1 && targetKind == .audio && !dragCarriesMIDI
     }
 
     private static func rejectReason(_ url: URL) -> String {
@@ -107,31 +226,46 @@ public struct AudioImportPlan: Sendable, Equatable {
             : "'\(url.lastPathComponent)' isn't a supported audio file (.\(ext.lowercased()))"
     }
 
-    public init(actions: [AudioImportAction], rejected: [RejectedImportFile]) {
+    public init(actions: [AudioImportAction],
+                midiImports: [MIDIImportAction] = [],
+                rejected: [RejectedImportFile]) {
         self.actions = actions
+        self.midiImports = midiImports
         self.rejected = rejected
     }
 
     /// Plans an import of `urls` under `context`.
     public init(urls: [URL], context: AudioImportContext) {
+        // No snapping happens here any more (m23-f): the beat arrived resolved,
+        // from the same call that drew the drop line. EVERY member of the import
+        // — audio clip or MIDI file — lands on this one value (m23-k4b).
+        let startBeat = context.startBeat.beat
+
         var rejected: [RejectedImportFile] = []
-        let audioURLs = urls.filter { url in
-            if Self.isAudioFile(url) { return true }
-            rejected.append(RejectedImportFile(url: url, reason: Self.rejectReason(url)))
-            return false
+        var midiImports: [MIDIImportAction] = []
+        var audioURLs: [URL] = []
+        for url in urls {
+            if Self.isAudioFile(url) {
+                audioURLs.append(url)
+            } else if Self.isMIDIFile(url) {
+                midiImports.append(MIDIImportAction(url: url, startBeat: startBeat))
+            } else {
+                rejected.append(RejectedImportFile(url: url, reason: Self.rejectReason(url)))
+            }
         }
 
         guard !audioURLs.isEmpty else {
-            self.init(actions: [], rejected: rejected)
+            // A MIDI-ONLY import takes this path — the headline k4b case — so it
+            // must carry `midiImports` out with it. (It used to be a bare
+            // `actions: []` early return.)
+            self.init(actions: [], midiImports: midiImports, rejected: rejected)
             return
         }
 
-        let startBeat = context.snap.snap(beat: max(0, context.atBeatRaw),
-                                          meterMap: context.meterMap)
-
         var actions: [AudioImportAction] = []
         if Self.routesToExistingAudioTrack(fileCount: audioURLs.count,
-                                           targetKind: context.targetTrackKind),
+                                           targetKind: context.targetTrackKind,
+                                           dragCarriesMIDI: !midiImports.isEmpty),
            let targetID = context.targetTrackID {
             actions.append(.existingTrack(trackID: targetID, startBeat: startBeat, url: audioURLs[0]))
         } else {
@@ -142,7 +276,7 @@ public struct AudioImportPlan: Sendable, Equatable {
             }
         }
 
-        self.init(actions: actions, rejected: rejected)
+        self.init(actions: actions, midiImports: midiImports, rejected: rejected)
     }
 }
 
@@ -155,15 +289,23 @@ public struct AudioImportFileResult: Sendable, Equatable {
     public var trackID: UUID?
     public var trackName: String?
     public var error: String?
+    /// MIDI imports only (m23-k4b): how many tracks the file created. An audio
+    /// file always creates 0 or 1 and leaves this nil; a `.mid` can create
+    /// several, and then `clipID`/`trackID` name only its FIRST imported part —
+    /// this field is what stops that first id from reading as the whole story.
+    /// The full ledger is `MIDIImportReport`, which `project.importMIDI` returns.
+    public var tracksCreated: Int?
 
     public var isImported: Bool { error == nil && clipID != nil }
 
     public init(path: String, clipID: UUID? = nil, trackID: UUID? = nil,
-                trackName: String? = nil, error: String? = nil) {
+                trackName: String? = nil, error: String? = nil,
+                tracksCreated: Int? = nil) {
         self.path = path
         self.clipID = clipID
         self.trackID = trackID
         self.trackName = trackName
         self.error = error
+        self.tracksCreated = tracksCreated
     }
 }

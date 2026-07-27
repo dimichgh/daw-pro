@@ -90,6 +90,114 @@ struct StemPlanTests {
         }
     }
 
+    // MARK: - The one home for the rule (m23-m3c)
+
+    @Test("m23-m3c: isMasterInput is true for buses and direct tracks, false for a bus-routed one")
+    func isMasterInputPerKindAndRouting() {
+        // Every KIND, direct to master.
+        #expect(Track(name: "Keys", kind: .instrument).isMasterInput)
+        #expect(Track(name: "Vox", kind: .audio).isMasterInput)
+        #expect(Track(name: "Verb", kind: .bus).isMasterInput,
+                "A BUS IS A STEM — stems are not 'instrument tracks'")
+
+        let verb = Track(name: "Verb", kind: .bus)
+        // Routing is what decides it, not the kind.
+        #expect(Track(name: "Bass", kind: .audio, outputBusID: verb.id).isMasterInput == false)
+        #expect(Track(name: "Lead", kind: .instrument, outputBusID: verb.id).isMasterInput == false)
+        // A bus stays a master input whatever `outputBusID` says: buses output
+        // to master in v0, and the field is never meaningful on one.
+        #expect(Track(name: "Verb 2", kind: .bus, outputBusID: verb.id).isMasterInput)
+
+        // A send does NOT cost a track its own stem — its send contribution
+        // lives in the destination bus's stem, its direct signal in its own.
+        let sending = Track(name: "Keys", kind: .instrument,
+                            sends: [Send(destinationBusID: verb.id, level: 0.5)])
+        #expect(sending.isMasterInput)
+    }
+
+    @Test("m23-m3c: the plan's filter and its refusal answer with the SAME predicate")
+    func partitionAgreesWithIsMasterInput() throws {
+        let s = session()
+        let plan = try StemPlan.descriptors(tracks: s.tracks, including: nil)
+        let planned = Set(plan.map(\.id))
+        for track in s.tracks {
+            #expect(planned.contains(track.id) == track.isMasterInput,
+                    "\(track.name) is planned=\(planned.contains(track.id)) but isMasterInput=\(track.isMasterInput)")
+            // …and naming it explicitly must succeed or refuse by the same rule:
+            // a track the filter drops silently must reject readably.
+            if track.isMasterInput {
+                #expect(throws: Never.self) {
+                    _ = try StemPlan.descriptors(tracks: s.tracks, including: [track.id])
+                }
+            } else {
+                #expect(throws: ProjectError.self) {
+                    _ = try StemPlan.descriptors(tracks: s.tracks, including: [track.id])
+                }
+            }
+        }
+    }
+
+    // MARK: - The planned file set (m23-m3c)
+
+    @Test("m23-m3c: fileSet composes the siblings ahead of the partition, in write order")
+    func fileSetOrderAndComposition() throws {
+        let s = session()
+        let stems = try StemPlan.descriptors(tracks: s.tracks, including: nil).map(\.fileName)
+        #expect(try StemPlan.fileSet(tracks: s.tracks) == stems,
+                "no siblings asked for → exactly the partition")
+        #expect(try StemPlan.fileSet(tracks: s.tracks, includeMixdown: true)
+                == ["00 Mixdown.wav"] + stems)
+        #expect(try StemPlan.fileSet(tracks: s.tracks, includeMasteredMixdown: true)
+                == ["00 Mastered Mix.wav"] + stems)
+        // ORDER is contract, not incidental: the mixdown is written before the
+        // mastered sibling, and both before nothing — set equality would not
+        // pin the list the preview renders top to bottom.
+        #expect(try StemPlan.fileSet(tracks: s.tracks, includeMixdown: true,
+                                     includeMasteredMixdown: true)
+                == ["00 Mixdown.wav", "00 Mastered Mix.wav"] + stems)
+    }
+
+    @Test("m23-m3c: the sibling names come from the constants the render writes with")
+    func siblingNamesHaveOneHome() throws {
+        let s = session()
+        let set = try StemPlan.fileSet(tracks: s.tracks, includeMixdown: true,
+                                       includeMasteredMixdown: true,
+                                       format: .default)
+        #expect(set[0] == DeliveryFormat.default.fileName(StemPlan.mixdownBaseName))
+        #expect(set[1] == DeliveryFormat.default.fileName(StemPlan.masteredMixdownBaseName))
+        // The extension is the format's, never a literal (m23-m2): these names
+        // are what the dialog PROMISES, so a hardcoded ".wav" would promise WAV
+        // files from an AIFF export.
+        let aiff = try DeliveryFormat.resolve(bitDepth: 24, container: "aiff")
+        let aiffSet = try StemPlan.fileSet(tracks: s.tracks, includeMixdown: true,
+                                           includeMasteredMixdown: true, format: aiff)
+        #expect(aiffSet == ["00 Mixdown.aiff", "00 Mastered Mix.aiff",
+                            "01 Drums.aiff", "02 Crunch.aiff", "03 Keys.aiff"])
+    }
+
+    @Test("m23-m3c: an empty partition plans NOTHING — not even the siblings")
+    func fileSetIsEmptyWhenNothingReachesMaster() throws {
+        let verb = Track(name: "Verb", kind: .bus)
+        // The destination bus is absent from the session, so nothing here is a
+        // master input.
+        let orphan = [Track(name: "Bass", kind: .audio, outputBusID: verb.id)]
+        #expect(try StemPlan.fileSet(tracks: orphan, includeMixdown: true,
+                                     includeMasteredMixdown: true).isEmpty,
+                "renderStems throws nothingToRender before it writes anything, so promising two 00 files would be a lie")
+        #expect(try StemPlan.fileSet(tracks: []).isEmpty)
+    }
+
+    @Test("m23-m3c: fileSet validates an explicit selection exactly as descriptors does")
+    func fileSetInheritsTheRefusals() {
+        let s = session()
+        #expect(throws: ProjectError.self) {
+            _ = try StemPlan.fileSet(tracks: s.tracks, including: [s.gtr.id])
+        }
+        #expect(throws: ProjectError.self) {
+            _ = try StemPlan.fileSet(tracks: s.tracks, including: [UUID()])
+        }
+    }
+
     // MARK: - Solo transform: track stems
 
     @Test("Track stem pass = the track alone with sends stripped, all else whole")
