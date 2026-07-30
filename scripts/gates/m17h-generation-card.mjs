@@ -17,19 +17,16 @@
 // Output: captures land under /tmp/daw-gate-out/m17h-orch/ —
 // `mkdir -p /tmp/daw-gate-out/m17h-orch` before running.
 // Promoted from session scratchpad 2026-07-16 (m17-g).
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function connect() {
-  for (let i = 0; i < 20; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const w = new WebSocket("ws://127.0.0.1:17695");
-        w.addEventListener("open", () => res(w));
-        w.addEventListener("error", () => rej(new Error("refused")));
-      });
-    } catch { await sleep(1000); }
-  }
-  throw new Error("no connect");
-}
+// m23-ac-3a: was "class 3" — it never launched anything and drove whatever was
+// on 17695. It now builds and launches its own instance. GATE is "m17h-orch" so
+// that `startStaging` creates the SAME `/tmp/daw-gate-out/m17h-orch` this gate
+// already writes its captures into; the "mkdir -p before running" note above is
+// obsolete because the harness makes the directory.
+import { sleep, buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+
+const GATE = "m17h-orch";
+buildOrAbort({ label: "building staging binary (m17h)…" });
+startStaging({ gate: GATE });
 const ws = await connect();
 let n = 0, pass = 0, fail = 0;
 function cmd(command, params = {}, timeoutMs = 30000) {
@@ -106,4 +103,5 @@ await cmd("debug.generationCard", { clear: true });
 await cmd("project.new");
 console.log(`ORCH_M17H_GATE pass=${pass} fail=${fail}`);
 ws.close();
+stopStaging(GATE);
 process.exit(0);

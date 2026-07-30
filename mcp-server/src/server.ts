@@ -133,6 +133,24 @@ registerTool(
 );
 
 registerTool(
+  "transport_panic",
+  {
+    title: "Panic — silence stuck notes",
+    description:
+      "PANIC / all-notes-off. Silences a note that is stuck sounding — a key " +
+      "whose note-off was lost because the cable was unplugged, the device was " +
+      "removed, or the sending app crashed mid-note. Sends all-notes-off to " +
+      "every instrument track and releases any held preview notes. Works while " +
+      "stopped (transport_stop cannot clear a stuck note — it does nothing when " +
+      "already stopped), and deliberately does NOT stop playback or recording, " +
+      "so it is safe mid-take. Returns tracksFlushed, the number of instrument " +
+      "renderers asked.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("transport.panic"))
+);
+
+registerTool(
   "transport_seek",
   {
     title: "Move the playhead",

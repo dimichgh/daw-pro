@@ -3177,6 +3177,35 @@ final class PlaybackGraph {
         }
     }
 
+    /// THE home for "all-notes-off on every LIVE instrument renderer" (m23-af).
+    /// Returns how many renderers were asked, which is what the panic verb
+    /// reports to the wire.
+    ///
+    /// TWO CALLERS, and the second is why this exists: `stopAllPlayers()` below
+    /// (the stop/seek/tempo contract) and `AudioEngine.allNotesOff()` (the user's
+    /// panic button). Before m23-af the fanout lived inline in `stopAllPlayers`
+    /// and a second copy would have been the only way to reach it while stopped.
+    ///
+    /// ⚠️ THE FANOUT IS `requestFlush()` ONLY — `publish(nil)` DELIBERATELY STAYS
+    /// AT THE CALL SITE. They are not the same quantity: unpublishing throws away
+    /// the SEQUENCED schedule, which is correct when the transport is stopping and
+    /// WRONG for a panic taken mid-playback (it would silence the arrangement, not
+    /// the stuck note). Folding `publish(nil)` in here to make the home "complete"
+    /// would make it complete in the wrong direction.
+    ///
+    /// ⚠️ THE PER-NODE TEARDOWN SITES ARE NOT DUPLICATES OF THIS and must not be
+    /// folded in (`:983`, `:2143`, `:2149`, `:3337`). Those pair the flush with
+    /// `removeTap` + `teardownDetach` on ONE node that is being removed from the
+    /// graph; this asks every node that is STAYING. Same call, different
+    /// operation.
+    @discardableResult
+    func flushAllInstruments() -> Int {
+        for node in instrumentNodes.values {
+            node.renderer.requestFlush()
+        }
+        return instrumentNodes.count
+    }
+
     /// Stops every player, clearing their queues and resetting player time
     /// to 0 — the single reschedule primitive relies on this.
     ///
@@ -3212,10 +3241,15 @@ final class PlaybackGraph {
                 node.noteStopped()
             }
         }
+        // Unpublish first, then flush via the one home (m23-af). Splitting the
+        // old single loop preserves the per-node order that matters (a node's
+        // own publish still precedes its own flush); only the CROSS-node
+        // interleave changes, and nodes share no state — each owns its slot and
+        // its flag.
         for node in instrumentNodes.values {
             node.renderer.publish(nil)
-            node.renderer.requestFlush()
         }
+        flushAllInstruments()
         // Automation unpublishes alongside the MIDI flush: the mixer node
         // resumes full fader/pan authority (the stopped-WYSIWYG values land
         // on the caller's next parameter pass).

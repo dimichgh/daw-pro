@@ -23,3 +23,8 @@ assets/generated/
 # tokenizer (`tokenizer/.cache/huggingface`). Belt-and-braces: the copy step
 # already excludes it, this makes staging it impossible.
 **/.cache/huggingface/
+
+# Python bytecode from the gate-analysis helpers (`scripts/gates/_*.py`).
+# Build output, never source: regenerated on every run of the tool that
+# imports them.
+__pycache__/

@@ -32,7 +32,7 @@ struct VoiceListCommandTests {
     @Test("vc.listVoices is in the canonical command list; count moved 132 -> 133 (135 as of m10-p-6's ai.copilotGetModel/SetModel, 139 as of the chat-persist design's Phase C, 141 as of the au.* parameter surface, 142 as of m21-d's clip.fitToContent, 143 as of m21-e's clip.analyzeAudio, 144 as of m22-c's mixer.liveLoudness)")
     func commandIsCanonical() {
         #expect(CommandRouter.allCommands.contains("vc.listVoices"))
-        #expect(CommandRouter.allCommands.count == 165)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
+        #expect(CommandRouter.allCommands.count == 166)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af
     }
 
     @Test("adding vc.listVoices left every existing vc.*/ai.sidecar* name untouched")

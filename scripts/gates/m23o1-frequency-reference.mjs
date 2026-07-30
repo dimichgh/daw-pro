@@ -32,58 +32,23 @@
 // instrument. A `fx.setParam` that silently did NOTHING would also satisfy
 // that. S4 applies a DELIBERATELY WRONG corner through the SAME comparison
 // code path and demands a BIG delta. S3 without S4 is decorative.
-import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+// m23-ac-2b: the staging lifecycle now comes from the ONE home. This gate used
+// to spawn `.build/debug/DAWApp` directly with NO BUILD STEP — a "class 2"
+// gate, which means every green it ever printed certified whatever binary
+// happened to be on disk. That is the trap the m23-o2 cycle fell into twice.
+// `buildOrAbort` makes it structurally impossible here now.
+import { mkdirSync, writeFileSync } from "node:fs";
+import {
+  sleep, buildOrAbort, startStaging, stopStaging, connect,
+} from "./_staging.mjs";
 
-const PORT = 17695;                 // staging. NEVER 17600.
-const OUT = "/tmp/daw-gate-out/m23o1";
-const PIDFILE = `${OUT}/staging.pid`;
+const GATE = "m23o1";               // also names the pidfile + out dir
+const OUT = `/tmp/daw-gate-out/${GATE}`;
 const FIXTURE_BEATS = 4096;         // ~68 min at 60 bpm — cannot end mid-run
 const LOW_NOTE = 30;                // 46.25 Hz -> band 0
 const HIGH_NOTE = 65;               // 349.23 Hz -> band 8
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 mkdirSync(OUT, { recursive: true });
-
-// ---------------------------------------------------------------- staging up
-let child = null;
-function startStaging() {
-  child = spawn(".build/debug/DAWApp", [], {
-    cwd: "/Users/dsemenov/Views/daw-pro",
-    env: { ...process.env, DAW_CONTROL_PORT: String(PORT) },
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: false,
-  });
-  writeFileSync(PIDFILE, String(child.pid));
-  const log = [];
-  child.stdout.on("data", (d) => log.push(d.toString()));
-  child.stderr.on("data", (d) => log.push(d.toString()));
-  process.on("exit", () => writeFileSync(`${OUT}/staging.log`, log.join("")));
-}
-
-// Kill by the EXACT pid we recorded. NEVER pkill/pgrep — a pattern kill here
-// could take down the user's live app on 17600.
-function stopStaging() {
-  if (!existsSync(PIDFILE)) return;
-  const pid = Number(readFileSync(PIDFILE, "utf8").trim());
-  if (Number.isInteger(pid) && pid > 0) {
-    try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
-  }
-  rmSync(PIDFILE, { force: true });
-}
-
-async function connect() {
-  for (let i = 0; i < 40; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const w = new WebSocket(`ws://127.0.0.1:${PORT}`);
-        w.addEventListener("open", () => res(w));
-        w.addEventListener("error", () => rej(new Error("refused")));
-      });
-    } catch { await sleep(1000); }
-  }
-  throw new Error(`could not connect to staging on ${PORT}`);
-}
 
 // ------------------------------------------------------------------ harness
 let ws, seq = 0, pass = 0, fail = 0;
@@ -150,7 +115,8 @@ async function measure(trackId, effectId, reads = 6) {
 }
 
 // ---------------------------------------------------------------------- run
-startStaging();
+buildOrAbort({ label: "building staging binary (m23o1)…" });
+startStaging({ gate: GATE });
 ws = await connect();
 
 try {
@@ -401,7 +367,7 @@ try {
   writeFileSync(`${OUT}/bands.json`, JSON.stringify({ base, hp, slope }, null, 2));
 } finally {
   try { ws?.close(); } catch { /* ignore */ }
-  stopStaging();
+  stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 }
 
 console.log(`\nM23O1_GATE pass=${pass} fail=${fail}`);

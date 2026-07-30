@@ -7,49 +7,15 @@
 //
 // Staging 17695 ONLY. 17600 is the user's LIVE app and is never touched.
 // Kill by EXACT pid from the pidfile — never pkill/pgrep.
-import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+// m23-ac-2b: staging lifecycle from the ONE home. This gate used to spawn
+// `.build/debug/DAWApp` with NO BUILD STEP, so it certified whatever binary was
+// already on disk — and it is the smoke test for the very cycle (m23-o2) where
+// that stale-binary trap was hit twice. `buildOrAbort` closes it at the source.
+import {
+  sleep, buildOrAbort, startStaging, stopStaging, connect,
+} from "./_staging.mjs";
 
-const PORT = 17695;
-const OUT = "/tmp/daw-gate-out/m23o2-smoke";
-const PIDFILE = `${OUT}/staging.pid`;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-mkdirSync(OUT, { recursive: true });
-
-let child = null;
-function startStaging() {
-  child = spawn(".build/debug/DAWApp", [], {
-    cwd: "/Users/dsemenov/Views/daw-pro",
-    env: { ...process.env, DAW_CONTROL_PORT: String(PORT) },
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: false,
-  });
-  writeFileSync(PIDFILE, String(child.pid));
-  const log = [];
-  child.stdout.on("data", (d) => log.push(d.toString()));
-  child.stderr.on("data", (d) => log.push(d.toString()));
-  process.on("exit", () => writeFileSync(`${OUT}/staging.log`, log.join("")));
-}
-function stopStaging() {
-  if (!existsSync(PIDFILE)) return;
-  const pid = Number(readFileSync(PIDFILE, "utf8").trim());
-  if (Number.isInteger(pid) && pid > 0) {
-    try { process.kill(pid, "SIGTERM"); } catch { /* gone */ }
-  }
-  rmSync(PIDFILE, { force: true });
-}
-async function connect() {
-  for (let i = 0; i < 40; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const w = new WebSocket(`ws://127.0.0.1:${PORT}`);
-        w.addEventListener("open", () => res(w));
-        w.addEventListener("error", () => rej(new Error("refused")));
-      });
-    } catch { await sleep(1000); }
-  }
-  throw new Error(`could not connect to staging on ${PORT}`);
-}
+const GATE = "m23o2-smoke";   // names the pidfile + out dir, as before
 let ws, seq = 0, pass = 0, fail = 0;
 const failures = [];
 function cmd(command, params = {}, timeoutMs = 30000) {
@@ -70,7 +36,8 @@ function ck(label, cond, detail = "") {
   else { fail++; failures.push(label); console.log(`FAIL ${label} :: ${detail}`); }
 }
 
-startStaging();
+buildOrAbort({ label: "building staging binary (m23o2-smoke)…" });
+startStaging({ gate: GATE });
 try {
   ws = await connect();
   let r = await cmd("project.new", { discardChanges: true });
@@ -220,7 +187,7 @@ try {
   console.log("EXCEPTION", e.stack);
 } finally {
   try { ws?.close(); } catch { /* ignore */ }
-  stopStaging();
+  stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 }
 console.log(`\n=== m23-o2 probe smoke: ${pass} pass / ${fail} fail ===`);
 if (failures.length) console.log(failures.join("\n"));

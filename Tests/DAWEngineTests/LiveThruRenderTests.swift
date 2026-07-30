@@ -208,9 +208,64 @@ struct LiveThruRenderTests {
         let captured = harness.capture.capturedEvents()
         // The reset lands BEFORE the drained events this quantum.
         #expect(captured.first?.wasReset == true)
-        #expect(captured.filter { !$0.wasReset }.count == InstrumentRenderer.thruRingCapacity)
+        // 512 pops of the SAME pitch: the first is a bare on, each of the other
+        // 511 emits the defensive close plus its on (m23-ad). Written as the
+        // derivation, not the literal, so it tracks `thruRingCapacity`.
+        #expect(captured.filter { !$0.wasReset }.count
+                == 1 + 2 * (InstrumentRenderer.thruRingCapacity - 1))
         // Flag consumed: the next quantum does not reset again.
         _ = harness.pull()
         #expect(harness.capture.capturedEvents().filter(\.wasReset).count == 1)
+    }
+
+    @Test("thru retrigger closes the previous voice instead of orphaning it (m23-ad)")
+    func thruRetriggerClosesPreviousVoice() {
+        let harness = Harness()
+        harness.pushLive(kind: ScheduledMIDIEvent.noteOn, pitch: 60)
+        harness.pushLive(kind: ScheduledMIDIEvent.noteOn, pitch: 60)
+        _ = harness.pull()
+
+        let fired = harness.capture.capturedEvents().filter { !$0.wasReset }
+        // on(id1), off(id1), on(id2) — the close carries the OLD voice's ID, so
+        // the instrument replaces the voice rather than stacking a second one.
+        #expect(fired.count == 3)
+        #expect(fired.map(\.event.kind) == [ScheduledMIDIEvent.noteOn,
+                                            ScheduledMIDIEvent.noteOff,
+                                            ScheduledMIDIEvent.noteOn])
+        #expect(fired.allSatisfy { $0.event.pitch == 60 })
+        #expect(fired[1].event.noteID == fired[0].event.noteID)   // closes the FIRST
+        #expect(fired[2].event.noteID != fired[0].event.noteID)   // a NEW voice
+        // The popcount is unchanged by a retrigger: one pitch, one open voice.
+        #expect(harness.renderer.openLiveCount == 1)
+
+        // And the single matching off must land it back at zero. Under the old
+        // code this was the bug: increment twice, decrement once, 6d re-arming
+        // the tail forever. A count test alone would miss a sign error here.
+        harness.pushLive(kind: ScheduledMIDIEvent.noteOff, pitch: 60, velocity: 0)
+        _ = harness.pull()
+        let all = harness.capture.capturedEvents().filter { !$0.wasReset }
+        #expect(all.count == 4)
+        #expect(all[3].event.kind == ScheduledMIDIEvent.noteOff)
+        #expect(all[3].event.noteID == fired[2].event.noteID)     // pairs the NEW voice
+        #expect(harness.renderer.openLiveCount == 0)
+    }
+
+    @Test("a full ring of same-pitch retriggers stays inside the scratch bound (m23-ad)")
+    func fullRingOfThruRetriggersStaysInBounds() {
+        let harness = Harness()
+        for _ in 0..<InstrumentRenderer.thruRingCapacity {
+            harness.pushLive(kind: ScheduledMIDIEvent.noteOn, pitch: 60)
+        }
+        _ = harness.pull()
+        let fired = harness.capture.capturedEvents().filter { !$0.wasReset }
+        // The worst case the capacity constant is sized for: every pop emits
+        // two. 1 + 511×2 = 1023, and `liveScratchCapacity` is 1280.
+        #expect(fired.count == 1 + 2 * (InstrumentRenderer.thruRingCapacity - 1))
+        #expect(fired.count <= InstrumentRenderer.liveScratchCapacity)
+        #expect(fired.last?.event.kind == ScheduledMIDIEvent.noteOn)
+        // The whole ring drained in ONE quantum — the loop counts pops, not
+        // emitted events. Bounding on emissions would have left ~half queued.
+        #expect(harness.renderer.thruRing.count == 0)
+        #expect(harness.renderer.openLiveCount == 1)
     }
 }

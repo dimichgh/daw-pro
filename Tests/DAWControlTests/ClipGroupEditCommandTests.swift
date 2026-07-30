@@ -345,7 +345,10 @@ struct ClipGroupEditCommandTests {
 
     @Test("clip.removeMany and clip.moveMany are registered at the END of allCommands")
     func registeredAtEndOfAllCommands() {
-        #expect(CommandRouter.allCommands.dropLast().last == "clip.removeMany")
-        #expect(CommandRouter.allCommands.last == "clip.moveMany")
+        // m23-af appended `transport.panic` after this pair, so both slide
+        // one rung up — they did not move, they are simply no longer last.
+        #expect(CommandRouter.allCommands.dropLast(2).last == "clip.removeMany")
+        #expect(CommandRouter.allCommands.dropLast().last == "clip.moveMany")
+        #expect(CommandRouter.allCommands.last == "transport.panic")
     }
 }

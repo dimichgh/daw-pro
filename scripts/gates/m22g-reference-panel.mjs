@@ -1,12 +1,21 @@
 // m22-g P3 gate — REFERENCE row + panel + debug.referenceSeed.
-// Staging: DAW_CONTROL_PORT=17695 (17600 is the user's LIVE app — never touched).
-// Usage: M22G_FIXTURE=/path/to/song.wav node m22g-reference-panel.mjs
-// Output: captures land under /tmp/daw-gate-out/m22g-p3/ (created by the script).
+//
+// CLASS 1 since m23-ac-3b-3: this gate builds the binary and launches its own
+// staging app on 17695 (17600 is the user's LIVE app — never touched). It no
+// longer measures whatever happened to be on the port; the gate that asserts the
+// pixels now also owns the process that drew them.
+//
+// Usage: node scripts/gates/m22g-reference-panel.mjs
+//        M22G_FIXTURE=/path/to/song.wav overrides the reference audio.
+// Output: captures land under /tmp/daw-gate-out/m22g-p3/ — the very directory
+// `startStaging({gate:"m22g-p3"})` derives, so the pidfile sits beside them.
 // Promoted from the session scratchpad at the m22-g P3 close (2026-07-26).
 import { createHash } from "node:crypto";
 import { readFileSync, mkdirSync } from "node:fs";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
 
-const OUT = "/tmp/daw-gate-out/m22g-p3";
+const GATE = "m22g-p3";                     // also names the pidfile + out dir
+const OUT = `/tmp/daw-gate-out/${GATE}`;
 mkdirSync(OUT, { recursive: true });
 // A real audio file to import as the reference. Any stereo WAV works; the
 // gate asserts the analysis SHAPE and the law, not specific loudness values
@@ -14,19 +23,11 @@ mkdirSync(OUT, { recursive: true });
 const FIXTURE = process.env.M22G_FIXTURE
   ?? `${process.env.HOME}/Library/Application Support/DAWPro/References/orch-reference.wav`;
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function connect() {
-  for (let i = 0; i < 20; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const w = new WebSocket("ws://127.0.0.1:17695");
-        w.addEventListener("open", () => res(w));
-        w.addEventListener("error", () => rej(new Error("refused")));
-      });
-    } catch { await sleep(1000); }
-  }
-  throw new Error("no connect");
-}
+buildOrAbort({ label: "building staging binary (m22g)…" });
+startStaging({ gate: GATE });
+// The harness connect retries 40x1 s and refuses port 17600 outright. The local
+// 20x1 s loop it replaced was written against an app a human had already
+// launched; against our own cold boot it was the tighter budget of the two.
 const ws = await connect();
 let n = 0, pass = 0, fail = 0;
 function cmd(command, params = {}, timeoutMs = 60000) {
@@ -309,5 +310,6 @@ check("F5 mix:false still DROPS by name", r.ok && r.result.mixIntegratedLufs ===
 await cmd("debug.referenceSeed", { clear: true });
 
 console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
 process.exit(fail ? 1 : 0);

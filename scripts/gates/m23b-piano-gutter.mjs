@@ -10,24 +10,31 @@
 // both lane tones.
 //
 // CAPTURE-ONLY: no pass/fail assertions; every frame is for pixel review.
-// Staging: DAW_CONTROL_PORT=17695 ONLY (17600 is the user's live app).
-// Usage: node m23b-gate.mjs <ABSOLUTE outdir> [prefix]
-const PORT = process.env.PORT || "17695";
-const OUT = process.argv[2];
-const PREFIX = process.argv[3] || "m23b";
+// Staging: this gate BUILDS AND LAUNCHES its own app on 17695 — just run
+// `node scripts/gates/m23b-piano-gutter.mjs`. 17600 is the user's LIVE app and
+// the harness refuses it outright.
+//
+// >>> THE `PORT` OVERRIDE IS GONE, AND IT WAS THE DANGEROUS KIND (m23-ac-3c) <<<
+// This file used to read `process.env.PORT || "17695"` under a header claiming
+// `DAW_CONTROL_PORT=17695 ONLY`. The documented variable did nothing; the one it
+// actually honoured, `PORT`, is among the most commonly-exported names in any
+// shell, so a stray `PORT=17600` aimed this gate at the user's live session —
+// where its first command is `project.new {discardChanges: true}`. No override
+// now; `assertStagingPort` refuses 17600 structurally.
+//
+// Usage: node m23b-piano-gutter.mjs [ABSOLUTE outdir] [prefix]
+//   The outdir arg still works and is resolved by the APP against ITS cwd, so
+//   pass an absolute path. Omitted, it defaults to the staging out dir.
 import fs from "fs";
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+
+const GATE = "m23b";                                  // names the pidfile + out dir
+const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
+const PREFIX = process.argv[3] || "m23b";
 const log = (s) => fs.writeSync(1, s + "\n");
 fs.mkdirSync(OUT, { recursive: true });
 let seq = 0;
 
-function connect(timeoutMs = 5000) {
-  return new Promise((res, rej) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
-    const t = setTimeout(() => rej(new Error("connect timeout")), timeoutMs);
-    ws.onopen = () => { clearTimeout(t); res(ws); };
-    ws.onerror = () => { clearTimeout(t); rej(new Error("connect failed")); };
-  });
-}
 function cmd(ws, command, params = {}, timeoutMs = 30000) {
   return new Promise((res, rej) => {
     const id = "m23b-" + (++seq);
@@ -42,6 +49,13 @@ function cmd(ws, command, params = {}, timeoutMs = 30000) {
   });
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+buildOrAbort({ label: "building staging binary (m23b)…" });
+startStaging({ gate: GATE });
+// A true drop-in HERE, unlike m18c/m19f: cmd() attaches its own per-call `message`
+// listener and removes it on reply, so there is no shared reply pump on the socket
+// to preserve. The harness also retries 40x1 s rather than failing after a single
+// 5 s attempt — the right budget against a cold boot we now own.
 const ws = await connect();
 async function must(command, params) {
   const r = await cmd(ws, command, params);
@@ -129,6 +143,7 @@ await must("debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
 await sleep(400);
 await cap("pro-floor");
 
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 log("done");
 ws.close();
 process.exit(0);

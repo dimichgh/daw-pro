@@ -168,7 +168,7 @@ struct AUParamCommandTests {
     func commandsAreCanonical() {
         #expect(CommandRouter.allCommands.contains("au.describeParams"))
         #expect(CommandRouter.allCommands.contains("au.setParam"))
-        #expect(CommandRouter.allCommands.count == 165)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
+        #expect(CommandRouter.allCommands.count == 166)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af
     }
 
     // MARK: - au.describeParams shapes

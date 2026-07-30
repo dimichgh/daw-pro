@@ -20,25 +20,22 @@
 // user's live app port).
 // Usage: DAW_CONTROL_PORT=17695 node scripts/gates/m18i-undo-split.mjs [outdir]
 //   outdir defaults to /tmp/daw-gate-out/m18i-undo-split
+// m23-ac-3b-1: staging lifecycle from the ONE home. Was "class 3" — it launched
+// nothing and drove whatever was on the port, so its greens certified a hand-prepared
+// instance. `sleep` stays local (importing it would redeclare); the DAW_CONTROL_PORT
+// override is preserved and now passes through assertStagingPort, so this gate can no
+// longer be pointed at 17600 even by an env var.
 import fs from "fs";
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
-const OUT = process.argv[2] || "/tmp/daw-gate-out/m18i-undo-split";
+const GATE = "m18i-undo-split";   // names the pidfile + out dir = the default OUT below
+const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 fs.mkdirSync(OUT, { recursive: true });
 const killer = setTimeout(() => { console.error("GATE TIMEOUT"); process.exit(2); }, 120_000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function connect() {
-  for (let i = 0; i < 30; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const w = new WebSocket(`ws://127.0.0.1:${PORT}`);
-        w.addEventListener("open", () => res(w));
-        w.addEventListener("error", () => rej(new Error("refused")));
-      });
-    } catch { await sleep(800); }
-  }
-  throw new Error(`no connect to ${PORT}`);
-}
-const ws = await connect();
+buildOrAbort({ label: "building staging binary (m18i)…" });
+startStaging({ gate: GATE });
+const ws = await connect({ port: Number(PORT) });
 let n = 0, pass = 0, fail = 0;
 function cmd(command, params = {}) {
   return new Promise((res, rej) => {
@@ -116,4 +113,5 @@ await cmd("project.new", { discardChanges: true });
 console.log(`M18I_UNDO_SPLIT pass=${pass} fail=${fail}`);
 clearTimeout(killer);
 ws.close();
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 process.exit(fail === 0 ? 0 : 1);

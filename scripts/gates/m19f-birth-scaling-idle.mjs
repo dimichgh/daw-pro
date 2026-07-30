@@ -27,17 +27,24 @@
 // m18c-birth-scaling-active.mjs (same recipe, active players — the pre-R1
 // baseline the delta collapse is measured against).
 //
-// Staging port law: DAW_CONTROL_PORT env, default 17695 — NEVER 17600 (the
-// user's live app port).
-// Usage: DAW_CONTROL_PORT=17695 node scripts/gates/m19f-birth-scaling-idle.mjs
+// Staging: this gate BUILDS AND LAUNCHES its own app on 17695 — just run
+// `node scripts/gates/m19f-birth-scaling-idle.mjs`. The old DAW_CONTROL_PORT
+// override is GONE on purpose: it could be pointed at 17600, the user's LIVE
+// app, and the harness refuses that port outright.
+//
+// >>> WHY SELF-LAUNCHING IS SAFE FOR A TIMING GATE (m23-ac-3b-5) <<<
+// Measured, not argued. 3 runs against an app left idle 60 s with no build
+// immediately prior — the historical calibration condition — gave K40 idle
+// medians 109/119/109 and deltas -10/+19/+5; 3 runs through the launching
+// harness gave 118/112/120 and +14/+9/+16. Overlapping ranges, 100% band-pass
+// both ways. The preamble is neutral, and it finishes ~15 s of setup before the
+// first birth is ever timed.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
 
-const PORT = process.env.DAW_CONTROL_PORT || "17695";
-const URL_ = `ws://127.0.0.1:${PORT}`;
-const killer = setTimeout(() => { console.error("GATE TIMEOUT"); process.exit(2); }, 150_000);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const GATE = "m19f";                        // names the pidfile + staging out dir
 
 // Self-contained tone fixture: 10 s of 440 Hz sine at amplitude 0.5, mono
 // Int16 48 kHz WAV — matches the original scratchpad fixture byte-for-byte
@@ -65,23 +72,6 @@ makeToneWav(WAV);
 
 let ws, nextId = 0;
 const pending = new Map();
-async function connect() {
-  for (let i = 0; i < 20; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const w = new WebSocket(URL_);
-        w.onopen = () => res(w);
-        w.onerror = () => rej(new Error("refused"));
-        w.onmessage = (ev) => {
-          const m = JSON.parse(ev.data);
-          const e = pending.get(m.id);
-          if (e) { pending.delete(m.id); e.res({ msg: m, ms: Date.now() - e.t0 }); }
-        };
-      });
-    } catch { await sleep(1000); }
-  }
-  throw new Error("no connect");
-}
 function cmd(command, params, timeoutMs = 20000) {
   const id = `oi_${++nextId}`;
   return new Promise((res, rej) => {
@@ -98,7 +88,23 @@ const check = (label, cond, detail) => {
   if (!cond) failures++;
 };
 
+buildOrAbort({ label: "building staging binary (m19f)…" });
+// The 150 s watchdog is armed AFTER the build, deliberately. It exists to catch a
+// gate hung talking to the app; a cold `swift build` can legitimately outlast it,
+// and arming first would turn a slow compile into a bogus GATE TIMEOUT. Its
+// teardown is structural since m23-bd (armTeardown), so this self-kill — the path
+// that fires precisely when the gate has HUNG — cannot leak the app it was driving.
+const killer = setTimeout(() => { console.error("GATE TIMEOUT"); process.exit(2); }, 150_000);
+startStaging({ gate: GATE });
 ws = await connect();
+// Re-attach the id-keyed reply pump the local connect() used to install. EVERY
+// band in this gate is measured from the `ms` computed here, so it must stay
+// exactly as it was: resolve on reply, ms = now - the t0 stamped in cmd().
+ws.onmessage = (ev) => {
+  const m = JSON.parse(ev.data);
+  const e = pending.get(m.id);
+  if (e) { pending.delete(m.id); e.res({ msg: m, ms: Date.now() - e.t0 }); }
+};
 
 async function runBlock(K) {
   const r0 = await cmd("project.new", { discardChanges: true });
@@ -140,6 +146,7 @@ check("R1: per-player slope COLLAPSED (delta_idle in [-40, +60] ms)", delta >= -
 
 const norm = await cmd("project.new", { discardChanges: true });
 check("post-gate normalize ok", norm.msg.ok);
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
 clearTimeout(killer);
 console.log(failures === 0 ? "\nORCH IDLE SCALING GATE: ALL PASS" : `\nORCH IDLE SCALING GATE: ${failures} FAILURE(S)`);

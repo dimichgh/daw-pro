@@ -6,15 +6,19 @@
 // the undo-regex leg matches this script's own "ZoomOrch" track name — verify via a direct edit.history read.
 // Staging: DAW_CONTROL_PORT=17695. Promoted from session scratchpad 2026-07-16 (m17-g).
 // m17-b orch gate v2 — fixed verbs, explicit reset baseline, settle-then-read (layout applies on a fresh main-actor turn).
-// NOTE: capture/output paths point at /tmp/daw-gate-out — `mkdir -p /tmp/daw-gate-out` before running.
-const SCRATCH = "/tmp/daw-gate-out/m17b-orch";
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+// m23-ac-3a: was "class 3" — it never launched anything and drove whatever was
+// on 17695. It now builds and launches its own instance. GATE is "m17b-orch" so
+// that `startStaging` creates the SAME `/tmp/daw-gate-out/m17b-orch` this gate
+// already writes its captures into; the old "mkdir -p before running" note is
+// obsolete because the harness makes the directory.
+import { sleep, buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
 
-const ws = await new Promise((res, rej) => {
-  const w = new WebSocket("ws://127.0.0.1:17695");
-  w.addEventListener("open", () => res(w));
-  w.addEventListener("error", () => rej(new Error("refused")));
-});
+const GATE = "m17b-orch";
+const SCRATCH = `/tmp/daw-gate-out/${GATE}`;
+
+buildOrAbort({ label: "building staging binary (m17b)…" });
+startStaging({ gate: GATE });
+const ws = await connect();
 let n = 0;
 function cmd(command, params = {}) {
   return new Promise((res, rej) => {
@@ -98,4 +102,5 @@ ck("normalized non-dirty for kill", r.ok, r.error);
 
 console.log(`ORCH_ZOOM_GATE2 pass=${pass} fail=${fail}`);
 ws.close();
+stopStaging(GATE);
 process.exit(fail ? 1 : 0);

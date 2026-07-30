@@ -14,24 +14,21 @@
 // hand it to Apple's `MusicSequenceFileLoad` (G8) — the third-party arbiter. A
 // round trip through our own reader alone would pass a mirrored encoder/decoder
 // bug with a green light.
+// m23-ac-3b-2: staging lifecycle from the ONE home. Was "class 3" — it launched
+// nothing and drove whatever sat on the port. The mkdtemp default is KEPT (this gate
+// already had one, unlike its three siblings) but note it makes the transcript
+// non-reproducible: the out dir is printed at the end, so pass an explicit dir
+// whenever you intend to diff two runs. `sleep` stays local to avoid redeclaring it.
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
 
+const GATE = "m23k4a-midi-export";   // names the pidfile + out dir
 const outDir = process.argv[2] ?? mkdtempSync(join(tmpdir(), "m23k4a-"));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function connect() {
-  for (let i = 0; i < 25; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const w = new WebSocket("ws://127.0.0.1:17695");
-        w.addEventListener("open", () => res(w));
-        w.addEventListener("error", () => rej(new Error("refused")));
-      });
-    } catch { await sleep(1000); }
-  }
-  throw new Error("no connect");
-}
+buildOrAbort({ label: "building staging binary (m23k4a)…" });
+startStaging({ gate: GATE });
 const ws = await connect();
 let n = 0;
 function cmd(command, params = {}) {
@@ -273,4 +270,5 @@ ck("G2 the project snapshot is identical too", eq(snapBefore, snapAfter));
 console.log(`\n${pass} pass / ${fail} fail`);
 console.log(`exported files for the Apple-loader leg (G8) are in: ${outDir}`);
 ws.close();
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 process.exit(fail === 0 ? 0 : 1);

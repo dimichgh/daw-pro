@@ -72,7 +72,7 @@ struct CopilotCatalogTests {
         // group delete/move, and strictly better undo atomicity for a
         // capability (clip.remove/clip.move) already IN the catalog — took it
         // 69 -> 71.
-        #expect(CopilotToolCatalog.v1.count == 71)
+        #expect(CopilotToolCatalog.v1.count == 72)   // 72 at m23-af (transport.panic)
         #expect(CopilotToolCatalog.tool(command: "clip.removeMany") != nil,
                 "clip.removeMany missing from the catalog")
         #expect(CopilotToolCatalog.tool(command: "clip.moveMany") != nil,

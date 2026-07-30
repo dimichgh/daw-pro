@@ -65,7 +65,7 @@ struct ClipTranscribeCommandTests {
         // suite keeps the ordering leg (still precedes the newer verbs)
         // rather than deleting it, per the wire-count-pin law: a hand-updated
         // count is a premise that must be re-pointed deliberately, not erased.
-        #expect(all.count == 165)   // 158 -> 159 at m23-n2b -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
+        #expect(all.count == 166)   // 158 -> 159 at m23-n2b -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af
         // Additive: neighboring clip.* / the just-landed MIDI export verbs
         // are untouched, in place.
         #expect(all.contains("clip.analyzeAudio"))

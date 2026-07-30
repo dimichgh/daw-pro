@@ -4,8 +4,13 @@
 // (this item refactored the ONE landing registry the shipped arrange drag runs
 // on, so unit-green is not seam-green).
 //
-// Usage:  env DAW_CONTROL_PORT=17695 nohup .build/debug/DAWApp &
-//         node scripts/gates/m23z-mixer-strip-drag.mjs
+// Usage:  node scripts/gates/m23z-mixer-strip-drag.mjs
+//
+// CLASS 1 since m23-ac-3b-3 — the gate builds the binary and launches its own
+// staging app on 17695. The two-step `nohup .build/debug/DAWApp &` recipe that
+// used to live here is obsolete: it left the gate measuring whichever build a
+// human had last started, which is exactly the provenance gap that made a stale
+// binary look like a product regression twice during M23.
 //
 // CALIBRATED 2026-07-26, three mutants, each caught by exactly the right legs:
 //   1. naive visual-index pass-through  -> 32/47 (B2,B3,B5,B6,C2,C3,D1,D3,D4,E2
@@ -24,19 +29,12 @@
 //                gap sampled from slot 0-1 (the arrange's trick) reads it.
 //   I            [C0, C1, B0(bus)] — the divider gap sits directly BEHIND the
 //                dragged strip while the drag goes the other way.
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function connect() {
-  for (let i = 0; i < 25; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const w = new WebSocket("ws://127.0.0.1:17695");
-        w.addEventListener("open", () => res(w));
-        w.addEventListener("error", () => rej(new Error("refused")));
-      });
-    } catch { await sleep(1000); }
-  }
-  throw new Error("no connect");
-}
+import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
+
+const GATE = "m23z";                        // also names the pidfile + out dir
+
+buildOrAbort({ label: "building staging binary (m23z)…" });
+startStaging({ gate: GATE });
 const ws = await connect();
 let n = 0;
 function cmd(command, params = {}) {
@@ -301,5 +299,6 @@ iS = await mix({ act: "end", x: iCentre(0) });
 ck("I2 …and it lands", eq(iS.names, ["C1", "C0", "B0"]), JSON.stringify(iS.names));
 
 console.log(`\nm23-z gate: ${pass} pass / ${fail} fail`);
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
 process.exit(fail === 0 ? 0 : 1);

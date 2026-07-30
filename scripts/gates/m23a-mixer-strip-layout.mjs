@@ -9,26 +9,34 @@
 // the thing to check in each is the BOTTOM-MOST control of each strip kind
 // (Arm on a channel, Solo on a bus), not merely "the fader is visible".
 //
-// Staging: DAW_CONTROL_PORT=17695 ONLY (17600 is the user's live app).
-// Usage: node m23a-mixer-strip-layout.mjs <ABSOLUTE outdir>
-//   (absolute — the app resolves a relative path against ITS cwd, not yours.)
+// Staging: this gate BUILDS AND LAUNCHES its own app on 17695 — just run
+// `node scripts/gates/m23a-mixer-strip-layout.mjs`. 17600 is the user's LIVE app
+// and the harness refuses it outright.
+//
+// >>> THE `PORT` OVERRIDE IS GONE, AND IT WAS THE DANGEROUS KIND (m23-ac-3c) <<<
+// This file used to read `process.env.PORT || "17695"` under a header that
+// claimed `DAW_CONTROL_PORT=17695 ONLY`. Both halves of that were wrong and the
+// combination was worse than either: the DOCUMENTED variable did nothing (anyone
+// who set it got 17695 by accident, not by configuration), while the variable it
+// ACTUALLY honoured is `PORT` — one of the most commonly-exported names in any
+// shell. A stray `PORT=17600` pointed this gate at the user's live session, where
+// its FIRST command is `project.new {discardChanges: true}`. There is no override
+// now; `assertStagingPort` refuses 17600 structurally.
+//
+// Usage: node m23a-mixer-strip-layout.mjs [ABSOLUTE outdir] [prefix]
+//   The outdir arg still works and is still resolved by the APP against ITS cwd,
+//   so pass an absolute path. Omitted, it defaults to the staging out dir.
 // Promoted from the session scratchpad 2026-07-26 (m23-a).
-const PORT = process.env.PORT || "17695";
-const OUT = process.argv[2];
-const PREFIX = process.argv[3] || "cap";
 import fs from "fs";
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+
+const GATE = "m23a";                                  // names the pidfile + out dir
+const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
+const PREFIX = process.argv[3] || "cap";
 const log = (s) => fs.writeSync(1, s + "\n");
 fs.mkdirSync(OUT, { recursive: true });
 let seq = 0;
 
-function connect(timeoutMs = 5000) {
-  return new Promise((res, rej) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
-    const t = setTimeout(() => rej(new Error("connect timeout")), timeoutMs);
-    ws.onopen = () => { clearTimeout(t); res(ws); };
-    ws.onerror = () => { clearTimeout(t); rej(new Error("connect failed")); };
-  });
-}
 function cmd(ws, command, params = {}, timeoutMs = 30000) {
   return new Promise((res, rej) => {
     const id = "m23a-" + (++seq);
@@ -43,6 +51,14 @@ function cmd(ws, command, params = {}, timeoutMs = 30000) {
   });
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+buildOrAbort({ label: "building staging binary (m23a)…" });
+startStaging({ gate: GATE });
+// Swapping the local connect() for the harness one is a true drop-in HERE, unlike
+// m18c/m19f: this gate's cmd() attaches its own per-call `message` listener and
+// removes it on reply, so the socket carries no shared reply pump to preserve.
+// The harness also retries 40x1 s instead of failing after a single 5 s attempt,
+// which is the right budget against a cold boot we now own.
 const ws = await connect();
 async function must(command, params) {
   log(`> ${command}`);
@@ -173,6 +189,7 @@ await must("debug.windowFrame", { width: 1440, height: 900 });
 await must("debug.panelDensity", { panel: "mixer", mode: "pro" });
 await sleep(450);
 await cap("master-tallest-pro-h900");
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
 log("done");
 process.exit(0);

@@ -1,21 +1,21 @@
 // m23-m3 export-dialog gate — capture + on-disk assertions through the LIVE app.
 // Staging: DAW_CONTROL_PORT=17695 ONLY (17600 is the user's live app).
 // Usage: node m23m3-export-dialog.mjs <ABSOLUTE outdir>
-const PORT = process.env.PORT || "17695";
-const OUT = process.argv[2];
+// m23-ac-3b-2: staging lifecycle from the ONE home. Was "class 3" — it launched
+// nothing and drove whatever sat on the port, so its greens certified a hand-prepared
+// instance. Two things changed besides build+launch. (1) `OUT` now DEFAULTS to the
+// staging out dir, so the gate runs with no arguments like every other converted gate;
+// an explicit argv still wins. (2) The old local `connect` was a SINGLE 5 s shot with
+// no retry — fine when a human had the app up already, a race against our own boot now.
+// The harness retries 40x1 s and refuses port 17600 outright.
 import fs from "fs";
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+const PORT = process.env.PORT || "17695";
+const GATE = "m23m3-export-dialog";   // names the pidfile + out dir = the default OUT
+const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 const log = (s) => fs.writeSync(1, s + "\n");
 fs.mkdirSync(OUT, { recursive: true });
 let seq = 0;
-
-function connect(timeoutMs = 5000) {
-  return new Promise((res, rej) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
-    const t = setTimeout(() => rej(new Error("connect timeout")), timeoutMs);
-    ws.onopen = () => { clearTimeout(t); res(ws); };
-    ws.onerror = () => { clearTimeout(t); rej(new Error("connect failed")); };
-  });
-}
 function cmd(ws, command, params = {}, timeoutMs = 60000) {
   return new Promise((res, rej) => {
     const id = "r" + ++seq;
@@ -39,7 +39,9 @@ const check = (name, ok, detail = "") => {
   else { FAIL++; log(`  FAIL ${name}${detail ? " — " + detail : ""}`); }
 };
 
-const ws = await connect();
+buildOrAbort({ label: "building staging binary (m23m3)…" });
+startStaging({ gate: GATE });
+const ws = await connect({ port: Number(PORT) });
 const cap = async (name, params = {}) => {
   const r = await cmd(ws, "debug.captureUI", { path: `${OUT}/${name}.png`, ...params });
   log(`  captured ${name} ${r?.width}x${r?.height}`);
@@ -159,4 +161,5 @@ await cap("05-closed");
 
 log(`\n${PASS} passed, ${FAIL} failed`);
 ws.close();
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 process.exit(FAIL ? 1 : 0);

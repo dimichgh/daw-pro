@@ -3,12 +3,16 @@
 // act responses echo the PREVIOUS view-reported state — act, settle ~300 ms, then a BARE debug.arrangePointer {}
 // read. Staging: DAW_CONTROL_PORT=17695. Promoted from session scratchpad 2026-07-16 (m17-g).
 // m17-c zone legs re-run with hover -> settle -> BARE READ (view-reported state law).
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const ws = await new Promise((res, rej) => {
-  const w = new WebSocket("ws://127.0.0.1:17695");
-  w.addEventListener("open", () => res(w));
-  w.addEventListener("error", () => rej(new Error("refused")));
-});
+// m23-ac-3a: was a "class 3" gate — it never launched anything and simply drove
+// whatever instance happened to be listening on 17695, at an unknown commit,
+// prepared by hand. It now builds the tree and launches its own instance, so a
+// green here means something about the code as it stands.
+import { sleep, buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+
+const GATE = "m17c-pointer-zones";
+buildOrAbort({ label: "building staging binary (m17c)…" });
+startStaging({ gate: GATE });
+const ws = await connect();
 let n = 0;
 function cmd(command, params = {}) {
   return new Promise((res, rej) => {
@@ -69,4 +73,5 @@ r = await cmd("project.new");
 ck("normalized", r.ok, r.error);
 console.log(`ORCH_ZONES pass=${pass} fail=${fail}`);
 ws.close();
+stopStaging(GATE);
 process.exit(fail ? 1 : 0);

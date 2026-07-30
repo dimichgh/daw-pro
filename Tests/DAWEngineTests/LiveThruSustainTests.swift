@@ -257,9 +257,10 @@ struct LiveThruSustainTests {
     func controllerTrafficNeverCountsAsAVoice() {
         var h = Harness()
         // 200 controller events, some with data1 == 60 — the map-collision
-        // hazard. NO CC64: the sustain-pedal residual survives m23-u (a
-        // pedal-held voice is still cut at the tail), so a pedal-down stimulus
-        // here would pin that bug as intended behaviour.
+        // hazard. STILL NO CC64, but the reason INVERTED at m23-ae: a pedal-down
+        // now keeps the node awake BY DESIGN, so mixing one in here would fail
+        // the "controller traffic alone kept the node awake" leg below for a
+        // correct reason. The pedal has its own legs, T8 and T9.
         for n in 0..<200 {
             switch n % 3 {
             case 0: h.pushLive(kind: ScheduledMIDIEvent.controlChange, pitch: 60, velocity: 99)
@@ -320,7 +321,11 @@ struct LiveThruSustainTests {
         // Step 1b resets and clears, THEN the 512 queued same-pitch ons drain in
         // the same quantum: the first opens the slot, the other 511 retrigger it.
         _ = h.pull()
-        #expect(h.renderer.openLiveCount == 1)   // 1, not 512 — the guard again
+        // 1, not 512. Since m23-ad this holds for a different reason than it
+        // used to: the `== 0` increment guard is gone, and each retrigger now
+        // decrements in the defensive close then increments — netting zero
+        // because the popcount of a pitch going id₁ → id₂ does not change.
+        #expect(h.renderer.openLiveCount == 1)
 
         h.pushLive(kind: ScheduledMIDIEvent.noteOff, pitch: 60)
         _ = h.pull()
@@ -329,5 +334,145 @@ struct LiveThruSustainTests {
         let last = h.pull()
         #expect(last.isSilence)
         #expect(last.peak == 0)
+    }
+
+    // MARK: - T8: m23-ae — the pedal is a SECOND term, not a kind of key
+
+    /// The residual m23-u left behind and documented: `openLiveCount` counts
+    /// KEYS HELD, but under CC64 both built-ins DEFER the note-off
+    /// (`PolySynthInstrument.swift:377`), so the key can be up — popcount 0 —
+    /// while the voice is still sounding. 6d then let the tail expire and cut it
+    /// mid-sustain. Any pianist who uses a pedal hit this within one bar.
+    @Test("T8 a CC64-sustained thru voice survives PAST liveTailSeconds after the key is released")
+    func pedalSustainedThruVoiceSurvivesPastTheTail() {
+        var h = Harness()
+        h.pushLive(kind: ScheduledMIDIEvent.controlChange, pitch: 64, velocity: 127)
+        h.pushLive(kind: ScheduledMIDIEvent.noteOn, pitch: 60, velocity: 100)
+        _ = h.pull()
+        // THE KEY GOES UP IMMEDIATELY — that is the whole scenario. The synth
+        // defers the release because the pedal is down, so the voice sounds on
+        // with NOTHING in the pitch map to keep 6d arming the tail.
+        h.pushLive(kind: ScheduledMIDIEvent.noteOff, pitch: 60)
+        _ = h.pull()
+        #expect(h.renderer.openLiveCount == 0,
+                "the key is UP — if this reads 1 the leg below passes for the wrong reason")
+
+        var peaks: [Float] = []
+        var silences: [Bool] = []
+        for _ in 0..<holdQuanta {
+            let quantum = h.pull()
+            peaks.append(quantum.peak)
+            silences.append(quantum.isSilence)
+        }
+
+        // Same discriminating window as T1, and for the same reason: everything
+        // before `tailQuanta` is a region where the pre-m23-ae code was already
+        // correct, so a leg measured there proves nothing.
+        let from = tailQuanta + 50
+        let window = Array(peaks[from..<holdQuanta])
+        let lo = window.min() ?? 0
+        let hi = window.max() ?? 0
+        print("[measured] m23-ae T8 window [\(from), \(holdQuanta)) — min \(lo), max \(hi)")
+        #expect(lo > 0.01,
+                "the PEDAL-SUSTAINED voice was CUT — min peak \(lo) over quanta [\(from), \(holdQuanta)), entirely after liveTailSeconds")
+        #expect(silences[from..<holdQuanta].allSatisfy { !$0 },
+                "the node reported SILENCE past the tail under a held pedal")
+        // The counter is UNCHANGED by all of this — the point of the item. If a
+        // future refactor folds the pedal into `openLiveCount`, this reddens and
+        // the popcount invariant (InstrumentSourceNode.swift:140) is protected.
+        #expect(h.renderer.openLiveCount == 0)
+
+        // PEDAL UP: the deferred release finally lands and the tail becomes
+        // bounded again. Without this leg the fix is indistinguishable from
+        // "the node never sleeps once a pedal event is seen".
+        h.pushLive(kind: ScheduledMIDIEvent.controlChange, pitch: 64, velocity: 0)
+        _ = h.pull()
+        for _ in 0..<(tailQuanta + 8) { _ = h.pull() }
+        let idle = h.pull()
+        #expect(idle.isSilence, "the node never went idle after the pedal was released")
+        #expect(idle.peak == 0, "still writing audio after pedal-up — peak \(idle.peak)")
+    }
+
+    // MARK: - T10: the flush must clear the PEDAL too, not just the map
+
+    /// `clearLiveVoices()` is the one home for the bulk clear, and m23-ae added
+    /// the pedal to it. Both call sites pair it with `instrument.reset()`, which
+    /// clears the instrument's own `pedalDown` (`PolySynthInstrument.swift:227`)
+    /// — so a latch left set diverges from the instrument permanently: nothing
+    /// is sounding, nothing can ever lift the pedal (the physical pedal-up went
+    /// to the flushed stream), and the node re-arms 6d forever.
+    ///
+    /// THE DISCRIMINATOR IS `isSilence`, NOT `peak`. A stuck latch renders the
+    /// instrument every quantum and the instrument renders zeros, so the peak is
+    /// 0 either way — only the fast path's own signal separates "asked and got
+    /// silence" from "never asked".
+    @Test("T10 a flush clears the sustain-pedal latch, not just the pitch map")
+    func flushClearsThePedalLatch() {
+        var h = Harness()
+        h.pushLive(kind: ScheduledMIDIEvent.controlChange, pitch: 64, velocity: 127)
+        h.pushLive(kind: ScheduledMIDIEvent.noteOn, pitch: 60, velocity: 100)
+        _ = h.pull()
+        h.pushLive(kind: ScheduledMIDIEvent.noteOff, pitch: 60)
+        _ = h.pull()
+        // Pedal genuinely down with a sustaining voice — T8's state. This is the
+        // moment a MIDI device is unplugged (MIDIInputManager.swift:256-260).
+        #expect(!h.pull().isSilence, "precondition: the pedal-held voice must be sounding")
+
+        h.renderer.requestFlush()
+        let afterFlush = h.pull()
+        #expect(h.renderer.openLiveCount == 0)
+        #expect(afterFlush.isSilence, "the flush left the PEDAL latch set — the node re-arms forever")
+        #expect(afterFlush.peak == 0)
+        for _ in 0..<(tailQuanta + 8) { _ = h.pull() }
+        #expect(h.pull().isSilence, "the node never slept after a flush under a held pedal")
+    }
+
+    // MARK: - T9: the trap — `pitch == 64` does NOT mean "pedal"
+
+    /// In the kind ≥ 2 branch `pitch` is a controller number ONLY for kind 2.
+    /// For `pitchBend` it is the LSB and for `channelPressure` it is the value
+    /// (MIDISchedule.swift:21-25). So the latch must test the KIND, and both
+    /// directions of getting that wrong are live bugs: a CENTRED bend (LSB 64,
+    /// MSB 0x40 ≥ 64 — the most common single message in any bend gesture)
+    /// would latch the pedal ON forever, and an aftertouch of 64 (velocity 0)
+    /// would latch it OFF under a genuinely held pedal, restoring the exact
+    /// m23-ae bug. One leg each.
+    @Test("T9 a bend LSB of 64 and an aftertouch of 64 are NOT the sustain pedal")
+    func onlyControlChangeSixtyFourLatchesThePedal() {
+        // A: a centred bend must not latch the pedal ON. Nothing is held, so the
+        // node must go idle exactly as in T2.
+        var h = Harness()
+        h.pushLive(kind: ScheduledMIDIEvent.pitchBend, pitch: 64, velocity: 0x40)
+        h.pushLive(kind: ScheduledMIDIEvent.noteOn, pitch: 60, velocity: 100)
+        _ = h.pull()
+        h.pushLive(kind: ScheduledMIDIEvent.noteOff, pitch: 60)
+        _ = h.pull()
+        for _ in 0..<(tailQuanta + 8) { _ = h.pull() }
+        let afterBend = h.pull()
+        #expect(afterBend.isSilence,
+                "a centred pitch-bend latched the sustain pedal — the node never sleeps again")
+        #expect(afterBend.peak == 0, "peak \(afterBend.peak) after a bend-only stimulus")
+
+        // B: channel pressure of 64 must not latch the pedal OFF. The pedal IS
+        // genuinely down here, so the voice must still be sounding past the tail
+        // — the same measurement as T8, with the aftertouch injected mid-hold.
+        var g = Harness()
+        g.pushLive(kind: ScheduledMIDIEvent.controlChange, pitch: 64, velocity: 127)
+        g.pushLive(kind: ScheduledMIDIEvent.noteOn, pitch: 60, velocity: 100)
+        _ = g.pull()
+        g.pushLive(kind: ScheduledMIDIEvent.noteOff, pitch: 60)
+        _ = g.pull()
+        // Aftertouch whose VALUE is 64 — `velocity` is 0 for this kind, so a
+        // guard that reads `pitch == 64` alone computes `0 >= 64` = false and
+        // silently lifts the pedal.
+        g.pushLive(kind: ScheduledMIDIEvent.channelPressure, pitch: 64, velocity: 0)
+        _ = g.pull()
+
+        for _ in 0..<(tailQuanta + 50) { _ = g.pull() }
+        let stillHeld = g.pull()
+        #expect(stillHeld.peak > 0.01,
+                "an aftertouch of 64 lifted the sustain pedal — voice cut at \(stillHeld.peak)")
+        #expect(!stillHeld.isSilence,
+                "the node reported silence past the tail after an aftertouch of 64")
     }
 }

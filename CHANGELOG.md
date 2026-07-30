@@ -1,5 +1,337 @@
 # Changelog
 
+## 2026-07-30 — A Panic button, for when a note will not stop
+
+**There is now a way out of a stuck note.** Every so often a note gets stuck
+sounding and nothing you do makes it stop. It is almost never your fault: a
+keyboard sends "key down" and "key up" as two separate messages, and if the
+second one never arrives — you unplug the cable mid-note, the device drops off,
+another app quits with a key held — the note is left hanging on. The DAW is
+right to keep sounding it, because as far as anything can tell, the key is
+still down.
+
+What was missing was the exit. Pressing Stop did nothing, because Stop only
+does something when there is something playing to stop. Nothing in the AI
+copilot's vocabulary could clear it either. So the only fix was to quit the app.
+
+There is now a **PANIC button in the transport bar** — the red octagon next to
+Record. Press it and everything goes quiet. Your AI assistant can do the same
+thing when you ask it to, using the new `transport.panic` command.
+
+Two things about it are deliberate. It works **whether or not anything is
+playing**, which is the whole point — a stuck note usually happens when you are
+not playing anything. And it does **not** stop playback or recording, so if a
+note jams in the middle of a take you can silence it and keep the take.
+
+## 2026-07-30 — The sustain pedal holds for as long as you hold it
+
+**Live MIDI thru: a pedalled note no longer dies after 8 seconds.** Hold the
+sustain pedal, play a note, lift your finger — the note is supposed to ring on
+until you lift the pedal. It did, for eight seconds, and then stopped dead in
+the middle of the sound. Any pedalled phrase longer than a bar or two ran into
+it.
+
+The engine was watching the wrong thing. It kept a track awake while a *key*
+was held down, which is the right rule right up until you use a pedal: under
+the pedal your finger comes off the key while the sound keeps going. So the
+engine saw nothing held, started its idle countdown, and cut a note that was
+still sounding. It now watches the pedal as well as the keys.
+
+Lifting the pedal still releases everything exactly as before — that is
+checked, because "never stops" would have been a worse bug than "stops too
+early".
+
+## 2026-07-30 — Let go of the key and the note stops
+
+**Live MIDI thru: a retrigger no longer strands the previous voice.** Play a
+note, then play the same note again without lifting the key first — something
+real hardware does constantly, and any source that drops a note-off does by
+accident. The second press used to leave the first note stranded: nothing could
+ever switch it off, so it sounded until the whole instrument was flushed, and
+the note-off you eventually sent went to the *second* voice instead. The
+retrigger now closes the first voice itself.
+
+Under the hood this was a capacity change, not a one-line fix. Each incoming
+note can now produce two outgoing events, so the render thread's fixed scratch
+buffer was resized (768 -> 1280 events) and the drain loop was changed to count
+*presses* rather than emitted events — bounding on emissions would have left
+half a busy quantum's input queued a beat late, every beat.
+
+Verified end to end through real CoreMIDI, not just in unit tests: a new gate
+creates a virtual MIDI source, plays on/on/off into a sustaining synth, and
+watches the master meter fall silent. Deliberately re-run against a build with
+the fix removed, where it stays loud forever — so the test is known to be
+capable of catching the bug it was written for.
+
+One accepted trade: two MIDI devices holding the *same* note now replace each
+other rather than stacking. That is the better failure — previously they
+stranded a voice *and* mis-paired the key-up.
+
+## 2026-07-30 — The last check that was quietly measuring a zombie
+
+The internal check that proves your window-follow preference survives a restart of the app used to kill the app, wait, and ask "is it gone?" — and get back "no, still running" even when it had already exited. The answer was an artifact of how the check was being run, not of the app: nothing was left to notice the process had died, so the question kept returning the stale answer. That mattered more than it sounds, because that one question is what rules out the check accidentally re-connecting to the OLD app and congratulating itself on a setting that never actually persisted. It now measures what it claims, and the tooling around it says so out loud.
+
+Two other things in the same area stopped being taken on trust. This check was the last one in the suite that ran against whatever copy of the app happened to be lying around rather than building a fresh one, and it measured the screen through a small helper program that had last been compiled by hand four days earlier. Both are now rebuilt every single run. And the audit that reports "nothing launches the app behind our back" turned out to have never been able to see this particular check doing exactly that — it was looking for a literal filename and this one used a variable. The audit has been taught to see it, and to refuse to stay quiet unless each case is justified in writing.
+
+Separately, four genuine problems this check has been reporting for a while are now written down as their own task rather than living inside a wall of output — they all look like one cause, the same one already logged against a sibling check: the screen measurements are aimed at coordinates the layout has since moved away from.
+
+
+## 2026-07-30 — An internal check that had been quietly testing a third less than it claimed
+
+The resize sweep is one of our internal display checks: it resizes the app to four
+window sizes and photographs the screen in each, so we can see that nothing overlaps
+or gets cut off. It is meant to take 24 photographs.
+
+It was taking 16. The last eight needed a project with some music in it — a few notes,
+a volume curve, an EQ — and the check never made one. It expected whoever ran it to set
+that up by hand first and tell it where to look. If you just ran it, it took the 16
+photographs it could and stopped, without mentioning the eight it had skipped. That has
+been true since the check was written in July, and the runs that did produce all 24
+happened because a person staged the project by hand that day.
+
+The check now builds that project itself, every time, so all 24 photographs get taken.
+We recovered what the project should contain from the notes of the original 24-photograph
+run rather than guessing, then confirmed by eye that the photographs really do show it:
+the notes, the volume curve continuing past the end of the clip, the EQ panel.
+
+Also fixed: this check read a setting called PORT to decide which copy of the app to
+talk to. PORT is a name lots of tools set for unrelated reasons, so an unlucky value
+could have pointed a 24-step resize sweep at the app you were actually working in and
+resized your window out from under you. It now talks only to its own private copy.
+
+Filed for a follow-up sweep: any other internal check that quietly does less than it
+says when something optional is missing.
+
+## 2026-07-30 — The two long-running stress tests start the app themselves, and the last of the risky `PORT` shortcuts is nearly gone
+
+The two endurance checks — one that repeatedly deletes an audio file mid-playback
+to make sure the app never wedges, and one that rebuilds a 40-track session five
+times over to make sure the sound never silently drops out — now build and launch
+their own private copy of DAW Pro. Verified over eight runs: identical results
+every time, and the measured loudness of the 40-track mix came out the same to
+four decimal places whether the check started the app itself or not.
+
+These two carried the same hazard fixed yesterday, in a worse form: they defaulted
+to a port that was neither the private one nor your live one, and still obeyed a
+`PORT` setting from the environment. Pointed at your real session, one of them
+would have deleted files during playback and the other would have rebuilt your
+project forty tracks at a time. Both overrides are gone. One check still carries
+this shortcut and is scheduled next.
+
+## 2026-07-30 — Two more internal checks start the app themselves, and a stray `PORT` setting can no longer aim them at your project
+
+The mixer-strip and piano-gutter layout checks now build and launch their own
+private copy of DAW Pro instead of quietly attaching to whatever happens to be
+running. Every picture they take came out **byte-for-byte identical** to the old
+way — all 25 of them, across nine runs — so nothing they look at has changed.
+
+The reason this mattered more than housekeeping: both checks used to read an
+environment variable called `PORT`, which is one of the most commonly set names
+on any developer's machine. If it happened to be set to the port your real DAW
+Pro window listens on, these checks would have driven **your** session — and the
+first thing they do is start a new empty project, discarding what you had open.
+Their own instructions named a different variable entirely, so the setting people
+were told to use did nothing while the dangerous one worked silently. The
+override is gone; the checks now refuse your live app outright rather than
+trusting a setting.
+
+## 2026-07-30 — The two speed checks now start the app themselves, and it was proven not to change what they measure
+
+Two internal checks measure how long it takes to add a track *while the project is
+playing* — one with 40 audio clips rolling, one with them idle. They were the last checks
+that still needed someone to launch DAW Pro by hand, and the awkward ones to change: they
+assert on millisecond timings, so making them build and launch the app first could plausibly
+have altered the very numbers they measure.
+
+Rather than argue about it, it was measured. Each check was run nine times across three
+setups: against an app left sitting idle for a minute with no build beforehand (how they
+were originally calibrated), through the old hand-launched path, and self-launching. All
+eighteen runs passed every timing band, and the self-launching average landed exactly on the
+idle-app average. The startup work finishes about fifteen seconds before the first
+measurement is taken.
+
+Two side benefits. These two checks could previously be pointed at a different port by an
+environment variable — including the one the user's real app runs on. That override is gone.
+And a stray sixty-second override could no longer make a slow compile look like a hung check.
+
+One thing to fix later, now written down: the active-players check requires its result to be
+*at least* 330 ms, and the fastest run measured came in at 337. That floor means a genuine
+speed-up in track creation would be reported as a failure.
+
+## 2026-07-30 — The two biggest internal checks now start the app themselves
+
+The spectrum pair — the check that the per-insert spectrum actually draws on a track's EQ
+card, and the check that the vibe orb, goniometer trail and mono-safety readouts keep
+running while DAW Pro is in the background — were the last two large checks still requiring
+someone to launch the app by hand first. They now build and start their own copy, like the
+rest. Between them they are the heaviest pair in the suite, which is why they were left
+until the recipe had been proven on twelve smaller ones.
+
+Both produced exactly the same result afterwards as before — 64 checks and 47 checks, all
+passing, in the same order — so the change is in how they start, not in what they measure.
+
+One of the two got quietly more trustworthy in the process. It works by holding focus away
+from DAW Pro for its whole run, and its very first check confirms the app *is* in front
+before that starts — otherwise the run proves nothing. Previously that depended on luck,
+since whoever launched the app by hand would have had their terminal in front by the time
+the check ran. Now the check starts the app itself, so the condition is guaranteed.
+
+## 2026-07-30 — Three more checks start the app themselves, and one turned out to be looking at a blank patch of screen
+
+Three internal checks — the reference-track panel, the off-clip playhead cue, and mixer
+strip dragging — used to require someone to launch DAW Pro by hand first, then point the
+check at it. Whatever build happened to be running is what got measured. All three now
+build the app and start their own copy, so a check can no longer quietly report on
+yesterday's code. The playhead check had a second version of the same problem: the small
+Swift tool it uses to inspect pixels was also compiled by hand, once. It is now rebuilt on
+every run too.
+
+Two real problems surfaced while doing this, both of which predate the change and are now
+written down rather than quietly fixed:
+
+The off-clip playhead check has been examining a strip of the note grid that no longer has
+anything in it. The cue it looks for sits about 165 pixels lower on screen than where the
+check reads. Sixteen of its thirty-three assertions fail for that one reason, so a real
+break in this feature would currently be invisible among them.
+
+The reference panel's match-gain chip draws +24 dB and −24 dB identically. Everything in
+between is distinct, so the readout is fine until you reach the extremes, where a large
+boost and a large cut become indistinguishable at a glance.
+
+One more thing worth recording: the app remembers its window size between launches, and
+nothing in the checks pins it down. A check that compares screenshots can therefore change
+its answer purely because the window came back a different size — which is exactly what
+happened here, and it looked convincingly like a regression until the old version of the
+check was re-run and produced the same result.
+
+## 2026-07-30 — A check that times out no longer leaves a copy of DAW Pro running behind it
+
+Twelve of the internal checks carry a stopwatch that gives up if the app stops responding.
+When that stopwatch fired, the check quit — but left the copy of DAW Pro it had started
+still running, invisibly, in the background. The same thing happened if you pressed Ctrl-C
+to stop a check partway through.
+
+That leftover copy is worse than untidy. Later checks would connect to it by mistake and
+report on the wrong app: on one occasion in July, a single stray copy caused five checks to
+pass that should have failed, and three to fail that should have passed. It is the reason a
+run could look clean and mean nothing.
+
+The shutdown now happens in the one place that starts the app, so it covers every way a
+check can end — finishing normally, timing out, being interrupted, or crashing — and it
+covers checks written in the future without anyone having to remember. Measured before and
+after: with the old code the leftover copy was still running on every path tested; with the
+new code it is gone on all of them, and the checks themselves report exactly what they did
+before.
+
+## 2026-07-30 — The four export checks now start the app themselves, and one of them stopped lying about stems
+
+Four more of the app's internal checks — the ones covering the export window, exporting
+MIDI from a track, and the stems dialog — now build and start DAW Pro themselves instead
+of testing whatever copy happened to be open. All four came out the same before and
+after: a hundred individual checks, none failing. The exported files landed on disk as
+expected, which is the part that actually matters for export.
+
+One of these had a real problem worth explaining. The export window remembers your
+settings until you quit. The stems check tests what the window looks like *fresh*, so if
+anything had opened that window earlier in the same session, the check would report
+failures that looked exactly like a bug in the app — and that had already happened once,
+in July, on a build with nothing wrong with it. It relied on someone remembering to
+restart the app first. Now it starts its own, every time, so the situation can't arise.
+
+We also found a piece of cleanup code that had never once run. It was written to release
+resources when the check finished, but it sat in a place the program never reaches on its
+way out. Harmless as written — but it is exactly where someone would later put "shut the
+app down", and it would have quietly left copies of DAW Pro running after every
+successful run. Fixed here, and we've made a note to check the rest for the same shape.
+
+## 2026-07-30 — Three more checks now build the app they test, and one tool had stopped counting straight
+
+Another three of the app's internal checks were converted so they build and launch
+DAW Pro themselves instead of quietly measuring whatever copy happened to be running.
+All three came out green before and after, matching step for step — so this is
+plumbing, not a bug hunt. Nothing about the app itself changed.
+
+Two things did turn up along the way.
+
+The tool that runs a check "before" state — the reference point we compare against —
+was silently dropping any arguments you gave it. Four of the checks still waiting to
+be converted take a folder to write their output into, and three of those have no
+fallback, so they could not have been measured at all. That is fixed, and it was
+confirmed the blunt way: the same probe run through the old tool and the new one, one
+losing the arguments and one keeping them.
+
+The tool that keeps score of how many checks have been converted had started counting
+one of our own tools as if it were a check. The number it reported was one too high
+and had quietly stopped adding up against last week's. Also fixed, and the totals line
+up again.
+
+We also pulled two checks out of this batch. They measure how long the app takes to do
+something, and they were calibrated against this specific machine on a quiet day.
+Converting them would mean compiling the app immediately before timing it, which
+disturbs the very thing they measure. They need a different approach and now have
+their own entry, rather than being rushed through with the rest.
+
+## 2026-07-30 — We started auditing the checks that were never really checking, and found three real problems
+
+There is a group of 25 automated checks in this project that never start DAW Pro
+themselves. They connect to a copy that is already running — one a person started
+by hand, at some unknown moment, from some unknown version of the code. A check
+like that can report a confident pass without having tested anything you would
+recognise, and it has no way of noticing.
+
+Rather than convert all 25 at once, this round did four as a probe, deliberately
+mixed between checks that only talk to the app and checks that inspect what is
+drawn on screen. All four now build the current code and start their own copy of
+the app. Each was measured before and after to confirm the change itself altered
+nothing.
+
+**Two of the four were already failing before anything was touched.** That is the
+finding, and it is why the probe was worth doing:
+
+- One check **could never have reported a failure at all.** It always signalled
+  success when it finished, no matter how many of its own tests had failed. It
+  has been quietly failing two tests for some time while reporting a clean pass
+  every single run.
+- The same check also **spoils its own setup.** It tests how the app behaves when
+  the AI audio generator is switched off — but starting that generator is part of
+  what it does. So it passes the first time and fails every time after, until the
+  generator is switched off again by hand.
+- A second check **contradicts its own written rule.** A note at the top of the
+  file says to clear text focus a specific way because the obvious way does not
+  work. The code then does it the way the note warns against. Everything after
+  that point fails in a chain.
+
+None of these are new breakages and none were caused by this work — all three
+were confirmed present beforehand. They are now written down as tasks instead of
+sitting invisible.
+
+Separately, while investigating: **the Stop button for the AI audio generator does
+not reliably stop it.** If it loses track of the running process it reports "was
+not running" and leaves it running. The status display, meanwhile, correctly shows
+it as healthy — so the app contradicts itself. Also written up as a task.
+
+## 2026-07-30 — The last two checks that could lie to you, and the last two that tested nothing
+
+The previous entry ended by naming two automated checks that were still leaving
+behind the false "you crashed" marker. Both are fixed. No check in the project
+leaves that marker any more, so the app will only offer to recover your work when
+something actually went wrong.
+
+Those same two checks had a second, quieter problem. Every check is supposed to
+rebuild DAW Pro before testing it, so that what gets tested is the code as it
+stands right now. These two skipped that step and simply ran whatever build
+happened to be sitting on disk — which could be hours or days old. A check like
+that reports a confident pass without having looked at your current code, and
+gives no sign that anything is wrong. It has bitten us before, on the very
+feature these two checks were written to guard.
+
+Both now rebuild before they run. That was the whole point of converting them,
+and with it done, every check in the project that starts the app also builds it
+first.
+
+Nothing about the app itself changed here — this is entirely about whether our
+own checks can be believed.
+
 ## 2026-07-30 — Our tests were leaving DAW Pro convinced it had crashed
 
 When DAW Pro starts, it writes a small marker file to say "a session is running",

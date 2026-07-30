@@ -16,20 +16,51 @@
 // "is the playhead in frame" is a pixel fact, not an inference from the app's
 // own numbers. Those numbers are read too, and the two are cross-checked.
 //
-//   swiftc -O -o /tmp/m23c2-probe scripts/probes/m23c1-cyan-column-probe.swift
-//   M23C2_PROBE=/tmp/m23c2-probe M23C2_OUT=/tmp/m23c2 \
-//     M23C2_PIDFILE=/tmp/staging.pid node scripts/gates/m23c2-follow-playhead.mjs
+// >>> THIS GATE NOW BUILDS AND LAUNCHES ITS OWN APP (m23-ac-3e-3) <<<
 //
-// Staging port 17695 only — 17600 is the user's live app.
+// It was the corpus's LAST class 2 — it launched a binary but never built one,
+// so every run measured whatever `.build/debug/DAWApp` happened to contain. It
+// was also a HYBRID: it connected FIRST and only spawned at Leg 6, because that
+// leg deliberately kills and respawns staging to prove the follow preference
+// survives a real process restart. That relaunch is the POINT of Leg 6 and is
+// preserved exactly; only the lifecycle around it moved to the harness.
+//
+// TWO PROVENANCE GAPS WERE CLOSED, NOT ONE — the same pair m23c1 had (m23-ac-3b-3):
+//   1. the APP was never built, and
+//   2. the cyan-column PROBE was compiled by hand "once" and then trusted
+//      forever. `/tmp/m23c2-probe` on this machine was dated Jul 26 and would
+//      have been used silently. It is now rebuilt every run, like the app, for
+//      the same reason: a stale probe measures the previous build's pixels.
+//      (Swift binaries are NOT byte-reproducible — compare FUNCTION, not bytes.)
+//
+// >>> THE ENV OVERRIDES THAT COULD BREAK TEARDOWN ARE GONE <<<
+// `M23C2_PIDFILE`, `M23C2_BINARY` and `M23C2_REPO` were deleted. The pidfile in
+// particular is the single file the whole teardown chain depends on: startStaging
+// writes pid A to it, Leg 6 kills A and writes its replacement B to it, and
+// stopStaging/armTeardown re-read it to kill B. A stale `M23C2_PIDFILE` export
+// would have broken link 2 silently and left B alive on 17695 — the same shape as
+// the `PORT` hazard swept at m23-bi. Binary and repo root now have ONE home in
+// the harness rather than a second spelling here.
+//
+// Staging port 17695 only — 17600 is the user's live app (assertStagingPort).
+// Usage: node scripts/gates/m23c2-follow-playhead.mjs
+// Exit codes: 0 = all checks pass; 1 = a check failed; 2 = the 900 s watchdog.
 import fs from "fs";
-import { execFileSync, spawn } from "child_process";
+import { execFileSync, spawn, spawnSync } from "child_process";
+import {
+  ROOT, STAGING_PORT, DEFAULT_BINARY,
+  buildOrAbort, startStaging, stopStaging, pidfilePath, releaseSessionLock,
+} from "./_staging.mjs";
 
-const PORT = process.env.DAW_CONTROL_PORT || "17695";
+const GATE = "m23c2";                     // names the pidfile + staging out dir
+const PORT = STAGING_PORT;
 const OUT = process.env.M23C2_OUT || "/tmp/m23c2";
 const PROBE = process.env.M23C2_PROBE || "/tmp/m23c2-probe";
-const PIDFILE = process.env.M23C2_PIDFILE || "/tmp/m23c2-staging.pid";
-const BINARY = process.env.M23C2_BINARY || ".build/debug/DAWApp";
-const REPO = process.env.M23C2_REPO || process.cwd();
+// ONE home for each of these — the harness owns them; this file no longer
+// carries a second spelling that could drift from it.
+const PIDFILE = pidfilePath(GATE);
+const BINARY = DEFAULT_BINARY;
+const REPO = ROOT;
 fs.mkdirSync(OUT, { recursive: true });
 const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 900_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -111,6 +142,40 @@ async function connect() {
   }
   throw new Error("no connect");
 }
+
+// ── lifecycle ─────────────────────────────────────────────────────────────
+// Build the app, then rebuild the probe, then launch — in that order, so a
+// compile failure on either side costs nothing and leaves nothing running.
+buildOrAbort({ label: "building staging binary (m23c2)…" });
+
+// Rebuild the cyan-column probe every run, for the same reason the app is built
+// every run: a stale probe measures the previous build's idea of the pixels.
+// This is m23c1's pattern and the SAME probe source — the two gates share it.
+// Swift binaries are NOT byte-reproducible, so this is compared by FUNCTION
+// (the dims assertion in probe()), never by bytes.
+const probeSrc = "scripts/probes/m23c1-cyan-column-probe.swift";
+const probeBuild = spawnSync("swiftc", ["-O", "-o", PROBE, probeSrc], {
+  cwd: REPO, encoding: "utf8",
+});
+if (probeBuild.status !== 0) {
+  console.log("ABORT: probe compile failed — every pixel leg would measure a stale probe");
+  console.log((probeBuild.stderr || "").trim().split("\n").slice(-12).join("\n"));
+  process.exit(2);
+}
+console.log(`# probe rebuilt: ${PROBE} <- ${probeSrc}`);
+
+// startStaging clears a stale pidfile before launching and arms the teardown
+// (m23-bd), which re-READS the pidfile on exit — that is what makes Leg 6's
+// kill-and-respawn safe, provided Leg 6 writes its new pid to the same file.
+const staged = startStaging({ gate: GATE });
+const firstPid = staged.pid;
+// The harness owns the pidfile path; assert our copy agrees rather than trusting
+// two spellings to stay equal. Link 1 of the three-link teardown chain.
+if (staged.pidfile !== PIDFILE) {
+  console.log(`ABORT: pidfile disagreement — harness ${staged.pidfile} vs gate ${PIDFILE}`);
+  process.exit(2);
+}
+console.log(`# staging pid ${firstPid} (pidfile ${PIDFILE})`);
 
 let { ws, req } = await connect();
 const checks = [];
@@ -505,13 +570,26 @@ console.log("\n── PERSISTENCE ACROSS A RELAUNCH");
   let stillUp = true;
   try { process.kill(oldPid, 0); } catch { stillUp = false; }
   check("L6: the old process is gone", stillUp === false, `pid ${oldPid}`);
+  // We killed A outside the harness, so nothing released A's session.lock. This
+  // is a no-op unless the lock is PROVABLY A's (strict typeof + pid equality),
+  // so it can never delete a real crash-recovery lock in the user's profile.
+  releaseSessionLock(oldPid);
   const log = fs.openSync(`${OUT}/relaunch.log`, "a");
   const child = spawn(BINARY, [], {
     cwd: REPO, detached: true, stdio: ["ignore", log, log],
-    env: { ...process.env, DAW_CONTROL_PORT: PORT },
+    env: { ...process.env, DAW_CONTROL_PORT: String(PORT) },
   });
   child.unref();
   fs.writeFileSync(PIDFILE, String(child.pid));
+  // ⚠️ LINK 2 OF THE TEARDOWN CHAIN, ASSERTED RATHER THAN INFERRED (m23-ac-3e-3).
+  // startStaging writes A here; this leg kills A and must leave B here; stopStaging
+  // and armTeardown both RE-READ this file to kill B. If the write above ever
+  // landed somewhere else — a surviving env override, a second spelling of the
+  // path — B would outlive the gate as a real orphan on the staging port, and the
+  // usual "0 orphans" reading would report 1 without saying why. Read it back.
+  const written = Number(fs.readFileSync(PIDFILE, "utf8").trim());
+  check("L6: the pidfile now names the RELAUNCHED process, so teardown can reach it",
+        written === child.pid, `pidfile ${PIDFILE} holds ${written}, spawned ${child.pid}`);
   await sleep(4000);
   ({ ws, req } = await connect());
   const after = await req("debug.panelLayout", {});
@@ -536,4 +614,7 @@ for (const c of checks) {
 }
 fs.writeFileSync(`${OUT}/gate.json`, JSON.stringify({ checks }, null, 2));
 console.log(`\n${checks.length - failed}/${checks.length} checks passed`);
+// Link 3: re-reads the pidfile, so this SIGTERMs the RELAUNCHED process (B),
+// not the one startStaging launched. Also releases B's session.lock.
+stopStaging(GATE);
 clearTimeout(killer); ws.close(); process.exit(failed === 0 ? 0 : 1);

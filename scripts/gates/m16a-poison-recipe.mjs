@@ -29,18 +29,24 @@
 // iterations must complete, the wire must keep answering, and the
 // operator's .ips ledger must be byte-identical around the run.
 //
-// Usage against a staging instance (fresh 176xx port; see staging laws):
-//   env DAW_CONTROL_PORT=17663 nohup .build/debug/DAWApp &
-//   PORT=17663 ITERS=10 node scripts/gates/m16a-poison-recipe.mjs
+// Staging: this gate BUILDS AND LAUNCHES its own app on 17695 — just run
+//   ITERS=10 node scripts/gates/m16a-poison-recipe.mjs
+// ITERS and PLAY_MS remain tuning knobs. The PORT knob is GONE (m23-bi):
+// it defaulted to 17663 but honoured `process.env.PORT`, one of the most
+// commonly-exported names in any shell, so `PORT=17600` pointed this soak —
+// 10 iterations of `project.new`, play, and file deletion — at the user's LIVE
+// session. `assertStagingPort` now refuses 17600 structurally.
 //
 // Exit codes: 0 = all iterations clean (wire answered throughout);
 // 2 = app dead (connect failed); 3 = wedge (commands stopped answering);
 // 4 = iteration shortfall (an iteration failed without a wedge/crash).
+// >>> THESE CODES ARE SIGNALS, NOT PASS/FAIL — see the connect budget below. <<<
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
 
-const PORT = process.env.PORT || "17663";
+const GATE = "m16a";                        // names the pidfile + staging out dir
 const ITERS = Number(process.env.ITERS || "10");
 const PLAY_MS = Number(process.env.PLAY_MS || "6000");
 let seq = 0;
@@ -62,14 +68,17 @@ function makeWav(at) {
   fs.writeFileSync(at, buf);
 }
 
-function connect(timeoutMs = 5000) {
-  return new Promise((res, rej) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
-    const t = setTimeout(() => rej(new Error("connect timeout")), timeoutMs);
-    ws.onopen = () => { clearTimeout(t); res(ws); };
-    ws.onerror = () => { clearTimeout(t); rej(new Error("connect failed")); };
-  });
-}
+// CONNECT BUDGET — deliberately NOT the harness default here.
+//
+// This gate uses connect FAILURE as a verdict: a refused connection means "app
+// dead" (exit 2), and the wedge probe distinguishes exit 3 from exit 2 the same
+// way. Retry count is therefore NOT a neutral robustness knob — the harness
+// default of 40x1 s would turn a genuine crash into a 40-second stall before
+// reporting the very same code, and would do it twice on the wedge path. The
+// old local connect() was a single attempt with a 5 s timeout; 5x1 s preserves
+// that detection latency. The COLD BOOT we now own gets the full budget instead,
+// once, before the loop starts.
+const reconnect = () => connect({ attempts: 5 });
 
 function cmd(ws, command, params, timeoutMs = 15000) {
   return new Promise((res, rej) => {
@@ -125,11 +134,25 @@ async function iteration(ws, iter) {
   return codes;
 }
 
+buildOrAbort({ label: "building staging binary (m16a)…" });
+startStaging({ gate: GATE });
+// One full-budget wait for the cold boot, then hand off to the loop's tight
+// 5 s reconnects. Without this the FIRST iteration would have to absorb boot
+// latency inside a budget sized for crash detection, and a slow launch would
+// read as "app dead".
+try {
+  const boot = await connect();
+  try { boot.close(); } catch { /* ignore */ }
+} catch {
+  log("staging app never accepted a connection — aborting before iteration 1");
+  process.exit(2);
+}
+
 let clean = 0;
 for (let iter = 1; iter <= ITERS; iter++) {
   let ws;
   try {
-    ws = await connect();
+    ws = await reconnect();
   } catch {
     log(`iter ${iter}: CONNECT FAILED — app dead (pre-fix signature: crash)`);
     process.exit(2);
@@ -143,7 +166,7 @@ for (let iter = 1; iter <= ITERS; iter++) {
       // Distinguish wedge from crash: try one fresh-connection probe.
       try { ws.close(); } catch {}
       try {
-        const probe = await connect();
+        const probe = await reconnect();
         await cmd(probe, "project.snapshot", undefined, 10000);
         probe.close();
         log(`iter ${iter}: transient timeout but wire answers — continuing (${e.message})`);
@@ -161,6 +184,12 @@ for (let iter = 1; iter <= ITERS; iter++) {
 }
 
 log(`done: ${clean}/${ITERS} iterations clean; clip-unplayable seen in ${sawUnplayable} snapshots (permitted, not required — m16-h)`);
+// Both remaining exits are "the soak ran to completion and rendered a verdict",
+// so tear the app down here rather than duplicating it in each branch. The
+// ABRUPT exits above (2 = dead, 3 = wedged) are covered structurally by
+// armTeardown, which is the case that matters most: those fire precisely when
+// the app is misbehaving and most likely to be left behind.
+stopStaging(GATE);
 if (clean === ITERS) {
   log("C1 PASS");
   process.exit(0);

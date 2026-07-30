@@ -67,12 +67,67 @@ export function pidfilePath(gate, override) {
 }
 
 /**
+ * Teardown that fires on EVERY way this process can end (m23-bd).
+ *
+ * WHY. Twelve gates arm a watchdog shaped
+ * `setTimeout(() => { console.error("TIMEOUT"); process.exit(2) }, 600_000)`
+ * and none of them tear down first. That is the one exit path that fires
+ * precisely when the gate has HUNG — i.e. when a staging app is most likely to
+ * be in a bad state — and it was the path that leaked it. MEASURED, not
+ * reasoned: a probe using this very function with a fake binary exited via a
+ * watchdog and left both the child and its pidfile alive.
+ *
+ * Fixing it HERE rather than in the twelve call sites is the point. A gate
+ * author cannot forget what they never have to write, and the next gate gets it
+ * for free. `stopStaging` is idempotent (a missing pidfile is an early return),
+ * so a gate that already tears down explicitly is unaffected.
+ *
+ * ⚠️ TWO HOOKS, AND NEITHER IS REDUNDANT — do not delete one as duplication.
+ *   • `exit`   covers `process.exit()` (the watchdogs, the guards) and falling
+ *              off the end. It does NOT fire on a signal.
+ *   • signals  cover Ctrl-C and `kill`. Their ONLY job is to convert the signal
+ *              into an exit so the `exit` hook above can run: installing any
+ *              listener replaces Node's default "die immediately", which runs
+ *              no hooks at all. This matters most for `detached: true` children,
+ *              which leave our process group and so never receive the Ctrl-C
+ *              that would otherwise have killed them alongside us.
+ *
+ * Synchronous by necessity — an `exit` handler gets no event loop. That is
+ * already `stopStaging`'s contract: it SIGTERMs and then does its own
+ * ownership-checked `releaseSessionLock` without waiting for the app (see its
+ * docstring, verified at m23-ac-2c), so nothing here needs to await anything.
+ */
+const armed = new Map(); // gate -> pidfileOverride, for gates started in this process
+let signalsHooked = false;
+
+function armTeardown(gate, pidfileOverride) {
+  if (!armed.has(gate)) {
+    armed.set(gate, pidfileOverride);
+    process.on("exit", () => {
+      try { stopStaging(gate, pidfileOverride); } catch { /* exiting anyway */ }
+    });
+  }
+  if (signalsHooked) return;
+  signalsHooked = true;
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.on(sig, () => process.exit(sig === "SIGINT" ? 130 : 143));
+  }
+}
+
+/**
  * Launch a staging instance. Returns { pid, out, pidfile }.
  *
  * `detached: true` matches the shape m23v/m23x use — the child outlives this
- * process and its output goes to a real file rather than in-memory pipes. It is
- * NOT the default: an attached child dies with a crashing gate, whereas a
- * detached one is left running and only the pidfile can find it again.
+ * process and its output goes to a real file rather than in-memory pipes.
+ *
+ * ⚠️ An ATTACHED child is NOT automatically cleaned up either. This comment
+ * used to claim "an attached child dies with a crashing gate"; that is false for
+ * the path that actually mattered, and believing it is plausibly why the
+ * watchdog leak above went unnoticed for so long. `detached: false` only keeps
+ * the child in our process GROUP, so it dies when a signal is delivered to the
+ * group (Ctrl-C in a terminal) — a plain `process.exit()` sends no signal and
+ * the child survives it. MEASURED at m23-bd with the attached default.
+ * Teardown comes from `armTeardown`, not from the spawn mode.
  */
 export function startStaging({
   gate,
@@ -121,6 +176,9 @@ export function startStaging({
   }
   writeFileSync(pidfile, String(child.pid));
   live.set(gate, { child, pidfile, out, log });
+  // Registered AFTER the log-flush hook above, so `exit` runs them in that
+  // order: write the log we captured, then kill the app that produced it.
+  armTeardown(gate, pidfileOverride);
   return { pid: child.pid, out, pidfile };
 }
 

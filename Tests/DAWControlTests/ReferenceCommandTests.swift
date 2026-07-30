@@ -126,13 +126,13 @@ struct ReferenceCommandTests {
         // THAT, making it TEN. m23-o1 appended `frequency.reference` after
         // THAT, making it ELEVEN. m23-w appended `clip.removeMany` +
         // `clip.moveMany` after THAT, making it THIRTEEN.
-        let tail = Array(CommandRouter.allCommands.dropLast(13).suffix(8))
+        let tail = Array(CommandRouter.allCommands.dropLast(14).suffix(8))
         #expect(tail == ["reference.import", "reference.remove",
                          "reference.status", "reference.analyze",
                          "reference.setMonitor", "reference.setOffset",
                          "reference.setTrim", "reference.compare"])
-        #expect(CommandRouter.allCommands.count == 165)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
-        #expect(CommandRouter.allCommands.last == "clip.moveMany")
+        #expect(CommandRouter.allCommands.count == 166)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af
+        #expect(CommandRouter.allCommands.last == "transport.panic")  // m23-af
         // Additive: earlier neighbors untouched.
         #expect(CommandRouter.allCommands.contains("mixer.liveLoudness"))
         #expect(CommandRouter.allCommands.contains("clip.analyzeAudio"))

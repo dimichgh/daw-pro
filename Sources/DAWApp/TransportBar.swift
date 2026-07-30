@@ -159,6 +159,26 @@ struct TransportBar: View {
             .help(recordHelp)
             .explainable(.transportRecord)
 
+            // PANIC (m23-af). Momentary, so `isActive` is always false — there is
+            // no "panicking" state to show; the press either silenced something
+            // or there was nothing to silence, and both look the same.
+            //
+            // NEVER `.disabled(...)`. The whole point is that a stuck note can
+            // outlive any state the app thinks it is in, so every condition you
+            // could gate this on is a condition under which it might be the only
+            // control that still helps. It is also the reason this sits OUTSIDE
+            // the `isPro` check below: a beginner is likelier to hit a stuck note
+            // and far likelier to be stuck with it.
+            TransportButton(
+                systemName: "exclamationmark.octagon.fill",
+                isActive: false,
+                activeColor: DAWTheme.record
+            ) {
+                store.panic()
+            }
+            .help("Panic — silence stuck notes")
+            .explainable(.transportPanic)
+
             loopChip
                 .explainable(.transportLoop)
 

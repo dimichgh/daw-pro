@@ -21,23 +21,20 @@
 // user's live app port).
 // Usage: DAW_CONTROL_PORT=17695 node scripts/gates/m19g-setnotes-ghost.mjs [outdir]
 //   outdir defaults to /tmp/daw-gate-out/m19g-setnotes-ghost
+// m23-ac-3b-1: staging lifecycle from the ONE home. Was "class 3" — it launched
+// nothing and drove whatever was on the port, so its greens certified a hand-prepared
+// instance. `sleep` stays local (importing it would redeclare); the DAW_CONTROL_PORT
+// override is preserved and now passes through assertStagingPort, so this gate can no
+// longer be pointed at 17600 even by an env var.
 import fs from "fs";
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
-const OUT = process.argv[2] || "/tmp/daw-gate-out/m19g-setnotes-ghost";
+const GATE = "m19g-setnotes-ghost";   // names the pidfile + out dir = the default OUT below
+const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 fs.mkdirSync(OUT, { recursive: true });
 const killer = setTimeout(() => { console.error("GATE TIMEOUT"); process.exit(2); }, 120_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function connectWithRetry(url, attempts = 60, delayMs = 500) {
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const ws = new WebSocket(url);
-      await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error("x")); });
-      return ws;
-    } catch { await sleep(delayMs); }
-  }
-  throw new Error("no connect");
-}
 let nextId = 1;
 const pending = new Map();
 function request(ws, command, params = {}) {
@@ -48,7 +45,9 @@ function request(ws, command, params = {}) {
     setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error(`timeout ${command}`)); } }, 15000);
   });
 }
-const ws = await connectWithRetry(`ws://127.0.0.1:${PORT}`);
+buildOrAbort({ label: "building staging binary (m19g)…" });
+startStaging({ gate: GATE });
+const ws = await connect({ port: Number(PORT) });
 ws.onmessage = (event) => {
   let msg; try { msg = JSON.parse(event.data); } catch { return; }
   const e = pending.get(msg.id);
@@ -112,6 +111,7 @@ await request(ws, "project.new", { discardChanges: true });
 await sleep(300);
 ws.close();
 clearTimeout(killer);
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 console.log(failures === 0
   ? `\nORCH SETNOTES GATE (analytic legs): ALL PASS — pixel leg is a human/agent read of ${OUT}/my-setnotes.png`
   : `\nORCH SETNOTES GATE: ${failures} FAILURE(S)`);

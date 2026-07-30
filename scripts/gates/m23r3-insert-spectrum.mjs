@@ -6,8 +6,10 @@
 // spectrum fill the MASTER card has drawn since m22-b, fed by that insert's own
 // armed tap.
 //
-// Staging: DAW_CONTROL_PORT=17695 .build/debug/DAWApp   (17600 is the user's
-// LIVE app — never touched). Kill staging by EXACT PID from its pidfile.
+// Staging: this gate BUILDS AND LAUNCHES its own app on 17695 — just run
+// `node scripts/gates/m23r3-insert-spectrum.mjs`. 17600 is the user's LIVE app
+// and the harness refuses it outright. Teardown is by EXACT PID on every exit
+// path, including the ones this script never reaches itself.
 // Output: captures land under /tmp/daw-gate-out/m23r3/ (created by the script).
 //
 // ⚠️ THE FIXTURE-LIVENESS LAW — the thing most likely to make this gate lie.
@@ -67,23 +69,17 @@
 //
 // Promoted from the session scratchpad at the m23-r3 close (2026-07-28).
 import { mkdirSync } from "node:fs";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
 
-const OUT = "/tmp/daw-gate-out/m23r3";
+const GATE = "m23r3";                       // also names the pidfile + out dir
+const OUT = `/tmp/daw-gate-out/${GATE}`;    // exactly what startStaging derives
 mkdirSync(OUT, { recursive: true });
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function connect() {
-  for (let i = 0; i < 20; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const w = new WebSocket("ws://127.0.0.1:17695");
-        w.addEventListener("open", () => res(w));
-        w.addEventListener("error", () => rej(new Error("refused")));
-      });
-    } catch { await sleep(1000); }
-  }
-  throw new Error("could not connect to staging on 17695");
-}
+buildOrAbort({ label: "building staging binary (m23r3)…" });
+startStaging({ gate: GATE });
+// The harness connect retries 40x1 s and refuses port 17600 outright. The local
+// 20x1 s loop it replaced was written against an app a human had already
+// launched; against our own cold boot it is the tighter budget of the two.
 const ws = await connect();
 let n = 0, pass = 0, fail = 0;
 function cmd(command, params = {}, timeoutMs = 30000) {
@@ -504,5 +500,6 @@ ck("L8c and the last one is genuinely measuring, not just nominally armed",
 await cmd("transport.stop");
 await cmd("debug.effectEditor", { close: true });
 console.log(`M23R3_GATE pass=${pass} fail=${fail}`);
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
 process.exit(fail ? 1 : 0);

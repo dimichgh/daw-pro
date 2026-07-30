@@ -26,12 +26,15 @@
 // lands at the same level (peak RMS ≈ 0.5) at every scale — one threshold
 // (0.1) serves the 40-strip and the 2-strip (E4) shapes alike.
 //
-// Usage against a staging instance (fresh 176xx port; see staging laws):
-//   env DAW_CONTROL_PORT=17663 nohup .build/debug/DAWApp &
-//   PORT=17663 CYCLES=5 STRIPS=40 LIMITERS=16 node scripts/gates/m16h-second-cycle.mjs
+// Staging: this gate BUILDS AND LAUNCHES its own app on 17695 — just run
+//   CYCLES=5 STRIPS=40 LIMITERS=16 node scripts/gates/m16h-second-cycle.mjs
 //
-// Env contract: PORT (required), CYCLES (default 5), STRIPS (default 40),
-// LIMITERS (default 16; 0 skips the limiter strip).
+// Env contract: CYCLES (default 5), STRIPS (default 40), LIMITERS (default 16;
+// 0 skips the limiter strip). PORT IS NO LONGER PART OF THE CONTRACT (m23-bi):
+// it defaulted to 17663 but honoured `process.env.PORT`, one of the most
+// commonly-exported names in any shell, so `PORT=17600` aimed this at the user's
+// LIVE session — where cycle 1 alone does `project.new` plus 40 track births and
+// 16 limiter inserts. `assertStagingPort` now refuses 17600 structurally.
 //
 // Exit codes: 0 = every cycle audible and zero clip-unplayable;
 // 1 = a silent cycle or a clip-unplayable notice (the defect's signature);
@@ -39,8 +42,9 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
 
-const PORT = process.env.PORT || "17663";
+const GATE = "m16h";                        // names the pidfile + staging out dir
 const CYCLES = Number(process.env.CYCLES || "5");
 const STRIPS = Number(process.env.STRIPS || "40");
 const LIMITERS = Number(process.env.LIMITERS || "16");
@@ -102,15 +106,6 @@ function peakRMS(file) {
   return { frames, peak };
 }
 
-function connect(timeoutMs = 5000) {
-  return new Promise((res, rej) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
-    const t = setTimeout(() => rej(new Error("connect timeout")), timeoutMs);
-    ws.onopen = () => { clearTimeout(t); res(ws); };
-    ws.onerror = () => { clearTimeout(t); rej(new Error("connect failed")); };
-  });
-}
-
 function cmd(ws, command, params, timeoutMs = 20000) {
   return new Promise((res, rej) => {
     const id = "m16h-" + (++seq);
@@ -135,11 +130,17 @@ const tone = path.join(scratch, "tone440.wav");
 makeToneWav(tone);
 const volume = Math.min(1, 2 / STRIPS);
 
+buildOrAbort({ label: "building staging binary (m16h)…" });
+startStaging({ gate: GATE });
+
 let ws;
 try {
+  // Harness default (40x1 s) is right here: unlike m16a this gate connects ONCE
+  // and never uses connect failure to distinguish a crash from a wedge, so the
+  // only thing the budget has to cover is our own cold boot.
   ws = await connect();
 } catch (e) {
-  log(`FAIL: cannot connect to ws://127.0.0.1:${PORT} — ${e.message}`);
+  log(`FAIL: staging app never accepted a connection — ${e.message}`);
   process.exit(2);
 }
 
@@ -191,6 +192,9 @@ try {
   process.exit(2);
 }
 
+// Both remaining exits mean the soak completed and rendered a verdict; the
+// abrupt exit(2) paths above are covered structurally by armTeardown.
+stopStaging(GATE);
 if (failures === 0) {
   log(`m16-h gate PASS: ${CYCLES}/${CYCLES} cycles audible, zero clip-unplayable`);
   process.exit(0);

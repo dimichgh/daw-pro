@@ -24,6 +24,8 @@ public enum ExplainID: String, CaseIterable, Sendable {
     case transportReturnToZero
     case transportPlay
     case transportRecord
+    /// PANIC (m23-af) — the way out of a note that will not stop sounding.
+    case transportPanic
     case transportLoop
     case transportPunch
     case transportClick
@@ -341,6 +343,9 @@ public enum ExplainCatalog {
         .transportRecord: ExplainEntry(
             title: "Record",
             body: "Captures new sound or notes onto any armed track. Arm a track first, set the playhead, then press this to lay down a take. With LOOP on it jumps to the loop start and each pass stacks a fresh take to pick from."),
+        .transportPanic: ExplainEntry(
+            title: "Panic — Stuck Notes",
+            body: "Cuts off a note that is stuck sounding and will not stop — usually a keyboard whose \"note off\" went missing when a cable was unplugged mid-note. Press it and everything goes quiet. It does not stop playback or recording, so it is safe mid-take."),
         .transportLoop: ExplainEntry(
             title: "Loop",
             body: "Repeats one section over and over so you can practice or refine it. Turn it on to cycle the current region until you switch it off."),

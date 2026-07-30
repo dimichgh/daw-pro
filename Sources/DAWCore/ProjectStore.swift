@@ -1403,6 +1403,38 @@ public final class ProjectStore {
         audition.stopAll(engine: engine)
     }
 
+    /// PANIC (m23-af) — the user's and the agent's way out of a stuck note.
+    /// Returns how many instrument renderers were asked for all-notes-off.
+    ///
+    /// THE `audition.stopAll` CALL IS LOAD-BEARING; ITS POSITION IS ONLY
+    /// DEFENSIVE. Both halves were measured, and the first draft of this comment
+    /// had it wrong, so the distinction is written down rather than reasoned:
+    ///
+    /// - DROPPING it resurrects the note. `stopAll` clears the CONTROLLER's
+    ///   ledger (`heldTrackID`/`heldPitches`) and cancels its 500 ms heartbeat,
+    ///   which exists to re-assert a held audition past the renderer's 3 s
+    ///   watchdog (`Audition.swift:184`). Leave the ledger held and the next
+    ///   heartbeat re-pushes the pitches into a ring the panic just emptied.
+    ///   MEASURED: `m23af-panic.mjs` L5 goes red and STAYS red — the note is
+    ///   still sounding at -17.65 LUFS two heartbeats after the panic.
+    /// - SWAPPING the two lines changes nothing at runtime. MEASURED: 7/7 green
+    ///   with the order reversed. There is no suspension point between them —
+    ///   this method is synchronous and main-actor-bound, so the heartbeat
+    ///   `Task` cannot interleave. The order is kept (and pinned by
+    ///   `PanicCommandTests` T3) so that a future refactor which makes this
+    ///   `async`, or slips an `await` between the calls, cannot quietly turn a
+    ///   harmless ordering into the resurrection above.
+    ///
+    /// Deliberately does NOT touch the transport. `stop()` above early-returns
+    /// unless `isPlaying || isRecording`, so routing panic through it would
+    /// inherit that guard and fix nothing while stopped — the very case this
+    /// verb exists for. Panicking mid-take must also keep the take rolling.
+    @discardableResult
+    public func panic() -> Int {
+        audition.stopAll(engine: engine)
+        return engine?.allNotesOff() ?? 0
+    }
+
     /// Shared validation for both audition entry points — every check runs
     /// BEFORE anything is pushed, so a rejected call sounds nothing.
     private func validateAuditionTarget(trackID: UUID, pitches: [Int], velocity: Int) throws {

@@ -94,6 +94,11 @@ struct ZeroParamVerbRejectionTests {
         "transport.play",
         "transport.stop",
         "transport.record",
+        // m23-af. `transport.panic` is zero-param like the three above, and
+        // `zeroParamVerbsTableMatchesSource` scrapes Commands.swift for every
+        // `rejectUnknownKeys([], verb:)` site — so omitting it here reddens
+        // that test rather than leaving a silent gap. It did.
+        "transport.panic",
         "reference.remove",
         "reference.status",
         "reference.analyze",
@@ -228,7 +233,7 @@ struct ZeroParamVerbRejectionTests {
         let sourceVerbs = try Self.zeroParamVerbsInSource()
         #expect(!sourceVerbs.isEmpty, "the source scan itself must find something, or this test is vacuously green")
         #expect(Set(Self.zeroParamVerbs) == sourceVerbs)
-        #expect(Self.zeroParamVerbs.count == 38)
+        #expect(Self.zeroParamVerbs.count == 39)   // 39 at m23-af (transport.panic)
     }
 
     /// NOTE: this compares against the SOURCE SCRAPE, not `Self.zeroParamVerbs`
@@ -248,7 +253,7 @@ struct ZeroParamVerbRejectionTests {
                 "a typo'd verb name in the exclusion set would silently shrink drivenVerbs without anyone noticing")
         #expect(Set(Self.drivenVerbs).isDisjoint(with: Self.notDrivenForFlakeReasons))
         #expect(Set(Self.drivenVerbs).union(Self.notDrivenForFlakeReasons) == sourceVerbs)
-        #expect(Self.drivenVerbs.count == 36)
+        #expect(Self.drivenVerbs.count == 37)   // 37 at m23-af (transport.panic)
     }
 
     /// m23-n2h durable-win sweep: every one of the 162 `allCommands` reaches
@@ -287,7 +292,7 @@ struct ZeroParamVerbRejectionTests {
         let orphaned = sourceCallSites.subtracting(Set(CommandRouter.allCommands))
         #expect(orphaned.isEmpty,
                 "these verbs have a rejectUnknownKeys call site but are not in allCommands — either renamed/removed (a bug), or an off-surface debug.* verb that was hardened (good; allowlist it above): \(orphaned.sorted())")
-        #expect(CommandRouter.allCommands.count == 165)   // 161 -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
+        #expect(CommandRouter.allCommands.count == 166)   // 161 -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af
     }
 
     private func makeRouter() -> CommandRouter {

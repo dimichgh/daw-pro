@@ -17,22 +17,23 @@
 // exactly like a product regression when they do (observed 2026-07-27: a floor
 // soak left mode=stems + 16-bit AIFF behind and this gate reported 22/27 on an
 // unchanged build). The guard below refuses instead of mis-reporting.
-const PORT = process.env.PORT || "17695";
-const OUT = process.argv[2];
+// m23-ac-3b-2: staging lifecycle from the ONE home — and for THIS gate that is not
+// just provenance, it closes the failure its own header documents. The PREMISE GUARD
+// below refuses to run if the export sheet has already been driven this session,
+// because the sheet is sticky until quit and the launch-default legs would otherwise
+// go red and "read exactly like a product regression" (observed 2026-07-27: a floor
+// soak left mode=stems behind and this gate reported 22/27 on an unchanged build).
+// As a class-3 gate that premise depended on a human remembering to relaunch. It is
+// now STRUCTURAL: every run gets a process that has never seen the sheet.
 import fs from "fs";
 import path from "path";
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+const PORT = process.env.PORT || "17695";
+const GATE = "m23m3c-stems-dialog";   // names the pidfile + out dir = the default OUT
+const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 const log = (s) => fs.writeSync(1, s + "\n");
 fs.mkdirSync(OUT, { recursive: true });
 let seq = 0;
-
-function connect(timeoutMs = 5000) {
-  return new Promise((res, rej) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
-    const t = setTimeout(() => rej(new Error("connect timeout")), timeoutMs);
-    ws.onopen = () => { clearTimeout(t); res(ws); };
-    ws.onerror = () => { clearTimeout(t); rej(new Error("connect failed")); };
-  });
-}
 function cmd(ws, command, params = {}, timeoutMs = 120000) {
   return new Promise((res, rej) => {
     const id = "r" + ++seq;
@@ -64,7 +65,9 @@ const listing = (dir) => {
   catch (e) { return ["<unreadable: " + e.code + ">"]; }
 };
 
-const ws = await connect();
+buildOrAbort({ label: "building staging binary (m23m3c)…" });
+startStaging({ gate: GATE });
+const ws = await connect({ port: Number(PORT) });
 const cap = async (name, params = {}) => {
   const r = await cmd(ws, "debug.captureUI", { path: `${OUT}/${name}.png`, ...params });
   log(`  captured ${name} ${r?.width}x${r?.height}`);
@@ -102,6 +105,11 @@ if (st.mode !== "bounce" || st.request.bitDepth !== null || st.request.container
       `(mode=${st.mode} bitDepth=${st.request.bitDepth} container=${st.request.container} ` +
       `includeMixdown=${st.includeMixdown} includeMasteredMixdown=${st.includeMasteredMixdown}). ` +
       "Relaunch the staging app and re-run; the sheet keeps its settings until quit.");
+  // m23-ac-3b-2: this should now be UNREACHABLE — the gate launches its own fresh app,
+  // so nothing can have driven the sheet before leg 1. Kept deliberately: if it ever
+  // fires again it means the launch did not give us a clean process, which is a far
+  // more useful thing to be told than a mysterious 22/27.
+  stopStaging(GATE);
   process.exit(2);
 }
 check("sheet opens in BOUNCE mode", st.visible === true && st.mode === "bounce", st.mode);
@@ -250,4 +258,5 @@ check("sheet closes", st.visible === false);
 
 log(`\n${PASS} passed, ${FAIL} failed`);
 ws.close();
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 process.exit(FAIL ? 1 : 0);

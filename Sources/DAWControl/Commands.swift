@@ -377,6 +377,11 @@ public final class CommandRouter {
         // law).
         "clip.removeMany",
         "clip.moveMany",
+        // m23-af PANIC. Appended at the end per the additive-at-end law; the
+        // `transport.` prefix is where a user looks for a transport-bar
+        // control, NOT a claim that this touches the transport (it must not —
+        // see the verb's case below).
+        "transport.panic",
     ]
 
     public init(
@@ -455,6 +460,20 @@ public final class CommandRouter {
             try params.rejectUnknownKeys([], verb: "transport.stop")
             store.stop()
             return .success(request.id)
+
+        case "transport.panic":
+            // PANIC / all-notes-off (m23-af). No params, like transport.stop.
+            //
+            // ⚠️ THIS MUST NOT CALL `store.stop()`, now or in any future
+            // "simplification". `stop()` early-returns unless the transport is
+            // playing or recording, so routing panic through it would make the
+            // verb a no-op in the ONE situation it exists for: a note left
+            // stuck by a lost note-off while the transport sits idle. Pinned by
+            // a test that panics while stopped and by one that asserts the
+            // transport is still playing afterwards.
+            try params.rejectUnknownKeys([], verb: "transport.panic")
+            let flushed = store.panic()
+            return .success(request.id, .object(["tracksFlushed": .number(Double(flushed))]))
 
         case "transport.seek":
             // Two ways to name the destination (m11-c): the absolute `beats`

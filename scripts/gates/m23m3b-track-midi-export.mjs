@@ -13,23 +13,22 @@
 //           mitigation is STRUCTURAL, not observational: the `.contextMenu`
 //           builder has zero inline conditions left, so "the view ignores the
 //           model" would have to be a visible edit in TrackListView.swift.
-const PORT = process.env.PORT || "17695";
-const OUT = process.argv[2];
+// m23-ac-3b-2: staging lifecycle from the ONE home. Was "class 3". `OUT` now DEFAULTS
+// to the staging out dir, which RETIRES the old `usage:` guard — that guard existed
+// because the gate had no default and would otherwise mkdir `undefined`; it exited 2,
+// and an exit-2 from a gate that never ran looks a lot like a gate that ran and failed.
+// The old local `connect` was a SINGLE 5 s shot with no retry, which raced our own boot;
+// the harness retries 40x1 s and refuses port 17600 outright.
 import fs from "fs";
 import path from "path";
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+const PORT = process.env.PORT || "17695";
+const GATE = "m23m3b-track-midi-export";   // names the pidfile + out dir = the default OUT
+const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 const log = (s) => fs.writeSync(1, s + "\n");
-if (!OUT) { log("usage: node m23m3b-track-midi-export.mjs <ABSOLUTE outdir>"); process.exit(2); }
 fs.mkdirSync(OUT, { recursive: true });
 let seq = 0;
 
-function connect(timeoutMs = 5000) {
-  return new Promise((res, rej) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
-    const t = setTimeout(() => rej(new Error("connect timeout")), timeoutMs);
-    ws.onopen = () => { clearTimeout(t); res(ws); };
-    ws.onerror = () => { clearTimeout(t); rej(new Error("connect failed")); };
-  });
-}
 function cmd(ws, command, params = {}, timeoutMs = 60000) {
   return new Promise((res, rej) => {
     const id = "r" + ++seq;
@@ -89,7 +88,9 @@ function parseSMF(buf) {
   return { format, ntrks, division, chunks };
 }
 
-const ws = await connect();
+buildOrAbort({ label: "building staging binary (m23m3b)…" });
+startStaging({ gate: GATE });
+const ws = await connect({ port: Number(PORT) });
 try {
   // ---- Fixture: one track of every kind, plus one instrument routed through a
   // bus (the configuration where "exports" and "bounces" disagree).
@@ -209,7 +210,15 @@ try {
   const failed = legs.filter((l) => !l.ok);
   fs.writeFileSync(path.join(OUT, "legs.json"), JSON.stringify(legs, null, 2));
   log(`\n${legs.length - failed.length}/${legs.length} legs passed`);
+  // ⚠️ Teardown must happen HERE, before process.exit — not only in the `finally`.
+  // `process.exit()` terminates immediately and does NOT run pending finally blocks,
+  // so on the normal path that `ws.close()` below has never executed. Harmless for a
+  // socket the OS reaps anyway; fatal for a staging app, which would be left running.
+  // stopStaging is idempotent (a missing pidfile is an early return), so having it on
+  // both paths is safe and the `finally` still covers a throw.
+  stopStaging(GATE);
   process.exit(failed.length ? 1 : 0);
 } finally {
   ws.close();
+  stopStaging(GATE);
 }

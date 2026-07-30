@@ -132,14 +132,21 @@ def classify(path):
 
 
 def main():
+    # m23-ac-3b-1: exclude EVERY leading-underscore file, not just _staging.mjs by
+    # name. When _class3-baseline.mjs shipped in ac-3a it was counted as a gate — it
+    # builds and launches, so it silently inflated CLASS 1 by one and made the class
+    # totals stop reconciling against the previous cycle. The directory already uses
+    # `_` to mean "harness, not gate" (_staging, _class3-baseline, _classify,
+    # _orphans); encoding that convention here means the next harness is excluded the
+    # day it lands instead of the cycle someone notices the arithmetic drifted.
     rows = [classify(p) for p in sorted(glob.glob(os.path.join(GATES, "*.mjs")))
-            if os.path.basename(p) != HARNESS]
+            if not os.path.basename(p).startswith("_")]
 
     by = {1: [], 2: [], 3: []}
     for r in rows:
         by[r["cls"]].append(r)
 
-    print("TOTAL GATES: %d   (excludes the harness %s)" % (len(rows), HARNESS))
+    print("TOTAL GATES: %d   (excludes every _-prefixed harness)" % len(rows))
     for c, label in ((1, "builds + launches — KNOWN binary"),
                      (2, "launches, NEVER builds — stale binary"),
                      (3, "never launches — drives whatever is on the port")):

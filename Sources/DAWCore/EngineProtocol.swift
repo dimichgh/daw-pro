@@ -798,6 +798,23 @@ public protocol AudioEngineControlling: AnyObject {
     /// main actor is about to stop being able to send note-offs.
     func stopAllAudition()
 
+    /// PANIC (m23-af): all-notes-off on EVERY instrument renderer, whatever the
+    /// transport is doing. Returns how many renderers were asked.
+    ///
+    /// NOT a superset of `stopAllAudition()` in the direction you'd guess, which
+    /// is the whole reason this exists. That one iterates `auditionVoices` and so
+    /// only reaches renderers holding an AUDITION voice; a note stuck by a lost
+    /// note-off from a MIDI INPUT is on a track with no audition entry at all, so
+    /// nothing there touches it. This asks every renderer unconditionally.
+    ///
+    /// Must work while STOPPED — that is the bug it closes. `ProjectStore.stop()`
+    /// early-returns unless `isPlaying || isRecording`, so the Stop button
+    /// provably cannot clear a stuck note, and neither can anything routed
+    /// through it. Must ALSO leave the transport alone: a panic taken mid-take is
+    /// how a player rescues a stuck note without losing the take.
+    @discardableResult
+    func allNotesOff() -> Int
+
     /// Latest master-mix analysis snapshot (M8 vm-a, session vibe meter):
     /// 24 log-spaced spectral bands (40 Hz → 16 kHz, dB, −80 floor),
     /// short-term RMS level, held peak, spectral centroid, normalized
@@ -897,6 +914,13 @@ extension AudioEngineControlling {
     /// The audition all-stop is optional capability (m23-d): an engine with no
     /// audition support holds no voices, so the default is a no-op.
     public func stopAllAudition() {}
+
+    /// Panic is optional capability (m23-af, same precedent): an engine with no
+    /// instrument renderers has nothing to flush, so the default reports 0 asked
+    /// and existing conformers compile unchanged. The 0 is honest — callers
+    /// surface it as the count, and "no renderers" and "flushed none" are the
+    /// same fact here.
+    public func allNotesOff() -> Int { 0 }
 
     /// Live click toggling is optional capability (m14-c): engines without a
     /// click player pick the change up from the TransportState handed to the

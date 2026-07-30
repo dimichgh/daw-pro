@@ -320,8 +320,8 @@ struct FrequencyReferenceCommandTests {
 
     @Test("W8: frequency.reference was registered at the END of allCommands at m23-o1 (additive-at-end law); m23-w appended clip.removeMany/clip.moveMany after it, so it is now third-from-last; count 162 -> 163 -> 165")
     func registeredAtEndOfAllCommands() {
-        #expect(CommandRouter.allCommands.dropLast(2).last == "frequency.reference")
-        #expect(CommandRouter.allCommands.count == 165)
+        #expect(CommandRouter.allCommands.dropLast(3).last == "frequency.reference")
+        #expect(CommandRouter.allCommands.count == 166)   // 166 at m23-af
     }
 
     // MARK: - W9: the catalog's family enum is computed on BOTH sides, never a hand list

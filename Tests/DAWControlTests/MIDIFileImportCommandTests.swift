@@ -66,8 +66,8 @@ struct MIDIFileImportCommandTests {
         // m23-w appended `clip.removeMany`/`clip.moveMany` AFTER this pair —
         // the additive-at-end law working, not a regression: the k3 verbs did
         // not move, they are simply no longer last.
-        #expect(CommandRouter.allCommands.count == 165)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
-        #expect(Array(CommandRouter.allCommands.suffix(11).prefix(2))
+        #expect(CommandRouter.allCommands.count == 166)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af
+        #expect(Array(CommandRouter.allCommands.suffix(12).prefix(2))
                 == ["project.importMIDI", "clip.importMIDI"])
     }
 

@@ -4,21 +4,20 @@
 // Promoted from session scratchpad 2026-07-16 (m17-g). Wire error is a STRING; kill staging exact-PID only.
 // m17-a orchestrator gate — disjoint scenarios: reverb card, master gain card,
 // wire-add-no-popup, own undo burst, one-at-a-time via state reads.
-// NOTE: capture/output paths point at /tmp/daw-gate-out — `mkdir -p /tmp/daw-gate-out` before running.
-const SCRATCH = "/tmp/daw-gate-out/m17a";
+// m23-ac-3b-1: the staging lifecycle now comes from the ONE home. This gate used to
+// be "class 3" — it launched nothing and drove whatever happened to be listening on
+// 17695, so every green it printed certified an instance a human had prepared by
+// hand. It now builds and launches its own. The old "mkdir -p /tmp/daw-gate-out
+// before running" note is obsolete: `startStaging({gate:"m17a"})` derives and creates
+// /tmp/daw-gate-out/m17a, which is exactly the SCRATCH path below — the gate name is
+// therefore a data-location decision, not a label, and must not be tidied.
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
 
-async function connect() {
-  for (let i = 0; i < 15; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const ws = new WebSocket("ws://127.0.0.1:17695");
-        ws.addEventListener("open", () => res(ws));
-        ws.addEventListener("error", () => rej(new Error("refused")));
-      });
-    } catch { await new Promise(r => setTimeout(r, 1000)); }
-  }
-  throw new Error("could not connect after 15s");
-}
+const GATE = "m17a";                        // also names the pidfile + out dir
+const SCRATCH = `/tmp/daw-gate-out/${GATE}`;
+
+buildOrAbort({ label: "building staging binary (m17a)…" });
+startStaging({ gate: GATE });
 const ws = await connect();
 let n = 0;
 function cmd(command, params = {}) {
@@ -130,4 +129,5 @@ ck("close ok", r.ok && r.result?.visible === false);
 
 console.log(`ORCH_GATE pass=${pass} fail=${fail}`);
 ws.close();
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 process.exit(fail ? 1 : 0);

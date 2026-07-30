@@ -291,8 +291,9 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // the master mix) took it 164 -> 165. m23-o1's frequency_reference (the
   // cited instrument frequency reference table) took it 165 -> 166. m23-w's
   // clip_remove_many/clip_move_many (the wire half of m23-g1/m23-g2's group
-  // delete/move) took it 166 -> 168.
-  assert.equal(result.tools.length, 168);
+  // delete/move) took it 166 -> 168. m23-af's `transport_panic` (PANIC /
+  // all-notes-off) took it 168 -> 169.
+  assert.equal(result.tools.length, 169);
 });
 
 // ---------------------------------------------------------------------------

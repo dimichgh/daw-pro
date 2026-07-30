@@ -8,8 +8,13 @@
 // idiom the m22-e law forbids in writing (`Mixer/ReferencePanelView.swift:26`,
 // "a capture agent's app is never frontmost").
 //
-// Staging: DAW_CONTROL_PORT=17695 .build/debug/DAWApp   (17600 is the user's
-// LIVE app — never touched). Kill staging by EXACT PID from its pidfile.
+// Staging: this gate BUILDS AND LAUNCHES its own app on 17695 — just run
+// `node scripts/gates/m23r3b-live-layers.mjs`. 17600 is the user's LIVE app and
+// the harness refuses it outright. Teardown is by EXACT PID on every exit path.
+// Launching it ourselves also makes F0's premise STRUCTURAL rather than assumed:
+// F0 requires the app to be FRONTMOST before the theft starts, which a run
+// against a human-launched app could only get by luck (the operator's terminal
+// has focus at that moment, not the app).
 // Output: captures land under /tmp/daw-gate-out/m23r3b/.
 //
 // ⚠️ THE FOCUS-THEFT LAW — without it this gate is decorative.
@@ -62,23 +67,17 @@
 //       and not the behaviour, which is why L0-L3 exist.
 import { mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
 
-const OUT = "/tmp/daw-gate-out/m23r3b";
+const GATE = "m23r3b";                      // also names the pidfile + out dir
+const OUT = `/tmp/daw-gate-out/${GATE}`;    // exactly what startStaging derives
 mkdirSync(OUT, { recursive: true });
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function connect() {
-  for (let i = 0; i < 20; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const w = new WebSocket("ws://127.0.0.1:17695");
-        w.addEventListener("open", () => res(w));
-        w.addEventListener("error", () => rej(new Error("refused")));
-      });
-    } catch { await sleep(1000); }
-  }
-  throw new Error("could not connect to staging on 17695");
-}
+buildOrAbort({ label: "building staging binary (m23r3b)…" });
+startStaging({ gate: GATE });
+// The harness connect retries 40x1 s and refuses port 17600 outright. It returns
+// as soon as the socket opens, which can precede the window ordering front — F0
+// then does the actual settling, since it ASSERTS frontmost before any theft.
 const ws = await connect();
 let n = 0, pass = 0, fail = 0;
 function cmd(command, params = {}, timeoutMs = 30000) {
@@ -389,5 +388,6 @@ for (const [label, re] of PATTERNS) {
 
 stopStealing();
 console.log(`M23R3B_GATE pass=${pass} fail=${fail}`);
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
 process.exit(fail ? 1 : 0);

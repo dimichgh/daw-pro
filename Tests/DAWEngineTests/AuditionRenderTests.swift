@@ -96,10 +96,13 @@ struct AuditionRenderTests {
 
     @Test("C3 capacity: liveScratch bound derives from the emit arithmetic")
     func liveScratchCapacityDerivesFromEmitBounds() {
+        // 128 = the 6a watchdog's ≤ one off per open AUDITION voice over the
+        // 128-pitch domain (it does not scan the thru map). Both drains emit up
+        // to TWO events per pop — audition since m23-d, thru since m23-ad.
         #expect(InstrumentRenderer.liveScratchCapacity
-                == 128 + InstrumentRenderer.thruRingCapacity
+                == 128 + 2 * InstrumentRenderer.thruRingCapacity
                    + 2 * InstrumentRenderer.auditionRingCapacity)
-        #expect(InstrumentRenderer.liveScratchCapacity == 768)
+        #expect(InstrumentRenderer.liveScratchCapacity == 1_280)
         #expect(InstrumentRenderer.auditionRingCapacity == 64)
         // Power of two — LiveEventRing.init preconditions on it.
         #expect(InstrumentRenderer.auditionRingCapacity

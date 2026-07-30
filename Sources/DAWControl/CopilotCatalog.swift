@@ -192,6 +192,11 @@ public enum CopilotToolCatalog {
             schema: schemaObject([])
         ),
         CopilotTool(
+            command: "transport.panic",
+            description: "PANIC — silence a stuck or hung note. Sends all-notes-off to every instrument track and releases any held preview notes. Use this when a note keeps sounding after the key was released or the MIDI cable was unplugged mid-note. Works whether or not anything is playing, and does NOT stop playback or recording — it is safe to use in the middle of a take.",
+            schema: schemaObject([])
+        ),
+        CopilotTool(
             command: "transport.seek",
             description: "Move the playhead to an absolute position in beats (quarter notes) from the start of the timeline, OR to a named session marker. Pass `beats` for an absolute jump, or `marker` (a marker's id or exact name from marker_list) to jump to that section — e.g. \"go to the second chorus\": marker_list, then seek with that marker. Pass exactly one of the two.",
             schema: schemaObject([

@@ -11,19 +11,43 @@
 // column runs they report are directly comparable. If the two bands placed the
 // cue at different x the runs would differ.
 //
-// Setup: build the column probe once, then run against a STAGING app (17695 —
-// never 17600, the user's live app):
-//   swiftc -O -o /tmp/m23c1-probe scripts/probes/m23c1-cyan-column-probe.swift
-//   M23C1_PROBE=/tmp/m23c1-probe M23C1_OUT=/tmp/m23c1 node scripts/gates/m23c1-offclip-cue.mjs
+// CLASS 1 since m23-ac-3b-3. Setup is no longer a human's job:
+//   node scripts/gates/m23c1-offclip-cue.mjs
+// The gate builds the app, builds the column probe, and launches its own staging
+// app on 17695 (never 17600, the user's live app). Both binaries it measures
+// through are now built by the run that measures — this gate had TWO provenance
+// gaps, not one, because the probe was also compiled by hand "once".
 import fs from "fs";
-import { execFileSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
+import { ROOT, buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
 
-const PORT = process.env.DAW_CONTROL_PORT || "17695";
+const GATE = "m23c1";                       // names the pidfile + staging out dir
 const OUT = process.env.M23C1_OUT || "/tmp/m23c1";
 const PROBE = process.env.M23C1_PROBE || "/tmp/m23c1-probe";
 fs.mkdirSync(OUT, { recursive: true });
+// NOTE: OUT is deliberately left outside /tmp/daw-gate-out, where every other
+// gate's artefacts live, so this gate's captures stay where its history is. The
+// pidfile therefore sits in a DIFFERENT tree from the captures — surprising, but
+// changing it would orphan the comparison baselines.
+
+// The 600 s self-kill. Since m23-bd the harness tears the staging app down on
+// `exit`, so this path — the one that fires precisely when the gate has HUNG —
+// no longer leaks the app it was driving.
 const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+buildOrAbort({ label: "building staging binary (m23c1)…" });
+// Rebuild the cyan-column probe every run, for the same reason the app is built
+// every run: a stale probe measures the previous build's idea of the pixels.
+// m23t-baroperand already does this with the same probe; the header here used to
+// ask a human to compile it once by hand.
+const probeBuild = spawnSync("swiftc", ["-O", "-o", PROBE,
+                             "scripts/probes/m23c1-cyan-column-probe.swift"],
+                             { cwd: ROOT, stdio: "inherit" });
+if (probeBuild.status !== 0) {
+  console.log("ABORT: probe compile failed — the pixel legs would measure a stale probe");
+  process.exit(2);
+}
+startStaging({ gate: GATE });
 
 // ── crop windows, in CAPTURE pixels (window 1400x1000 logical @2x = 2800x2000)
 // x windows: shared by both bands so their numbers are comparable.
@@ -60,16 +84,6 @@ function probe(png, tag, x, y, w, h, threshold) {
   return kv;
 }
 
-async function connectWithRetry(url, attempts = 40, delayMs = 500) {
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const ws = new WebSocket(url);
-      await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error("x")); });
-      return ws;
-    } catch { await sleep(delayMs); }
-  }
-  throw new Error("no connect");
-}
 let nextId = 1; const pending = new Map();
 const req = (ws, command, params = {}) => {
   const id = String(nextId++);
@@ -79,7 +93,7 @@ const req = (ws, command, params = {}) => {
     setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error(`timeout ${command}`)); } }, 25000);
   });
 };
-const ws = await connectWithRetry(`ws://127.0.0.1:${PORT}`);
+const ws = await connect();   // 40x1 s, and refuses port 17600 outright
 ws.onmessage = (ev) => {
   let m; try { m = JSON.parse(ev.data); } catch { return; }
   const e = pending.get(m.id); if (!e) return; pending.delete(m.id);
@@ -268,4 +282,7 @@ for (const c of checks) {
 }
 fs.writeFileSync(`${OUT}/gate.json`, JSON.stringify({ results, simple, checks }, null, 2));
 console.log(`\n${checks.length - failed}/${checks.length} checks passed`);
-clearTimeout(killer); ws.close(); process.exit(failed === 0 ? 0 : 1);
+clearTimeout(killer);
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
+ws.close();
+process.exit(failed === 0 ? 0 : 1);

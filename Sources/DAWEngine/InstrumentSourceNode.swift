@@ -85,14 +85,22 @@ final class InstrumentRenderer: @unchecked Sendable {
     static let auditionRingCapacity = 64
 
     /// Live-scratch capacity — the size of the LIVE BLOCK one quantum can emit.
-    /// The watchdog (step 6a) emits ≤ one note-off per open audition voice,
-    /// bounded by the 128-pitch domain; the thru drain emits one event per pop;
-    /// the audition drain emits up to TWO per pop (an implicit off then the on
-    /// when a still-open pitch retriggers). Getting this bound wrong overruns
-    /// `liveScratch` — memory corruption on the render thread — so it is
-    /// DERIVED here and asserted against the emit arithmetic in
-    /// `AuditionRenderTests`.
-    static let liveScratchCapacity = 128 + thruRingCapacity + 2 * auditionRingCapacity
+    /// The watchdog (step 6a) emits ≤ one note-off per open AUDITION voice,
+    /// bounded by the 128-pitch domain — it does not scan the thru map, so that
+    /// term is 128 and not 256; BOTH drains emit up to TWO events per pop (an
+    /// implicit off then the on when a still-open pitch retriggers). Getting
+    /// this bound wrong overruns `liveScratch` — memory corruption on the
+    /// render thread — so it is DERIVED here and asserted against the emit
+    /// arithmetic in `AuditionRenderTests`.
+    ///
+    /// The `2 *` on `thruRingCapacity` is m23-ad: the thru drain used to emit
+    /// one event per pop, and the old `while liveCount < take` loop bound was a
+    /// STRUCTURAL guarantee that it could not write past the take. Adding the
+    /// defensive close made the emit count per pop variable, so that loop now
+    /// counts POPS (`thruDrained`) and this constant plus the `emitBound`
+    /// precondition at 6b are the only things standing between a wrong number
+    /// and a scratch overrun. They must be edited together.
+    static let liveScratchCapacity = 128 + 2 * thruRingCapacity + 2 * auditionRingCapacity
     /// Default merged-scratch capacity: a full live block plus a generous
     /// schedule slice (4096) — overflowing this is pathological, and the
     /// merge then passes the schedule slice alone, leaving live events queued.
@@ -116,9 +124,14 @@ final class InstrumentRenderer: @unchecked Sendable {
     /// (which count from 0 per build). Render-thread-only.
     private var nextLiveNoteID: UInt64 = 1 << 63
     /// pitch → the open live note-on's ID (0 = none), so the off carries its
-    /// on's ID. Same-pitch collision across two omni devices may orphan one
-    /// voice until flush — documented v0 limit. `openLiveCount` below is this
-    /// map's POPCOUNT and is maintained wherever the map changes.
+    /// on's ID. ACCEPTED TRADE (m23-ad): the map is keyed by pitch alone —
+    /// `channel` is dropped at the scratch write — so two omni devices holding
+    /// the same pitch REPLACE each other rather than stacking. Before m23-ad
+    /// they orphaned instead, which is strictly worse: the orphan sounded until
+    /// flush AND the second device's key-up closed the first device's voice.
+    /// Replacement clips a legitimately-stacked note; orphaning hangs one.
+    /// `openLiveCount` below is this map's POPCOUNT and is maintained wherever
+    /// the map changes.
     private let pitchToLiveID: UnsafeMutablePointer<UInt64>
     /// Open live-THRU voices — the thru analogue of `openAuditionCount`, and the
     /// term 6d's re-arm needs so the tail cannot expire under a key the user is
@@ -126,11 +139,39 @@ final class InstrumentRenderer: @unchecked Sendable {
     ///
     /// INVARIANT: `openLiveCount == #{ p : pitchToLiveID[p] != 0 }`. It is a
     /// POPCOUNT OF THE PITCH MAP and nothing else. Maintained ONLY where the map
-    /// itself changes — the note-on branch (0 → id) and the MATCHED note-off
-    /// branch (id → 0) — and zeroed by every bulk clear of the map. Two branches
-    /// must NOT touch it: kind ≥ 2 (controllers never enter the map, m16-b3 §4.3
+    /// itself changes — the note-on branch and the MATCHED note-off branch
+    /// (id → 0) — and zeroed by every bulk clear of the map. Two branches must
+    /// NOT touch it: kind ≥ 2 (controllers never enter the map, m16-b3 §4.3
     /// C11) and the orphan-off branch (nothing to pair with).
+    ///
+    /// The note-on branch has TWO cases and they differ (m23-ad): 0 → id grows
+    /// the popcount by one, while a retrigger id₁ → id₂ leaves it UNCHANGED —
+    /// so the defensive close's decrement and the unconditional increment
+    /// deliberately net to zero there. Read them as one transaction.
     private(set) var openLiveCount = 0
+    /// Live sustain-pedal state (CC64), render-thread-only — the SECOND term 6d's
+    /// re-arm needs, and deliberately NOT folded into `openLiveCount` (m23-ae).
+    ///
+    /// `openLiveCount` counts KEYS HELD. Both built-in instruments DEFER the
+    /// release while the pedal is down (`PolySynthInstrument.swift:377`,
+    /// `SamplerInstrument.swift:190`), so a key can be released — slot cleared,
+    /// popcount back to 0 — while the voice is still sounding. m23-u's tail then
+    /// expired and cut it at `liveTailSeconds`, which is the whole bug.
+    ///
+    /// KEYS and PEDAL are different quantities and must stay separate: merging
+    /// the pedal into the popcount would break the invariant at :140 that makes
+    /// the retrigger arithmetic above readable.
+    ///
+    /// TRADE, AND IT IS NOT m23-u's. A held key means a voice is genuinely
+    /// sounding; a held pedal with no notes means NOTHING is sounding and this
+    /// node renders silence anyway, indefinitely. Accepted because the renderer
+    /// cannot ask the instrument whether it holds sustained voices, and a node
+    /// that idles is cheaper than a note that gets cut. Cleared on pedal-up and
+    /// by `clearLiveVoices()` — whose two call sites both pair with
+    /// `instrument.reset()`, which lifts the instrument's own pedal
+    /// (`PolySynthInstrument.swift:227`, `SamplerInstrument.swift:567`), so the
+    /// two sides cannot disagree.
+    private var livePedalDown = false
     /// pitch → the open AUDITION note-on's ID (0 = none), m23-d. Deliberately
     /// NOT `pitchToLiveID`: two live sources sharing one pitch-keyed map orphan
     /// each other's voices (an audition on C4 while hardware holds C4 steals the
@@ -544,16 +585,22 @@ final class InstrumentRenderer: @unchecked Sendable {
         // with an arithmetic one, and `mergedCapacity` is a caller-supplied init
         // parameter — so a caller passing a LARGE `mergedCapacity` must not be
         // able to run `liveCount` past the fixed `liveScratch`. The `2 *` on
-        // `audTake` is not padding: one popped audition note-on emits TWO events
-        // when it retriggers a still-open pitch.
+        // BOTH takes is not padding: one popped note-on emits TWO events when it
+        // retriggers a still-open pitch (m23-d for audition, m23-ad for thru).
         let thruTake = min(thruRing.count, Self.thruRingCapacity)
         let audTake = min(auditionRing.count, Self.auditionRingCapacity)
-        let emitBound = liveCount + thruTake + 2 * audTake
+        let emitBound = liveCount + 2 * thruTake + 2 * audTake
         if thruTake + audTake > 0,
            emitBound <= Self.liveScratchCapacity,        // SCRATCH bound
            slice.count + emitBound <= mergedCapacity {   // MERGE bound (m16-b3)
-            let take = liveCount + thruTake
-            while liveCount < take, let event = thruRing.pop() {
+            // Counts POPS, not emitted events (m23-ad). The old bound was
+            // `liveCount < liveCount + thruTake`, which was equivalent only
+            // while every pop emitted exactly one event; with the defensive
+            // close it would stop after ~thruTake/2 pops on a retrigger storm
+            // and leave the rest queued a quantum late, every quantum.
+            var thruDrained = 0
+            while thruDrained < thruTake, let event = thruRing.pop() {
+                thruDrained += 1
                 let id: UInt64
                 if event.kind >= ScheduledMIDIEvent.controlChange {
                     // Kind ≥ 2 (CC / bend / pressure, m16-b3): controller
@@ -563,29 +610,66 @@ final class InstrumentRenderer: @unchecked Sendable {
                     // can't corrupt that note's on/off pairing (§4.3, C11).
                     id = nextLiveNoteID
                     nextLiveNoteID &+= 1
+                    // SUSTAIN-PEDAL LATCH (m23-ae) — mirrors, does not replace,
+                    // the instrument's own CC64 handling. The renderer needs it
+                    // because 6d must keep the tail armed while a voice the user
+                    // has released is still sounding under the pedal.
+                    //
+                    // C11 IS INTACT: this writes one Bool and touches NO pitch
+                    // map, mints no extra ID, and emits NOTHING. The last part is
+                    // load-bearing — the `emitBound` arithmetic at 6b assumes
+                    // this branch emits exactly one event per pop. A latch that
+                    // also synthesised an off would break the scratch bound
+                    // m23-ad had just made the only thing standing between a
+                    // wrong number and a render-thread overrun.
+                    //
+                    // ⚠️ THE `kind ==` TEST IS NOT REDUNDANT WITH `pitch == 64`.
+                    // In this branch `pitch` is only a controller number for
+                    // kind 2. For `pitchBend` (3) it is the LSB and for
+                    // `channelPressure` (4) it is the value (MIDISchedule.swift:
+                    // 21-25) — so a bare `pitch == 64` latches the pedal on an
+                    // ordinary fine bend or a mid-range aftertouch, and the node
+                    // then never sleeps again. Pinned by a test.
+                    if event.kind == ScheduledMIDIEvent.controlChange,
+                       event.pitch == 64 {
+                        livePedalDown = event.velocity >= 64
+                    }
                 } else if event.kind == ScheduledMIDIEvent.noteOn {
+                    let p = Int(event.pitch & 0x7F)
+                    // DEFENSIVE RETRIGGER CLOSE (m23-ad), the thru twin of 6c.
+                    // The slot is overwritten unconditionally below, so without
+                    // this the previous voice is ORPHANED: no off can ever pair
+                    // with it, the instrument holds it until flush, and the
+                    // matching off that eventually arrives closes the NEW voice.
+                    // Real hardware retriggers, and so does any source that
+                    // drops an off. A voice is now REPLACED, never stacked.
+                    //
+                    // THE COUNTER ARITHMETIC IS THE m23-u TRAP, INVERTED.
+                    // `openLiveCount` is a POPCOUNT of `pitchToLiveID` (:127).
+                    // On a retrigger the slot goes id₁ → id₂ and NEVER passes
+                    // through zero, so the popcount is unchanged — hence the
+                    // decrement here and the UNCONDITIONAL increment below net
+                    // to zero. That is why the old `if pitchToLiveID[p] == 0`
+                    // guard had to be REPLACED rather than kept: alongside the
+                    // close it would decline to increment while the close had
+                    // already decremented, and the counter would read 0 with a
+                    // voice open — m23-u restored on the retrigger path, 6d
+                    // never arming the tail, a real note cut off.
+                    //
+                    // Do NOT "simplify" the decrement/increment pair away: on
+                    // the NON-retrigger path (the common one) the popcount
+                    // genuinely grows, and only the increment runs.
+                    if pitchToLiveID[p] != 0 {
+                        liveScratch[liveCount] = ScheduledMIDIEvent(
+                            sampleTime: renderStart, noteID: pitchToLiveID[p],
+                            kind: ScheduledMIDIEvent.noteOff,
+                            pitch: event.pitch, velocity: 0)
+                        liveCount += 1
+                        openLiveCount -= 1
+                    }
                     id = nextLiveNoteID
                     nextLiveNoteID &+= 1
-                    let p = Int(event.pitch & 0x7F)
-                    // GUARD IS LOAD-BEARING (m23-u). The slot is overwritten
-                    // UNCONDITIONALLY on the next line, so a retrigger of an
-                    // already-open pitch — real hardware does this, and so does
-                    // any source that drops an off — would increment twice and
-                    // decrement once on the single matching off. `openLiveCount`
-                    // would never return to zero and 6d would re-arm the tail
-                    // FOREVER: this node renders its instrument every quantum
-                    // for the life of the app. A silence bug traded for
-                    // permanent wakefulness. Do NOT simplify this to an
-                    // unconditional increment.
-                    //
-                    // If a defensive retrigger CLOSE is ever added here (the
-                    // audition path has one at 6c), this guard must be REPLACED
-                    // by a decrement inside that close, never kept alongside it:
-                    // the close would decrement while the slot is still
-                    // non-zero, this guard would then decline to increment, and
-                    // the counter would read 0 with a voice open — m23-u,
-                    // restored, on the retrigger path.
-                    if pitchToLiveID[p] == 0 { openLiveCount += 1 }
+                    openLiveCount += 1
                     pitchToLiveID[p] = id
                 } else if pitchToLiveID[Int(event.pitch & 0x7F)] != 0 {
                     id = pitchToLiveID[Int(event.pitch & 0x7F)]
@@ -670,9 +754,14 @@ final class InstrumentRenderer: @unchecked Sendable {
         // `openLiveCount > 0` is m23-u: it is what keeps a PHYSICALLY HELD key
         // alive. Without it the tail aged out under a finger that never left the
         // key, because hardware thru sends nothing at all while a note is held.
-        // Note it counts KEYS, not VOICES — a CC64-sustained voice whose key has
-        // been released is still cut at `liveTailSeconds` (filed separately).
-        if liveCount > 0 || openLiveCount > 0 || openAuditionCount > 0 {
+        // Note it counts KEYS, not VOICES — which is why `livePedalDown` is a
+        // SEPARATE disjunct (m23-ae) and not folded into the popcount. Under
+        // CC64 both built-ins defer the release, so the key can be up (popcount
+        // 0) while the voice sounds on; before m23-ae that voice was cut at
+        // `liveTailSeconds` mid-sustain. The three quantities 6d needs are
+        // genuinely distinct: events THIS quantum, keys held, pedal held.
+        if liveCount > 0 || openLiveCount > 0 || openAuditionCount > 0
+            || livePedalDown {
             liveTailRemaining = liveTailFrames
         } else if liveTailRemaining > 0 {
             let elapsed = UInt64(frameCount)
@@ -815,6 +904,12 @@ final class InstrumentRenderer: @unchecked Sendable {
     private func clearLiveVoices() {
         pitchToLiveID.update(repeating: 0, count: 128)
         openLiveCount = 0
+        // m23-ae. Both call sites pair this with `instrument.reset()`, which
+        // clears the instrument's own `pedalDown` (PolySynthInstrument.swift:227,
+        // SamplerInstrument.swift:567). Leaving the latch set would hold this
+        // node awake forever after a flush that left nothing sounding — a
+        // divergence no seam could observe, since the symptom is silence.
+        livePedalDown = false
     }
 
     private func zeroFill(_ output: UnsafeMutableAudioBufferListPointer, frameCount: Int) {

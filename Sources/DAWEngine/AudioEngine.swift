@@ -1223,6 +1223,28 @@ public final class AudioEngine: AudioEngineControlling {
         auditionVoices.removeAll()
     }
 
+    /// PANIC (m23-af) — all-notes-off on every instrument renderer, regardless of
+    /// transport state. Returns how many renderers were asked.
+    ///
+    /// Both halves are needed and neither implies the other. `stopAllAudition()`
+    /// clears the ENGINE's `auditionVoices` ledger (and pushes the note-offs), so
+    /// a later audition does not believe pitches are still down;
+    /// `graph.flushAllInstruments()` reaches every renderer, including the ones
+    /// holding a stuck THRU note that no audition ledger has ever heard of. Doing
+    /// only the first would leave the motivating bug untouched; only the second
+    /// would leave the ledger lying.
+    ///
+    /// Idempotent and cheap: the flush is one atomic store per renderer, honored
+    /// at the top of the next render quantum (`InstrumentSourceNode.swift:412`),
+    /// where it resets the instrument and clears live + audition voices — and,
+    /// since m23-ae, the sustain-pedal latch with them. Calling it twice costs
+    /// two stores.
+    @discardableResult
+    public func allNotesOff() -> Int {
+        stopAllAudition()
+        return graph.flushAllInstruments()
+    }
+
     /// Test seam: pitches this engine believes are auditioning on a track.
     var auditionPitchesForTesting: [UUID: Set<UInt8>] {
         auditionVoices.mapValues(\.pitches)

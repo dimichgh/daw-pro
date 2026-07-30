@@ -238,7 +238,7 @@ struct FXSpectrumCommandTests {
         #expect(refusal.error?.contains("release") == true,
                 "the refusal must teach how to free a slot")
         #expect(engine.taps.count == 8, "the refused arm must not have recorded a 9th tap")
-        #expect(CommandRouter.allCommands.count == 165, "a cap-full refusal must not have touched allCommands")
+        #expect(CommandRouter.allCommands.count == 166, "a cap-full refusal must not have touched allCommands")
     }
 
     // MARK: - L4a/L4b: lease expiry — reporting vs cap-slot, deliberately split
@@ -432,11 +432,13 @@ struct FXSpectrumCommandTests {
         // m23-w's clip.removeMany/clip.moveMany are each additive-at-end AFTER
         // it, so fx.spectrum is now fourth-from-last — still contiguous,
         // still unmoved, per the same law it was gated by.
-        #expect(CommandRouter.allCommands.dropLast(3).last == "fx.spectrum")
-        #expect(CommandRouter.allCommands.dropLast(2).last == "frequency.reference")
-        #expect(CommandRouter.allCommands.dropLast().last == "clip.removeMany")
-        #expect(CommandRouter.allCommands.last == "clip.moveMany")
-        #expect(CommandRouter.allCommands.count == 165)
+        #expect(CommandRouter.allCommands.dropLast(4).last == "fx.spectrum")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "frequency.reference")
+        #expect(CommandRouter.allCommands.dropLast(2).last == "clip.removeMany")
+        #expect(CommandRouter.allCommands.dropLast().last == "clip.moveMany")
+        // m23-af appended `transport.panic` after the m23-w pair.
+        #expect(CommandRouter.allCommands.last == "transport.panic")
+        #expect(CommandRouter.allCommands.count == 166)   // 166 at m23-af
     }
 
     // MARK: - L12: headless / no-capability both refuse honestly, never with a cap number
