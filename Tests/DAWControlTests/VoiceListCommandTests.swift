@@ -32,7 +32,7 @@ struct VoiceListCommandTests {
     @Test("vc.listVoices is in the canonical command list; count moved 132 -> 133 (135 as of m10-p-6's ai.copilotGetModel/SetModel, 139 as of the chat-persist design's Phase C, 141 as of the au.* parameter surface, 142 as of m21-d's clip.fitToContent, 143 as of m21-e's clip.analyzeAudio, 144 as of m22-c's mixer.liveLoudness)")
     func commandIsCanonical() {
         #expect(CommandRouter.allCommands.contains("vc.listVoices"))
-        #expect(CommandRouter.allCommands.count == 158)   // 156 -> 158 at m23-k4a
+        #expect(CommandRouter.allCommands.count == 165)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
     }
 
     @Test("adding vc.listVoices left every existing vc.*/ai.sidecar* name untouched")
@@ -96,6 +96,38 @@ struct VoiceListCommandTests {
         #expect(response.error?.contains("bogus") == true, "the unknown key is named verbatim")
         let calls = await fake.listVoicesCalls
         #expect(calls == 0, "a rejected request must never reach the client")
+    }
+
+    /// m23-n2e: `vc.listVoices` is one of the two verbs measured live on
+    /// staging returning the dangling `"… valid keys are "` sentence (the
+    /// other was `transport.play`). `rejectUnknownKeys([])` now takes a
+    /// distinct zero-param branch — pin the FULL corrected message as a
+    /// literal so the empty-`allowed` case has a direct guard, not just the
+    /// generic `contains("bogus")` check above.
+    @Test("no params: the teaching error for a zero-param verb says so, verbatim, not a dangling 'valid keys are'")
+    func rejectsUnknownParamsWithZeroParamTeachingMessage() async throws {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "vc.listVoices", params: ["bogus": .bool(true)]))
+        #expect(!response.ok)
+        #expect(response.error == "vc.listVoices: unknown parameter 'bogus' — vc.listVoices takes no parameters")
+    }
+
+    @Test("the zero-param teaching message pluralizes — TWO unknown keys read 'parameters', sorted")
+    func zeroParamTeachingMessagePluralizes() async throws {
+        // m23-n2e follow-up. The singular pin above cannot see this: it passes
+        // ONE key, so deleting the `unknown.count > 1` conditional from the
+        // empty branch leaves it — and the entire 4103-test suite — green
+        // (verified by mutation). Plural is a genuinely separate property of
+        // the branch this item introduced, so it needs its own literal.
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "vc.listVoices",
+            params: ["zebra": .bool(true), "alpha": .bool(true)]))
+        #expect(!response.ok)
+        // Also pins the SORT: 'alpha' precedes 'zebra' regardless of dict order.
+        #expect(response.error
+            == "vc.listVoices: unknown parameters 'alpha', 'zebra' — vc.listVoices takes no parameters")
     }
 
     @Test("unreachable sidecar surfaces the manager's actionable message, never a bare connection error")

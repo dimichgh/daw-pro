@@ -120,13 +120,19 @@ struct ReferenceCommandTests {
         // BEFORE that four-verb tail — still contiguous, still in order.
         // m23-k4a appended `project.exportMIDI` + `track.exportMIDI` too, so
         // the tail after the reference block is now SIX verbs, not four.
-        let tail = Array(CommandRouter.allCommands.dropLast(6).suffix(8))
+        // m23-n2b appended `clip.transcribe` after that, making it SEVEN.
+        // m23-n3b appended `ai.installSpeechModel` + `ai.speechModelInstallStatus`
+        // after THAT, making it NINE. m23-r4 appended `fx.spectrum` after
+        // THAT, making it TEN. m23-o1 appended `frequency.reference` after
+        // THAT, making it ELEVEN. m23-w appended `clip.removeMany` +
+        // `clip.moveMany` after THAT, making it THIRTEEN.
+        let tail = Array(CommandRouter.allCommands.dropLast(13).suffix(8))
         #expect(tail == ["reference.import", "reference.remove",
                          "reference.status", "reference.analyze",
                          "reference.setMonitor", "reference.setOffset",
                          "reference.setTrim", "reference.compare"])
-        #expect(CommandRouter.allCommands.count == 158)
-        #expect(CommandRouter.allCommands.last == "track.exportMIDI")
+        #expect(CommandRouter.allCommands.count == 165)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
+        #expect(CommandRouter.allCommands.last == "clip.moveMany")
         // Additive: earlier neighbors untouched.
         #expect(CommandRouter.allCommands.contains("mixer.liveLoudness"))
         #expect(CommandRouter.allCommands.contains("clip.analyzeAudio"))

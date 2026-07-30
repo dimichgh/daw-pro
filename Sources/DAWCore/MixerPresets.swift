@@ -51,6 +51,7 @@ extension EffectDescriptor {
             saturator: saturator,
             gate: gate,
             chorus: chorus,
+            bassEnhancer: bassEnhancer,
             audioUnit: audioUnit)
     }
 }

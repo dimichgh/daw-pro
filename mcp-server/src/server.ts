@@ -1706,6 +1706,7 @@ const fxKindSchema = z
     "saturator",
     "gate",
     "chorus",
+    "bassEnhancer",
     "audioUnit",
   ])
   .describe(
@@ -1734,7 +1735,17 @@ const fxKindSchema = z
       "`saturator` " +
       "is a tanh-based drive/color stage: `driveDb`, `mix`, `outputDb`. `gate` is a " +
       "noise gate: `thresholdDb`, `attackMs`, `holdMs`, `releaseMs`. `chorus` is a " +
-      "2-voice modulated thickener: `rateHz`, `depthMs`, `mix`. `audioUnit` hosts an " +
+      "2-voice modulated thickener: `rateHz`, `depthMs`, `mix`. " +
+      "`bassEnhancer` is a psychoacoustic bass enhancer (RBass class): `crossoverHz`, " +
+      "`amount`, `mix`. It low-passes the signal at `crossoverHz`, synthesizes the " +
+      "2nd/3rd/4th harmonics OF THAT LOW BAND ONLY, high-passes them back at the same " +
+      "corner, and ADDS them to an untouched dry path — so a speaker that cannot " +
+      "reproduce a 50 Hz fundamental still hears its harmonic series and the ear infers " +
+      "the missing fundamental. Reach for it when a mix has no low end on laptops or " +
+      "phones. It is NOT the `saturator`: the shaper only ever sees the low band and the " +
+      "series stops at the 4th partial. Be honest with users that it ADDS harmonics that " +
+      "were not in the recording. `amount` 0 or `mix` 0 is bit-exact bypass. " +
+      "`audioUnit` hosts an " +
       "installed Audio Unit EFFECT plugin — third-party or Apple effects registered " +
       "with the system — selected via fx_add's `audioUnit` param (REQUIRED when this " +
       "kind is used); call fx_list_audio_units first to discover what's installed."
@@ -1801,7 +1812,7 @@ registerTool(
       "mix's master output chain (post-fader, the last stop before the speakers) instead " +
       "of a track/bus. The master chain hosts BUILT-IN effects only in v1 — `kind: " +
       "\"audioUnit\"` on \"master\" is rejected (pick one of gain|eq|compressor|limiter|" +
-      "reverb|delay|saturator|gate|chorus). Classic mastering move: fx_add {trackId: " +
+      "reverb|delay|saturator|gate|chorus|bassEnhancer). Classic mastering move: fx_add {trackId: " +
       "\"master\", kind: \"eq\"} then {trackId: \"master\", kind: \"limiter\"}, then " +
       "render_measure_loudness to check the level. Returns " +
       "`{effectId, effects}`: the new effect's server-minted id, and the track's full " +
@@ -2261,6 +2272,61 @@ registerTool(
     )
 );
 
+registerTool(
+  "fx_spectrum",
+  {
+    title: "Read (and hold) an insert's own spectrum — not just the master mix",
+    description:
+      "Read the real-time analysis snapshot measured on ONE effect insert's own output — " +
+      "the same shape mixer_master_analysis returns (bands/levelDB/peakDB/centroidHz/flux/" +
+      "correlation/width/balance — see that tool's description for what each field means), " +
+      "but scoped to a single insert instead of the whole mix, so you can see what an EQ or " +
+      "compressor is actually PRODUCING rather than what the master bus receives overall. " +
+      "Pass `trackId` as a track/bus id, or the exact string \"master\" for the master output " +
+      "chain, plus the `effectId` of the insert to measure. `arm` (default true) arms — or, " +
+      "on every subsequent call, RENEWS — a 3-second measurement lease and then reads; a call " +
+      "with `arm: false` reads one last time and releases the tap immediately. Poll at 5-30 Hz " +
+      "while you want the reading live: below roughly 12 Hz the underlying ring buffer drops " +
+      "its oldest frames, so peak release and flux smoothing lag behind wall-clock. If you stop " +
+      "polling, the lease simply expires on its own after 3 seconds — no separate cleanup call " +
+      "is required, though an explicit `arm: false` releases it immediately and is more polite " +
+      "if you know you are done. A freshly armed tap honestly reads the floor (-80 dB bands) " +
+      "for its first ~43 ms, never a fabricated non-floor value. At most 8 inserts total — " +
+      "shared with the app's own EQ meter, first-come-first-served — can be measured at once; " +
+      "a 9th is refused (naming the cap and how to free a slot), never silently evicted. " +
+      "Returns the snapshot fields plus `armed` (whether the lease is held as of this response), " +
+      "`tapPoint` (\"postInsertPreFader\" for a track/bus insert — measured BEFORE that " +
+      "track's own fader, so moving the fader does not move this curve — or " +
+      "\"postInsertPostFader\" for a master insert, measured AFTER the master fader; comparing " +
+      "a strip reading to a master reading without checking `tapPoint` is how you'd wrongly " +
+      "conclude the meter is broken), and `leaseSeconds` (the full lease length, currently 3). " +
+      "A refusal never carries analysis fields — an unarmed tap never masquerades as a live " +
+      "silent meter.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .min(1)
+        .describe(
+          "Id of the track or bus that owns the effect, from project_snapshot, OR \"master\" " +
+            "for the master output chain."
+        ),
+      effectId: z
+        .string()
+        .min(1)
+        .describe("Id of the effect to measure, from fx_add's result or project_snapshot."),
+      arm: z
+        .boolean()
+        .optional()
+        .describe(
+          "Default true: arm (or renew) the 3-second measurement lease and read. False: read " +
+            "one last time and release the tap immediately."
+        ),
+    },
+  },
+  async ({ trackId, effectId, arm }) =>
+    toToolResult(() => bridge.send("fx.spectrum", { trackId, effectId, arm }))
+);
+
 server.registerTool(
   "fx_describe",
   {
@@ -2284,7 +2350,11 @@ server.registerTool(
       "division × 60000 / tempo BPM and follows tempo changes, `timeMs` staying the " +
       "unsync fallback), `saturator` (tanh drive " +
       "color — driveDb/mix/outputDb), `gate` (noise gate — thresholdDb/attackMs/holdMs/" +
-      "releaseMs), and `chorus` (2-voice modulated thickener — rateHz/depthMs/mix).",
+      "releaseMs), `chorus` (2-voice modulated thickener — rateHz/depthMs/mix), and " +
+      "`bassEnhancer` (psychoacoustic bass enhancer — crossoverHz/amount/mix: it " +
+      "generates the 2nd/3rd/4th harmonics of the sub-crossover content and adds them " +
+      "above the crossover so small speakers imply a fundamental they cannot play; the " +
+      "params' `note`s teach the exact semantics).",
     inputSchema: {
       kind: fxKindSchema.optional().describe("Effect kind to describe. Omit to list every available kind."),
     },
@@ -4534,7 +4604,7 @@ const automationTargetSchema = z
       "EXACT name from fx_describe for that effect's kind): one parameter of a " +
       "BUILT-IN effect already in the track's insert chain — use it for filter sweeps, " +
       "reverb-mix rises, delay-feedback build-ups, etc.; built-in kinds (gain, eq, " +
-      "compressor, limiter, reverb, delay, saturator, gate, chorus) work today. " +
+      "compressor, limiter, reverb, delay, saturator, gate, chorus, bassEnhancer) work today. " +
       "`effectParam` is REJECTED in v0 when the effect is a hosted Audio Unit " +
       "(`kind: \"audioUnit\"` from fx_add), since its generic parameter surface is empty."
   );
@@ -5802,9 +5872,11 @@ registerTool(
 // direct provider HTTP call): process lifecycle only. The convert/train pair
 // (vc_convert_vocals/vc_train_voice, m10-p-4) is registered right after this
 // trio, below. Policy note carried in every description in both groups:
-// voices are trained ONLY from a user's OWN recordings — never a celebrity
-// or third-party voice model, and none of this implies a product-
-// compatibility claim about the underlying engine.
+// the product supports third-party voice models, and the USER is
+// responsible for having the rights to any voice they train or convert
+// with; none of this implies a product-compatibility claim about the
+// underlying engine. m23-n2d retargeted this from a prohibition — the user
+// explicitly WITHDREW the old own-voice-only rule; do not reintroduce it.
 
 server.registerTool(
   "vc_sidecar_status",
@@ -5812,8 +5884,8 @@ server.registerTool(
     title: "Check the local voice-conversion sidecar",
     description:
       "Check the status of the local RVC voice-conversion sidecar — the " +
-      "offline engine that will convert vocals to a voice trained from the " +
-      "user's OWN recordings (never a celebrity or third-party voice; " +
+      "offline engine that will convert vocals to a voice the user trained " +
+      "or supplied (the user is responsible for having the rights to it; " +
       "training arrives with a later roadmap item — this tool is " +
       "lifecycle/health only for now). No params. Always succeeds (never " +
       "throws) and returns one of five states: `notInstalled` (run " +
@@ -5885,10 +5957,13 @@ registerTool(
 // landed as a new track + clip when this returns. `vc_train_voice` always
 // answers a reserved "not yet available" error today (training ships with a
 // later roadmap item) — call it anyway if asked; the error IS the honest
-// answer. OWN-VOICE-ONLY POLICY (every description below carries this):
-// voices are trained ONLY from a user's OWN recordings that they have the
-// rights to use — NEVER a celebrity or third-party voice model, and this
-// pair implies no product-compatibility claim about the underlying engine.
+// answer. RIGHTS-RESPONSIBILITY POLICY (every description below carries
+// this): the product supports third-party voice models, and the USER is
+// responsible for having the rights to any voice they train or convert
+// with. This pair implies no product-compatibility claim about the
+// underlying engine. m23-n2d retargeted this from a prohibition — the
+// user explicitly WITHDREW the old own-voice-only rule, so do not
+// reintroduce it here or in any description below.
 
 registerTool(
   "vc_convert_vocals",
@@ -5905,9 +5980,10 @@ registerTool(
       "vocal into voice X\": generate or import a song, extract_stems with " +
       "trackNames:[\"vocals\"] (or import an existing a cappella recording), " +
       "then convert_vocals the resulting vocal clip/file to the target " +
-      "voice. OWN-VOICE-ONLY POLICY: voiceId must be a voice trained from " +
-      "the user's OWN recordings (vc_train_voice) that they have the rights " +
-      "to use — NEVER a celebrity or third-party voice. The reserved id " +
+      "voice. RIGHTS-RESPONSIBILITY POLICY: voiceId may be a voice trained " +
+      "from the user's own recordings (vc_train_voice) OR a user-supplied " +
+      "third-party voice model; the USER is responsible for having the " +
+      "rights to it. The reserved id " +
       "\"base\" is a legitimate SMOKE-TEST target: it exercises the full " +
       "pipeline honestly WITHOUT a real trained voice, and its result always " +
       "carries realConversion:false plus a note explaining why — use it to " +
@@ -5942,9 +6018,9 @@ registerTool(
         .string()
         .min(1)
         .describe(
-          "The target voice's id: either a real voice trained from the user's OWN " +
-            "recordings (vc_train_voice; own-voice-only, never a celebrity or third-party " +
-            "voice), or the reserved smoke-test id \"base\" (untrained generic synthesizer — " +
+          "The target voice's id: either a real voice the user trained or supplied " +
+            "(vc_train_voice, or an imported third-party model — the user is responsible " +
+            "for the rights to it), or the reserved smoke-test id \"base\" (untrained generic synthesizer — " +
             "proves the pipeline runs, NOT a real voice conversion; its result always carries " +
             "realConversion:false plus an explanatory note)."
         ),
@@ -5981,14 +6057,14 @@ registerTool(
 registerTool(
   "vc_train_voice",
   {
-    title: "Train a new voice from the user's own recordings",
+    title: "Train a new voice from a user-supplied recording set",
     description:
       "Train a new voice for vc_convert_vocals from a local directory of " +
-      "clean, dry vocal recordings. OWN-VOICE-ONLY POLICY: datasetDir must " +
-      "contain ONLY recordings the user has the rights to use as their own " +
-      "voice (or a voice they have explicit permission for) — NEVER a " +
-      "celebrity or third-party voice; this tool implies no product-" +
-      "compatibility claim about the underlying engine. TODAY this always " +
+      "clean, dry vocal recordings. RIGHTS-RESPONSIBILITY POLICY: datasetDir " +
+      "must contain recordings the USER is responsible for having the rights " +
+      "to use; the product does not restrict whose voice that is. This tool " +
+      "implies no product-compatibility claim about the underlying engine. " +
+      "TODAY this always " +
       "answers a reserved \"training not yet available\" error (the facade " +
       "validates the request shape, then answers that the feature ships " +
       "with a later roadmap item, the in-app Voice panel) — call it anyway " +
@@ -6002,8 +6078,8 @@ registerTool(
         .string()
         .min(1)
         .describe(
-          "Absolute or ~-expanded local directory of the user's OWN clean, dry vocal " +
-            "recordings to train from (own-voice-only — never a celebrity or third-party voice)."
+          "Absolute or ~-expanded local directory of clean, dry vocal recordings to " +
+            "train from — the user is responsible for having the rights to them."
         ),
       voiceId: z
         .string()
@@ -6039,10 +6115,10 @@ registerTool(
       "or \"incomplete\". Requires the sidecar to be running — call " +
       "vc_sidecar_start first if vc_sidecar_status isn't healthy; an " +
       "unreachable sidecar errors with the actionable next step, never a " +
-      "bare connection failure. OWN-VOICE-ONLY POLICY: any real voice " +
-      "listed here was trained from the user's OWN recordings that they " +
-      "have the rights to use — NEVER a celebrity or third-party voice " +
-      "model.",
+      "bare connection failure. RIGHTS-RESPONSIBILITY POLICY: a real voice " +
+      "listed here may be one the user trained from their own recordings or " +
+      "a third-party model they supplied; the user is responsible for " +
+      "having the rights to it.",
     inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("vc.listVoices"))
@@ -7511,4 +7587,273 @@ registerTool(
   },
   async ({ trackId, path, division, format, dryRun }) =>
     toToolResult(() => bridge.send("track.exportMIDI", { trackId, path, division, format, dryRun }))
+);
+
+// ---------------------------------------------------------------------------
+// Speech-to-text (m23-n2b)
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "clip_transcribe",
+  {
+    title: "Transcribe an audio clip to text with word/segment timings on its beats",
+    description:
+      "Run on-device speech-to-text (WhisperKit, Apple Neural Engine) over an AUDIO clip's " +
+      "backing recording and return the text plus every segment and WORD placed on the " +
+      "PROJECT's beat grid, not just in seconds — read `startBeat`/`endBeat` to place lyrics " +
+      "or align edits without doing any seconds-to-beats math yourself. Nothing leaves the " +
+      "machine. BLOCKS until finished (like render_bounce/render_mixdown, not a pollable job — " +
+      "there is no job registry for it): the FIRST call on a given Mac pays a one-time ~90 " +
+      "second model-compile cost that the OS then caches, so expect the very first transcription " +
+      "on a fresh install to take a minute or two and every one after that to be close to real " +
+      "time. `clipId` (required) must name an existing AUDIO clip — a MIDI clip has no backing " +
+      "recording and is refused (read its notes directly instead). `language` (optional, a " +
+      "BCP-47-ish code like \"en\") forces a spoken language; omit it to let the recogniser " +
+      "detect one automatically. A TIME-STRETCHED clip (stretchRatio != 1, from clip_set_stretch) " +
+      "is REFUSED rather than transcribed with wrong timings — word placement assumes one second " +
+      "of the source recording equals one second of project time, which a stretch breaks; " +
+      "un-stretch the clip first (clip_set_stretch ratio 1) if you need its words on the grid. " +
+      "Response: {text, language, modelVariantDirectoryName, rangeStartSeconds, anchorBeat, " +
+      "segments: [{text, startSeconds, endSeconds, startBeat, endBeat, words: [{text, " +
+      "startSeconds, endSeconds, startBeat, endBeat, confidence}]}]} — seconds are measured from " +
+      "the start of the SOURCE FILE (rangeStartSeconds is where the read began), while beats are " +
+      "measured on the PROJECT timeline from `anchorBeat` (the clip's own start beat); confidence " +
+      "is 0-1 per word. Errors readably for an unknown `clipId`, a MIDI clip, and a stretched " +
+      "clip; when no speech model is installed the error names the directory it looked in.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the existing AUDIO clip to transcribe, from project_snapshot."),
+      language: z
+        .string()
+        .optional()
+        .describe(
+          "Force a spoken language with a BCP-47-ish code (e.g. \"en\"). Omit to let the " +
+            "recogniser detect the language automatically, exactly as it does by default."
+        ),
+    },
+  },
+  async ({ clipId, language }) => toToolResult(() => bridge.send("clip.transcribe", { clipId, language }))
+);
+
+// ---------------------------------------------------------------------------
+// Speech-to-text model install (m23-n3b)
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "ai_install_speech_model",
+  {
+    title: "Start installing a WhisperKit speech-to-text model",
+    description:
+      "Start downloading and installing an on-device WhisperKit speech-recognition MODEL " +
+      "(a set of CoreML weights) into Application Support, in the layout `clip_transcribe` " +
+      "looks for. RETURNS IMMEDIATELY — this does NOT wait for the (often multi-hundred-MB " +
+      "to multi-GB) download to finish. Poll `ai_speech_model_install_status` for progress " +
+      "and the terminal outcome, INCLUDING a FAST failure: an unrecognised `variant` name or " +
+      "an already-installed variant without `overwrite` both still return `ok` here (the " +
+      "request was accepted) and only report their failure once polled — never treat a " +
+      "successful response from THIS tool as \"the model is installed\", only `succeeded` " +
+      "from the status tool means that. `variant` (required) is a WhisperKit size such as " +
+      "\"tiny.en\", \"base\", \"small\", \"medium\", or \"large-v3\" (WhisperKit also publishes " +
+      "\"-turbo\" and \".en\" English-only variants of several of these) or the full on-disk " +
+      "directory name (e.g. \"openai_whisper-tiny.en\"); smaller models install faster and use " +
+      "less disk but transcribe less accurately. `overwrite` (optional, default false) " +
+      "replaces an existing install of the SAME variant — omit it to keep whatever is already " +
+      "there rather than risk deleting a multi-hundred-MB install by mistake. ONLY ONE " +
+      "INSTALL RUNS AT A TIME across the whole app: a second call while one is in flight is " +
+      "REFUSED (never queued, never merged), naming the variant already installing — wait for " +
+      "`ai_speech_model_install_status` to reach a terminal state (`succeeded` or `failed`) " +
+      "before starting another. Response (the SAME shape `ai_speech_model_install_status` " +
+      "returns): {state: \"installing\", variantDirectoryNameRequested}.",
+    inputSchema: {
+      variant: z
+        .string()
+        .describe(
+          "A WhisperKit model size (\"tiny.en\", \"base\", \"small\", \"medium\", \"large-v3\", " +
+            "etc.) or a full on-disk directory name (\"openai_whisper-tiny.en\"). Determines " +
+            "both the CoreML weights fetched and the matching tokenizer — WhisperKit rejects a " +
+            "name that doesn't contain a known size."
+        ),
+      overwrite: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: replace an existing install of this SAME variant, discarding it first. Omit " +
+            "or false (default): refuse instead — discoverable via " +
+            "ai_speech_model_install_status's errorMessage, never a silent deletion of an " +
+            "existing multi-hundred-MB install."
+        ),
+    },
+  },
+  async ({ variant, overwrite }) =>
+    toToolResult(() => bridge.send("ai.installSpeechModel", { variant, overwrite }))
+);
+
+registerTool(
+  "ai_speech_model_install_status",
+  {
+    title: "Poll the current or most recently finished speech-model install",
+    description:
+      "Poll the status of the speech-model install started by `ai_install_speech_model`. " +
+      "There is exactly ONE install slot for the whole app (in flight, or the most recently " +
+      "finished one) — nothing to name, so this tool takes no parameters. Response: {state: " +
+      "\"idle\"|\"installing\"|\"succeeded\"|\"failed\", variantDirectoryNameRequested?: " +
+      "string (what was passed to ai_install_speech_model — NOT necessarily the canonical " +
+      "on-disk directory name; that only exists once `descriptor` does), progress?: {phase: " +
+      "\"preparing\"|\"downloadingModel\"|\"downloadingTokenizer\"|\"installing\"|\"finished\", " +
+      "variantDirectoryName, phaseFraction (0-1 WITHIN the current phase, not overall progress " +
+      "of the whole install), completedUnitCount, totalUnitCount} — may be ABSENT even while " +
+      "`state` is \"installing\" if nothing has ticked yet, and a silent download (zero " +
+      "progress callbacks) still reaches a terminal state, so do not treat a missing " +
+      "`progress` as a hang. descriptor?: {variantDirectoryName, displayName, modelFolder, " +
+      "tokenizerFolder, modelSizeBytes, tokenizerSizeBytes, hasContextPrefill, " +
+      "totalSizeBytes, formattedTotalSize} — present only once `state` is \"succeeded\"; this " +
+      "is the model clip_transcribe will use. errorMessage?: string — present only once " +
+      "`state` is \"failed\" (an unrecognised variant name, an already-installed variant " +
+      "without overwrite, or a download/tokenizer failure all surface here, readably). " +
+      "`state: \"idle\"` means nothing has ever been started on this app instance.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("ai.speechModelInstallStatus"))
+);
+
+// ---------------------------------------------------------------------------
+// Instrument frequency reference (m23-o1)
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "frequency_reference",
+  {
+    title: "Cited instrument frequency reference — fundamentals, bands, HP/LP advice",
+    description:
+      "Look up a cited frequency reference for a recognized instrument family: its " +
+      "fundamental pitch range (as MIDI notes, with derived Hz and note names), 2-5 " +
+      "presence/problem bands (each with a plain-language effect and a source citation), " +
+      "and a recommended high-pass corner (always present) plus a low-pass corner (only " +
+      "when the source supports one — some instruments, e.g. hi-hats, have useful content " +
+      "to the top of the audible band and carry `recommendedLowPass.kind: " +
+      "\"noneRecommended\"` instead of a fake number). Pass `family` directly — call with " +
+      "NO arguments first to see the full vocabulary under the response's `families` " +
+      "array — or pass `trackId` to resolve the family from that track's own instrument; " +
+      "`family` wins when both are given (`resolvedFrom: \"argument\"` in the response " +
+      "says so). A track that cannot be resolved (a recorded audio track, an unconfigured " +
+      "instrument, a hosted plugin, a bus) returns `resolution: \"unresolved\"` with " +
+      "`reason`/`explanation`/`remedy` — NEVER infer a family from the track's name " +
+      "yourself either; ask the user, or pick a `family` from the enumerated list. A " +
+      "percussion-kit track queried with no `note` returns `resolution: \"drumKit\"` plus " +
+      "`coveredNotes` (the GM percussion notes this table knows); with an uncovered note, " +
+      "`unresolved` still carries `coveredNotes` so \"not this one\" never reads as \"no " +
+      "data\". To ACT on a recommendation, call `fx_set_param` on an \"eq\" insert with " +
+      "`name: \"highPassFreq\"` (the corner, in Hz) and `name: \"highPassSlopeDbPerOct\"` " +
+      "(12 or 24) — the same fields `fx_describe` documents for the eq kind.",
+    inputSchema: {
+      family: z
+        .string()
+        .optional()
+        .describe(
+          "An instrument family id to look up directly, e.g. \"electricBass\", \"kick\", " +
+            "\"snare\". Wins over trackId when both are given. Call with no arguments to " +
+            "see every valid id under the response's `families` array — an unrecognized " +
+            "value is refused (naming the valid ids), never silently treated as unresolved."
+        ),
+      trackId: z
+        .string()
+        .optional()
+        .describe(
+          "Id of a track to resolve a family from, from project_snapshot. Not a bus and " +
+            "not \"master\" — a bus carries no instrument identity."
+        ),
+      note: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe(
+          "A General MIDI percussion note (0-127) to resolve within a drum-kit track. " +
+            "Only meaningful together with trackId, on a track whose instrument addresses " +
+            "the GM percussion kit; passed against a melodic-bank track it is ignored " +
+            "(with `noteIgnored: true` in the response) rather than rejected, since you " +
+            "cannot know the bank before asking."
+        ),
+    },
+  },
+  async ({ family, trackId, note }: { family?: string; trackId?: string; note?: number }) =>
+    toToolResult(() => bridge.send("frequency.reference", { family, trackId, note }))
+);
+
+// ---------------------------------------------------------------------------
+// Group clip edit (m23-w) — the wire half of the group delete (m23-g1) and
+// group drag (m23-g2), both of which shipped their ProjectStore side under a
+// zero-wire-growth preference. Strictly additive: clip_remove/clip_move are
+// unchanged; use these instead of a per-clip loop to collapse a multi-clip
+// selection edit into ONE undo step.
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "clip_remove_many",
+  {
+    title: "Remove several clips as one undo step",
+    description:
+      "Permanently remove SEVERAL clips — audio or MIDI, on one or several tracks — " +
+      "in ONE undo step. Prefer this over calling clip_remove in a loop: N separate " +
+      "clip_remove calls cost N undo steps, so edit_undo would only restore the last " +
+      "one. ALL-OR-NOTHING: every id must resolve to a live clip and must not belong " +
+      "to a take group (the clip_remove contract) or the WHOLE call is refused and " +
+      "the project is left untouched — never a partial delete. Duplicate ids " +
+      "collapse. `ids` may be empty, which is a safe no-op. Returns `{clips}`, the " +
+      "removed clips.",
+    inputSchema: {
+      ids: z
+        .array(z.string().uuid())
+        .describe(
+          "Ids of the clips to remove, from project_snapshot. May be empty (a no-op). " +
+            "Order does not matter; duplicates collapse."
+        ),
+    },
+  },
+  async ({ ids }) => toToolResult(() => bridge.send("clip.removeMany", { ids }))
+);
+
+registerTool(
+  "clip_move_many",
+  {
+    title: "Move several clips together, rigidly, as one undo step",
+    description:
+      "Translate SEVERAL clips — possibly on different tracks — by the SAME beat " +
+      "delta in ONE undo step, so every gap between them survives the move exactly. " +
+      "Prefer this over calling clip_move in a loop: a per-clip loop applies " +
+      "`toStartBeat`'s own `>= 0` clamp to EACH clip independently, which can weld " +
+      "gaps shut the moment any one clip would cross beat 0 while the others still " +
+      "have room. `byBeats` is signed (positive = later, negative = earlier) and " +
+      "applies identically to every listed clip. WHOLE-GROUP CLAMP: if translating " +
+      "the group by the full `byBeats` would carry its leftmost clip past beat 0, " +
+      "the delta actually applied is reduced (never per-clip) so that clip lands " +
+      "exactly on 0 and every other clip's offset from it is preserved — check the " +
+      "response's `clamped`/`effectiveDeltaBeats` rather than assuming the requested " +
+      "`byBeats` fully applied, since it can legitimately be less. Same ALL-OR-" +
+      "NOTHING validation as clip_remove_many (an unknown id or a take-group member " +
+      "refuses the whole call). `ids` may be empty, or the clamp may reduce the " +
+      "effective delta to exactly 0 (e.g. the group is already at beat 0 and " +
+      "`byBeats` is negative) — both are safe no-ops with no undo step recorded. " +
+      "Landing on another same-track clip trims or removes it, same overlap policy " +
+      "as clip_move. Returns `{requestedDeltaBeats, effectiveDeltaBeats, clamped, " +
+      "trimmedClipIDs, removedClipIDs, clips}` — `clips` is every moved clip's " +
+      "current fields; `trimmedClipIDs`/`removedClipIDs` name any OTHER (stationary) " +
+      "clips the overlap policy edited.",
+    inputSchema: {
+      ids: z
+        .array(z.string().uuid())
+        .describe(
+          "Ids of the clips to move together, from project_snapshot. May be empty " +
+            "(a no-op). Order does not matter; duplicates collapse."
+        ),
+      byBeats: z
+        .number()
+        .describe(
+          "Signed beat delta applied identically to every listed clip. Positive moves " +
+            "later, negative moves earlier. May be reduced (never per-clip) if it would " +
+            "carry the group's leftmost clip past beat 0 — see `clamped` in the response."
+        ),
+    },
+  },
+  async ({ ids, byBeats }) => toToolResult(() => bridge.send("clip.moveMany", { ids, byBeats }))
 );

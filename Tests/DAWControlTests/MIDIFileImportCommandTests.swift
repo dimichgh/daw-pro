@@ -59,11 +59,15 @@ struct MIDIFileImportCommandTests {
     /// command was renamed or reordered.
     @Test("both verbs are registered, at the END of the command list")
     func commandsAreRegisteredAtTheEnd() {
-        // 158 since m23-k4a appended `project.exportMIDI` / `track.exportMIDI`
-        // AFTER this pair — which is the additive-at-end law working, not a
-        // regression: the k3 verbs did not move, they are simply no longer last.
-        #expect(CommandRouter.allCommands.count == 158)
-        #expect(Array(CommandRouter.allCommands.suffix(4).prefix(2))
+        // 161 since m23-k4a appended `project.exportMIDI` / `track.exportMIDI`,
+        // m23-n2b appended `clip.transcribe`, m23-n3b appended
+        // `ai.installSpeechModel`/`ai.speechModelInstallStatus`, m23-r4
+        // appended `fx.spectrum`, m23-o1 appended `frequency.reference`, and
+        // m23-w appended `clip.removeMany`/`clip.moveMany` AFTER this pair —
+        // the additive-at-end law working, not a regression: the k3 verbs did
+        // not move, they are simply no longer last.
+        #expect(CommandRouter.allCommands.count == 165)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
+        #expect(Array(CommandRouter.allCommands.suffix(11).prefix(2))
                 == ["project.importMIDI", "clip.importMIDI"])
     }
 

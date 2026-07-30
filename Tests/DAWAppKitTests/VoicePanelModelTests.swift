@@ -113,11 +113,30 @@ struct VoicePanelModelTests {
 
     // MARK: - Policy copy (standing constraint — verbatim pins)
 
-    @Test("the own-voice-only policy line carries the REQUIRED verbatim fragment")
+    @Test("the rights-responsibility policy line carries the REQUIRED verbatim fragment")
     func policyLineVerbatim() {
+        // This fragment is REQUIRED by the m10-p-5 brief and SURVIVED the
+        // m23-n2d policy change unchanged — the user withdrew the
+        // own-voice-only prohibition, not the rights requirement.
         #expect(VoicePanelModel.policyLine.contains("a voice you have the rights to use"))
-        #expect(VoicePanelModel.policyDetail.contains("Never a celebrity voice"))
-        #expect(VoicePanelModel.policyDetail.contains("anyone else's voice"))
+        // m23-n2d re-point: these two used to pin "Never a celebrity voice"
+        // and "anyone else's voice". The user WITHDREW that policy, so the
+        // prohibition had to go — but the copy stays guarded rather than
+        // unpinned. Literals, never `VoicePanelModel.policyDetail` compared
+        // against itself (a pin that reads its own source is tautological).
+        #expect(VoicePanelModel.policyDetail.contains("You are responsible for the rights"))
+        #expect(VoicePanelModel.policyDetail.contains("including third-party voices"))
+    }
+
+    @Test("the withdrawn own-voice-only prohibition is GONE from the rendered copy")
+    func withdrawnProhibitionIsAbsent() {
+        // The failure this guards is re-propagation: the prohibition lived at
+        // seven-plus sites and memory twice under-counted them, so a future
+        // edit restoring "never a celebrity voice" anywhere in the panel copy
+        // must go red rather than quietly contradict the user's decision.
+        let rendered = VoicePanelModel.policyLine + " " + VoicePanelModel.policyDetail
+        #expect(!rendered.lowercased().contains("celebrity"))
+        #expect(!rendered.lowercased().contains("only with your own voice"))
     }
 
     @Test("the record-path hint teaches the track-record route (mic capture is deferred, said out loud)")

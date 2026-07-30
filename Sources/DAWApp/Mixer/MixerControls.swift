@@ -400,58 +400,151 @@ struct InsertRow: View {
     /// and every other kind do NOT (the store rejects them with a teaching
     /// error) — so the picker only shows where a key is actually accepted. The
     /// MASTER chain (trackID nil) is never keyable (design §4).
-    private var isKeyable: Bool {
+    ///
+    /// ONE home for the predicate, because TWO things now depend on it: this row
+    /// draws the KEY picker from it, and `MixerInsertsSection` scores the row's
+    /// HEIGHT from it (a keyable row is 42 pt, not 24) when it counts how many empty
+    /// slots still fit under a partial chain. A second copy could disagree and the
+    /// section would mis-count the reserve and overflow its viewport.
+    static func isKeyable(effect: EffectDescriptor, trackID: UUID?) -> Bool {
         trackID != nil && (effect.kind == .compressor || effect.kind == .gate)
+    }
+
+    /// Reports what this row DREW (m23-s) — the label, its pin flag, its
+    /// intrinsic width, the name line's width, and each gain-reduction underline
+    /// frame. nil in previews and unit hosts; the app hands it
+    /// `AppModel.insertLabels`, which `debug.insertLabels` publishes.
+    var onProbe: ((InsertRowProbe) -> Void)?
+
+    private var isKeyable: Bool { Self.isKeyable(effect: effect, trackID: trackID) }
+
+    /// True while the pointer is over the row. Only used for the hover cue that
+    /// stands in for the editor glyph m23-s removed.
+    @State private var isHovering = false
+
+    /// **The m23-s classification, in one expression.**
+    /// `MixerFormat.effectDisplayName` returns a closed vocabulary of ten strings
+    /// for the built-in kinds and arbitrary vendor text for `.audioUnit`. A
+    /// closed vocabulary of control labels pins its width and never truncates
+    /// (DESIGN-LANGUAGE, m22-g); a plugin's name is soft data and truncates, like
+    /// the reference row's track name one law over.
+    private var labelIsPinned: Bool { effect.kind != .audioUnit }
+
+    /// Hands one measurement to the probe, tagged with this row's identity.
+    private func probe(_ event: InsertRowProbe.Event) {
+        onProbe?(InsertRowProbe(effectID: effect.id, trackID: trackID,
+                                kind: effect.kind.rawValue, event: event))
+    }
+
+    /// The row's name line: bypass dot · name · (AU window glyph).
+    ///
+    /// **There is no editor glyph here any more, and that is the m23-s trade.**
+    /// A 132 pt channel strip leaves the row 112 pt; the row's own padding takes
+    /// 14, the bypass dot 7 and its gap 6. A 16 pt trailing glyph plus its gap
+    /// took the name from 85 pt to 63, and the widest built-in name
+    /// (`Bass Enhancer`) measures 72.6 pt at 10 pt medium — so with the glyph in
+    /// the flow that name CANNOT be drawn whole at any bar placement, spacing or
+    /// padding this design would accept. The glyph was the one piece of chrome
+    /// that could go: `onOpenEditor` is nil on `.audioUnit` rows, so the row-body
+    /// tap is a no-op there and the AU's window glyph is its only click target,
+    /// while on a built-in row the glyph duplicated a tap target the whole row
+    /// already provided. The cost is real and is not zero: a built-in row no
+    /// longer advertises "editable" at rest. It is paid down with the cyan hover
+    /// rim above, the row's `.help`, and the context menu's "Edit Controls…".
+    private var nameLine: some View {
+        HStack(spacing: MixerStripLayout.insertRowContentSpacing) {
+            Button(action: onToggleBypass) {
+                Circle()
+                    .fill(effect.isBypassed ? DAWTheme.textDim.opacity(0.35) : DAWTheme.signal)
+                    .frame(width: MixerStripLayout.insertBypassDotWidth,
+                           height: MixerStripLayout.insertBypassDotWidth)
+                    .glow(DAWTheme.signal, radius: 4, intensity: effect.isBypassed ? 0 : 0.6)
+            }
+            .buttonStyle(.plain)
+            .help(effect.isBypassed ? "Bypassed — click to enable" : "Active — click to bypass")
+
+            InsertLabel(
+                text: MixerFormat.effectDisplayName(effect),
+                pinned: labelIsPinned,
+                isBypassed: effect.isBypassed,
+                onDrawn: { label, frame in probe(.label(label, frame)) },
+                onPin: { probe(.pin($0)) },
+                onIntrinsic: { probe(.intrinsic($0)) })
+            // `frame(maxWidth:)` rather than a trailing `Spacer`: an `HStack`
+            // puts its spacing around a Spacer too, so the old `Spacer(minLength: 0)`
+            // was quietly charging the name a sixth gap it never used.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let onOpenWindow {
+                PluginWindowButton(action: onOpenWindow)
+                    .help("Open the effect plugin window")
+            }
+        }
+        .frame(height: MixerStripLayout.insertRowContentHeight)
+        // The line's own height is pinned rather than hugged: the 16 pt editor
+        // glyph used to set it, and letting the row shrink to 20 would have
+        // re-opened `insertsViewportHeight` / `insertsRemainderSlots` and the
+        // 3-slot reserve — the most expensive thing this item could have done.
+        .coordinateSpace(name: InsertRowCoordinateSpace.name)
+        .background(GeometryReader { geo in
+            reportLine(width: geo.size.width)
+        })
+        .overlay(alignment: .bottom) {
+            // The m22-e gain-reduction ladder, now an UNDERLINE (m23-s): it
+            // draws in the row's EXISTING bottom padding, so it costs the row
+            // neither width nor height, and on a keyable row it lands in the
+            // 4 pt gap above the KEY sub-row — beneath the name either way.
+            // An `.overlay` never affects the line's size; hit testing is off so
+            // the row-body tap target is unchanged.
+            if let gainReduction {
+                GainReductionMiniBar(
+                    kind: effect.kind,
+                    gainReduction: gainReduction,
+                    onTick: { probe(.barTick(fraction: $0)) },
+                    onWidth: { probe(.barWidth($0)) })
+                .offset(y: GainReductionMiniBar.underlineDrop)
+                .allowsHitTesting(false)
+            }
+        }
+        // The row body toggles the built-in effect editor card (m17-a). A plain
+        // tap gesture: the bypass dot / window glyph and the KEY picker's menu
+        // sit ABOVE it and keep their own single-purpose hits.
+        .contentShape(Rectangle())
+        .onTapGesture { onOpenEditor?() }
+        .onHover { isHovering = $0 }
+        .help(onOpenEditor != nil
+              ? "\(MixerFormat.effectDisplayName(effect)) — click to edit its controls"
+              : MixerFormat.effectDisplayName(effect))
+    }
+
+    /// Publishes the name line's measured width and returns a transparent view.
+    private func reportLine(width: CGFloat) -> some View {
+        probe(.line(width))
+        return Color.clear
     }
 
     var body: some View {
         VStack(spacing: 4) {
-            HStack(spacing: 6) {
-                Button(action: onToggleBypass) {
-                    Circle()
-                        .fill(effect.isBypassed ? DAWTheme.textDim.opacity(0.35) : DAWTheme.signal)
-                        .frame(width: 7, height: 7)
-                        .glow(DAWTheme.signal, radius: 4, intensity: effect.isBypassed ? 0 : 0.6)
-                }
-                .buttonStyle(.plain)
-                .help(effect.isBypassed ? "Bypassed — click to enable" : "Active — click to bypass")
-
-                Text(MixerFormat.effectDisplayName(effect))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(effect.isBypassed ? DAWTheme.textDim : DAWTheme.textPrimary)
-                    .lineLimit(1)
-                    .strikethrough(effect.isBypassed, color: DAWTheme.textDim)
-                Spacer(minLength: 0)
-                // The GR activity bar (m22-e): dynamics inserts only, seated
-                // right of the soft name (which truncates first — the m10-i
-                // soft-name rule) so the row's height and chip anatomy stay
-                // untouched. Draws nothing while the effect isn't reporting.
-                if let gainReduction {
-                    GainReductionMiniBar(kind: effect.kind, gainReduction: gainReduction)
-                }
-                if let onOpenWindow {
-                    PluginWindowButton(action: onOpenWindow)
-                        .help("Open the effect plugin window")
-                }
-                if let onOpenEditor {
-                    EffectEditorButton(action: onOpenEditor)
-                        .help("Edit the effect's controls")
-                }
-            }
-            // The row body toggles the built-in effect editor card (m17-a).
-            // A plain tap gesture: the bypass dot / glyph buttons and the KEY
-            // picker's menu sit ABOVE it and keep their own single-purpose hits.
-            .contentShape(Rectangle())
-            .onTapGesture { onOpenEditor?() }
+            nameLine
             if isKeyable, let trackID {
                 SidechainKeyControl(store: store, trackID: trackID, effect: effect)
                     .explainable(.sidechain)
             }
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-        .background(DAWTheme.panelRaised.opacity(0.6))
+        .padding(.horizontal, MixerStripLayout.insertRowHorizontalPadding)
+        .padding(.vertical, MixerStripLayout.insertRowVerticalPadding)
+        .background(DAWTheme.panelRaised.opacity(isHovering ? 1 : 0.6))
         .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(
+            // The hover cue that replaces the removed editor glyph (m23-s): a
+            // quiet cyan rim on the row that IS the button. Cyan is the house
+            // hover accent (`PluginWindowButton` / `EffectEditorButton`), never
+            // violet, and it is gone the instant the pointer leaves (Rule 3 —
+            // nothing static glows). AU rows keep their window glyph and so do
+            // not light: their row body opens nothing.
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(isHovering && onOpenEditor != nil
+                        ? DAWTheme.playback.opacity(0.55) : .clear, lineWidth: 1)
+        )
         .contextMenu {
             Button(effect.isBypassed ? "Enable" : "Bypass", action: onToggleBypass)
             if let onOpenWindow {

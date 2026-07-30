@@ -145,9 +145,15 @@ calling it.
 surface but are **not** granted to any agent in this plugin, to keep the
 roster tight and avoid any ambiguity around voice content. If a future
 version of this plugin adds them (only to `sound-designer`, per the DAW Pro
-project's own policy), the same rule applies every time: any `voiceId` must
-be trained **only** from a person's own recordings that they have the rights
-to use — **never** a celebrity or third-party voice model. The reserved id
+project's own policy), the **rights-responsibility policy** applies: a
+`voiceId` may be trained from the user's own recordings **or** be a
+user-supplied third-party voice model — the product does not restrict whose
+voice it is, and the **user** bears responsibility for holding the rights to
+whatever they use. Do not refuse a voice on provenance grounds. (This
+replaces an earlier own-voice-only prohibition that the project owner
+withdrew on 2026-07-27. The one thing still out of scope: importing a
+user-supplied model file is supported; going and *finding* third-party voice
+models at scale is not a feature to build.) The reserved id
 `"base"` is a harmless smoke-test target (an untrained generic voice, not a
 real conversion).
 

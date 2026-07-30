@@ -1051,6 +1051,35 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
     /// to explain.
     public var canExportMIDI: Bool { kind == .instrument }
 
+    /// Whether a MIDI clip is allowed to live on this track (m23-v).
+    ///
+    /// **The ONE home for MIDI-clip eligibility**, the `canExportMIDI` /
+    /// `isMasterInput` shape. Three places ask this same question and must never
+    /// disagree: `addMIDIClip` REFUSES a track that fails it, `duplicateClip`
+    /// refuses a MIDI source landing on one (both throw
+    /// `midiClipsRequireInstrumentTrack`), and — the reason this predicate was
+    /// hoisted — the arrange lanes decide from it whether to draw the empty-lane
+    /// "double-click to add a clip" HINT (`DAWAppKit.ArrangeEmptyLaneHints`).
+    /// Advertising an action the store will then refuse is worse than silence, so
+    /// the affordance and the refusal have to be the same rule, not two
+    /// expressions that agree today.
+    ///
+    /// **NOT the same rule as `canExportMIDI`, and deliberately not merged with
+    /// it.** The two expressions are identical today and answer different
+    /// questions — "may a MIDI clip live here" versus "can this track be written
+    /// out as a Standard MIDI File". Rules that happen to agree must stay free to
+    /// diverge (the m23-m3c reasoning that kept `PlaybackGraph`'s routing sites
+    /// out of `isMasterInput`): the day an export gains a second condition — a
+    /// muted track, a track with no notes, an AU-only track — merging them would
+    /// silently delete the hint from lanes that still accept clips.
+    ///
+    /// It stays a one-line comparison on purpose: there is no computation here to
+    /// give a resolver type, so a `fileprivate`-init producer (the
+    /// `ResolvedDropBeat` pattern) would be ceremony around two tokens. The
+    /// composed value the arrange lanes actually draw DOES get that treatment —
+    /// see `ArrangeEmptyLaneHint`.
+    public var canHoldMIDIClips: Bool { kind == .instrument }
+
     /// Whether this track is one of the signals the MAIN MIX sums — a bus, or a
     /// track routed direct to master (m23-m3c).
     ///

@@ -120,19 +120,14 @@ public final class AutosaveManager {
         self.clock = clock
     }
 
-    /// Default autosave directory: `~/Library/Application Support/DAWPro/Autosave/`
-    /// (the same home `ProjectStore.defaultAutosaveDirectory` resolves — the
-    /// rolling snapshot and the legacy per-slug recovery bundles cohabit there
-    /// under distinct names). A `public static` so it can back the `public init`'s
-    /// default argument.
+    /// Default autosave directory: `~/Library/Application Support/DAWPro/Autosave/`.
+    /// The rolling snapshot and the legacy per-slug recovery bundles cohabit here
+    /// under distinct names, so `ProjectStore.defaultAutosaveDirectory()` must
+    /// resolve the SAME URL — since m23-n1b it does so by DELEGATING to this
+    /// function, which is the only producer. A `public static` so it can back the
+    /// `public init`'s default argument.
     public static func defaultDirectory() -> URL {
-        let base = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return base
-            .appendingPathComponent("DAWPro", isDirectory: true)
-            .appendingPathComponent("Autosave", isDirectory: true)
+        AppDirectories.applicationSupport(.autosave)
     }
 
     // MARK: - Writing

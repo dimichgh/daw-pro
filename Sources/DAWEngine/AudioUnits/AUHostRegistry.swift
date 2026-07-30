@@ -28,9 +28,11 @@ public enum HostedAUEndpoint: Hashable, Sendable {
 /// queue's doc for the two crash signatures that made per-instance
 /// exclusivity insufficient.
 ///
-/// Every AU call runs inside a timeout-raced Task so a stalled (v3 XPC)
-/// component can never block the main actor: on timeout the track fails
-/// readably and renders the silent placeholder.
+/// Every AU call runs inside a timeout-raced Task (`DAWCore.DeadlineRace`) so
+/// a stalled (v3 XPC) component can never block the main actor: on timeout the
+/// track fails readably and renders the silent placeholder. m23-at: that
+/// deadline runs OFF the main actor, so it still fires while a wedged plugin
+/// holds the actor — the case it exists for.
 @MainActor
 public final class AUHostRegistry {
     /// Per-track hosting status, published for snapshots.
@@ -112,6 +114,65 @@ public final class AUHostRegistry {
 
     public init() {}
 
+    // MARK: - Prepare timeout policy (m23-at)
+
+    /// THE SHIPPED WALL. A real user on a real machine sees an AU prepare
+    /// complete in 0.05–0.6 s (measured, isolated, including a GM AUSampler
+    /// bank load), so 10 s is already ~20× generous — it exists to bound a
+    /// component that has genuinely stalled, not to accommodate a slow one.
+    ///
+    /// The roadmap's m23-at line forbids raising this: before the deadline was
+    /// made real, "raise the number" was the tempting non-fix, and it would
+    /// have made a broken deadline slower rather than correct.
+    /// `AUPrepareTimeoutPolicyTests` pins the value so the ban is enforced by
+    /// something other than memory.
+    nonisolated public static let productionPrepareTimeout: Duration = .seconds(10)
+
+    /// The value used INSIDE a Swift test process, and the number carries no
+    /// claim about AU behaviour — it only has to exceed the main-actor
+    /// starvation this package's own parallel test run produces.
+    ///
+    /// Why the divergence exists at all: m23-at replaced a timeout that could
+    /// not fire while the main actor was contended with one that always fires
+    /// on wall time. That is strictly correct, and it made an old measurement
+    /// visible instead of merely true — under a full ~448-suite parallel run
+    /// the SAME prepare that takes 0.05–0.6 s isolated takes **17.3–26.9 s**
+    /// (measured across eight full runs at m23-at), because ~78% of this
+    /// suite's siblings are `@MainActor`-isolated and the prepare spends that
+    /// time queued behind them (characterized in m23-ab-3). Against the old
+    /// coin-flip deadline those runs "passed" ~75–80% of the time; against a
+    /// real one they fail deterministically-ish, and the thing they would be
+    /// reporting is the test harness's own load, not a stalled plugin.
+    ///
+    /// Note the top of that range is measured WITH this policy in place and is
+    /// higher than the 17–22 s seen before it: a prepare that used to be
+    /// abandoned at 10 s now runs to completion, which lengthens the very
+    /// main-actor queue it is waiting in. Second-order, expected, and the
+    /// reason the headroom below is stated against the post-fix number.
+    ///
+    /// Fixing that per-call-site was rejected: none of the 35 `prepare` /
+    /// `prepareEffect` call sites across 10 test files passes an explicit
+    /// `timeout:`, the breach set MOVES between runs (five suites in one
+    /// five-run sample, two in another), and patching only the sites that
+    /// happened to breach leaves the trap armed for the next author — the
+    /// m23-aa argument, verbatim.
+    ///
+    /// 60 s is ~2.2× the measured 26.9 s worst case — not the ~3× a reading of
+    /// the pre-fix 17–22 s figures would suggest. It is the same shape and the
+    /// same justification as `DeadlineRaceTests`' leg-2 budget.
+    nonisolated public static let testPrepareTimeout: Duration = .seconds(60)
+
+    /// What `prepare`/`prepareEffect` use when the caller says nothing.
+    /// Production gets `productionPrepareTimeout` and nothing about the
+    /// shipped guard changes; a detected Swift test process gets
+    /// `testPrepareTimeout`.
+    ///
+    /// The test-process question has ONE home — `DAWCore.TestEnvironment` —
+    /// shared with the m23-aa autosave redirection, so the two cannot come to
+    /// different conclusions about the same process.
+    nonisolated public static let defaultPrepareTimeout: Duration =
+        TestEnvironment.isRunningTests ? testPrepareTimeout : productionPrepareTimeout
+
     // MARK: - Discovery
 
     /// All installed Audio Unit music devices ('aumu', wildcard sub/manu).
@@ -171,7 +232,7 @@ public final class AUHostRegistry {
     /// (component, sampleRate, stateData, bank address); serialized per
     /// track; the whole sequence races `timeout`.
     public func prepare(track: Track, sampleRate: Double,
-                        timeout: Duration = .seconds(10)) async {
+                        timeout: Duration = AUHostRegistry.defaultPrepareTimeout) async {
         let id = track.id
         let previous = prepareChains[id]?.task
         let token = UUID()
@@ -258,7 +319,7 @@ public final class AUHostRegistry {
     /// serialized per effect; the whole sequence races `timeout`.
     public func prepareEffect(effectID: UUID, config: AudioUnitConfig,
                               sampleRate: Double, maxFrames: Int = 8_192,
-                              timeout: Duration = .seconds(10)) async {
+                              timeout: Duration = AUHostRegistry.defaultPrepareTimeout) async {
         let previous = effectPrepareChains[effectID]?.task
         let token = UUID()
         let task = Task { @MainActor [weak self] in
@@ -345,7 +406,7 @@ public final class AUHostRegistry {
 
         effectStatus[effectID] = .pending
         let stateData = config.stateData
-        let outcome = await raceAgainstTimeout(timeout) { [instantiator] in
+        let outcome = await DeadlineRace.run(timeout: timeout) { [instantiator] in
             let au: AUAudioUnit
             if isV3 {
                 // v3: in-process first (lower latency), out-of-process retry.
@@ -489,7 +550,7 @@ public final class AUHostRegistry {
             & AudioComponentFlags.isV3AudioUnit.rawValue != 0
 
         status[id] = .pending
-        let outcome = await raceAgainstTimeout(timeout) { [instantiator] in
+        let outcome = await DeadlineRace.run(timeout: timeout) { [instantiator] in
             let au: AUAudioUnit
             if isV3 {
                 // v3: in-process first (lower latency), out-of-process retry.
@@ -730,52 +791,6 @@ public final class AUHostRegistry {
         if status != noErr {
             FileHandle.standardError.write(Data(
                 "AUHostRegistry: sound bank re-load after rate renegotiation failed (OSStatus \(status)) — instrument may render the factory default preset\n".utf8))
-        }
-    }
-
-    private enum RaceOutcome<T: Sendable>: Sendable {
-        case value(T)
-        case error(any Error)
-        case timedOut
-    }
-
-    /// Races `work` against a timeout with UNSTRUCTURED tasks: a stalled AU
-    /// call is abandoned, never awaited, so the main actor is never blocked
-    /// past `timeout`. First resume wins (both resumers run on the main
-    /// actor, so the once-guard needs no lock).
-    private func raceAgainstTimeout<T: Sendable>(
-        _ timeout: Duration,
-        _ work: @escaping @MainActor () async throws -> T
-    ) async -> RaceOutcome<T> {
-        await withCheckedContinuation { continuation in
-            let gate = ResumeGate<T>(continuation)
-            Task { @MainActor in
-                do {
-                    let value = try await work()
-                    gate.resume(.value(value))
-                } catch {
-                    gate.resume(.error(error))
-                }
-            }
-            Task { @MainActor in
-                try? await Task.sleep(for: timeout)
-                gate.resume(.timedOut)
-            }
-        }
-    }
-
-    /// Resumes a continuation exactly once. Main-actor confined.
-    @MainActor
-    private final class ResumeGate<T: Sendable> {
-        private var continuation: CheckedContinuation<RaceOutcome<T>, Never>?
-
-        init(_ continuation: CheckedContinuation<RaceOutcome<T>, Never>) {
-            self.continuation = continuation
-        }
-
-        func resume(_ outcome: RaceOutcome<T>) {
-            continuation?.resume(returning: outcome)
-            continuation = nil
         }
     }
 

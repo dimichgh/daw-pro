@@ -97,7 +97,8 @@ struct TransportBar: View {
             // The session vibe meter — the signature glowing instrument (vm-b). It's
             // read-only STATUS chrome, so it shows in BOTH Simple and Pro, sitting just
             // left of the master cluster. Reads the seed override, else the live poll.
-            VibeMeterView(snapshot: { appModel.vibeSeed ?? store.masterAnalysis() })
+            VibeMeterView(snapshot: { appModel.vibeSeed ?? store.masterAnalysis() },
+                          onFrame: { appModel.liveLayers.recordVibeFrame($0) })
                 .frame(width: 74, height: 44)
                 .explainable(.vibeMeter)
 

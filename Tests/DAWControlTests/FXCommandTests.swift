@@ -283,15 +283,34 @@ struct FXCommandTests {
         #expect(param["unit"]?.stringValue == "linear")
     }
 
-    @Test("fx.describe lists all nine built-in kinds plus audioUnit with full schemas")
-    func fxDescribeListsAllNineKinds() async throws {
+    // m23-n2h: `fx.describe` used to be one of 26 verbs that never called
+    // `rejectUnknownKeys` at all — an unknown key was silently ignored. The
+    // allowed set is exactly {kind}; both the omit-kind and valid-kind
+    // success paths are already pinned above/below, so this only needs the
+    // rejection pin.
+    @Test("fx.describe rejects an unknown param")
+    func fxDescribeRejectsUnknownParam() async throws {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "fx.describe", params: ["bogus": .bool(true)]))
+        #expect(!response.ok)
+        #expect(response.error == "fx.describe: unknown parameter 'bogus' — valid keys are 'kind'")
+    }
+
+    /// The count in this name is DELIBERATELY absent: it used to say "nine",
+    /// and m23-p1's tenth built-in made the name lie while the body still
+    /// passed. The expectation below is the list itself — read that, not a
+    /// number in a title.
+    @Test("fx.describe lists every built-in kind plus audioUnit with full schemas")
+    func fxDescribeListsEveryBuiltInKind() async throws {
         let (router, _) = makeRouter()
         let response = await router.handle(ControlRequest(id: "1", command: "fx.describe"))
         #expect(response.ok)
         let kinds = try #require(response.result?["kinds"]?.arrayValue)
         #expect(kinds.compactMap { $0["kind"]?.stringValue }
                 == ["gain", "eq", "compressor", "limiter",
-                    "reverb", "delay", "saturator", "gate", "chorus", "audioUnit"])
+                    "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer",
+                    "audioUnit"])
         // AU params are not on the generic surface in v0 — empty schema.
         #expect(kinds.last?["params"]?.arrayValue?.isEmpty == true)
 
@@ -418,7 +437,8 @@ struct FXCommandTests {
         #expect(clamped["lowPassEnabled"]?.doubleValue == 1)  // setting it activated it
     }
 
-    @Test("fx.add + fx.setParam work for the new kinds; unknown kind lists all nine")
+    // Name carries no count on purpose — see fxDescribeListsEveryBuiltInKind.
+    @Test("fx.add + fx.setParam work for the new kinds; unknown kind lists every kind")
     func fxAddAndSetParamWorkForNewKinds() async throws {
         let (router, _) = makeRouter()
         let trackID = await addTrack(router, name: "Vox", kind: "audio")
@@ -454,13 +474,14 @@ struct FXCommandTests {
         ))
         #expect(!badKind.ok)
         #expect(badKind.error == "unknown effect kind 'phaser' — use "
-                + "gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|audioUnit")
+                + "gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|"
+                + "bassEnhancer|audioUnit")
 
         // The remaining kinds add and expose their resolved params on the wire.
         for (kind, expected) in [("compressor", "thresholdDb"), ("limiter", "ceilingDb"),
                                  ("reverb", "roomSize"), ("delay", "timeMs"),
                                  ("saturator", "driveDb"), ("gate", "thresholdDb"),
-                                 ("chorus", "rateHz")] {
+                                 ("chorus", "rateHz"), ("bassEnhancer", "crossoverHz")] {
             let response = await router.handle(ControlRequest(
                 id: "add-\(kind)", command: "fx.add",
                 params: ["trackId": .string(trackID.uuidString), "kind": .string(kind)]

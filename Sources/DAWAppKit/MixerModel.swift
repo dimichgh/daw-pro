@@ -107,6 +107,7 @@ public enum MixerFormat {
         case .saturator: return "Saturator"
         case .gate: return "Gate"
         case .chorus: return "Chorus"
+        case .bassEnhancer: return "Bass Enhancer"
         case .audioUnit:
             let name = effect.audioUnit?.name ?? ""
             return name.isEmpty ? "Audio Unit" : name

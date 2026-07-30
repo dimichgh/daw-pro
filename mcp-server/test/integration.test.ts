@@ -282,8 +282,17 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // File import as new tracks, or into an existing MIDI clip) took it
   // 157 -> 159. m23-k4a's project_export_midi/track_export_midi (Standard
   // MIDI File export, project-or-selection and single-track) took it
-  // 159 -> 161.
-  assert.equal(result.tools.length, 161);
+  // 159 -> 161. m23-n2b's clip_transcribe (on-device WhisperKit
+  // speech-to-text, word/segment timings mapped onto the clip's project
+  // beats) took it 161 -> 162. m23-n3b's ai_install_speech_model/
+  // ai_speech_model_install_status (start-then-poll pair exposing the
+  // m23-n3a WhisperKit model installer) took it 162 -> 164. m23-r4's
+  // fx_spectrum (a TTL-leased read of one insert's own spectrum, not just
+  // the master mix) took it 164 -> 165. m23-o1's frequency_reference (the
+  // cited instrument frequency reference table) took it 165 -> 166. m23-w's
+  // clip_remove_many/clip_move_many (the wire half of m23-g1/m23-g2's group
+  // delete/move) took it 166 -> 168.
+  assert.equal(result.tools.length, 168);
 });
 
 // ---------------------------------------------------------------------------

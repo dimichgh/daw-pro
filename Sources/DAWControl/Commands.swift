@@ -96,6 +96,36 @@ public final class CommandRouter {
     /// sidecar process.
     private let songGenerator: SongGenerating
 
+    /// On-device speech-to-text (m23-n2b) — `clip.transcribe`'s engine,
+    /// held ONE PER ROUTER (not constructed per call), exactly why
+    /// `WhisperTranscriber`'s own doc comment holds one for the whole
+    /// process: the first call on a machine pays a one-time ~90 s CoreML
+    /// ANE compile that the OS then caches, so a fresh instance per call
+    /// would pay it every time. Defaults to the real actor resolving
+    /// weights through `WhisperModelCatalog.resolved()`; tests inject one
+    /// pointed at a custom catalog/variant the same way `WhisperTranscriberTests`
+    /// (AIServicesTests) already do.
+    private let transcriber: WhisperTranscriber
+
+    /// `ai.installSpeechModel`/`ai.speechModelInstallStatus`'s engine (m23-n3b)
+    /// — held ONE PER ROUTER (the `transcriber` precedent, immediately above),
+    /// so every poll of `ai.speechModelInstallStatus` sees the SAME in-flight
+    /// state a prior `ai.installSpeechModel` call started, rather than a fresh
+    /// coordinator with no memory of it. `WhisperModelInstaller` (m23-n3a) is
+    /// a plain unisolated struct; this actor is what makes "start, then poll"
+    /// safe against two overlapping installs (see its own doc). Defaults to
+    /// the real installer via `WhisperModelInstallCoordinator.liveInstallFunction`;
+    /// tests inject one constructed with a fake `InstallFunction`.
+    private let installCoordinator: WhisperModelInstallCoordinator
+
+    /// `fx.spectrum`'s control-plane TTL lease (m23-r4, design D2) — held
+    /// ONE PER ROUTER (the `transcriber`/`installCoordinator` precedent,
+    /// immediately above), so "arm, then poll" sees the same lease state.
+    /// Defaults to the real injectable-but-production continuous clock;
+    /// tests construct their own `InsertSpectrumLeases(now:)` with a fake
+    /// clock and inject it here.
+    private let insertSpectrumLeases: InsertSpectrumLeases
+
     /// Read-only API-key store for `ai.providerStatus` (M6). Defaults to the
     /// real Keychain; tests inject an in-memory store. This is STATUS-ONLY —
     /// there is deliberately NO command to SET a key (see `ai.providerStatus`):
@@ -318,6 +348,35 @@ public final class CommandRouter {
         // HEAD's list stays an exact PREFIX of this one.
         "project.exportMIDI",
         "track.exportMIDI",
+        // m23-n2b: exposes the m23-n2a WhisperTranscriber engine — on-device
+        // speech-to-text with word/segment timings mapped onto the clip's
+        // project beats. APPENDED AT THE END (the additive-at-end law).
+        "clip.transcribe",
+        // m23-n3b: exposes the m23-n3a WhisperModelInstaller through the new
+        // WhisperModelInstallCoordinator — start (returns immediately) +
+        // poll, the stretch-render precedent for a locally-owned long job.
+        // Both APPENDED AT THE END (the additive-at-end law).
+        "ai.installSpeechModel",
+        "ai.speechModelInstallStatus",
+        // m23-r4: fx.spectrum — a control-plane TTL-leased read of the
+        // per-insert spectrum tap r1-r3 built (named-owner arm sharing with
+        // the UI's own EQ-card arm, so wire polling and an open card never
+        // stomp each other). APPENDED AT THE END (the additive-at-end law).
+        "fx.spectrum",
+        // m23-o1: frequency.reference — the instrument frequency reference
+        // table (design-m23o1-instrument-frequency-reference.md §6): family
+        // fundamentals, cited presence/problem bands, and an HP/LP
+        // recommendation the copilot can hand straight to fx.setParam.
+        // APPENDED AT THE END (the additive-at-end law).
+        "frequency.reference",
+        // m23-w: clip.removeMany / clip.moveMany — the wire half of m23-g1's
+        // group delete and m23-g2's group drag, both of which shipped their
+        // store side (ProjectStore.removeClips(ids:)/moveClips(ids:byBeats:))
+        // under a zero-wire-growth preference. STRICTLY ADDITIVE — clip.remove
+        // / clip.move are unchanged. APPENDED AT THE END (the additive-at-end
+        // law).
+        "clip.removeMany",
+        "clip.moveMany",
     ]
 
     public init(
@@ -326,6 +385,9 @@ public final class CommandRouter {
         voiceConversionManager: VoiceConversionManaging = VoiceConversionManager(),
         voiceConverting: VoiceConverting = VoiceConversionClient(),
         songGenerator: SongGenerating = ACEStepClient(),
+        transcriber: WhisperTranscriber = WhisperTranscriber(),
+        installCoordinator: WhisperModelInstallCoordinator = WhisperModelInstallCoordinator(),
+        insertSpectrumLeases: InsertSpectrumLeases = InsertSpectrumLeases(),
         keyStore: APIKeyStoring = KeychainKeyStore(),
         keyEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         connectionInfo: ControlConnectionInfo = ControlConnectionInfo(),
@@ -337,6 +399,9 @@ public final class CommandRouter {
         self.voiceConversionManager = voiceConversionManager
         self.voiceConverting = voiceConverting
         self.songGenerator = songGenerator
+        self.transcriber = transcriber
+        self.installCoordinator = installCoordinator
+        self.insertSpectrumLeases = insertSpectrumLeases
         self.keyStore = keyStore
         self.keyEnvironment = keyEnvironment
         self.connectionInfo = connectionInfo
@@ -460,6 +525,7 @@ public final class CommandRouter {
 
         case "marker.list":
             // No params. Returns {markers: [{id,name,beat}]} sorted by beat.
+            try params.rejectUnknownKeys([], verb: "marker.list")
             let markers = store.markers.map(Self.markerJSON)
             return .success(request.id, .object(["markers": .array(markers)]))
 
@@ -479,6 +545,7 @@ public final class CommandRouter {
             // each — a single-tempo project reports its synthesized single
             // segment/change) plus the monotonic mapRevision. The omit-when-
             // trivial mirror rides project.snapshot's tempoMap/meterChanges.
+            try params.rejectUnknownKeys([], verb: "tempo.map")
             return .success(request.id, Self.tempoMapJSON(store))
 
         case "tempo.setMap":
@@ -840,6 +907,7 @@ public final class CommandRouter {
         case "instrument.listAudioUnits":
             // No params. Every installed Audio Unit music device ('aumu'),
             // via the store's engine forwarder (DAWControl stays engine-free).
+            try params.rejectUnknownKeys([], verb: "instrument.listAudioUnits")
             return .success(request.id, .object([
                 "audioUnits": .array(store.availableAudioUnits().map { info in
                     .object([
@@ -858,6 +926,7 @@ public final class CommandRouter {
             // No params. GM first, then each scanned dir's *.sf2/*.dls (§6.2).
             // Never errors — an unreadable scan dir is skipped silently. Pure
             // file discovery through the store's injected SoundBankLibrary.
+            try params.rejectUnknownKeys([], verb: "instrument.listSoundBanks")
             return .success(request.id, .object([
                 "banks": .array(store.availableSoundBanks().map(soundBankInfoJSON)),
             ]))
@@ -868,6 +937,7 @@ public final class CommandRouter {
             // {source, namesParsed, programs:[{program, bankMSB, bankLSB, name,
             // category}]}: the GM table for "gm", parsed SF2 names for a .sf2,
             // generic 0…127 (namesParsed:false) otherwise (§6.3).
+            try params.rejectUnknownKeys(["source"], verb: "instrument.listSoundBankPrograms")
             let programsSource = try parseSoundBankSource(params["source"])
             let listing = try store.soundBankPrograms(source: programsSource)
             return .success(request.id, .object([
@@ -1349,6 +1419,7 @@ public final class CommandRouter {
             // default, unit, note?}]}]}. `note` (m22-a, additive) teaches the
             // semantics a bare range can't: the EQ's nil-means-off HP/LP corners,
             // 12/24 slope snapping, and 0/1 per-band bypass.
+            try params.rejectUnknownKeys(["kind"], verb: "fx.describe")
             let fxKinds: [EffectDescriptor.Kind]
             if let rawKind = params["kind"]?.stringValue {
                 guard let resolved = EffectDescriptor.Kind(rawValue: rawKind) else {
@@ -1382,6 +1453,7 @@ public final class CommandRouter {
         case "fx.listAudioUnits":
             // No params. Every installed Audio Unit effect ('aufx') — the
             // instrument.listAudioUnits mirror, same wire shape.
+            try params.rejectUnknownKeys([], verb: "fx.listAudioUnits")
             return .success(request.id, .object([
                 "audioUnits": .array(store.availableAudioUnitEffects().map { info in
                     .object([
@@ -1449,6 +1521,7 @@ public final class CommandRouter {
             // +1 = all right; floor 0). The goniometer's raw sample pairs
             // deliberately do NOT ride this always-on payload — they stay on
             // the app-side engine accessor (MasterScopeFrame).
+            try params.rejectUnknownKeys([], verb: "mixer.masterAnalysis")
             return .success(request.id, try JSONValue(encoding: store.masterAnalysis()))
 
         case "mixer.liveLoudness":
@@ -1655,6 +1728,7 @@ public final class CommandRouter {
             // (read-then-reset — the windowed-profiling idiom: call with
             // reset=true, do the work, call again to read exactly that
             // window).
+            try params.rejectUnknownKeys(["reset"], verb: "engine.performanceStats")
             let statsReset = params["reset"]?.boolValue ?? false
             return .success(request.id,
                             try JSONValue(encoding: store.performanceStats(reset: statsReset)))
@@ -1687,6 +1761,7 @@ public final class CommandRouter {
             // omitted (they're produced on the main actor — see
             // ControlServer.wedgeIntercept). Same verb, one discoverable
             // surface, zero new commands.
+            try params.rejectUnknownKeys([], verb: "engine.watchdogStatus")
             var watchdogPayload = try JSONValue(encoding: store.watchdogStatus())
             if case .object(var watchdogFields) = watchdogPayload {
                 watchdogFields["mainActor"] = .object(["responsive": .bool(true)])
@@ -2324,6 +2399,7 @@ public final class CommandRouter {
             // current tempo/stretch. A MIDI clip surfaces
             // transientsRequireAudioClip verbatim; headless surfaces
             // engineUnavailable; clipNotFound via the LocalizedError mapping.
+            try params.rejectUnknownKeys(["clipId", "sensitivity"], verb: "clip.detectTransients")
             let transientClipID = try params.requireClipID()
             let transientSensitivity = params["sensitivity"]?.doubleValue ?? 0.5
             guard (0...1).contains(transientSensitivity) else {
@@ -2654,6 +2730,7 @@ public final class CommandRouter {
             // are derived and NEVER persisted in a project (only saved-template ids
             // are stored, and those are untouched), so nothing on disk references
             // them — resolve a built-in by NAME ("swing8:66") for a stable handle.
+            try params.rejectUnknownKeys([], verb: "groove.list")
             let builtins = GrooveTemplate.builtinNames.compactMap { GrooveTemplate.builtin(named: $0) }
             return .success(request.id, .object([
                 "templates": try JSONValue(encoding: store.grooveTemplates),
@@ -2980,6 +3057,7 @@ public final class CommandRouter {
             // ditModel?, lmModel?, pid?, phase?, startingForSeconds?}. This is
             // process-lifecycle management only — the generation client/tools
             // arrive in a later roadmap item.
+            try params.rejectUnknownKeys([], verb: "ai.sidecarStatus")
             let sidecarStatus = await sidecarManager.status()
             return .success(request.id, try JSONValue(encoding: sidecarStatus))
 
@@ -3026,6 +3104,7 @@ public final class CommandRouter {
             // is logged in agents' conversations (house directive: never log key
             // values). Keys are entered only via environment variables or the
             // app's Settings panel (→ system Keychain).
+            try params.rejectUnknownKeys([], verb: "ai.providerStatus")
             let statuses = providerStatuses(environment: keyEnvironment, store: keyStore)
             return .success(request.id, try JSONValue(encoding: ["providers": statuses]))
 
@@ -3124,6 +3203,7 @@ public final class CommandRouter {
             // non-ok response with an unrecognized jobId/failure message
             // means exactly that. Once audioPath is present, import it with
             // clip.addAudio.
+            try params.rejectUnknownKeys(["jobId"], verb: "ai.generationStatus")
             let statusJobID = try params.require("jobId", \.stringValue)
             do {
                 let status = try await songGenerator.generationStatus(jobID: statusJobID)
@@ -3464,6 +3544,7 @@ public final class CommandRouter {
             }
 
         case "input.listDevices":
+            try params.rejectUnknownKeys([], verb: "input.listDevices")
             return .success(request.id, try inputDeviceList())
 
         case "input.setDevice":
@@ -3494,6 +3575,7 @@ public final class CommandRouter {
             // (hot-plug refreshes the list; the first call may lazily create
             // the engine's MIDI client). Wire shape:
             // {"inputs": [{uniqueID, name, isVirtual, isOnline}, ...]}.
+            try params.rejectUnknownKeys([], verb: "midi.listInputs")
             return .success(request.id, .object([
                 "inputs": try JSONValue(encoding: store.listMIDIInputs()),
             ]))
@@ -3546,6 +3628,7 @@ public final class CommandRouter {
             return .success(request.id, .object(auditionPayload))
 
         case "project.snapshot":
+            try params.rejectUnknownKeys([], verb: "project.snapshot")
             return .success(request.id, try snapshotJSON())
 
         case "project.overview":
@@ -3556,6 +3639,7 @@ public final class CommandRouter {
             // no file paths — a few KB an agent can afford to re-read on
             // every turn to re-orient. Wire shape mirrors `ProjectOverview`
             // directly (no wrapping key): {transport, master, tracks: [...]}.
+            try params.rejectUnknownKeys([], verb: "project.overview")
             return .success(request.id, try JSONValue(encoding: store.overview()))
 
         // in mcp-server/src/index.ts (see /mcp-verify) — matching these routes.
@@ -3649,6 +3733,7 @@ public final class CommandRouter {
             // Apple-epoch seconds). Readable anytime; headless-safe — a session
             // that never ran crash detection, or no Autosave dir, reads
             // {available:false}.
+            try params.rejectUnknownKeys([], verb: "project.recoveryStatus")
             return .success(request.id, try JSONValue(encoding: store.recoveryStatus()))
 
         case "project.recoveryBundles":
@@ -3669,6 +3754,7 @@ public final class CommandRouter {
             // write on its next flush) so an agent doesn't try to recover its own
             // live session's safety copy. Never throws — an unreadable/missing
             // Autosave directory reads an empty list.
+            try params.rejectUnknownKeys([], verb: "project.recoveryBundles")
             let recoveryBundleFormatter = ISO8601DateFormatter()
             return .success(request.id, .object([
                 "bundles": .array(store.untitledRecoveryBundles().map { entry in
@@ -3733,6 +3819,7 @@ public final class CommandRouter {
             // own connection, so it stays a human decision in Settings (the
             // API-key-entry split precedent). Never throws. Response: {url, port,
             // source, defaultPort}.
+            try params.rejectUnknownKeys([], verb: "app.connectionInfo")
             return .success(request.id, .object([
                 "url": .string(connectionInfo.url),
                 "port": .number(Double(connectionInfo.port)),
@@ -3784,6 +3871,7 @@ public final class CommandRouter {
             // client can surface/respect it. An UNKNOWN turnId is not an error: it
             // returns the engine's current status with an empty filtered transcript
             // (poller-friendly).
+            try params.rejectUnknownKeys(["turnId"], verb: "ai.copilotState")
             guard let copilotEngine else {
                 throw ControlError("copilot engine not wired — app startup incomplete")
             }
@@ -4057,6 +4145,7 @@ public final class CommandRouter {
             // edit.redo reapplies NEXT (then edits undone EARLIER). Empty lists
             // mirror canUndo/canRedo == false, matching project.snapshot's
             // undoLabel/redoLabel top-of-stack fields.
+            try params.rejectUnknownKeys([], verb: "edit.history")
             let history = store.undoHistory()
             return .success(request.id, .object([
                 "undo": .array(history.undo.map { JSONValue.string($0) }),
@@ -4112,6 +4201,7 @@ public final class CommandRouter {
             // Response: {available: bool, windows: [...openUI result objects...]}.
             // `available:false, windows:[]` is the honest answer for a headless
             // control session (the app has no UI to open windows in).
+            try params.rejectUnknownKeys([], verb: "plugin.listOpenUIs")
             guard let pluginUI else {
                 return .success(request.id, .object([
                     "available": .bool(false),
@@ -4233,6 +4323,7 @@ public final class CommandRouter {
             // ai.sidecarStatus — this is a SECOND, separate local sidecar.
             // This is process-lifecycle management only — voice-conversion/
             // training tools arrive in a later roadmap item.
+            try params.rejectUnknownKeys([], verb: "vc.sidecarStatus")
             let vcStatus = await voiceConversionManager.status()
             return .success(request.id, try JSONValue(encoding: vcStatus))
 
@@ -4296,9 +4387,10 @@ public final class CommandRouter {
             // hand). Response: {trackId, clipId, outputPath, realConversion,
             // inputSeconds, inferSeconds, rtf?, sampleRate, note?}.
             //
-            // Own-voice-only policy: voices are trained ONLY from a user's
-            // OWN recordings (vc.trainVoice) — never a celebrity or
-            // third-party voice model. Throws the SidecarManager-style
+            // Rights-responsibility policy (m23-n2d — the user WITHDREW the
+            // old own-voice-only prohibition): third-party voice models are
+            // supported, and the user owns provenance/licensing for whatever
+            // voice they train or convert with. Throws the SidecarManager-style
             // actionable guidance (pointing at vc.sidecarStart, or
             // scripts/rvc/install.sh if never installed) when the sidecar
             // isn't reachable, instead of a bare connection error.
@@ -4378,9 +4470,9 @@ public final class CommandRouter {
             // (m10-p-6). Unreachable sidecar → the manager's state-specific
             // actionable message (never a bare connection error), via
             // translateVoiceConversionError — the vc.convertVocals/
-            // vc.trainVoice precedent. Own-voice-only policy: any real
-            // voice listed here was trained from the user's OWN recordings
-            // — never a celebrity or third-party voice model.
+            // vc.trainVoice precedent. Rights-responsibility policy
+            // (m23-n2d): voices listed here may be user-trained OR
+            // user-supplied third-party models; provenance is the user's.
             try params.rejectUnknownKeys([], verb: "vc.listVoices")
             do {
                 let vlDescriptors = try await voiceConverting.availableVoiceTargets()
@@ -4394,8 +4486,9 @@ public final class CommandRouter {
         case "vc.trainVoice":
             // params: name (required — the new voice's display name).
             // datasetDir (required — absolute or ~-expanded local directory
-            // of the user's OWN clean dry vocal recordings; own-voice-only,
-            // NEVER a celebrity or third-party voice). voiceId (optional — a
+            // of clean dry vocal recordings the user has the rights to use;
+            // m23-n2d — third-party voices permitted, provenance is the
+            // user's). voiceId (optional — a
             // specific id for the new voice; omit to let the facade derive
             // one from name). epochs (optional — training-length override).
             // Today the facade validates shape then ALWAYS answers a
@@ -4427,6 +4520,369 @@ public final class CommandRouter {
             } catch {
                 throw await translateVoiceConversionError(error)
             }
+
+        case "clip.transcribe":
+            // BLOCKING (m23-n2b) — the render.mixdown-class precedent stated
+            // verbatim at vc.convertVocals above: there is NO in-app job
+            // registry (ai.generateSong's job lives in the ACE-Step
+            // SIDECAR), so inventing one here would be new infrastructure
+            // for a call that, like vc.convertVocals, can simply await its
+            // answer. On-device WhisperKit (m23-n2a); nothing leaves the
+            // machine. `transcriber` is held ONE PER ROUTER (see its own
+            // property doc): the FIRST call on a machine pays a one-time
+            // ~90 s CoreML ANE compile (measured 93.7 s cold vs 1.15 s
+            // warm, 2026-07-27) that the OS then caches, so every later
+            // call is ~1 s. `mcp-server/src/bridge.ts` gives this command
+            // its own timeout tier (CLIP_TRANSCRIBE_TIMEOUT_MS) sized for
+            // that cold-compile-plus-transcribe shape — see that file's
+            // comment for why VOICE_CONVERT_TIMEOUT_MS's 330 s (sized for a
+            // DIFFERENT, real-time-factor-bound cost model) isn't reused.
+            //
+            // params: clipId (required — an existing AUDIO clip; a MIDI
+            // clip has no audioFileURL and is refused with
+            // transcriptionRequiresAudioClip). language (optional
+            // BCP-47-ish code like "en" — omitted lets the recogniser
+            // decide, exactly as WhisperTranscriptionRequest does).
+            //
+            // The clip -> request mapping has ONE home:
+            // Clip.sourceWindowSeconds(tempoMap:) (Model.swift), the single
+            // evaluator of how much of the source file a clip reads.
+            // audioURL/startSeconds/endSeconds/anchorBeat all come from
+            // ProjectStore.transcriptionSource(clipId:)
+            // (ProjectStore+Transcription.swift), which calls it verbatim
+            // rather than re-deriving it.
+            //
+            // stretchRatio != 1 is REFUSED
+            // (transcriptionRequiresUnstretchedClip), never silently wrong:
+            // WhisperKit's word timings come back in SOURCE seconds, and
+            // the beat mapper (m23-n2a, stretch-unaware by construction)
+            // maps elapsed SOURCE seconds straight onto the timeline —
+            // correct only when one source second equals one timeline
+            // second, i.e. exactly stretchRatio == 1. The engine itself
+            // ignores stretch until M5 ii-d, so refusing here is the
+            // honest interim rather than placing a word at the wrong beat
+            // by exactly that factor.
+            //
+            // Response: the Transcription value verbatim — {text, language,
+            // modelVariantDirectoryName, rangeStartSeconds, anchorBeat,
+            // segments: [{text, startSeconds, endSeconds, startBeat,
+            // endBeat, words: [{text, startSeconds, endSeconds, startBeat,
+            // endBeat, confidence}]}]}. Errors: clipNotFound /
+            // transcriptionRequiresAudioClip /
+            // transcriptionRequiresUnstretchedClip surface via the
+            // LocalizedError mapping in handle(_:); WhisperModelError
+            // surfaces the catalog's own teaching text verbatim when no
+            // model is installed.
+            try params.rejectUnknownKeys(["clipId", "language"], verb: "clip.transcribe")
+            let transcribeClipID = try params.requireClipID()
+            let transcribeLanguage = params["language"]?.stringValue
+            let transcribeSource = try store.transcriptionSource(clipId: transcribeClipID)
+            let transcription = try await transcriber.transcribe(WhisperTranscriptionRequest(
+                audioURL: transcribeSource.audioURL,
+                startSeconds: transcribeSource.startSeconds,
+                endSeconds: transcribeSource.endSeconds,
+                anchorBeat: transcribeSource.anchorBeat,
+                tempoMap: transcribeSource.tempoMap,
+                language: transcribeLanguage))
+            return .success(request.id, try JSONValue(encoding: transcription))
+
+        case "ai.installSpeechModel":
+            // Starts a WhisperKit model download/install (m23-n3b, on top of
+            // the m23-n3a installer) and RETURNS IMMEDIATELY — never waits
+            // for the transfer. Poll ai.speechModelInstallStatus for
+            // progress and the terminal outcome. Chosen over a blocking call
+            // (clip.transcribe/vc.convertVocals's shape) because a
+            // multi-hundred-MB-to-multi-GB fetch is a fundamentally
+            // different cost model from either of those; the in-tree
+            // precedent for a locally-owned long job with PULL-based status
+            // is the stretch render (AudioEngine.clipStretchStatus), not a
+            // blocking call.
+            //
+            // params: variant (required — a WhisperKit size like "tiny.en"
+            // or a full on-disk directory name like
+            // "openai_whisper-tiny.en"). overwrite (optional bool, default
+            // false — replaces an existing install of the SAME variant;
+            // omitting it on an already-installed variant is a FAST failure,
+            // discoverable only by polling, same as every other failure this
+            // starts — see installCoordinator's own doc for why this command
+            // never pre-checks). repo/token are NOT exposed here: the
+            // default public repo needs neither, and a Hugging Face token is
+            // exactly the kind of secret the house key policy keeps off the
+            // agent-logged control plane (ai.providerStatus's rationale,
+            // verbatim) even though it isn't one of the three provider keys
+            // that policy was written for.
+            //
+            // ONE install in flight at a time, enforced by
+            // WhisperModelInstallCoordinator (held ONE PER ROUTER, the
+            // transcriber precedent): a second call while one is running is
+            // REFUSED — never queued, never coalesced — naming the variant
+            // already installing.
+            //
+            // Response / ai.speechModelInstallStatus's response (SAME
+            // shape): {state: "idle"|"installing"|"succeeded"|"failed",
+            // variantDirectoryNameRequested?, progress?: {phase,
+            // variantDirectoryName, phaseFraction, completedUnitCount,
+            // totalUnitCount}, descriptor?: {variantDirectoryName,
+            // displayName, modelFolder, tokenizerFolder, modelSizeBytes,
+            // tokenizerSizeBytes, hasContextPrefill, totalSizeBytes,
+            // formattedTotalSize}, errorMessage?}.
+            try params.rejectUnknownKeys(["variant", "overwrite"], verb: "ai.installSpeechModel")
+            let installVariant = try params.require("variant", \.stringValue)
+            let installOverwrite = params["overwrite"]?.boolValue ?? false
+            let installStatus = try await installCoordinator.start(
+                variant: installVariant, overwrite: installOverwrite)
+            return .success(request.id, try JSONValue(encoding: installStatus))
+
+        case "ai.speechModelInstallStatus":
+            // No params — this coordinator tracks exactly one install slot
+            // (in flight, or the most recently finished one), so there is
+            // nothing to disambiguate. Response: see ai.installSpeechModel.
+            try params.rejectUnknownKeys([], verb: "ai.speechModelInstallStatus")
+            let pollStatus = await installCoordinator.status()
+            return .success(request.id, try JSONValue(encoding: pollStatus))
+
+        case "fx.spectrum":
+            // params: trackId (required — a track/bus UUID or the exact
+            // string "master"), effectId (required UUID), arm? (bool,
+            // default true). m23-r4 (design-m23r4-fx-spectrum-lease.md): a
+            // control-plane 3-second TTL LEASE on top of the per-insert
+            // spectrum tap r1-r3 built. `arm:true` (the default) arms-or-
+            // renews the lease then reads; `arm:false` reads once more and
+            // releases. There is no peek mode — those are the only two
+            // states.
+            //
+            // The lease is swept lazily HERE, and ONLY here (before params
+            // are even parsed, so an expired lease from a PRIOR call is
+            // always reaped before this call's own cap check runs).
+            // `armed` in the response means "the CONTROL-PLANE lease is
+            // held as of this response" — NOT "the engine tap is armed"
+            // (which can be true anyway because the UI's own EQ card holds
+            // it): `ProjectStore`'s named-owner set (`InsertAnalysisOwner`)
+            // means the wire and the UI can never stomp each other's arm.
+            //
+            // Response = the SAME MasterAnalysisSnapshot encoding
+            // mixer.masterAnalysis uses (bands/levelDB/peakDB/centroidHz/
+            // flux/correlation/width/balance) PLUS armed, tapPoint
+            // ("postInsertPreFader" | "postInsertPostFader" — a strip
+            // insert reads BEFORE that track's own fader, a master insert
+            // reads AFTER the master fader), leaseSeconds (the full TTL).
+            // A refusal never carries floor bands — an unarmed tap must
+            // never masquerade as a live silent meter. At most
+            // `AudioEngineControlling.maxArmedInsertAnalysis` inserts
+            // total — shared first-come-first-served with any open UI EQ
+            // card — can be measured at once; the 9th is refused, never
+            // evicted (spectrumTapsFull, naming the cap). On `arm:false`
+            // with nothing armed, the analysis fields are simply OMITTED
+            // (armed:false + tapPoint + leaseSeconds ride alone) — that is
+            // a benign success, not an error, mirroring the engine's own
+            // "disarming always reports true".
+            insertSpectrumLeases.sweep { target in
+                store.setInsertAnalysisArmed(trackID: target.trackID, effectID: target.effectID,
+                                             armed: false, owner: .control)
+            }
+            try params.rejectUnknownKeys(["trackId", "effectId", "arm"], verb: "fx.spectrum")
+            let fxSpecTrackID: UUID?
+            switch try params.parseFXTarget() {
+            case .track(let id): fxSpecTrackID = id
+            case .master: fxSpecTrackID = nil
+            }
+            let fxSpecEffectID = try params.requireEffectID()
+            let fxSpecArm = params["arm"]?.boolValue ?? true
+            let fxSpecTapPoint = InsertSpectrumTapPoint.forInsert(trackID: fxSpecTrackID)
+            let fxSpecTarget = InsertAnalysisTarget(trackID: fxSpecTrackID, effectID: fxSpecEffectID)
+
+            func fxSpecResponse(armed: Bool, snapshot: MasterAnalysisSnapshot?) throws -> JSONValue {
+                var obj: [String: JSONValue] = [
+                    "armed": .bool(armed),
+                    "tapPoint": .string(fxSpecTapPoint.wireValue),
+                    "leaseSeconds": .number(InsertSpectrumLeases.defaultTTLSeconds),
+                ]
+                if let snapshot, case .object(let snapObj) = try JSONValue(encoding: snapshot) {
+                    for (snapKey, snapValue) in snapObj { obj[snapKey] = snapValue }
+                }
+                return .object(obj)
+            }
+
+            if fxSpecArm {
+                switch store.setInsertAnalysisArmed(trackID: fxSpecTrackID, effectID: fxSpecEffectID,
+                                                    armed: true, owner: .control) {
+                case .armed:
+                    insertSpectrumLeases.renew(fxSpecTarget)
+                    // A nil reading here is a can't-happen: the arm just
+                    // succeeded. Throw rather than fabricate a floor.
+                    guard let snapshot = store.insertAnalysis(trackID: fxSpecTrackID,
+                                                              effectID: fxSpecEffectID) else {
+                        throw ProjectError.engineUnavailable
+                    }
+                    return .success(request.id, try fxSpecResponse(armed: true, snapshot: snapshot))
+                case .trackNotFound(let id):
+                    throw ProjectError.trackNotFound(id)
+                case .effectNotFound(let id):
+                    throw ProjectError.effectNotFound(id)
+                case .unavailableHeadless, .unsupported:
+                    throw ProjectError.engineUnavailable
+                case .refusedCapFull(let cap):
+                    throw ProjectError.spectrumTapsFull(cap)
+                case .released:
+                    throw ControlError("internal error: fx.spectrum arm returned .released")
+                }
+            } else {
+                // Read WHILE still armed (if it is), THEN validate+release:
+                // reading after release could observe the engine's own tap
+                // already torn down (the owner set emptying disarms it),
+                // which would turn every arm:false read into a false nil.
+                let fxSpecReading = store.insertAnalysis(trackID: fxSpecTrackID,
+                                                         effectID: fxSpecEffectID)
+                switch store.setInsertAnalysisArmed(trackID: fxSpecTrackID, effectID: fxSpecEffectID,
+                                                    armed: false, owner: .control) {
+                case .released:
+                    insertSpectrumLeases.release(fxSpecTarget)
+                    return .success(request.id,
+                                    try fxSpecResponse(armed: false, snapshot: fxSpecReading))
+                case .trackNotFound(let id):
+                    throw ProjectError.trackNotFound(id)
+                case .effectNotFound(let id):
+                    throw ProjectError.effectNotFound(id)
+                case .unavailableHeadless, .unsupported:
+                    throw ProjectError.engineUnavailable
+                case .armed, .refusedCapFull:
+                    throw ControlError("internal error: fx.spectrum release returned an arm outcome")
+                }
+            }
+
+        case "frequency.reference":
+            // m23-o1 (design-m23o1-instrument-frequency-reference.md §6): the
+            // instrument frequency reference — cited fundamentals, presence/
+            // problem bands, and an HP/LP recommendation the copilot can hand
+            // straight to fx.setParam (highPassFreq/highPassSlopeDbPerOct).
+            //
+            // params: family? (a InstrumentFamily raw value), trackId?
+            // (a track UUID — NO "master" sentinel; a bus has no instrument
+            // identity and resolves trackIsNotAnInstrumentOrAudioTrack),
+            // note? (GM percussion note, 0…127). ALL OPTIONAL — zero params
+            // is legal and returns resolution:"index" with the family
+            // vocabulary alone, which is how an agent learns the ids.
+            //
+            // The four-rung ladder (design §3): `family` (rung 1, handled
+            // HERE — it WINS over `trackId` outright, and the response says
+            // resolvedFrom:"argument" so the override is never silent) →
+            // InstrumentFamilyResolver's own GM-program / GM-percussion-note
+            // rungs (resolvedFrom:"gmProgram"|"gmPercussionNote") →
+            // unresolved(reason) — a first-class, self-remedying failure:
+            // every unresolved response carries reason/explanation/remedy
+            // AND the same `families` index a resolved one does, so a typo'd
+            // guess or a genuine gap costs the caller nothing extra.
+            // `family` + `note` together is rejected (two keys that could
+            // disagree). `note` against a MELODIC-bank track is NOT
+            // rejected (an agent cannot know the bank before asking) — the
+            // program resolves normally and the response adds
+            // noteIgnored:true plus a one-line explanation; Silent ignore is
+            // the thing this design refuses everywhere else. An unknown
+            // `family` value is a NAMED error listing the valid ids — a typo
+            // must never read as "not covered". A drumKit track queried with
+            // no `note` returns resolution:"drumKit" + coveredNotes (the
+            // notes this table knows); with an uncovered note, `unresolved`
+            // still carries `coveredNotes` so "no data" never reads where
+            // the truth is "not this one, but here are the ones I do have".
+            try params.rejectUnknownKeys(["family", "trackId", "note"], verb: "frequency.reference")
+            let freqFamilyRaw = try Self.optionalString(params["family"], "'family'")
+            let freqTrackIdRaw = try Self.optionalString(params["trackId"], "'trackId'")
+            let freqNote = try Self.optionalInteger(params["note"], "'note'")
+            if let freqNote, !(0...127).contains(freqNote) {
+                throw ControlError("'note' must be a MIDI note number 0…127")
+            }
+            if freqFamilyRaw != nil, freqNote != nil {
+                throw ControlError(
+                    "'family' and 'note' cannot both be passed — a named family already "
+                        + "answers the question, and 'note' could disagree with it")
+            }
+
+            if let freqFamilyRaw {
+                guard let freqFamily = InstrumentFamily(rawValue: freqFamilyRaw) else {
+                    let validFamilies = InstrumentFamily.allCases.map(\.rawValue)
+                        .sorted().joined(separator: ", ")
+                    throw ControlError(
+                        "unknown 'family' value '\(freqFamilyRaw)' — valid ids are \(validFamilies)")
+                }
+                return .success(request.id, Self.frequencyReferenceJSON(
+                    resolution: .resolved(freqFamily, source: .argument), noteIgnored: false))
+            }
+
+            guard let freqTrackIdRaw else {
+                return .success(request.id,
+                                Self.frequencyReferenceJSON(resolution: nil, noteIgnored: false))
+            }
+            guard let freqTrackID = UUID(uuidString: freqTrackIdRaw) else {
+                throw ControlError("'trackId' is not a valid UUID: \(freqTrackIdRaw)")
+            }
+            guard let freqTrack = store.tracks.first(where: { $0.id == freqTrackID }) else {
+                throw ControlError.noTrack(freqTrackID)
+            }
+            let freqResolution = InstrumentFamilyResolver.resolve(
+                trackKind: freqTrack.kind, instrument: freqTrack.instrument,
+                percussionNote: freqNote)
+            var freqNoteIgnored = false
+            if freqNote != nil, case .resolved(_, let freqSource) = freqResolution,
+               freqSource == .gmProgram {
+                freqNoteIgnored = true
+            }
+            return .success(request.id, Self.frequencyReferenceJSON(
+                resolution: freqResolution, noteIgnored: freqNoteIgnored))
+
+        case "clip.removeMany":
+            // params: ids (required array of clip id strings; may be empty).
+            // The wire half of ProjectStore.removeClips(ids:) (m23-g1/m23-w) —
+            // removes SEVERAL clips as ONE undoable edit, the group-delete verb
+            // behind the arrange's multi-selection. ALL-OR-NOTHING: every id
+            // must resolve to a live clip and clear requireNotCompMember
+            // BEFORE anything is removed — an unknown id or a take-group
+            // member refuses WHOLE and leaves the project untouched, with the
+            // SAME clipNotFound/clipInTakeGroup errors clip.remove gives via
+            // the LocalizedError mapping. Duplicate ids collapse. An empty
+            // 'ids' is a no-op — {"clips": []}, no undo entry journaled
+            // (mirrors ProjectStore.removeClips([])). Response: {"clips":
+            // [...]} — the removed clips, wrapped (not a bare top-level
+            // array, so an agent has one consistent shape to parse across
+            // this verb and clip.moveMany below).
+            try params.rejectUnknownKeys(["ids"], verb: "clip.removeMany")
+            let removeManyIDs = try parseClipIDs(params["ids"], field: "ids", requirement: "")
+            let removedClips = try store.removeClips(ids: removeManyIDs)
+            return .success(request.id, .object([
+                "clips": try JSONValue(encoding: removedClips),
+            ]))
+
+        case "clip.moveMany":
+            // params: ids (required array of clip id strings; may be empty),
+            // byBeats (required Double — signed; positive moves later,
+            // negative earlier). The wire half of
+            // ProjectStore.moveClips(ids:byBeats:) (m23-g2/m23-w) — translates
+            // SEVERAL clips RIGIDLY by the same delta as ONE undoable edit,
+            // the group-move verb behind the arrange's multi-selection drag.
+            // ALL-OR-NOTHING like clip.removeMany (same clipNotFound/
+            // clipInTakeGroup errors). WHOLE-GROUP BEAT-0 CLAMP: the
+            // effective delta is reduced (never per-clip) so the group's
+            // leftmost clip never crosses beat 0 — every other clip's offset
+            // from it survives intact even when clamped. Response surfaces
+            // the clamp instead of a bare ok, because a group move can
+            // legitimately deliver LESS than requested and an agent that
+            // cannot see that will compound the shortfall on its next call:
+            // {"requestedDeltaBeats", "effectiveDeltaBeats", "clamped",
+            // "trimmedClipIDs", "removedClipIDs", "clips"}. An empty 'ids',
+            // or a delta the clamp reduces to exactly 0, is a no-op — no undo
+            // entry journaled (mirrors ProjectStore.moveClips's own early
+            // returns).
+            try params.rejectUnknownKeys(["ids", "byBeats"], verb: "clip.moveMany")
+            let moveManyIDs = try parseClipIDs(params["ids"], field: "ids", requirement: "")
+            let moveManyDelta = try params.require("byBeats", \.doubleValue)
+            let moveManyResult = try store.moveClips(ids: moveManyIDs, byBeats: moveManyDelta)
+            return .success(request.id, .object([
+                "requestedDeltaBeats": .number(moveManyResult.requestedDeltaBeats),
+                "effectiveDeltaBeats": .number(moveManyResult.effectiveDeltaBeats),
+                "clamped": .bool(moveManyResult.clamped),
+                "trimmedClipIDs": .array(moveManyResult.trimmedClipIDs.map { .string($0.uuidString) }),
+                "removedClipIDs": .array(moveManyResult.removedClipIDs.map { .string($0.uuidString) }),
+                "clips": try JSONValue(encoding: moveManyResult.clips),
+            ]))
 
         default:
             // App-installed surface (see `appCommandHandler`): a non-nil return
@@ -5144,6 +5600,13 @@ public final class CommandRouter {
                 "depthMs": .number(chorus.depthMs),
                 "mix": .number(chorus.mix),
             ])
+        case .bassEnhancer:
+            let bass = effect.resolvedBassEnhancer
+            return .object([
+                "crossoverHz": .number(bass.crossoverHz),
+                "amount": .number(bass.amount),
+                "mix": .number(bass.mix),
+            ])
         case .audioUnit:
             // Hosted AU: the component triple + display name. AU parameters
             // are not on the generic surface in v0, and captured state never
@@ -5365,20 +5828,31 @@ public final class CommandRouter {
         return points
     }
 
-    /// Parses a `clipIds` param into `[UUID]`, with a per-index error naming the
-    /// offending element — the `parseNotes`/`parseAutomationPoints` precedent.
-    /// Shared by `take.group`. Does not itself enforce the >= 2 minimum (the
-    /// store's `cannotGroup` message owns that so it stays a single source of
-    /// truth).
-    private func parseClipIDs(_ value: JSONValue?) throws -> [UUID] {
+    /// Parses an array-of-clip-id param into `[UUID]`, with a per-index error
+    /// naming the offending element — the `parseNotes`/`parseAutomationPoints`
+    /// precedent. Shared by `take.group` (`clipIds`) and `clip.removeMany` /
+    /// `clip.moveMany` (`ids`, m23-w) — `field` names the parameter in both
+    /// error messages (the `parseOptionalTrackIDs(_:field:)` precedent) and
+    /// `requirement` is an appended clause on the "must be an array" message,
+    /// so `take.group`'s wording stays BYTE-IDENTICAL through its defaults
+    /// while `clip.removeMany`/`clip.moveMany` get their own honest text (no
+    /// take-group minimum applies to them). Does not itself enforce any
+    /// minimum count — `take.group`'s `cannotGroup` message owns the >= 2
+    /// requirement so it stays a single source of truth; `clip.removeMany`/
+    /// `clip.moveMany` have no minimum at all (an empty `ids` is a legal
+    /// no-op, mirroring `ProjectStore.removeClips`/`moveClips`).
+    private func parseClipIDs(
+        _ value: JSONValue?, field: String = "clipIds",
+        requirement: String = " (at least 2, to form a take group)"
+    ) throws -> [UUID] {
         guard let array = value?.arrayValue else {
-            throw ControlError("'clipIds' must be an array of clip id strings (at least 2, to form a take group)")
+            throw ControlError("'\(field)' must be an array of clip id strings\(requirement)")
         }
         var ids: [UUID] = []
         ids.reserveCapacity(array.count)
         for (i, element) in array.enumerated() {
             guard let raw = element.stringValue, let id = UUID(uuidString: raw) else {
-                throw ControlError("clipIds[\(i)] is not a valid UUID")
+                throw ControlError("\(field)[\(i)] is not a valid UUID")
             }
             ids.append(id)
         }
@@ -6039,6 +6513,17 @@ public final class CommandRouter {
         return flag
     }
 
+    /// An optional string field (m23-o1 `frequency.reference`'s `family`/
+    /// `trackId`): absent → nil; present-but-not-a-string → a field-path
+    /// error, so a wrong-typed value never silently reads as "not passed".
+    private static func optionalString(_ value: JSONValue?, _ field: String) throws -> String? {
+        guard let value else { return nil }
+        guard case .string(let string) = value else {
+            throw ControlError("\(field) must be a string")
+        }
+        return string
+    }
+
     /// An optional numeric field: absent → nil; present-but-not-a-number → a
     /// field-path error. Range is left to the model's clamping init.
     private static func optionalNumber(_ value: JSONValue?, _ field: String) throws -> Double? {
@@ -6421,6 +6906,174 @@ public final class CommandRouter {
             ]),
         ])
     }
+
+    // MARK: - frequency.reference helpers (m23-o1 Step 3, design §6)
+
+    /// The full `frequency.reference` wire payload. `resolution == nil` means
+    /// the caller passed neither `family` nor `trackId` — the zero-param
+    /// "teach me the vocabulary" call, which reads `resolution:"index"` with
+    /// `families` alone. `families` is ALWAYS present, including on
+    /// `unresolved` (design D2) — an unresolved answer is self-remedying in
+    /// one round trip because the same vocabulary rides every response.
+    private static func frequencyReferenceJSON(
+        resolution: InstrumentFamilyResolution?,
+        noteIgnored: Bool
+    ) -> JSONValue {
+        var payload: [String: JSONValue] = [:]
+        switch resolution {
+        case nil:
+            payload["resolution"] = .string("index")
+        case .resolved(let family, let source):
+            payload["resolution"] = .string("family")
+            payload["resolvedFrom"] = .string(source.rawValue)
+            payload["reference"] = Self.frequencyReferenceRowJSON(
+                InstrumentFrequencyTable.reference(for: family))
+            if noteIgnored {
+                payload["explanation"] = .string(
+                    "The 'note' parameter is only meaningful when the track's sound bank "
+                        + "addresses the General MIDI percussion kit (bank 120); this "
+                        + "track's bank is melodic, so 'note' was ignored and the family "
+                        + "was resolved from its General MIDI program instead.")
+            }
+        case .drumKit(let coveredNotes):
+            payload["resolution"] = .string("drumKit")
+            payload["coveredNotes"] = .array(Self.frequencyCoveredNotesJSON(coveredNotes))
+        case .unresolved(let reason):
+            payload["resolution"] = .string("unresolved")
+            payload["reason"] = .string(reason.rawValue)
+            payload["explanation"] = .string(reason.explanation)
+            payload["remedy"] = .string(reason.remedy)
+            if reason == .percussionNoteNotCoveredInV1 {
+                // Never "no data" where the truth is "not this one, but here
+                // are the ones I do have" (design D3).
+                payload["coveredNotes"] = .array(Self.frequencyCoveredNotesJSON(
+                    InstrumentFamilyResolver.coveredPercussionNotes))
+            }
+        }
+        if noteIgnored { payload["noteIgnored"] = .bool(true) }
+        payload["families"] = .array(Self.frequencyFamilyIndexJSON())
+        return .object(payload)
+    }
+
+    /// One resolved reference row (design §6's `"reference"` object): family,
+    /// displayName, fundamental (with its own citation), the two filter
+    /// recommendations, and the cited bands.
+    private static func frequencyReferenceRowJSON(_ row: InstrumentFrequencyReference) -> JSONValue {
+        .object([
+            "family": .string(row.family.rawValue),
+            "displayName": .string(row.displayName),
+            "fundamental": Self.frequencyFundamentalJSON(
+                row.fundamental, citation: row.fundamentalCitation),
+            "recommendedHighPass": Self.frequencyFilterRecommendationJSON(row.recommendedHighPass),
+            "recommendedLowPass": Self.frequencyFilterRecommendationJSON(row.recommendedLowPass),
+            "bands": .array(row.bands.map(Self.frequencyBandJSON)),
+        ])
+    }
+
+    /// `.pitched` carries both MIDI notes AND their Hz/note-name derivations
+    /// (`Fundamental.hz`/`.noteName` — the ONLY Hz source, design §5);
+    /// `.inharmonic` carries `reason` and no range at all — never a fake one.
+    private static func frequencyFundamentalJSON(
+        _ fundamental: Fundamental, citation: FrequencyCitation
+    ) -> JSONValue {
+        switch fundamental {
+        case .pitched(let lowest, let highest):
+            return .object([
+                "kind": .string("pitched"),
+                "lowestMidiNote": .number(Double(lowest)),
+                "highestMidiNote": .number(Double(highest)),
+                "lowestHz": .number(Fundamental.hz(midiNote: lowest)),
+                "highestHz": .number(Fundamental.hz(midiNote: highest)),
+                "lowestNoteName": .string(Fundamental.noteName(midiNote: lowest)),
+                "highestNoteName": .string(Fundamental.noteName(midiNote: highest)),
+                "citation": Self.frequencyCitationJSON(citation),
+            ])
+        case .inharmonic(let reason):
+            return .object([
+                "kind": .string("inharmonic"),
+                "reason": .string(reason),
+                "citation": Self.frequencyCitationJSON(citation),
+            ])
+        }
+    }
+
+    private static func frequencyFilterRecommendationJSON(
+        _ recommendation: FilterRecommendation
+    ) -> JSONValue {
+        switch recommendation {
+        case .corner(let hz, let slope, let rationale, let citation):
+            return .object([
+                "kind": .string("corner"),
+                "hz": .number(hz),
+                "slopeDbPerOct": .number(Double(slope)),
+                "rationale": .string(rationale),
+                "citation": Self.frequencyCitationJSON(citation),
+            ])
+        case .noneRecommended(let reason, let explanation):
+            return .object([
+                "kind": .string("noneRecommended"),
+                "reason": .string(reason.rawValue),
+                "explanation": .string(explanation),
+            ])
+        }
+    }
+
+    private static func frequencyBandJSON(_ band: FrequencyBand) -> JSONValue {
+        .object([
+            "role": .string(band.role.rawValue),
+            "lowHz": .number(band.lowHz),
+            "highHz": .number(band.highHz),
+            "effect": .string(band.effect),
+            "citation": Self.frequencyCitationJSON(band.citation),
+        ])
+    }
+
+    private static func frequencyCitationJSON(_ citation: FrequencyCitation) -> JSONValue {
+        .object([
+            "source": .string(citation.source),
+            "url": .string(citation.url),
+            "quote": .string(citation.quote),
+            "retrieved": .string(citation.retrieved),
+        ])
+    }
+
+    /// `[{note, name, family}]` for a set of covered GM percussion notes —
+    /// UNCOVERED notes ship no name (design D3): GM's own names for them are
+    /// spec data this table did not author, and inventing them would be the
+    /// same class of error one level down. `compactMap` rather than a force
+    /// unwrap so a note this function is never called with (there is none in
+    /// practice — every caller passes covered notes) fails silently rather
+    /// than crashing the control server.
+    private static func frequencyCoveredNotesJSON(_ notes: [Int]) -> [JSONValue] {
+        notes.compactMap { (note: Int) -> JSONValue? in
+            guard let covered = InstrumentFamilyResolver.percussionNote(note) else { return nil }
+            return .object([
+                "note": .number(Double(covered.note)),
+                "name": .string(covered.gmName),
+                "family": .string(covered.family.rawValue),
+            ])
+        }
+    }
+
+    /// The `families` index every response carries (design §6): id,
+    /// displayName, and — for note-keyed (percussion) families only — the
+    /// covered notes. `notes` is omitted for every non-percussion family
+    /// (the repo's nil-means-no-evidence convention) rather than shipping an
+    /// empty array on every one of the other rows.
+    private static func frequencyFamilyIndexJSON() -> [JSONValue] {
+        InstrumentFamily.allCases.map { family in
+            let row = InstrumentFrequencyTable.reference(for: family)
+            let notes = InstrumentFamilyResolver.percussionNotes(for: family)
+            var entry: [String: JSONValue] = [
+                "family": .string(family.rawValue),
+                "displayName": .string(row.displayName),
+            ]
+            if !notes.isEmpty {
+                entry["notes"] = .array(notes.map { .number(Double($0)) })
+            }
+            return .object(entry)
+        }
+    }
 }
 
 /// The addressing target of a master-capable verb (m13-d, design §4): a
@@ -6485,12 +7138,24 @@ extension [String: JSONValue] {
     /// a verb whose optional param legitimately keeps the current value on
     /// OMISSION still does — this only rejects keys that aren't recognized at all.
     /// `allowed` is sorted for a deterministic, contract-stable message.
+    ///
+    /// m23-n2e: for a zero-param verb (`allowed.isEmpty`), "valid keys are"
+    /// followed by nothing was a dangling, non-teaching sentence — measured
+    /// live on staging (`vc.listVoices`, `transport.play`). The honest
+    /// message for those 18 verbs is that the verb takes no parameters at
+    /// all; every verb with at least one real key keeps the original,
+    /// byte-identical "valid keys are …" sentence.
     func rejectUnknownKeys(_ allowed: Set<String>, verb: String, hint: String? = nil) throws {
         let unknown = keys.filter { !allowed.contains($0) }.sorted()
         guard !unknown.isEmpty else { return }
         let named = unknown.map { "'\($0)'" }.joined(separator: ", ")
-        let valid = allowed.sorted().map { "'\($0)'" }.joined(separator: ", ")
-        var message = "\(verb): unknown parameter\(unknown.count > 1 ? "s" : "") \(named) — valid keys are \(valid)"
+        var message: String
+        if allowed.isEmpty {
+            message = "\(verb): unknown parameter\(unknown.count > 1 ? "s" : "") \(named) — \(verb) takes no parameters"
+        } else {
+            let valid = allowed.sorted().map { "'\($0)'" }.joined(separator: ", ")
+            message = "\(verb): unknown parameter\(unknown.count > 1 ? "s" : "") \(named) — valid keys are \(valid)"
+        }
         if let hint { message += ". \(hint)" }
         throw ControlError(message)
     }

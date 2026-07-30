@@ -56,13 +56,20 @@ struct ConnectionInfoCommandTests {
         #expect(response.result?["port"]?.doubleValue == 17695)
     }
 
-    @Test("unknown extra params are ignored (house style)")
+    // m23-n2h: `app.connectionInfo` used to be one of 26 verbs that never
+    // called `rejectUnknownKeys` at all, so "house style" (as the old test
+    // name claimed) was actually FALSE — 135 of 161 commands already
+    // rejected unknown keys, and this permissive behaviour was the
+    // exception, not the rule. Withdrawn for consistency: an unrecognized
+    // key on a zero-param verb is now a teaching error, same as every other
+    // command. See `ZeroParamVerbRejectionTests`.
+    @Test("unknown extra params are rejected — no longer 'house style' to ignore them (m23-n2h)")
     func paramTolerance() async throws {
         let router = CommandRouter(store: ProjectStore())
         let response = await router.handle(ControlRequest(
             id: "1", command: "app.connectionInfo", params: ["bogus": .number(7)]))
-        #expect(response.ok)
-        #expect(response.result?["port"]?.doubleValue == 17600)
+        #expect(!response.ok)
+        #expect(response.error == "app.connectionInfo: unknown parameter 'bogus' — app.connectionInfo takes no parameters")
     }
 
     @Test("the response never carries key material")

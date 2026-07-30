@@ -183,7 +183,7 @@ struct GainReductionMeterBlock: View {
     }
 }
 
-/// The tiny GR activity bar on a dynamics insert chip (m22-e phase 2): five
+/// The GR activity indicator on a dynamics insert chip (m22-e phase 2): five
 /// zone-colored cells lit up to the current reduction, so a user scanning
 /// the rack sees WHICH insert is working without opening it — the
 /// `MiniLevelBar` sibling on the `GainReductionMeterModel` scale. Renders
@@ -192,14 +192,58 @@ struct GainReductionMeterBlock: View {
 /// untouched in that case. Own 10 Hz unpaused `.periodic` `TimelineView` so
 /// the tick never invalidates the row around it and keeps ticking while the
 /// app is unfocused (the LOUDNESS pattern — see `GainReductionMeterBlock`).
+///
+/// **⚠️ PLACEMENT CHANGED AT m23-s (2026-07-29): it is an UNDERLINE now, not a
+/// 24 pt chip beside the name — and the reason is arithmetic, not taste.** m22-e
+/// seated it right of "the soft insert name, which truncates first". But the
+/// built-in names are a CLOSED VOCABULARY of ten control labels, not soft data,
+/// and a 24 pt bar plus its 6 pt gap took the name's budget on a 132 pt channel
+/// strip from 63 pt to 33 — which is precisely why `Limiter` (34.3 pt) and
+/// `Compressor` (60.0 pt) drew as `Lim…` and `Compr…`. The ladder now spans the
+/// row's name line inside the row's EXISTING 4 pt of bottom padding, so it costs
+/// the row neither width nor height and `MixerStripLayout.insertRowHeight` (24)
+/// is untouched.
+///
+/// The trade, stated: the bar is no longer beside the name, so a user who
+/// learned the m22-e anatomy sees it move, and a wide low ladder reads a little
+/// more like a progress bar than a meter. It is bought with legibility — five
+/// cells across ~98 pt instead of ~24, i.e. ~18 pt per cell instead of ~3.7 —
+/// and with the zone colours, cell count, scale, ballistics, poll rate and
+/// unpaused timeline all unchanged.
 struct GainReductionMiniBar: View {
     var kind: EffectDescriptor.Kind
     /// Polled at 10 Hz — POSITIVE dB of reduction, nil = not reporting.
     var gainReduction: () -> Double?
+    /// Reports each TICK: the fraction this layer resolved FOR DRAWING, from
+    /// inside the `TimelineView` closure that produces it. **Not from the
+    /// `Canvas`'s `.background`** — that is a `GeometryReader`, which
+    /// re-evaluates on layout and not once per frame, so a tick counter fed from
+    /// there reads 0 while the layer is visibly drawing (measured at m23-s).
+    /// nil in previews.
+    var onTick: ((_ fraction: Double) -> Void)?
+    /// Reports the width the `Canvas` was drawn at — read ONCE, here, because it
+    /// is now the name line's width and a second read of one quantity is the
+    /// m23-o2 coordinate-space hole. Layout-driven. nil in previews.
+    var onWidth: ((_ width: CGFloat) -> Void)?
 
     private static let pollInterval = 1.0 / 10
     // nonisolated: the @Sendable Canvas renderer below reads it (m16-a).
     private nonisolated static let segmentCount = 5
+    /// The underline's height. It lives inside the row's own
+    /// `insertRowVerticalPadding`, which is why it costs the row nothing.
+    static let underlineHeight: CGFloat = 2.5
+
+    /// How far to drop the ladder from a `.bottom`-aligned overlay on the name
+    /// line. Bottom-aligned it sits INSIDE the line, occupying its last
+    /// `underlineHeight` points; dropping it by its own height clears the text,
+    /// and the remaining half-gap centres it in the row's bottom padding —
+    /// **2.5 + (4 − 2.5)/2 = 3.25**, i.e. rows 20.75…23.25 of a 24 pt row, well
+    /// inside the row's clip shape. On a KEYABLE row the same offset lands it in
+    /// the 4 pt gap above the KEY sub-row, so the ladder reads as belonging to
+    /// the name on every row shape.
+    static var underlineDrop: CGFloat {
+        underlineHeight + (MixerStripLayout.insertRowVerticalPadding - underlineHeight) / 2
+    }
 
     var body: some View {
         let kind = kind
@@ -207,16 +251,36 @@ struct GainReductionMiniBar: View {
             if let db = gainReduction() {
                 // CANVAS CONTRACT (m16-a): @Sendable renderer, value captures
                 // only, computed before the closure.
-                let fraction = GainReductionMeterModel.fraction(forDb: db)
+                let fraction = reportedFraction(
+                    GainReductionMeterModel.fraction(forDb: db))
                 Canvas { @Sendable context, size in
                     Self.draw(&context, size: size, fraction: fraction, kind: kind)
                 }
-                .frame(width: 24, height: 5)
+                .frame(height: Self.underlineHeight)
+                .background(GeometryReader { geo in
+                    report(width: geo.size.width)
+                })
                 .accessibilityLabel("Gain reduction")
                 .accessibilityValue(String(format: "%.1f decibels", db))
                 .help("How hard this effect is working — how many decibels it's turning the level down right now.")
             }
         }
+    }
+
+    /// Reports the fraction and RETURNS it, so the value the `Canvas` closure
+    /// captures IS the value published — the m23-p2 `reportedInk` shape. A
+    /// mutation has two options and both are red: change the argument (the
+    /// report changes with it), or drop the call (the ticks stop).
+    private func reportedFraction(_ value: Double) -> Double {
+        onTick?(value)
+        return value
+    }
+
+    /// Publishes the width the `Canvas` was sized to and returns a transparent
+    /// view.
+    private func report(width: CGFloat) -> some View {
+        onWidth?(width)
+        return Color.clear
     }
 
     private nonisolated static func draw(_ context: inout GraphicsContext,

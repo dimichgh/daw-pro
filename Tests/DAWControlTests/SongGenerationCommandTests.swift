@@ -229,6 +229,20 @@ struct SongGenerationCommandTests {
         #expect(response.error?.contains("jobId") == true)
     }
 
+    // m23-n2h: `ai.generationStatus` used to be one of 26 verbs that never
+    // called `rejectUnknownKeys` at all — an unknown key was silently
+    // ignored. The allowed set is exactly {jobId}, already positively
+    // exercised throughout this suite, so this only needs the rejection pin.
+    @Test("ai.generationStatus rejects an unknown param")
+    func generationStatusRejectsUnknownParam() async throws {
+        let router = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "ai.generationStatus",
+            params: ["jobId": .string("job-42"), "bogus": .bool(true)]))
+        #expect(!response.ok)
+        #expect(response.error == "ai.generationStatus: unknown parameter 'bogus' — valid keys are 'jobId'")
+    }
+
     @Test("ai.generationStatus threads a running status onto the wire, no audioPath yet")
     func generationStatusRunning() async throws {
         let generator = FakeSongGenerator()

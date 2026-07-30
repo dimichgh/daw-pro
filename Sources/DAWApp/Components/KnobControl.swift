@@ -63,12 +63,20 @@ struct KnobControl: View {
         return path
     }
 
+    /// The micro-label's ink, named because another surface has to COMPARE
+    /// against it (m23-p2): the effect editor's honesty disclosure claims its
+    /// prose is never drawn below the knob labels, and a claim about two inks
+    /// needs both of them reachable. Consumed by the `Text` immediately below —
+    /// this is the label's ink, not a copy of it, so a probe reporting this
+    /// constant is reporting what the label draws.
+    static let labelInk = DAWTheme.textDim
+
     var body: some View {
         VStack(spacing: 4) {
             Text(label.uppercased())
                 .font(.system(size: 8, weight: .semibold))
                 .tracking(0.8)
-                .foregroundStyle(DAWTheme.textDim)
+                .foregroundStyle(Self.labelInk)
                 .lineLimit(1)
             knob
             HStack(spacing: 2) {

@@ -22,6 +22,13 @@ public enum ProjectError: Error, LocalizedError {
     case invalidClipEdit(String)
     case effectNotFound(UUID)
     case chainFull(Int)
+    // Per-insert spectrum lease cap (m23-r4, fx.spectrum): modelled on
+    // chainFull's "name the cap" style. At most N inserts — shared
+    // first-come-first-served by any open UI EQ card AND every wire
+    // lease together — can be simultaneously measured; the message names
+    // the cap and the release verb so an agent (or the wire error string
+    // a human reads) knows exactly what is full and how to free a slot.
+    case spectrumTapsFull(Int)
     case unknownEffectParam(String)
     case audioUnitEffectRequiresComponent
     // Mixer presets (M7 macro-b): message built at throw time (lists valid names).
@@ -167,6 +174,22 @@ public enum ProjectError: Error, LocalizedError {
     // audition rejection lands BEFORE anything is pushed to a renderer, so a
     // refused call is guaranteed to have sounded nothing.
     case invalidAudition(String)
+    // Speech-to-text (m23-n2b, clip.transcribe): resolves its `clipId` param
+    // to that clip's backing audio file — a MIDI clip (or, structurally
+    // unreachable via any current mutation, an audio clip with no backing
+    // file) has none to transcribe. Same shape as
+    // voiceConversionRequiresAudioClip/analysisRequiresAudioClip.
+    case transcriptionRequiresAudioClip(UUID)
+    // clip.transcribe (m23-n2b): WhisperKit's word timings come back in
+    // SOURCE seconds, and `TranscriptionBeatMapper` (m23-n2a, by
+    // construction) maps elapsed SOURCE seconds straight onto the project
+    // timeline — correct only when one source second equals one timeline
+    // second, i.e. exactly `stretchRatio == 1`. A stretched clip is
+    // REFUSED rather than silently mis-placed by that factor; the engine
+    // itself ignores stretch until M5 ii-d, so this is the honest v1
+    // interim. Message built at throw time so it can name the offending
+    // ratio (the `invalidClipEdit` ready-to-show precedent).
+    case transcriptionRequiresUnstretchedClip(UUID, ratio: Double)
 
     public var errorDescription: String? {
         switch self {
@@ -200,6 +223,11 @@ public enum ProjectError: Error, LocalizedError {
         case .chainFull(let cap):
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "effect chain is full — a track holds at most \(cap) effects"
+        case .spectrumTapsFull(let cap):
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "too many spectrum taps — at most \(cap) inserts can be measured "
+                + "at once; release one with fx.spectrum {arm:false} (or close an EQ "
+                + "card) and retry"
         case .unknownEffectParam(let message):
             // The store builds the full message at throw time (which valid
             // parameter names to list depends on the effect kind, known only
@@ -443,7 +471,7 @@ public enum ProjectError: Error, LocalizedError {
         case .masterChainBuiltInOnly:
             // Exact wording is contract (design-m13d §4; control protocol +
             // MCP surface it verbatim, gate-checked in C6).
-            return "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus"
+            return "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|bassEnhancer"
         case .sidechainMasterUnsupported:
             // Exact wording is contract (design-m13d §4; surfaced verbatim over
             // the wire on `fx.setSidechain {trackId:"master"}`, gate-checked in
@@ -487,6 +515,16 @@ public enum ProjectError: Error, LocalizedError {
         case .referenceFileMissing(let path):
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "the reference audio file is missing (\(path)) — restore it, or import it again with reference.import"
+        case .transcriptionRequiresAudioClip(let id):
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "clip \(id.uuidString) is a MIDI clip — clip.transcribe applies only to audio clips (read MIDI notes directly for lyrics and timing)"
+        case .transcriptionRequiresUnstretchedClip(let id, let ratio):
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "clip \(id.uuidString) has a non-identity time-stretch (ratio "
+                + String(format: "%.3f", ratio)
+                + ") — un-stretch it (clip.setStretch ratio 1) first; clip.transcribe maps word "
+                + "timings assuming one source second equals one timeline second, which only "
+                + "holds at ratio 1 (stretch-aware transcription lands in a future version)"
         }
     }
 }

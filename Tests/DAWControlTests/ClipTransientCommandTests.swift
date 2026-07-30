@@ -222,4 +222,23 @@ struct ClipTransientCommandTests {
     func commandRegistered() {
         #expect(CommandRouter.allCommands.contains("clip.detectTransients"))
     }
+
+    // m23-n2h: `clip.detectTransients` used to be one of 26 verbs that never
+    // called `rejectUnknownKeys` at all — an unknown key was silently
+    // ignored rather than an error. The allowed set is exactly {clipId,
+    // sensitivity}; both already have positive coverage above (happy path
+    // passes both, the trim test omits sensitivity), so this only needs to
+    // pin the rejection + prove the guard runs before the engine is touched.
+    @Test("an unknown param is rejected before the engine is ever touched")
+    func detectTransientsRejectsUnknownParam() async throws {
+        let engine = FakeTransientEngine()
+        let (router, _) = makeRouter(engine: engine)
+        let (_, clipID) = try await addAudioClip(router)
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "clip.detectTransients",
+            params: ["clipId": .string(clipID), "bogus": .bool(true)]))
+        #expect(!response.ok)
+        #expect(response.error == "clip.detectTransients: unknown parameter 'bogus' — valid keys are 'clipId', 'sensitivity'")
+        #expect(engine.detectCalls == 0)
+    }
 }

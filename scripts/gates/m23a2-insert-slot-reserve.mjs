@@ -113,24 +113,21 @@ const teardown = async (code) => {
   clearTimeout(killer);
   fs.writeFileSync(`${OUT}/result.json`, JSON.stringify(checks, null, 2));
   try { ws.close(); } catch {}
-  // m23-ac-2a: the kill moves to the one home, but the pid is taken from
-  // startStaging rather than re-read from the pidfile — `stopStaging` REMOVES
-  // the pidfile, and the session.lock check below still needs to know whose
-  // lock it is. This gate's teardown does more than kill, and that extra step
-  // is kept here rather than pushed into the shared home: seventeen other
-  // callers do not want lock cleanup.
-  const pid = stagingPid;
+  // m23-ac-2c: this gate's bespoke session.lock cleanup MOVED into
+  // `stopStaging`, which now reads the pid before it deletes the pidfile and
+  // does the ownership check itself.
+  //
+  // The ac-2a note that used to sit here said the extra step was kept local
+  // because "seventeen other callers do not want lock cleanup". That was
+  // WRONG, and provably so: every gate that SIGTERMs staging leaves a lock
+  // behind, so every one of them was leaving the user a false crash recovery.
+  // This gate was not special in needing the cleanup — it was just the only
+  // one that had noticed. A step that looks bespoke is worth re-checking
+  // against the other callers before it is used as a reason not to share it.
+  //
+  // The 1200 ms sleep that preceded the check is also gone; see `stopStaging`
+  // for why both orderings are safe.
   stopStaging(GATE, PIDFILE);
-  await sleep(1200);
-  // SIGTERM skips the app's clean-exit path, so it leaves session.lock behind and
-  // the user would be offered a FALSE crash recovery. Remove it — but only if it
-  // is OURS (never touch a lock some other instance owns).
-  const lock = `${process.env.HOME}/Library/Application Support/DAWPro/Autosave/session.lock`;
-  try {
-    const j = JSON.parse(fs.readFileSync(lock, "utf8"));
-    if (Number(j.pid) === pid) { fs.rmSync(lock); console.log("removed our stale session.lock"); }
-    else console.log(`session.lock belongs to pid ${j.pid} — left alone`);
-  } catch {}
   process.exit(code);
 };
 

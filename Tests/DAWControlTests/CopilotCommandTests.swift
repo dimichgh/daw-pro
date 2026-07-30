@@ -89,6 +89,23 @@ struct CopilotCommandTests {
         #expect(resetResponse.error?.contains("not wired") == true)
     }
 
+    // m23-n2h: `ai.copilotState` used to be one of 26 verbs that never called
+    // `rejectUnknownKeys` at all — an unknown key was silently ignored. The
+    // allowed set is exactly {turnId}; both the omit-turnId and valid-turnId
+    // success paths are already pinned nearby, so this only needs the
+    // rejection pin.
+    @Test("ai.copilotState rejects an unknown param, even with no engine wired")
+    func stateRejectsUnknownParam() async throws {
+        // `rejectUnknownKeys` is the FIRST statement in this case body — it
+        // must fire before the "engine not wired" check, so a bare router
+        // (copilotEngine left nil) proves the guard runs unconditionally.
+        let router = CommandRouter(store: ProjectStore())
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "ai.copilotState", params: ["bogus": .bool(true)]))
+        #expect(!response.ok)
+        #expect(response.error == "ai.copilotState: unknown parameter 'bogus' — valid keys are 'turnId'")
+    }
+
     @Test("ai.copilotState with an unknown turnId returns current status and an empty transcript")
     func stateWithUnknownTurnID() async throws {
         let (router, _, engine) = makeWiredRouter()

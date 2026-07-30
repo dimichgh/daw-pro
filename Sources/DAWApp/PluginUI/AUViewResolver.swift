@@ -83,9 +83,21 @@ enum AUViewResolver {
 
     /// Bridges `requestViewController`'s completion (which the SDK says may run on
     /// ANY thread — CoreAudioKit/AUViewController.h) to an async main-actor result,
-    /// raced against a timeout with the same once-gate + unstructured-task idiom as
-    /// `AUHostRegistry.raceAgainstTimeout`: a stalled extension can never wedge the
-    /// main actor, and the gate resumes exactly once (a late completion is a no-op).
+    /// raced against a timeout. The gate resumes exactly once (a late completion is
+    /// a no-op).
+    ///
+    /// ⚠️ **KNOWN DEFECT — m23-au. Do NOT copy this shape.** The timeout below is
+    /// `Task { @MainActor in sleep }`, so the sleeper must RE-ACQUIRE the main actor
+    /// to fire: it is a sleep plus an unbounded queueing delay, not a deadline, and
+    /// it cannot fire while anything else is holding the actor. This is the same bug
+    /// m23-at removed from `AUHostRegistry` (whose `raceAgainstTimeout` this was
+    /// originally modelled on — that method no longer exists). The old comment here
+    /// claimed "a stalled extension can never wedge the main actor"; that is only an
+    /// argument about OUT-OF-PROCESS v3 extensions and it never covered the case
+    /// where our own main actor is busy for another reason. The fix is to route
+    /// through `DAWCore.DeadlineRace`, which puts the deadline on a `Task.detached`.
+    /// Note the deadline task here is also never cancelled, so it always sleeps the
+    /// full duration before its no-op resume.
     ///
     /// Never call this twice concurrently for one AU — `PluginWindowManager`'s
     /// `pendingOpens` serializes opens per target.

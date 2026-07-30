@@ -45,14 +45,20 @@ import AIServices
 public final class VoicePanelModel {
     // MARK: - Policy copy (standing legal/policy constraint, not decoration)
 
-    /// The own-voice-only policy line the panel renders verbatim. The phrase
+    /// The rights-responsibility line the panel renders verbatim. The phrase
     /// "a voice you have the rights to use" is a REQUIRED verbatim fragment
-    /// (m10-p-5 brief) — pinned by `VoicePanelModelTests`.
+    /// (m10-p-5 brief) — pinned by `VoicePanelModelTests` — and it SURVIVED
+    /// the m23-n2d policy change unchanged: the user withdrew the
+    /// own-voice-only prohibition, not the rights requirement.
     public static let policyLine =
-        "Train and convert only with your own voice — a voice you have the rights to use."
-    /// The no-celebrity/no-third-party companion line, also rendered verbatim.
+        "Train and convert with a voice you have the rights to use."
+    /// The companion line, also rendered verbatim. m23-n2d: this used to
+    /// assert an own-voice-only prohibition ("Never a celebrity voice…").
+    /// The user WITHDREW that policy — the product supports third-party
+    /// voice models and places provenance on the user. State the
+    /// responsibility; do not restate the prohibition.
     public static let policyDetail =
-        "Never a celebrity voice, and never anyone else's voice without their explicit permission."
+        "You are responsible for the rights to any voice you train or convert with, including third-party voices."
     /// The record-path hint: direct mic-record-into-panel is deferred (the
     /// record path already exists via normal track recording), and the panel
     /// SAYS so instead of hiding the gap.
@@ -566,15 +572,10 @@ public final class VoicePanelModel {
     }
 
     /// Default datasets root: `~/Library/Application Support/DAWPro/
-    /// VoiceDatasets/` (the `SoundBankLibrary.defaultLibraryDirectory` shape).
+    /// VoiceDatasets/` (m23-n1b — `DAWCore.AppDirectories` owns the rule; this
+    /// is one category of it).
     public static func defaultDatasetsRoot() -> URL {
-        let base = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return base
-            .appendingPathComponent("DAWPro", isDirectory: true)
-            .appendingPathComponent("VoiceDatasets", isDirectory: true)
+        AppDirectories.applicationSupport(.voiceDatasets)
     }
 }
 

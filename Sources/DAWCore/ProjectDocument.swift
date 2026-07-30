@@ -670,6 +670,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
     public var saturator: SaturatorParams?
     public var gate: GateParams?
     public var chorus: ChorusParams?
+    public var bassEnhancer: BassEnhancerParams?
     /// Hosted Audio Unit selection + inlined state (stateData rides as base64
     /// through Codable's Data default) — the InstrumentDocument.audioUnit
     /// mirror. Additive optional: pre-M4 (v) files have no key and stay
@@ -681,7 +682,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, kind, bypassed, gain, eq, compressor, limiter
-        case reverb, delay, saturator, gate, chorus, audioUnit
+        case reverb, delay, saturator, gate, chorus, bassEnhancer, audioUnit
         case sidechainSourceTrackID
     }
 
@@ -701,6 +702,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         saturator = effect.saturator
         gate = effect.gate
         chorus = effect.chorus
+        bassEnhancer = effect.bassEnhancer
         audioUnit = effect.audioUnit
         sidechainSourceTrackID = effect.sidechainSourceTrackID
     }
@@ -719,6 +721,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         saturator = try c.decodeIfPresent(SaturatorParams.self, forKey: .saturator)
         gate = try c.decodeIfPresent(GateParams.self, forKey: .gate)
         chorus = try c.decodeIfPresent(ChorusParams.self, forKey: .chorus)
+        bassEnhancer = try c.decodeIfPresent(BassEnhancerParams.self, forKey: .bassEnhancer)
         audioUnit = try c.decodeIfPresent(AudioUnitConfig.self, forKey: .audioUnit)
         sidechainSourceTrackID = try c.decodeIfPresent(UUID.self, forKey: .sidechainSourceTrackID)
     }
@@ -740,6 +743,7 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(saturator, forKey: .saturator)
         try c.encodeIfPresent(gate, forKey: .gate)
         try c.encodeIfPresent(chorus, forKey: .chorus)
+        try c.encodeIfPresent(bassEnhancer, forKey: .bassEnhancer)
         try c.encodeIfPresent(audioUnit, forKey: .audioUnit)
         try c.encodeIfPresent(sidechainSourceTrackID, forKey: .sidechainSourceTrackID)
     }
@@ -753,7 +757,8 @@ public struct EffectDocument: Codable, Sendable, Equatable {
                                 isBypassed: bypassed ?? false, gain: gain,
                                 eq: eq, compressor: compressor, limiter: limiter,
                                 reverb: reverb, delay: delay, saturator: saturator,
-                                gate: gate, chorus: chorus, audioUnit: audioUnit,
+                                gate: gate, chorus: chorus, bassEnhancer: bassEnhancer,
+                                audioUnit: audioUnit,
                                 sidechainSourceTrackID: sidechainSourceTrackID)
     }
 }

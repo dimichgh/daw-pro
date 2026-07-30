@@ -66,8 +66,17 @@ struct CopilotCatalogTests {
         // A silent add/drop fails here. m23-d's note.audition took it 65 -> 66.
         // m23-h's track.reorder — the ONE track-ordering verb, and the m21-b2
         // law that a new user-facing capability must be visible to the in-app
-        // copilot — took it 66 -> 67.
-        #expect(CopilotToolCatalog.v1.count == 67)
+        // copilot — took it 66 -> 67. m23-r4's fx.spectrum took it 67 -> 68.
+        // m23-o1's frequency.reference took it 68 -> 69. m23-w's
+        // clip.removeMany/clip.moveMany — the wire half of m23-g1/m23-g2's
+        // group delete/move, and strictly better undo atomicity for a
+        // capability (clip.remove/clip.move) already IN the catalog — took it
+        // 69 -> 71.
+        #expect(CopilotToolCatalog.v1.count == 71)
+        #expect(CopilotToolCatalog.tool(command: "clip.removeMany") != nil,
+                "clip.removeMany missing from the catalog")
+        #expect(CopilotToolCatalog.tool(command: "clip.moveMany") != nil,
+                "clip.moveMany missing from the catalog")
         #expect(CopilotToolCatalog.tool(command: "track.reorder") != nil,
                 "track.reorder missing from the catalog")
         #expect(CopilotToolCatalog.tool(command: "mixer.liveLoudness") != nil,

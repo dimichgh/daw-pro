@@ -364,11 +364,26 @@ struct WireHardeningM16ETests {
         #expect(error.contains("'groove'"))
     }
 
-    // MARK: - F5 survey completion: the zero-param mutating verbs the initial
-    // sweep missed (transport.play/stop/record, edit.undo/redo,
-    // ai.copilotReset, ai.sidecarStart/Stop) — "No params" documented in each
-    // doc comment but nothing previously enforced it, so a typo'd param was
-    // silently ignored rather than taught.
+    // MARK: - F5 survey completion: zero-param mutating verbs the initial
+    // sweep missed — "No params" documented in each doc comment but nothing
+    // previously enforced it, so a typo'd param was silently ignored rather
+    // than taught.
+    //
+    // CORRECTED m23-n2g: this MARK used to name eight verbs
+    // (transport.play/stop/record, edit.undo/redo, ai.copilotReset,
+    // ai.sidecarStart/Stop) as covered here. Only THREE are actually driven
+    // below — transport.play, edit.undo, ai.sidecarStop. The other five were
+    // never tested anywhere, and this comment is the likely reason nobody
+    // noticed: it reads as a completed survey. A comment is not coverage.
+    // Full coverage for all 18 zero-param verbs (including these) now lives in
+    // `ZeroParamVerbRejectionTests`, which derives the verb set from
+    // Commands.swift itself rather than from a hand-written claim like this
+    // one. (Counting `@Test` below yields FOUR, not three: the fourth,
+    // `transportPlayNoParamsStillWorks`, is a happy-path assertion, not an
+    // unknown-key rejection.) The three rejection tests here are kept as-is:
+    // they assert the message HEAD
+    // (`contains`), which is weaker than the new suite's full-literal pins but
+    // costs nothing and documents the original F5 intent.
 
     @Test("transport.play rejects a stray param instead of silently ignoring it")
     func transportPlayRejectsUnknownKey() async throws {

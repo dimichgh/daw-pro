@@ -166,9 +166,12 @@ struct TrackReorderCommandTests {
     func advertisedAtEnd() {
         #expect(CommandRouter.allCommands.contains("track.reorder"))
         // m23-k3's import pair and m23-k4a's export pair landed after it,
-        // under the same law; count 154 -> 156 -> 158.
-        #expect(CommandRouter.allCommands.last == "track.exportMIDI")
-        #expect(CommandRouter.allCommands.count == 158)
+        // under the same law; count 154 -> 156 -> 158. m23-n2b's
+        // clip.transcribe landed after that; count 158 -> 159. m23-n3b's
+        // install/status pair landed after THAT; count 159 -> 161 —
+        // clip.transcribe is no longer last (see
+        // SpeechModelInstallCommandTests for that leg).
+        #expect(CommandRouter.allCommands.count == 165)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
         // Additive: every pre-existing track.* verb is untouched, in place.
         for name in ["track.add", "track.remove", "track.rename", "track.setVolume",
                      "track.setPan", "track.setMute", "track.setSolo", "track.setOutput",

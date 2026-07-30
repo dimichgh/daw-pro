@@ -26,7 +26,8 @@ import DAWAppKit
 /// its OWN `TimelineView` at 20 Hz and the readouts in THEIRS at 10 Hz, so
 /// neither invalidates the strip around them; all geometry/semantics are
 /// headless in `DAWAppKit.StereoScopeModel`. Plain value/closure inputs, so
-/// previews and the real strip share it.
+/// previews and the real strip share it. Both ticks are UNPAUSED — the m22-e
+/// poll-discipline law; see `StereoScopeView.pollInterval`.
 struct MasterStereoImageBlock: View {
     /// Pro reveals the goniometer well + the WIDTH/BAL row.
     var showsScope: Bool
@@ -35,6 +36,15 @@ struct MasterStereoImageBlock: View {
     var scopeFrame: () -> MasterScopeFrame
     /// Polled at readout rate for `correlation` / `width` / `balance`.
     var analysis: () -> MasterAnalysisSnapshot
+    /// Per-frame reporters for the two live layers (the `LiveLayerWitness` seam,
+    /// m23-r3b) — SEPARATE, because the two tick at different rates in different
+    /// `TimelineView`s and either can freeze while the other runs. One shared
+    /// reporter could not tell them apart, and telling them apart is the whole
+    /// point of a per-site pin. nil in previews.
+    var onTrailFrame: ((_ points: Int, _ calm: Bool,
+                        _ zone: StereoScopeModel.CorrelationZone) -> Void)?
+    var onReadoutFrame: ((MasterAnalysisSnapshot,
+                          StereoScopeModel.CorrelationZone) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -49,9 +59,11 @@ struct MasterStereoImageBlock: View {
                     .foregroundStyle(DAWTheme.textFaint)
             }
             if showsScope {
-                StereoScopeView(scopeFrame: scopeFrame, analysis: analysis)
+                StereoScopeView(scopeFrame: scopeFrame, analysis: analysis,
+                                onFrame: onTrailFrame)
             }
-            StereoImageReadouts(analysis: analysis, showsDetail: showsScope)
+            StereoImageReadouts(analysis: analysis, showsDetail: showsScope,
+                                onFrame: onReadoutFrame)
         }
         .help("How wide the mix is and whether it stays mono-safe. The scope traces left vs right — a vertical line is mono, a cloud is wide stereo, a horizontal line cancels on single-speaker (phone) playback. The bar is the same verdict: green in phase, amber very wide, red out of phase.")
     }
@@ -66,14 +78,26 @@ struct MasterStereoImageBlock: View {
 struct StereoScopeView: View {
     var scopeFrame: () -> MasterScopeFrame
     var analysis: () -> MasterAnalysisSnapshot
+    /// Reports what each drawn frame resolved (the `LiveLayerWitness` seam,
+    /// m23-r3b): the trail keeps no smoothed state of its own, so without this
+    /// there is nothing downstream of the tick to read and a frozen trail is
+    /// indistinguishable from a live one. nil in previews.
+    var onFrame: ((_ points: Int, _ calm: Bool,
+                   _ zone: StereoScopeModel.CorrelationZone) -> Void)?
 
-    /// Pause the 20 Hz poll when the window isn't active (the `VibeMeterView`
-    /// guidance — no frames for a scope nobody's looking at).
-    @Environment(\.controlActiveState) private var controlActiveState
-
-    /// Trail poll rate: 20 Hz. The frame spans ~43 ms, so consecutive polls
-    /// tile the signal almost seamlessly; ≥30 Hz would only redraw the same
-    /// pairs more often.
+    /// **Poll discipline — the m22-e LAW** (`Mixer/ReferencePanelView.swift:26`):
+    /// this tick is UNPAUSED, and NEVER
+    /// `.animation(paused: controlActiveState == .inactive)`. That idiom lived
+    /// here until m23-r3b, justified by the superseded "no frames for a scope
+    /// nobody's looking at" guidance — which is wrong for an app agents drive
+    /// over a socket, because its window is routinely not frontmost and the
+    /// goniometer then freezes mid-trail over live audio.
+    ///
+    /// Trail poll rate: 20 Hz, UNCHANGED by the unpause. The frame spans
+    /// ~43 ms, so consecutive polls tile the signal almost seamlessly; ≥30 Hz
+    /// would only redraw the same pairs more often. Unpausing therefore costs
+    /// ~20 fps of small-canvas work while the app is in the background, not a
+    /// full display-link tick.
     private static let pollInterval = 1.0 / 20
 
     var body: some View {
@@ -83,8 +107,7 @@ struct StereoScopeView: View {
                 Self.drawGrid(&context, size: size)
             }
             // Layer 2: the trail — the only continuously-redrawing layer.
-            TimelineView(.animation(minimumInterval: Self.pollInterval,
-                                    paused: controlActiveState == .inactive)) { _ in
+            TimelineView(.periodic(from: .now, by: Self.pollInterval)) { _ in
                 // CANVAS CONTRACT (m16-a): @Sendable renderer, value captures
                 // only, computed before the closure (the per-frame point
                 // buffer is the VibeMeterView precedent).
@@ -93,6 +116,7 @@ struct StereoScopeView: View {
                 let zone = StereoScopeModel.zone(forCorrelation: Double(analysis().correlation))
                 let color = zoneColor(zone)
                 let points = calm ? [] : StereoScopeModel.displayPoints(frame)
+                let _ = onFrame?(points.count, calm, zone)
                 Canvas { @Sendable context, size in
                     Self.drawTrail(&context, size: size, points: points,
                                    color: color, calm: calm)
@@ -207,18 +231,32 @@ struct StereoImageReadouts: View {
     var analysis: () -> MasterAnalysisSnapshot
     /// Pro shows the WIDTH/BAL row; Simple keeps just the verdict + bar.
     var showsDetail: Bool
+    /// Reports the snapshot each drawn frame resolved, and the zone it picked
+    /// from it (the `LiveLayerWitness` seam, m23-r3b). The zone is handed over
+    /// rather than recomputed downstream: a witness that re-derived it would
+    /// stay green through a mis-wired readout. nil in previews.
+    var onFrame: ((MasterAnalysisSnapshot,
+                   StereoScopeModel.CorrelationZone) -> Void)?
 
-    @Environment(\.controlActiveState) private var controlActiveState
-
+    /// **Poll discipline — the m22-e LAW** (`Mixer/ReferencePanelView.swift:26`):
+    /// UNPAUSED, never `.animation(paused: controlActiveState == .inactive)` —
+    /// the idiom that lived here until m23-r3b and froze the correlation number
+    /// at a stale value whenever the app lost focus. A stale NUMBER is the worst
+    /// shape of this bug: an SF Mono readout looks authoritative, and nothing
+    /// about it says it stopped.
+    ///
+    /// Rate UNCHANGED at 10 Hz: the scalars ride τ 300 ms ballistics (≈3 Hz of
+    /// real information), so 10 Hz renders the bar's motion smoothly without
+    /// joining the trail's 20 Hz tick.
     private static let pollInterval = 1.0 / 10
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: Self.pollInterval,
-                                paused: controlActiveState == .inactive)) { _ in
+        TimelineView(.periodic(from: .now, by: Self.pollInterval)) { _ in
             let snapshot = analysis()
             let correlation = Double(snapshot.correlation)
             let zone = StereoScopeModel.zone(forCorrelation: correlation)
             let color = zoneColor(zone)
+            let _ = onFrame?(snapshot, zone)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     Text(zone.label)

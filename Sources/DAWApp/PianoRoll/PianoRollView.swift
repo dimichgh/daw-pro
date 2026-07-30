@@ -84,6 +84,28 @@ struct PianoRollView: View {
     /// must happen app-side). Defaulted so previews stay one-liner-simple.
     var onFocusChange: (Bool) -> Void
 
+    /// The NOTE-SELECTION bridge (m23-x, second pass) — reports out whether this
+    /// editor currently has notes selected, which is the app's own test for
+    /// "would the roll have consumed this key?" (see its `.onKeyPress(.delete)`
+    /// below), and carries the debug seam's staged selection back in. Defaulted
+    /// so previews and existing call sites stay one-liner-simple.
+    var noteSelection: PianoRollNoteSelectionBridge
+
+    /// Publishes the bar-ops readout's DRAWN text and ink (m23-t) so
+    /// `debug.pianoRollBarOps` can report what this header actually put on
+    /// screen. Called from inside the `Text`/`.foregroundStyle` arguments — see
+    /// `reportedBarOpsText`/`reportedBarOpsInk`. Defaulted to a no-op so
+    /// previews and any future call site stay one-liner-simple.
+    ///
+    /// The ink crosses as a `Color`, NOT as a resolved hex string: this cluster
+    /// is fed `positionBeats`, so it re-evaluates ~29 times a second while the
+    /// transport runs (MEASURED, not assumed — `debug.pianoRollBarOps.ticks`
+    /// counted 118 REPORTS in 2.007 s, and there are TWO reports per body: the
+    /// string and the ink),
+    /// and resolving through `NSColor` on the way out would put a per-frame
+    /// allocation in drawing code. The ledger resolves once per CHANGE instead.
+    var onBarOpsStyle: (_ role: String, _ text: String?, _ ink: Color?) -> Void = { _, _, _ in }
+
     @State private var model: PianoRollModel
     /// Edit model for the Pro controller strip (m16-b4), seeded from the clip's
     /// lanes. Recreated with the view on a clip switch (`.id(clip.id)`).
@@ -123,8 +145,10 @@ struct PianoRollView: View {
     private static let keyboardWidth: CGFloat = 54
     /// Height of the frozen scrub strip pinned to the top of the note grid.
     private static let scrubStripHeight: CGFloat = 18
-    /// Stable density key for this panel.
-    private static let panelID = "pianoRoll"
+    /// Stable density key for this panel. Internal (the `MixerView.panelID`
+    /// shape) since m23-t so `debug.pianoRollBarOps` reports the density from
+    /// the SAME constant the view reads, never a re-typed `"pianoRoll"`.
+    static let panelID = "pianoRoll"
     /// Coordinate space naming the grid's horizontal scroll viewport, so the
     /// content's leading edge reports the live scroll offset.
     private static let gridScrollSpace = "pianoRollGridScroll"
@@ -146,7 +170,10 @@ struct PianoRollView: View {
          onCommitControllerLane: @escaping (_ type: MIDIControllerType, _ points: [MIDIControllerPoint]) -> Clip?,
          onClose: @escaping () -> Void,
          onAudition: @escaping (_ pitches: [Int], _ velocity: Int) -> Void = { _, _ in },
-         onFocusChange: @escaping (Bool) -> Void = { _ in }) {
+         onFocusChange: @escaping (Bool) -> Void = { _ in },
+         noteSelection: PianoRollNoteSelectionBridge = PianoRollNoteSelectionBridge(),
+         onBarOpsStyle: @escaping (_ role: String, _ text: String?, _ ink: Color?) -> Void
+             = { _, _, _ in }) {
         self.clip = clip
         self.beatsPerBar = beatsPerBar
         self.positionBeats = positionBeats
@@ -163,6 +190,8 @@ struct PianoRollView: View {
         self.onClose = onClose
         self.onAudition = onAudition
         self.onFocusChange = onFocusChange
+        self.noteSelection = noteSelection
+        self.onBarOpsStyle = onBarOpsStyle
         _model = State(initialValue: PianoRollModel(
             notes: clip.notes ?? [],
             clipLengthBeats: clip.lengthBeats
@@ -248,8 +277,35 @@ struct PianoRollView: View {
         // zoom while it is focused (the View-menu key equivalents fire before
         // any focused view sees the key, so routing lives app-side).
         .onChange(of: isFocused, initial: true) { _, focused in onFocusChange(focused) }
+        // m23-x: publish whether THIS editor holds a note selection — the same
+        // test the DELETE handler just above applies to decide whether to
+        // consume the key or let it fall through to the arrange. The arrange's
+        // arrow-key nudge refuses on focus AND this, so ← with notes selected
+        // edits notes rather than sliding the whole clip underneath the user.
+        // `.onChange` (not `body`) for the `onFocusChange` reason: this gates a
+        // keyboard path, so it must be an observable transition, and
+        // `initial: true` means a roll that opens with a selection already
+        // reports it rather than waiting for the first change.
+        .onChange(of: model.selection.isEmpty, initial: true) { _, empty in
+            noteSelection.report(hasSelection: !empty)
+        }
+        // m23-x: the debug seam's staged selection (the
+        // `follow.externalScrollNonce` pattern — watch the NONCE, so a gate
+        // asking for the same state twice still applies). This is the only way
+        // anything outside can reach `model`, which is `@State private`.
+        .onChange(of: noteSelection.stageNonce) { _, _ in
+            if noteSelection.stagedSelectAll {
+                model.selection = Set(model.draft.map(\.id))
+            } else {
+                model.clearSelection()
+            }
+        }
         .onDisappear {
             onFocusChange(false)
+            // m23-x: and drop the note-selection claim with it. A latched
+            // `true` here would kill the arrange's arrow keys permanently once
+            // the editor closed, with nothing on screen to explain why.
+            noteSelection.clear()
             // m23-d: a clip switch recreates this view (`.id(clip.id)`), so the
             // disappearing instance must release whatever it was sounding.
             onAudition([], 0)
@@ -457,6 +513,14 @@ struct PianoRollView: View {
             lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
     }
 
+    /// The readout's DRAWN string, composed at its one home in `DAWAppKit`
+    /// (m23-t) so it is reachable from `Tests/` — `DAWApp` has no test target.
+    private var barReadoutText: String {
+        PianoRollBarOps.barReadoutLabel(
+            position: positionBeats, clipStartBeat: clip.startBeat,
+            lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
+    }
+
     /// Delete is off when it would collapse the clip below one bar (invalid → off).
     private var canDeleteBar: Bool {
         PianoRollBarOps.canDeleteBar(lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
@@ -476,11 +540,48 @@ struct PianoRollView: View {
     /// dead (m21-c discoverability): when it can't act it stays dim but a press
     /// explains WHY inline (the m17-c refusal-bubble idiom) instead of silently
     /// swallowing the click — a tooltip alone proved undiscoverable.
+    ///
+    /// **The readout is an OPERAND, never a position (m23-t).** It used to draw
+    /// in `DAWTheme.playback` under the comment "cyan = position readout", which
+    /// contradicted `targetBarNumber`'s own doc one screen up ("the bar number
+    /// the buttons act on"), the cluster's tooltips ("at bar n"), the explain
+    /// card ("at the marked spot") — and Rule 3, invoked two lines above for the
+    /// very glyphs beside it. With the transport four bars outside the clip the
+    /// header drew a cyan `BAR 1`: the transport was nowhere near bar 1, and the
+    /// accent said it was. Cyan is refused here for the same reason this view's
+    /// Middle C marker refuses it (docs/DESIGN-LANGUAGE.md, piano-roll entry):
+    /// **cyan in this very view is the transport playhead.**
+    ///
+    /// The ink is `textDim`, and neither of the cluster's own two tokens.
+    /// `barOpButton` draws `enabled ? textPrimary : textFaint` — BOTH are button
+    /// inks here, so either would make the readout read as a third button, and
+    /// `textFaint` additionally MEANS "can't act right now" inside this cluster
+    /// (and at 4.2–4.8:1 is the decorative floor, under Rule 5's 4.5:1 for a
+    /// label). `textDim` is the caption tier and is exactly what the sibling
+    /// readout in this same header uses — `zoomCluster`'s percent, same 9 pt
+    /// medium SF Mono. The face stays monospaced: SF Mono means "numeric
+    /// readout" in this app and this is one.
+    ///
+    /// The two clusters still do not collide: zoom is a true stepper
+    /// (`[−][100%][+]`, no dividers, uniformly `textDim`), this one is
+    /// `[BAR n] │ [+] │ [−]` — readout first, hairline dividers, brighter
+    /// glyphs. Anatomy and ink distribution both differ, so `BAR n` beside +/−
+    /// does not read as "nudge the number".
     private var barOpsCluster: some View {
         HStack(spacing: 0) {
-            Text("BAR \(targetBarNumber)")
+            // Reported THROUGH the arguments, never beside them (the m23-p2
+            // law): `reportedBarOpsText`/`reportedBarOpsInk` publish what they
+            // RETURN, so the value handed to `Text`/`.foregroundStyle` IS the
+            // value `debug.pianoRollBarOps` reports. A reporter in a sibling
+            // `.onChange` survived a literal colour mutation twice.
+            //
+            // Intrinsically sized on purpose: the number is DATA (clip length ×
+            // playhead), not a closed vocabulary, so no `.frame(width:)` and no
+            // `.fixedSize` — a pin without the width overflows and gets cut
+            // mid-glyph by the cluster's `clipShape`, with no ellipsis.
+            Text(reportedBarOpsText(barReadoutText, role: Self.barReadoutRole))
                 .font(.system(size: 9, weight: .medium, design: .monospaced))
-                .foregroundStyle(DAWTheme.playback)   // cyan = position readout
+                .foregroundStyle(reportedBarOpsInk(DAWTheme.textDim, role: Self.barReadoutRole))
                 .padding(.horizontal, 7)
             barOpsDivider
             barOpButton(system: "plus", enabled: true,
@@ -508,6 +609,97 @@ struct PianoRollView: View {
 
     private var barOpsDivider: some View {
         Rectangle().fill(DAWTheme.hairline).frame(width: 1, height: 14)
+    }
+
+    // MARK: Bar-ops readout probe (m23-t)
+
+    /// The one role this cluster reports. A role that never publishes both
+    /// halves is the signature of a call site replaced by a literal, which
+    /// `debug.pianoRollBarOps` reports as null and the gate FAILS on — never
+    /// skips.
+    static let barReadoutRole = "barReadout"
+
+    /// Publishes the string and RETURNS it, so what `Text` draws is what the
+    /// probe reports (the `EffectEditorOverlay.reportedFont` shape).
+    private func reportedBarOpsText(_ string: String, role: String) -> String {
+        onBarOpsStyle(role, string, nil)
+        return string
+    }
+
+    /// Publishes the ink and RETURNS it, so the colour handed to
+    /// `.foregroundStyle` IS the reported colour.
+    ///
+    /// Hands over the `Color` itself and lets the ledger resolve it: this runs
+    /// ~29×/s during playback (measured: one call per body, and the body ran 59
+    /// times in 2.007 s), and `DAWTheme.hexString` is an
+    /// `NSColor` bridge plus a `String(format:)` — a per-frame allocation in
+    /// drawing code. Resolution still happens through `NSColor` on the far side,
+    /// never as an echoed token name: a probe naming the token it INTENDED
+    /// agrees with itself while the view draws something else.
+    private func reportedBarOpsInk(_ ink: Color, role: String) -> Color {
+        onBarOpsStyle(role, nil, ink)
+        return ink
+    }
+
+    /// Where the bar-ops cluster's DRAWN text and ink land (m23-t).
+    ///
+    /// Deliberately OUTSIDE Observation — the `EffectHonestyStyleLedger` shape,
+    /// and for the same reason: the view reports from inside its own
+    /// `Text`/`.foregroundStyle` ARGUMENTS, which run during `body`, so the
+    /// write must not invalidate the view making it. An `@Observable` here is a
+    /// hang, not a compile error. Read only by `debug.pianoRollBarOps`.
+    ///
+    /// The two halves arrive as separate calls (a string argument and a colour
+    /// argument), so an entry can be half-filled for one frame; a PERMANENTLY
+    /// half-filled entry is what the gate fails on.
+    ///
+    /// The ink arrives as a `Color` and is resolved to sRGB hex HERE, once per
+    /// CHANGE. The view reports on every `body`, which during playback is ~29
+    /// times a second (MEASURED via `ticks`, which counts REPORTS at two per
+    /// body: 118 reports = 59 bodies in 2.007 s), and drawing code does not get to
+    /// allocate per frame — so the `NSColor` round-trip sits behind a
+    /// last-value memo. Resolving in the caller instead, or hoisting the hex to
+    /// a `static let`, both decouple the reported value from the DRAWN one, and
+    /// a decoupled reporter is exactly the defect the m23-p2 law names.
+    @MainActor
+    final class BarOpsStyleLedger {
+        private(set) var entries: [String: (text: String?, ink: String?)] = [:]
+
+        /// How many times the view has reported. One per reporter CALL, so two
+        /// per `body` evaluation of the cluster. Counted, never reasoned about:
+        /// this is the instrument that settled whether the cluster redraws on
+        /// every transport tick. It does: 0 reports idle over 2 s, 118 over
+        /// 2.007 s playing — which is 59 BODIES, ~29/s, not 118 redraws.
+        private(set) var ticks = 0
+
+        /// How many of those reports actually cost an `NSColor` resolution. Must
+        /// stay FLAT while `ticks` climbs; that difference is the memo working,
+        /// and it is the only observable proof that it does.
+        private(set) var inkResolutions = 0
+
+        private var lastInk: [String: Color] = [:]
+
+        func record(role: String, text: String?, ink: Color?) {
+            ticks += 1
+            var entry = entries[role] ?? (text: nil, ink: nil)
+            if let text { entry.text = text }
+            if let ink, lastInk[role] != ink {
+                lastInk[role] = ink
+                entry.ink = DAWTheme.hexString(ink)
+                inkResolutions += 1
+            }
+            entries[role] = entry
+        }
+
+        /// Drops the memo along with the entries — otherwise a reset would leave
+        /// `lastInk` matching, the next report would skip resolution, and the
+        /// role would read back with a permanently null ink.
+        func clear() {
+            entries.removeAll()
+            lastInk.removeAll()
+            ticks = 0
+            inkResolutions = 0
+        }
     }
 
     /// A press on a can't-act bar op explains itself here (m21-c): the m17-c

@@ -386,15 +386,137 @@ struct WhisperModelCatalogLocationTests {
         #expect(root.lastPathComponent == WhisperModelCatalog.relativeModelsPath)
     }
 
-    /// The walk-up anchors on `Package.swift`, so under the test runner (cwd =
-    /// package root) it must land on `<repo>/Models`. Asserted structurally, so
-    /// it holds on any checkout and does not depend on the weights being there.
-    @Test("With no override the location is <repo>/Models, found by Package.swift")
-    func walkUpFindsRepoModels() throws {
-        let root = try #require(WhisperModelCatalog.defaultSearchRoot(environment: [:]))
-        #expect(root.lastPathComponent == WhisperModelCatalog.relativeModelsPath)
-        let repo = root.deletingLastPathComponent()
-        #expect(FileManager.default.fileExists(
-            atPath: repo.appendingPathComponent("Package.swift").path))
+    /// SUPERSEDED 2026-07-27 (m23-n1): the weights moved out of `<repo>/Models`
+    /// to Application Support, so "the location IS `<repo>/Models`" is no longer
+    /// true — it is now the LAST candidate, not the only one. The walk-up itself
+    /// still works and is asserted below; what changed is its priority.
+    @Test("Application Support is the highest-priority candidate")
+    func applicationSupportLeadsTheChain() throws {
+        let candidates = WhisperModelCatalog.searchRootCandidates()
+        let first = try #require(candidates.first)
+        #expect(first == WhisperModelCatalog.applicationSupportModelsDirectory())
+        #expect(first.lastPathComponent == WhisperModelCatalog.relativeModelsPath)
+        // ...and it is under Application Support/DAWPro, not the repo.
+        #expect(first.deletingLastPathComponent().lastPathComponent == "DAWPro")
+    }
+
+    /// The walk-up still anchors on `Package.swift` (cwd = package root under
+    /// the test runner), so `<repo>/Models` must still be REACHABLE — just no
+    /// longer first. Structural: does not require the weights to be there.
+    @Test("The repo walk-up still contributes <repo>/Models, at lower priority")
+    func walkUpStillContributesRepoModels() throws {
+        let candidates = WhisperModelCatalog.searchRootCandidates()
+        let repoModels = try #require(candidates.first {
+            FileManager.default.fileExists(
+                atPath: $0.deletingLastPathComponent()
+                    .appendingPathComponent("Package.swift").path)
+        })
+        #expect(repoModels.lastPathComponent == WhisperModelCatalog.relativeModelsPath)
+        #expect(candidates.firstIndex(of: repoModels) != 0)
+    }
+
+    /// The picking rule, asserted as an invariant rather than against a fixed
+    /// machine state: whichever candidate is the FIRST to hold a usable model is
+    /// the one `defaultSearchRoot` returns. Holds on a machine with weights
+    /// installed and on a bare checkout alike.
+    @Test("The first candidate holding a usable model is the one chosen")
+    func firstStockedCandidateWins() throws {
+        let candidates = WhisperModelCatalog.searchRootCandidates()
+        let stocked = candidates.first {
+            !WhisperModelCatalog(searchRoot: $0).installedModels().isEmpty
+        }
+        let resolved = WhisperModelCatalog.defaultSearchRoot(environment: [:])
+        if let stocked {
+            #expect(resolved == stocked)
+        } else {
+            // Nothing installed anywhere: it still resolves to a real candidate
+            // so the teaching error can name a directory, never to nil.
+            #expect(resolved != nil)
+            #expect(candidates.contains(try #require(resolved)))
+        }
+    }
+
+    /// m23-n3d: the BUNDLED candidate — the one `scripts/bundle.sh
+    /// --with-weights` exists to populate. NOTHING covered it before this item:
+    /// the three tests above pin Application Support, the repo walk-up, and the
+    /// picking rule, so a bundle-relative candidate that quietly went missing
+    /// would leave all of them green while every `--with-weights` build shipped
+    /// ~1.5 GB of weights the app then ignored — a silent, expensive no-op.
+    ///
+    /// Asserted against a REAL .app directory laid out exactly as bundle.sh
+    /// lays one out (`Contents/Resources/Models/<variant>/…`), so the script's
+    /// destination and the resolver's expectation are pinned against each
+    /// other rather than each against itself. The fixture is kilobytes: the
+    /// recognition rule is purely structural — `componentURL` only checks that
+    /// the `.mlmodelc` EXISTS, nothing reads model bytes.
+    @Test("Weights sealed into a bundle are found there: candidate present, SECOND, and recognized")
+    func bundledWeightsAreResolvedInsideTheApp() throws {
+        let fm = FileManager.default
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("n3d-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: tmp) }
+
+        let app = tmp.appendingPathComponent("DAWPro.app", isDirectory: true)
+        let contents = app.appendingPathComponent("Contents", isDirectory: true)
+        let resources = contents.appendingPathComponent("Resources", isDirectory: true)
+        // Exactly bundle.sh's `cp -R` destination.
+        let models = resources.appendingPathComponent(
+            WhisperModelCatalog.relativeModelsPath, isDirectory: true)
+        let variantName = "openai_whisper-tiny.en"
+        let variant = models.appendingPathComponent(variantName, isDirectory: true)
+        try fm.createDirectory(at: variant, withIntermediateDirectories: true)
+        for component in WhisperModelCatalog.requiredComponents {
+            try fm.createDirectory(
+                at: variant.appendingPathComponent("\(component).mlmodelc", isDirectory: true),
+                withIntermediateDirectories: true)
+        }
+        let tokenizer = models.appendingPathComponent(
+            WhisperModelCatalog.tokenizerDirectoryName, isDirectory: true)
+        try fm.createDirectory(at: tokenizer, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(
+            to: tokenizer.appendingPathComponent(WhisperModelCatalog.tokenizerFileName))
+        // Minimal Info.plist so CFBundle accepts the directory as a bundle.
+        try PropertyListSerialization
+            .data(fromPropertyList: ["CFBundleIdentifier": "com.dawpro.n3d-fixture"],
+                  format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+
+        let bundle = try #require(Bundle(url: app), "the fixture is a real bundle")
+
+        // 1. The bundled candidate exists and lands where bundle.sh copies to.
+        let bundled = try #require(WhisperModelCatalog.bundledModelsDirectory(bundle: bundle))
+        #expect(bundled.lastPathComponent == WhisperModelCatalog.relativeModelsPath)
+        #expect(bundled.resolvingSymlinksInPath() == models.resolvingSymlinksInPath())
+
+        // 2. It sits SECOND — behind Application Support, so a user download
+        //    can upgrade a shipped default without reinstalling the app, and
+        //    ahead of the dev-only repo walk-up.
+        let candidates = WhisperModelCatalog.searchRootCandidates(bundle: bundle)
+        #expect(candidates.count >= 2)
+        #expect(candidates[0] == WhisperModelCatalog.applicationSupportModelsDirectory())
+        #expect(candidates[1] == bundled)
+
+        // 3. The sealed copy is actually RECOGNIZED, not merely pointed at —
+        //    the difference between a path that resolves and weights that load.
+        let installed = WhisperModelCatalog(searchRoot: bundled).installedModels()
+        #expect(installed.map(\.variantDirectoryName) == [variantName])
+    }
+
+    /// An empty higher-priority directory must NOT shadow a stocked lower one —
+    /// the rule is "first STOCKED", not "first that exists". This pins the exact
+    /// predicate `defaultSearchRoot` walks the chain with: an existing but empty
+    /// directory reports no installed models, so the walk continues past it.
+    @Test("An existing but empty directory reports nothing, so the chain walks on")
+    func emptyDirectoryDoesNotShadow() throws {
+        let empty = try ModelFixture()
+        defer { empty.destroy() }
+        // Exists, but holds no variant.
+        #expect(WhisperModelCatalog(searchRoot: empty.root).installedModels().isEmpty)
+
+        let stocked = try ModelFixture()
+        defer { stocked.destroy() }
+        try stocked.makeVariant("openai_whisper-tiny")
+        try stocked.makeSharedTokenizer()
+        #expect(!WhisperModelCatalog(searchRoot: stocked.root).installedModels().isEmpty)
     }
 }

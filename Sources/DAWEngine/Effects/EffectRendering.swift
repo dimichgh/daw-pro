@@ -44,18 +44,20 @@ protocol EffectRendering: AnyObject {
     /// the same pure-libm math the generation-change adoption already runs
     /// on the render thread. Verdicts on the derive-under-automation path:
     ///
-    ///   kind        derive cost / render-safety notes
-    ///   ----------  ------------------------------------------------------
-    ///   gain        exact target + ~5 ms declick ramp; unity skip preserved
-    ///   eq          4× RBJ coeff recompute (sin/cos/pow) — pure, no alloc
-    ///   compressor  2× exp coeffs; envelope smoother declicks the steps
-    ///   limiter     pow + exp; lookahead FIXED → lines never resize
-    ///   reverb      arithmetic only; preDelay is a read offset (MAX-sized)
-    ///   delay       1× exp; time is a read offset (lines MAX-sized, 2 s)
-    ///   saturator   3× pow; stateless shaper
-    ///   gate        pow + arithmetic; attack/release ramps declick steps
-    ///   chorus      arithmetic only; depth is math (lines MAX-sized)
-    ///   audioUnit   default no-op below (empty spec surface in v0)
+    ///   kind          derive cost / render-safety notes
+    ///   ------------  ----------------------------------------------------
+    ///   gain          exact target + ~5 ms declick ramp; unity skip kept
+    ///   eq            4× RBJ coeff recompute (sin/cos/pow) — pure, no alloc
+    ///   compressor    2× exp coeffs; envelope smoother declicks the steps
+    ///   limiter       pow + exp; lookahead FIXED → lines never resize
+    ///   reverb        arithmetic only; preDelay is a read offset (MAX-sized)
+    ///   delay         1× exp; time is a read offset (lines MAX-sized, 2 s)
+    ///   saturator     3× pow; stateless shaper
+    ///   gate          pow + arithmetic; attack/release ramps declick steps
+    ///   chorus        arithmetic only; depth is math (lines MAX-sized)
+    ///   bassEnhancer  2× RBJ cut sections (sin/cos) + 1 exp — pure, no
+    ///                 alloc; state FIXED (2 biquads + detector per channel)
+    ///   audioUnit     default no-op below (empty spec surface in v0)
     func storeAutomatedParam(slot: Int, value: Double)
 }
 

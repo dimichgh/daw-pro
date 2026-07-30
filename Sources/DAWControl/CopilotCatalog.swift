@@ -21,6 +21,7 @@
 // CommandRouter.allCommands parity matters (also asserted by test).
 
 import AIServices
+import DAWCore
 import Foundation
 
 /// One catalog entry: a control-protocol command exposed to the Copilot.
@@ -390,7 +391,7 @@ public enum CopilotToolCatalog {
             ], required: ["trackId"])
         ),
 
-        // MARK: clip (12)
+        // MARK: clip (14, m23-w added removeMany/moveMany)
 
         CopilotTool(
             command: "clip.addAudio",
@@ -598,6 +599,25 @@ public enum CopilotToolCatalog {
                 ("lengthBeats", numberSchema("How many empty beats to insert. To insert one bar, pass the project's beats-per-bar.")),
             ], required: ["clipId", "atBeat", "lengthBeats"])
         ),
+        CopilotTool(
+            command: "clip.removeMany",
+            description: "Permanently remove SEVERAL clips — audio or MIDI, across one or more tracks — in ONE undo step, instead of calling clip.remove once per clip (which would cost one undo step each). All-or-nothing: an unknown id or a take-group member refuses the WHOLE call and leaves the project untouched. Returns {clips: [...]}, the removed clips.",
+            schema: schemaObject([
+                ("ids", arraySchema(
+                    "Ids of the clips to remove, from project.snapshot. May be empty (a no-op).",
+                    items: stringSchema("Id of a clip to remove."))),
+            ], required: ["ids"])
+        ),
+        CopilotTool(
+            command: "clip.moveMany",
+            description: "Rigidly translate SEVERAL clips — possibly across tracks — by the SAME beat delta in ONE undo step, preserving every gap between them, instead of calling clip.move once per clip (which would weld gaps shut the moment any one clip hits beat 0). byBeats is signed: positive moves later, negative earlier. If the group would cross beat 0, the delta is clamped so the leftmost clip lands exactly at 0 and every offset survives — check the response's clamped/effectiveDeltaBeats fields rather than assuming the full byBeats applied. Returns {requestedDeltaBeats, effectiveDeltaBeats, clamped, trimmedClipIDs, removedClipIDs, clips}.",
+            schema: schemaObject([
+                ("ids", arraySchema(
+                    "Ids of the clips to move together, from project.snapshot. May be empty (a no-op).",
+                    items: stringSchema("Id of a clip to move."))),
+                ("byBeats", numberSchema("Signed beat delta applied to every listed clip. Positive moves later, negative earlier.")),
+            ], required: ["ids", "byBeats"])
+        ),
 
         // MARK: arrange (2, m15-d)
 
@@ -699,7 +719,7 @@ public enum CopilotToolCatalog {
             schema: schemaObject([])
         ),
 
-        // MARK: fx (5, m13-d)
+        // MARK: fx (6, m13-d/m23-r4)
 
         CopilotTool(
             command: "fx.add",
@@ -708,7 +728,7 @@ public enum CopilotToolCatalog {
                 ("trackId", stringSchema("Id of the track or bus to add the effect to, OR the string \"master\" for the master output chain.")),
                 ("kind", stringSchema(
                     "Which built-in effect to add. On the master chain only these built-ins are allowed.",
-                    enumValues: ["gain", "eq", "compressor", "limiter", "reverb", "delay", "saturator", "gate", "chorus"])),
+                    enumValues: ["gain", "eq", "compressor", "limiter", "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer"])),
                 ("index", integerSchema("Position in the chain, 0 = processed first. Omit to append at the end; out-of-range values clamp.", minimum: 0)),
             ], required: ["trackId", "kind"])
         ),
@@ -746,6 +766,15 @@ public enum CopilotToolCatalog {
                 ("trackId", stringSchema("Id of the track or bus whose compressor/gate is being keyed, from project.snapshot.")),
                 ("effectId", stringSchema("Id of the compressor or gate effect to key, from fx.add's result or project.snapshot.")),
                 ("sourceTrackId", stringSchema("Id of the audio track to key FROM (e.g. the kick). Omit or pass null to clear the key.")),
+            ], required: ["trackId", "effectId"])
+        ),
+        CopilotTool(
+            command: "fx.spectrum",
+            description: "Read a live 24-band spectrum measured AFTER one specific insert effect — the way to check what an EQ/compressor/etc. is actually producing, not just the whole mix (mixer.liveLoudness/mixer.masterAnalysis are always whole-mix). Pass trackId as a track/bus id from project.snapshot, or the string \"master\" for the master output chain. Same field meanings as mixer.masterAnalysis (bands, levelDB, peakDB, centroidHz, flux). arm defaults true: arms (or renews) a 3-second measurement lease and reads; pass arm:false to read one last time and release it. IMPORTANT — tapPoint tells you which side of the fader you're looking at: a track/bus insert reads BEFORE that track's own fader (moving the fader won't move the curve), a master insert reads AFTER the master fader (moving it will) — always check this field before comparing two spectra. The tap releases itself if you stop polling (or call arm:false); at most 8 inserts total can be measured at once (shared with any EQ card the user has open) and a 9th is refused, never evicted. Poll at roughly 5-30 Hz for a smooth reading; a freshly armed tap honestly reads near-silence for its first ~50 ms.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track or bus that owns the effect, OR the string \"master\" for the master output chain.")),
+                ("effectId", stringSchema("Id of the effect to measure, from fx.add's result or project.snapshot.")),
+                ("arm", booleanSchema("Default true: arm (or renew) the 3-second measurement lease and read. False: read one last time and release the tap immediately.")),
             ], required: ["trackId", "effectId"])
         ),
 
@@ -895,6 +924,22 @@ public enum CopilotToolCatalog {
             command: "edit.undo",
             description: "Revert the most recent document edit (track, clip, mixer, tempo, loop, punch, or metronome change), one step at a time. Does not affect playback position.",
             schema: schemaObject([])
+        ),
+
+        // MARK: frequency (1)
+
+        CopilotTool(
+            command: "frequency.reference",
+            description: "Cited frequency reference for a recognized instrument family: its fundamental pitch range, presence/problem bands (each with a source), and a recommended high-pass (always) and low-pass (when useful) corner. Pass family directly, or trackId to resolve it from that track's own instrument — an unresolved answer still lists every valid family id under families so you can ask the user or pick one yourself; NEVER infer a family from the track's name alone. To act on the recommendation, call fx.setParam on an \"eq\" insert with name \"highPassFreq\" (Hz) and \"highPassSlopeDbPerOct\" (12 or 24). Call with no arguments to see the full family vocabulary.",
+            schema: schemaObject([
+                ("family", stringSchema(
+                    "An instrument family id to look up directly. Wins over trackId when both are given.",
+                    enumValues: InstrumentFamily.allCases.map(\.rawValue))),
+                ("trackId", stringSchema("Id of a track to resolve a family from, from project.snapshot. Not a bus or \"master\" — a bus has no instrument identity.")),
+                ("note", integerSchema(
+                    "A General MIDI percussion note (0-127) to resolve within a drum-kit track. Only meaningful together with trackId, on a track whose instrument is a percussion kit.",
+                    minimum: 0, maximum: 127)),
+            ])
         ),
     ]
 

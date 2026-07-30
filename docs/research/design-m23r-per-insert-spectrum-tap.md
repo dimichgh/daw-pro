@@ -309,12 +309,32 @@ at all**, which is what "idle inserts pay nothing" has to mean.
 **How to measure — three legs, all headless, all at `EffectChainProcessor` level (C3 makes this
 mandatory):**
 1. **Allocation leg (both directions).** Drive 10,000 armed 512-frame quanta through
-   `processor.process(bufferList:frameCount:)` in a preallocated loop; assert
-   `malloc_zone_statistics(malloc_default_zone(), …).blocks_in_use` delta **== 0**. *Positive
-   counterpart:* `writeIndex` advanced by exactly `10_000 × 512` and a drain produces non-floor bands —
-   so a tap that allocated nothing *because it did nothing* fails. If the malloc counter proves flaky,
-   the fallback is structural review **plus** the index-advance assertion — but try the counter first;
-   it is the only leg that actually observes the invariant.
+   `processor.process(bufferList:frameCount:)` in a preallocated loop. **Use the `malloc_logger`
+   probe, NOT `blocks_in_use`.** *Positive counterpart:* `writeIndex` advanced by exactly
+   `10_000 × 512` and a drain produces non-floor bands — so a tap that allocated nothing *because it
+   did nothing* fails.
+
+   > **CORRECTION, measured at m23-r1 (2026-07-28) — this paragraph previously specified
+   > `malloc_zone_statistics(malloc_default_zone(), …).blocks_in_use` delta == 0 and called it "the
+   > only leg that actually observes the invariant." That is BACKWARDS for the allocation class that
+   > actually threatens r2.** `blocks_in_use` is a *level*, not a counter: an allocate-then-free
+   > inside the measurement window nets to zero and malloc reuses the block, so the probe is blind to
+   > **transient** allocation and sees only *retained* allocation. Proven by mutation at r1 — a
+   > deliberate per-call 4-element array allocation in `write` left the `blocks_in_use` leg **green**,
+   > while a `malloc_logger` probe (resolved via `dlsym(RTLD_DEFAULT, …)`, thread-filtered with
+   > `pthread_threadid_np`) failed it at 800 events.
+   >
+   > This matters most **here**, at r2: a transient alloc from a dynamic cast, a boxed closure or an
+   > ObjC bridge is exactly what chain integration can introduce, and it is precisely what the old
+   > probe cannot see. See `InsertSpectrumTapTests.swift` for the working implementation — and note
+   > that `malloc_logger` being unavailable must be recorded as a **failure, not a skip**.
+   >
+   > Two consequences beyond this file. (a) The same blind probe was used as the empirical backstop
+   > for **m23-d's C15** RT-safety claim ("`blocks_in_use` delta 0 across 10 000 audition-carrying
+   > quanta, 4 runs"); that cycle's *structural* argument stands, but its measured backstop only ever
+   > ruled out retained allocation. (b) Under `-Onone`, `for _ in 0..<n {}` with an empty body raises
+   > ~2 malloc/free events per iteration from `Range` iteration itself, while the identical `while`
+   > loop raises zero — so any measured loop must be a `while` loop.
 2. **Cost leg.** Same harness, `ContinuousClock`: disarmed baseline, then armed. Assert
    `(armed − disarmed) / quanta ≤ 3 µs` and `disarmed_delta ≤ 0.2 µs`. Print with the repo's
    `[measured]` convention. The 3 µs ceiling is ~15× the expected value, so a loaded machine still
@@ -351,7 +371,10 @@ surfaces before anything touches the walk or the null pin.**
 - **Tear defence:** stage a drain, forcibly advance `writeIndex` past the staged block, assert the block
   is **discarded and counted**, not consumed.
 - **Channel rule:** a 1-channel `write` produces a snapshot bit-identical to duplicated stereo.
-- **Allocation:** the `malloc_zone_statistics` leg against `write(...)` alone.
+- **Allocation:** the allocation leg against `write(...)` alone — **both probes**, retained
+  (`blocks_in_use`) *and* transient (`malloc_logger`), paired with the index-advance assertion in the
+  SAME test. See the CORRECTION under §4/r2 leg 1: `blocks_in_use` alone is blind to transient
+  allocation and was shown green against a deliberately-allocating mutant.
 - Suites green; 0-warn forced-full build.
 
 ### r2 — Chain integration + arm plumbing (the null-pin cycle)

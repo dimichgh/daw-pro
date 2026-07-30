@@ -21,7 +21,8 @@ import AIServices
 /// `SketchpadModel` precedent); this view owns only the sidecar status-poll
 /// cadence and the NSOpenPanel for sample imports. The panel speaks USER
 /// copy (the model's banner mapping), never wire-speak, and carries the
-/// standing own-voice-only policy lines verbatim.
+/// standing rights-responsibility policy lines verbatim (m23-n2d: these
+/// used to be own-voice-only prohibitions; the user withdrew that policy).
 struct VoicePanel: View {
     @Environment(AppModel.self) private var app
     @Bindable var model: VoicePanelModel
@@ -239,8 +240,9 @@ struct VoicePanel: View {
         }
     }
 
-    /// The standing own-voice-only policy copy, verbatim (m10-p-5: a legal/
-    /// policy constraint, not decoration). Neutral quiet chrome — policy text
+    /// The standing rights-responsibility policy copy, verbatim (m10-p-5: a
+    /// legal/policy constraint, not decoration; m23-n2d retargeted it from a
+    /// prohibition to a responsibility). Neutral quiet chrome — policy text
     /// is not AI content, so no violet here (Rule 3).
     private var policyBlock: some View {
         HStack(alignment: .top, spacing: 7) {

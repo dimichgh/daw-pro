@@ -46,6 +46,27 @@ const LONG_RUNNING_COMMANDS: ReadonlySet<string> = new Set([
  * 400/501 fast, by design. */
 const VOICE_CONVERT_TIMEOUT_MS = 330000;
 const VOICE_CONVERT_COMMANDS: ReadonlySet<string> = new Set(["vc.convertVocals"]);
+/** clip.transcribe (m23-n2b) runs on-device WhisperKit (Sources/AIServices/
+ * WhisperTranscriber.swift). The FIRST call on any machine pays a one-time
+ * CoreML ANE compile the OS then caches — measured 2026-07-27, identical
+ * runs: 93.7s cold vs 1.15s warm. A DIFFERENT cost model from
+ * VOICE_CONVERT_TIMEOUT_MS above (vc.convertVocals scales with the source
+ * clip's length at ~37x real time; this scales with a one-time compile that
+ * amortizes to ~1s on every later call), so it is not reused here — reusing
+ * a real-time-factor-bound budget for a fixed one-time-compile cost would be
+ * coincidence, not justification. Budget = the measured 93.7s cold compile
+ * plus generous headroom for the transcription itself on a long clip and for
+ * a slower machine than this one, rounded up to 300s — landing deliberately
+ * between the 180s render tier and the 330s convert tier above, since a
+ * cold-start transcription is heavier than a render but the compile is a
+ * fixed one-time cost, not an unbounded multiple of clip length the way
+ * voice conversion is. The Swift-side test suite happens to budget the same
+ * 5-minute ceiling for this identical cold-start-plus-transcribe operation
+ * (WhisperTranscriberFixtureTests, Tests/AIServicesTests/
+ * WhisperTranscriberTests.swift, `.timeLimit(.minutes(5))`) — corroboration
+ * that the number is generous enough, not the source of it. */
+const CLIP_TRANSCRIBE_TIMEOUT_MS = 300000;
+const CLIP_TRANSCRIBE_COMMANDS: ReadonlySet<string> = new Set(["clip.transcribe"]);
 
 interface ControlResponse {
   id: string;
@@ -91,9 +112,11 @@ export class DawBridge {
     const id = `mcp-${this.nextId++}-${Date.now()}`;
     const timeoutMs = VOICE_CONVERT_COMMANDS.has(command)
       ? VOICE_CONVERT_TIMEOUT_MS
-      : LONG_RUNNING_COMMANDS.has(command)
-        ? LONG_RUNNING_TIMEOUT_MS
-        : REQUEST_TIMEOUT_MS;
+      : CLIP_TRANSCRIBE_COMMANDS.has(command)
+        ? CLIP_TRANSCRIBE_TIMEOUT_MS
+        : LONG_RUNNING_COMMANDS.has(command)
+          ? LONG_RUNNING_TIMEOUT_MS
+          : REQUEST_TIMEOUT_MS;
 
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {

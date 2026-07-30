@@ -244,12 +244,47 @@ test("vc_list_voices surfaces the app's unreachable-sidecar teaching error verba
   );
 });
 
-test("vc_list_voices carries the own-voice-only policy line in its description", async () => {
+test("vc_list_voices carries the rights-responsibility policy line in its description", async () => {
   const listed = await client.listTools();
   const tool = listed.tools.find((t) => t.name === "vc_list_voices");
   assert.ok(tool, "vc_list_voices is registered");
-  assert.match(tool!.description ?? "", /OWN recordings/, "the policy copy is present");
-  assert.match(tool!.description ?? "", /NEVER a celebrity/, "the no-celebrity line is present");
+  // m23-n2d re-point: this used to pin /OWN recordings/ and /NEVER a
+  // celebrity/. The user WITHDREW the own-voice-only policy, so the
+  // prohibition had to go — the test is re-pointed at the replacement copy
+  // rather than deleted, because the guard is what keeps the copy honest.
+  assert.match(
+    tool!.description ?? "",
+    /RIGHTS-RESPONSIBILITY POLICY/,
+    "the policy copy is present"
+  );
+  assert.match(
+    tool!.description ?? "",
+    /responsible for/,
+    "the responsibility line is present"
+  );
+});
+
+test("the withdrawn own-voice-only prohibition is GONE from every vc_* tool description", async () => {
+  // This is the sweep the item actually needed: the prohibition lived at six
+  // sites in this file alone, and a partial fix would leave an AI client
+  // still told the product refuses what it now permits. Checking every vc_*
+  // tool (not just the one that was pinned) is what makes that visible.
+  const listed = await client.listTools();
+  const vcTools = listed.tools.filter((t) => t.name.startsWith("vc_"));
+  assert.ok(vcTools.length >= 5, "the vc_* tool family is registered");
+  for (const tool of vcTools) {
+    const text = `${tool.description ?? ""} ${JSON.stringify(tool.inputSchema ?? {})}`;
+    assert.doesNotMatch(
+      text,
+      /celebrity/i,
+      `${tool.name} still asserts the withdrawn no-celebrity prohibition`
+    );
+    assert.doesNotMatch(
+      text,
+      /own-voice-only/i,
+      `${tool.name} still asserts the withdrawn own-voice-only policy`
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

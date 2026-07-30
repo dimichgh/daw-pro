@@ -124,14 +124,94 @@ export function startStaging({
   return { pid: child.pid, out, pidfile };
 }
 
-/** SIGTERM the exact pid recorded in the pidfile. Safe to call twice. */
-export function stopStaging(gate, pidfileOverride) {
+/**
+ * The app's crash-detection sentinel (`DAWCore.AutosaveManager.lockURL`).
+ *
+ * ⚠️ SECOND SPELLING OF A PATH `DAWCore.AppDirectories` OWNS. The Swift side
+ * resolves `applicationSupport(.autosave)/session.lock`; this is the JS mirror
+ * of it, and the two will diverge silently if `AppDirectories.Category.autosave`
+ * ever changes its raw value. It is spelled ONCE here rather than in each gate
+ * (m23a2 used to carry its own copy) so the JS tier has one home even though it
+ * cannot share the Swift one.
+ */
+export function sessionLockPath(override) {
+  return override || `${process.env.HOME}/Library/Application Support/DAWPro/Autosave/session.lock`;
+}
+
+/**
+ * Remove the staging app's `session.lock` — but ONLY if `pid` owns it.
+ *
+ * WHY (m23-ac-2c). Gates kill staging with SIGTERM, which skips the app's
+ * clean-exit path, so the lock it wrote at launch survives the gate. At the
+ * next real launch DAW Pro reads that lock and offers the USER a recovery from
+ * a crash that never happened. That is test tooling reaching out and lying to
+ * the person running the app, which is why this is not merely tidiness.
+ *
+ * ⚠️ THE OWNERSHIP CHECK IS THE ENTIRE SAFETY PROPERTY. This function runs
+ * against the user's REAL profile directory — the same file the user's live app
+ * on port 17600 writes. A cleanup that deleted unconditionally would pass the
+ * obvious test and destroy a real crash recovery. So: a lock we cannot PROVE is
+ * ours is left alone, and every uncertain branch (absent file, unreadable,
+ * malformed JSON, missing/NaN pid) falls through to leaving it.
+ *
+ * Returns true if removed, false if left alone, null if there was no lock.
+ */
+export function releaseSessionLock(pid, lockPathOverride) {
+  const lock = sessionLockPath(lockPathOverride);
+  let owner;
+  try {
+    owner = JSON.parse(readFileSync(lock, "utf8")).pid;
+  } catch {
+    return null; // absent / unreadable / malformed — never guess at ownership
+  }
+  // ⚠️ STRICT `typeof`, NOT `Number(owner)`. The app writes `pid` as a JSON
+  // number; anything else was written by something we do not recognise, and
+  // coercing it is guessing. m23a2's original said `Number(j.pid) === pid`,
+  // which means a lock holding the STRING "12345" matches staging pid 12345
+  // and gets deleted — the gate's leg D caught exactly that when this function
+  // inherited the coercion. Being strict costs at most a leftover lock in a
+  // case that should never occur; being loose deletes a file we cannot prove
+  // is ours, in the user's real profile.
+  if (typeof owner !== "number" || !Number.isInteger(owner) || owner !== pid) {
+    console.log(`session.lock belongs to pid ${JSON.stringify(owner)} — left alone`);
+    return false;
+  }
+  try {
+    rmSync(lock, { force: true });
+    console.log(`removed our stale session.lock (pid ${pid})`);
+    return true;
+  } catch {
+    return false; // e.g. permissions — better to leave it than to pretend
+  }
+}
+
+/**
+ * SIGTERM the exact pid recorded in the pidfile, then release that pid's
+ * `session.lock`. Safe to call twice.
+ *
+ * ORDER MATTERS: the pid is read BEFORE the pidfile is removed, because the
+ * ownership check needs it — that ordering is why the lock cleanup lives here
+ * rather than in each caller, where the pid is no longer available afterwards.
+ *
+ * The early return on a missing pidfile is deliberate and is part of the safety
+ * property: with no pidfile there is no pid to compare against, so there is no
+ * lock we can prove is ours.
+ *
+ * SYNCHRONOUS on purpose. m23a2's hand-rolled version slept 1200 ms after the
+ * kill before checking, but making this async would change the signature for
+ * every caller. Both orderings are safe: if SIGTERM triggers the app's clean
+ * exit, the app removes the lock itself and the read below finds nothing; if it
+ * does not, the lock is still there and we remove it. (Verified empirically at
+ * m23-ac-2c — m23a2 still reports 31/31 with the sleep gone.)
+ */
+export function stopStaging(gate, pidfileOverride, { lockPath } = {}) {
   if (!gate) throw new Error("stopStaging requires the gate name");
   const pidfile = pidfilePath(gate, pidfileOverride);
   if (!existsSync(pidfile)) { live.delete(gate); return; }
   const pid = Number(readFileSync(pidfile, "utf8").trim());
   if (Number.isInteger(pid) && pid > 0) {
     try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+    releaseSessionLock(pid, lockPath);
   }
   rmSync(pidfile, { force: true });
   live.delete(gate);

@@ -190,6 +190,21 @@ struct SoundBankCommandTests {
         #expect(response.error == "no sound bank file at /nonexistent/Ghost.sf2 — see instrument.listSoundBanks")
     }
 
+    // m23-n2h: `instrument.listSoundBankPrograms` used to be one of 26 verbs
+    // that never called `rejectUnknownKeys` at all — an unknown key was
+    // silently ignored. The allowed set is exactly {source}, already
+    // positively exercised above (`listGMPrograms`/`listSF2Programs`), so
+    // this only needs the rejection pin.
+    @Test("listSoundBankPrograms rejects an unknown param")
+    func listProgramsRejectsUnknownParam() async throws {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "instrument.listSoundBankPrograms",
+            params: ["source": .string("gm"), "bogus": .bool(true)]))
+        #expect(!response.ok)
+        #expect(response.error == "instrument.listSoundBankPrograms: unknown parameter 'bogus' — valid keys are 'source'")
+    }
+
     // MARK: - track.setInstrument soundBank
 
     // 6.
@@ -415,7 +430,7 @@ struct SoundBankCommandTests {
         // design-au-parameter-surface) took it 139 -> 141. m21-d's
         // clip.fitToContent took it 141 -> 142. m21-e's clip.analyzeAudio
         // took it 142 -> 143. m22-c's mixer.liveLoudness took it 143 -> 144.
-        #expect(CommandRouter.allCommands.count == 158)   // 156 -> 158 at m23-k4a
+        #expect(CommandRouter.allCommands.count == 165)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBanks"))
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBankPrograms"))
         #expect(CommandRouter.allCommands.contains("instrument.importSoundBank"))

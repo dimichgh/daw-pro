@@ -240,6 +240,26 @@ struct TimelineLanesView: View {
     /// result — or surfaces the store's refusal verbatim for an audio/bus lane.
     var onCreateMIDIClip: (_ trackID: UUID, _ atBeat: Double, _ lengthBeats: Double) -> Void = { _, _, _ in }
 
+    // MARK: Empty-lane hint (m23-v)
+
+    /// Reports the empty-lane hints this view is DRAWING, on first render and
+    /// whenever they change (`debug.arrangePointer`'s `emptyLaneHints` echo).
+    ///
+    /// It is a SEPARATE path from `onPointerState` on purpose, and that is the
+    /// design decision of the item, not plumbing: the pointer seam fires on hover
+    /// and clears on exit, so it reports null in precisely the resting state this
+    /// hint exists for. This one is keyed on lane CONTENT.
+    ///
+    /// THE ECHO-SEAM LAW (m23-e, `DAWProApp.swift:725`): the reported value is
+    /// the value `emptyLaneHintLayer` iterates to draw, composed once, and the
+    /// reporter is attached to that layer — so a build that removes the layer
+    /// from the lane stack stops reporting too, and cannot answer `true` for
+    /// pixels it never drew. Recomputing the predicate in `AppModel` for the echo
+    /// would have made the whole gate decoration (the m23-m3b measurement: a
+    /// mutant that broke a `DAWApp`-only binding left the entire Swift suite
+    /// green, because no test target reaches this module).
+    var onEmptyLaneHints: (([ArrangeEmptyLaneHint]) -> Void)? = nil
+
     // MARK: Rubber band (m23-g3)
 
     /// Staged marquee step from `debug.arrangeMarquee` (nil in normal use). Runs
@@ -381,6 +401,14 @@ struct TimelineLanesView: View {
     static let rulerHeight: CGFloat = 80
     static let laneHeight: CGFloat = 34
     static let laneSpacing: CGFloat = 6
+    /// The empty-lane hint (m23-v): 11 pt SF Pro, inset from the content origin
+    /// by a little more than the playhead's own half-width so the two never touch
+    /// at beat 0 with the transport parked at the start (the first thing a new
+    /// user sees). It rides the SMALLEST row height the app can show — S rows are
+    /// 24 pt — so 11 pt is the largest size that still leaves clear air above and
+    /// below the glyphs at every step of the S/M/L ladder.
+    static let emptyLaneHintFontSize: CGFloat = 11
+    static let emptyLaneHintInsetX: CGFloat = 10
     /// The loop region band (beta m10-g) draws as a distinct strip in the TOP of
     /// the ruler — `y ∈ [loopBandTop, loopBandTop + loopBandHeight]` in content
     /// space — so it sits clear of the bar numbers and the marker lane and reads as
@@ -706,6 +734,7 @@ struct TimelineLanesView: View {
             ZStack(alignment: .topLeading) {
                 grid
                 pointerHoverSurface
+                emptyLaneHintLayer
                 loopBand
                 clipBlocks
                 crossfadeSeams
@@ -739,6 +768,10 @@ struct TimelineLanesView: View {
                 ZStack(alignment: .topLeading) {
                     grid
                     pointerHoverSurface
+                    // m23-v: lane CONTENT (like the clip note map), so it draws
+                    // under everything interactive and under the ghost line /
+                    // playhead / refusal bubble, which must read over it.
+                    emptyLaneHintLayer
                     clipBlocks
                     crossfadeSeams
                     takeLanes
@@ -1683,6 +1716,62 @@ struct TimelineLanesView: View {
             ArrangeRefusalBubble(message: refusal.message)
                 .offset(x: min(max(0, rawX), maxX), y: laneTop(index) + rowHeight / 2)
         }
+    }
+
+    /// The empty-lane hint (m23-v): a dim, calm "Double-click to add a clip" on
+    /// every instrument lane that holds no clips — the VISIBLE half of m23-e.
+    ///
+    /// Drawn like the hover ghost line and for the same reason: `textFaint` (the
+    /// measured placeholder/decorative FLOOR of the text hierarchy — a hint is
+    /// exactly what that token exists for, and reaching for the token rather than
+    /// an ad-hoc `.opacity()` on a brighter one is the design-language rule), no
+    /// glow, no accent — never cyan (earned active transport state), never violet
+    /// (AI content only). Glow is earned by state, not by a hint. It sits on
+    /// EVERY empty instrument lane at once, so anything louder becomes noise in a
+    /// project with several fresh tracks.
+    ///
+    /// `.allowsHitTesting(false)` is LOAD-BEARING, not tidiness: this layer sits
+    /// above `pointerHoverSurface`, and a hit-testable label would swallow the
+    /// very double-click it advertises. `.fixedSize()` keeps it on one line at
+    /// any content width.
+    ///
+    /// Left-anchored in CONTENT space (not pinned to the viewport): a lane's ink
+    /// scrolls with its lane, the way clips do, and beat 0 is where a new project
+    /// opens — which is the moment this hint is for. Scrolled far right it goes
+    /// with the rest of the lane's content, deliberately.
+    ///
+    /// **Explain copy**: the card is `.arrangePlayhead`, already anchored on
+    /// `pointerHoverSurface` — the surface this hint sits over, so hovering the
+    /// hint hovers the card's anchor. Its body already teaches this exact action
+    /// ("Double-click empty space on an instrument track to start a clip and open
+    /// the note editor"), and the catalogue forbids two entries with
+    /// near-identical copy (`ExplainModel.swift`). A second id would also be
+    /// unhoverable here by construction, since this layer must not hit-test.
+    @ViewBuilder
+    private var emptyLaneHintLayer: some View {
+        // Composed ONCE. The ForEach draws this array and the reporter announces
+        // this array — see `onEmptyLaneHints` for why that is the whole point.
+        let hints = emptyLaneHints
+        ZStack(alignment: .topLeading) {
+            ForEach(hints) { hint in
+                Text(hint.text)
+                    .font(.system(size: Self.emptyLaneHintFontSize))
+                    .foregroundStyle(DAWTheme.textFaint)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .offset(x: Self.emptyLaneHintInsetX,
+                            y: laneTop(hint.laneIndex) + (rowHeight - Self.emptyLaneHintFontSize) / 2 - 2)
+            }
+        }
+        .allowsHitTesting(false)
+        .onChange(of: hints, initial: true) { _, value in onEmptyLaneHints?(value) }
+    }
+
+    /// The hints this view draws — `[Track]` in, nothing else (the headless home
+    /// takes no transport, so "a track added mid-playback still shows the hint"
+    /// is structural rather than promised).
+    private var emptyLaneHints: [ArrangeEmptyLaneHint] {
+        ArrangeEmptyLaneHints.hints(for: tracks)
     }
 
     /// The hover ghost line (m17-c #2): a faint NEUTRAL hairline at the

@@ -169,6 +169,67 @@ struct ProjectStoreMIDITests {
         #expect(store.tracks[0].clips.isEmpty)  // nothing landed on the audio track
     }
 
+    // 7b. (m23-v)
+    /// `Track.canHoldMIDIClips` is the ONE home for "may a MIDI clip live here" —
+    /// the rule BOTH store guards now read (`addMIDIClip`, `duplicateClip`) and
+    /// the rule the arrange lanes draw their empty-lane hint from. Pinned per
+    /// kind, and pinned as SEPARATE from `canExportMIDI`.
+    @Test("m23-v: canHoldMIDIClips is true for instrument tracks and nothing else")
+    func canHoldMIDIClipsPerKind() {
+        #expect(Track(name: "Lead", kind: .instrument).canHoldMIDIClips)
+        #expect(Track(name: "Vox", kind: .audio).canHoldMIDIClips == false)
+        #expect(Track(name: "Reverb", kind: .bus).canHoldMIDIClips == false)
+        // Routing, mute, arm and AI provenance are all irrelevant — the rule is
+        // the KIND, so a bus-routed instrument track still holds MIDI clips.
+        var routed = Track(name: "Synth", kind: .instrument)
+        routed.outputBusID = UUID()
+        routed.isMuted = true
+        routed.isArmed = true
+        #expect(routed.canHoldMIDIClips)
+    }
+
+    /// The two store guards ask this ONE predicate, over every kind — the
+    /// DISCRIMINATING form: a guard that had kept its own local
+    /// `kind == .instrument` would still pass a spot check on `.audio`, but it
+    /// would drift the day the rule gains a condition. Here every kind is walked
+    /// and the store's ANSWER is required to match the predicate exactly.
+    @Test("m23-v: both MIDI-clip guards agree with canHoldMIDIClips for every track kind")
+    func bothGuardsReadTheOneHome() throws {
+        for kind in TrackKind.allCases {
+            let store = ProjectStore()
+            store.media = FakeMedia()
+            let host = store.addTrack(kind: .instrument)
+            let source = try store.addMIDIClip(toTrack: host.id, atBeat: 0, lengthBeats: 4)
+            let target = store.addTrack(kind: kind)
+
+            let addErr = projectError {
+                _ = try store.addMIDIClip(toTrack: target.id, atBeat: 32, lengthBeats: 4)
+            }
+            let dupErr = projectError {
+                _ = try store.duplicateClip(clipId: source.id, toStartBeat: 64,
+                                            toTrackId: target.id)
+            }
+            #expect((addErr == nil) == target.canHoldMIDIClips,
+                    "addMIDIClip on \(kind): err=\(String(describing: addErr))")
+            #expect((dupErr == nil) == target.canHoldMIDIClips,
+                    "duplicateClip onto \(kind): err=\(String(describing: dupErr))")
+        }
+    }
+
+    /// `canExportMIDI` and `canHoldMIDIClips` are identical expressions for
+    /// DIFFERENT questions and must stay two properties (the m23-m3c reasoning
+    /// that kept `PlaybackGraph`'s routing sites out of `isMasterInput`). This
+    /// records that they agree TODAY without licensing a merge: the day export
+    /// gains a second condition, the failure belongs in the export tests, and
+    /// the lane hint must be free to keep its own answer.
+    @Test("m23-v: canHoldMIDIClips and canExportMIDI agree today but stay two rules")
+    func twoRulesThatCurrentlyAgree() {
+        for kind in TrackKind.allCases {
+            let t = Track(name: "T", kind: kind)
+            #expect(t.canHoldMIDIClips == t.canExportMIDI)
+        }
+    }
+
     // 8.
     @Test("setClipNotes replaces, re-clamps, and canonically orders; guards apply")
     func setNotes() throws {

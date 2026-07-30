@@ -149,12 +149,22 @@ struct SidecarCommandTests {
         #expect(response.error == "could not signal pid 123")
     }
 
-    @Test("commands take no params and ignore any extras harmlessly")
+    // m23-n2h: `ai.sidecarStatus` used to be one of 26 verbs that never
+    // called `rejectUnknownKeys` at all — an unknown extra was silently
+    // ignored rather than harmless, contrary to the 135-of-161-command house
+    // style this test's old name claimed. Withdrawn for consistency: an
+    // unrecognized key on this zero-param verb is now a teaching error, and
+    // — since `rejectUnknownKeys` runs BEFORE `sidecarManager.status()` — the
+    // loopback health probe never fires for a rejected request.
+    @Test("ai.sidecarStatus takes no params — an unknown extra is rejected before the sidecar is probed (m23-n2h)")
     func noParamsRequired() async throws {
-        let (router, _) = makeRouter()
+        let sidecar = FakeSidecarManager()
+        let (router, _) = makeRouter(sidecar: sidecar)
         let response = await router.handle(
             ControlRequest(id: "1", command: "ai.sidecarStatus", params: ["unused": .bool(true)]))
-        #expect(response.ok)
+        #expect(!response.ok)
+        #expect(response.error == "ai.sidecarStatus: unknown parameter 'unused' — ai.sidecarStatus takes no parameters")
+        #expect(await sidecar.statusCalls == 0, "the guard must run before status() is ever called")
     }
 }
 

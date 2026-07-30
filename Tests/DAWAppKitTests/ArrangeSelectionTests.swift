@@ -325,4 +325,81 @@ struct ArrangeSelectionTests {
         #expect(s.ids == [a, b])
         #expect(s.focusID == a)
     }
+
+    // MARK: - The track header's set mutator (m23-y)
+
+    // 21. `subtract` — the focused clip leaving CLOSES the editor and leaves the
+    //     rest of the selection standing. `toggle`'s removal rule, one
+    //     cardinality up.
+    @Test("subtract drops the focus when the focused clip leaves, keeping the rest")
+    func subtractDropsDepartedFocus() {
+        var s = ArrangeSelection()
+        s.selectOnly(a)        // focus a
+        s.toggle(b)
+        s.toggle(c)            // {a,b,c}, focus a
+        s.subtract([a, b])
+        #expect(s.ids == [c])
+        #expect(s.focusID == nil, "the focused clip left — nothing else is promoted")
+    }
+
+    // 22. …and a focus that stays is untouched — the third of `toggle`'s four
+    //     focus rules, which is the one that keeps the note editor from
+    //     flickering while a selection is torn down around it.
+    @Test("subtract leaves an unrelated focus alone")
+    func subtractKeepsSurvivingFocus() {
+        var s = ArrangeSelection()
+        s.selectOnly(a)
+        s.formUnion([b, c])
+        s.subtract([b, c])
+        #expect(s.ids == [a])
+        #expect(s.focusID == a)
+    }
+
+    // 23. Ids that were never selected are simply absent — no throw, no
+    //     spurious focus change. (A header click can pass such a set whenever a
+    //     track is only partly selected.)
+    @Test("subtract ignores ids that were not selected")
+    func subtractIgnoresUnknownIDs() {
+        var s = ArrangeSelection()
+        s.selectOnly(a)
+        s.subtract([b, c])
+        #expect(s.ids == [a])
+        #expect(s.focusID == a)
+    }
+
+    // 24. INV2 through subtract: emptying `ids` necessarily removed the focus.
+    @Test("subtracting everything clears the focus too")
+    func subtractEverything() {
+        var s = ArrangeSelection()
+        s.selectOnly(a)
+        s.formUnion([b])
+        s.subtract([a, b])
+        #expect(s.isEmpty)
+        #expect(s.focusID == nil, "INV2")
+    }
+
+    // 25. The empty argument is a no-op in BOTH fields — the case a zero-clip
+    //     track would reach if `ArrangeTrackSelection` did not guard it first.
+    @Test("subtracting the empty set changes nothing")
+    func subtractEmpty() {
+        var s = ArrangeSelection()
+        s.selectOnly(a)
+        s.formUnion([b])
+        let before = s
+        s.subtract([])
+        #expect(s == before)
+    }
+
+    // 26. union-then-subtract of the SAME set round-trips exactly — the property
+    //     that makes the m23-y header chord a TRUE toggle rather than an
+    //     additive one, checked on the mutators themselves.
+    @Test("formUnion then subtract of the same set is the identity")
+    func unionSubtractRoundTrip() {
+        var s = ArrangeSelection()
+        s.selectOnly(a)
+        let before = s
+        s.formUnion([b, c])
+        s.subtract([b, c])
+        #expect(s == before)
+    }
 }

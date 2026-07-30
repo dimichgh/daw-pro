@@ -45,6 +45,25 @@ enum DAWTheme {
     static let textSecondary = Color(hex: 0x9FA9BC)   // legible secondary labels (7.2–8.2:1, ≥4.5)
     static let textDim = Color(hex: 0x8A93A6)         // muted micro-labels/captions (5.5–6.3:1, ≥4.5)
     static let textFaint = Color(hex: 0x767E90)       // placeholder/decorative floor (4.2–4.8:1, ≥3.0)
+
+    /// RESOLVES a drawn `Color` to its sRGB hex, for probes that must report
+    /// the ink a view actually applied rather than the token it was supposed to
+    /// (m23-p2). Going through `NSColor` is the point: a probe that echoed the
+    /// token constant would agree with itself while the `Text` drew something
+    /// else — the m23-o2 `widthSource` failure in a different medium, and the
+    /// exact hole a violet-ink mutation walked through green.
+    ///
+    /// Returns `"unresolved"` rather than a plausible black when the colour
+    /// cannot be converted (a dynamic/catalog colour with no sRGB form), so a
+    /// gate leg reads a value it can never mistake for a measurement.
+    static func hexString(_ color: Color) -> String {
+        guard let srgb = NSColor(color).usingColorSpace(.sRGB) else { return "unresolved" }
+        let channel = { (value: CGFloat) in Int((value * 255).rounded()) }
+        return String(format: "#%02X%02X%02X",
+                      channel(srgb.redComponent),
+                      channel(srgb.greenComponent),
+                      channel(srgb.blueComponent))
+    }
 }
 
 extension Color {

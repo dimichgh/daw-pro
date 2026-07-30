@@ -134,7 +134,7 @@ final class LimiterEffect: EffectRendering, GainReductionReporting,
         self.sampleRate = sampleRate
         preparedChannels = min(channelCount, Self.maxChannels)
         grRisePerSample = GainReductionMeter.risePerSample(sampleRate: sampleRate)
-        delaySamples = max(1, Int((LimiterParams.lookaheadSeconds * sampleRate).rounded()))
+        delaySamples = LimiterParams.lookaheadSamples(sampleRate: sampleRate)
 
         // (Re)allocate the delay lines and deque — main actor, pre-render.
         let neededDelay = delaySamples

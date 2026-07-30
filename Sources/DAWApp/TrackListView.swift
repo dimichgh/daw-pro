@@ -604,6 +604,33 @@ struct TrackRow: View {
         // double-click rename, the M/S/R chips, the disclosures — reachable: a
         // press that doesn't travel is never a drag.
         .gesture(reorderDrag)
+        // CLICK the header to select every clip on this track (m23-y).
+        //
+        // `.simultaneousGesture`, NOT `.onTapGesture` / `.gesture`, and that is
+        // the whole safety argument. This row already carries a count-2 tap on a
+        // DESCENDANT — `identityCluster`'s `.onTapGesture(count: 2)` rename —
+        // and a high-priority single tap on the ancestor can suppress it. Whether
+        // it actually would is not observable from any seam in this app
+        // (`isEditingName` is `@State` inside this view), so the mount is chosen
+        // to make the question MOOT rather than answered by hope: a simultaneous
+        // gesture never competes with a descendant's, so the double-click rename
+        // keeps working by construction.
+        //
+        // THE PRICE, stated rather than discovered: the first click of a rename
+        // double-click ALSO selects the track's clips, and a click on a control
+        // in this row may select it too (a simultaneous ancestor gesture can fire
+        // alongside a Button's). Both are benign — an extra selection with no
+        // destructive consequence — and both are strictly better than a dead
+        // rename that no test in this tree could detect.
+        //
+        // The chord is read from `NSEvent.modifierFlags` at mouse-up, the
+        // `ClipBlock` tap's own idiom: SwiftUI hands a `TapGesture` no event. That
+        // one line is NOT provable headlessly (see `ArrangeClickModifiers.current`),
+        // which is why the staging seam drives `clickTrack` with EXPLICIT
+        // modifiers — proving the decision and the selection, not the plumbing.
+        .simultaneousGesture(TapGesture().onEnded {
+            model.clickTrack(id: track.id, modifiers: ArrangeClickModifiers.current)
+        })
     }
 
     /// The reorder gesture. Reports the pointer in the LIST's coordinate space

@@ -1438,6 +1438,17 @@ struct CommandRouterTests {
             "clip.addAudio": ["trackId": .string(trackID), "path": .string("/tmp/Loop.wav")],
             // Empty notes → a 4-beat MIDI clip on the instrument track.
             "clip.addMIDI": ["trackId": .string(instTrackID)],
+            // clip.removeMany/clip.moveMany (m23-w): unlike the other per-clip
+            // edits below (which need a REAL clip id only clip.addMIDI can
+            // mint, out of order in this shared loop), an empty `ids` array
+            // is a LEGAL no-op mirroring ProjectStore.removeClips([])/
+            // moveClips([], ...) — no clip needed, no undo entry journaled.
+            // Routes inline here rather than joining the skip list below.
+            // Full coverage (round-trip, all-or-nothing refusals, the
+            // whole-group beat-0 clamp, edit.history depth) is in
+            // ClipGroupEditCommandTests.
+            "clip.removeMany": ["ids": .array([])],
+            "clip.moveMany": ["ids": .array([]), "byBeats": .number(0)],
             // Project-wide bar edits (m15-d) — no clip id needed; they run before
             // transport.record in allCommands order, so the transport is not yet
             // recording when their turn comes. bar 1 = beat 0. Full coverage in
@@ -1538,6 +1549,12 @@ struct CommandRouterTests {
                 // single gain effect can't be keyed. Proven by
                 // SidechainCommandTests (kick→pad + all four teaching errors).
                 "fx.setSidechain",
+                // fx.spectrum (m23-r4) is effect-id-dependent exactly like the
+                // fx.remove/reorder/setBypass/setParam group above — the
+                // exact rationale. Proven by FXSpectrumCommandTests (all
+                // twelve gate legs) plus InsertSpectrumCoverageTests/
+                // EQCurveEditorModelTests for the tapPoint label agreement.
+                "fx.spectrum",
                 "take.group", "take.setComp", "take.select", "take.removeLane",
                 "take.flatten", "take.move", "take.setCrossfade", "take.autoAlign",
                 "groove.extract", "groove.remove",
@@ -1690,7 +1707,41 @@ struct CommandRouterTests {
                 // refuse-while-recording guard itself) is proven by
                 // AuditionCommandTests against a stopped transport — the
                 // reference.import rationale.
-                "note.audition"].contains(command) {
+                "note.audition",
+                // clip.transcribe (m23-n2b) hits a REAL WhisperTranscriber —
+                // this bare router doesn't inject a fake (there is no
+                // WhisperTranscriber protocol to fake; the actor IS the
+                // engine, the vc.convertVocals precedent for "real client,
+                // no fake seam"). Even with weights installed it would still
+                // fail: the shared clip's `/tmp/Loop.wav` is a `FakeMedia`-
+                // backed fake path with no decodable audio on disk — the
+                // instrument.importSampleLibrary "a fixture this bare loop
+                // doesn't stage" rationale. Proven by dedicated tests:
+                // DAWCoreTests/ClipTranscriptionSourceTests (the clip -> request
+                // mapping + stretch-refusal, no model touched),
+                // DAWControlTests/ClipTranscribeCommandTests (wire shape +
+                // rejections, no model touched), and
+                // DAWControlTests/ClipTranscribeRealFixtureTests (a REAL
+                // `say`-generated clip transcribed end to end through the
+                // control wire, words on the right beats).
+                "clip.transcribe",
+                // ai.installSpeechModel (m23-n3b) hits the REAL
+                // WhisperModelInstallCoordinator's default (real)
+                // WhisperModelInstaller, which stages into the REAL
+                // `~/Library/Application Support/DAWPro/Models` — exactly the
+                // real-FS side effect instrument.importSoundBank/
+                // reference.import are excluded for, PLUS it would spawn a
+                // background Task that reaches for the network (blocked in
+                // this sandbox, per WhisperModelInstaller's own doc — a real
+                // attempt dies at NSURLErrorDomain -1001 after ~60s). Proven
+                // by SpeechModelInstallCommandTests with an injected
+                // WhisperModelInstallCoordinator (fake InstallFunction, no
+                // network, no real Application Support writes).
+                // ai.speechModelInstallStatus is read-only against the SAME
+                // (never-started, on this bare router) coordinator — answers
+                // {state:"idle"} with zero filesystem access — so it stays IN
+                // the loop, like ai.sidecarStatus/vc.sidecarStatus.
+                "ai.installSpeechModel"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

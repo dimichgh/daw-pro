@@ -1,15 +1,20 @@
 import Foundation
-// THE ONE-WAY DOOR, WALKED THROUGH UNDER A GATE (m23-n1). This bare import is
-// deliberate and load-bearing as EVIDENCE, not as code: attaching the product
-// in `Package.swift` makes SwiftPM build and link WhisperKit whether or not any
-// source imports it, so the build alone never exercises the import SITE. Under
-// Swift 6 strict concurrency (the reference app that vendored these weights is
-// tools-version 5.9 and has never compiled WhisperKit in this language mode)
-// that site is exactly where friction would show up, and a warning here is OURS
-// — the root package's — so it reddens the zero-warning gate instead of being
-// suppressed the way warnings from dependency targets are. m23-n2 replaces this
-// with the real transcriber call site; until then, keep it.
-import WhisperKit
+// `AppDirectories` — the one home for the Application-Support path rule (m23-n1b).
+import DAWCore
+// THE ONE-WAY DOOR, WALKED THROUGH UNDER A GATE (m23-n1) — and now walked
+// through for real. m23-n1 carried a bare `import WhisperKit` here purely as
+// EVIDENCE that the import SITE compiles under Swift 6 strict concurrency
+// (attaching the product in `Package.swift` makes SwiftPM build and link
+// WhisperKit whether or not any source imports it, so the build alone never
+// exercises it, and the reference app that vendored these weights is
+// tools-version 5.9 and has never compiled WhisperKit in this language mode).
+// m23-n2a replaced that placeholder with the real call sites —
+// `WhisperTranscriber.swift` and `TranscriptionBeats.swift` — which import and
+// USE the dependency, so the evidence is now load-bearing code and the bare
+// import is gone. This file itself needs no WhisperKit symbol: it mirrors
+// WhisperKit's load rules (see the citations on `WhisperModelCatalog`) rather
+// than calling them, which is what keeps it testable against a synthesized
+// fixture instead of the 1.5 GB copy.
 
 // MARK: - What a resolved model looks like
 
@@ -204,18 +209,39 @@ public struct WhisperModelCatalog: Sendable {
         return WhisperModelCatalog(searchRoot: root)
     }
 
-    /// `DAWPRO_WHISPER_MODELS_DIR` wins if set (also how a packaged `.app`
-    /// points at its bundled copy, and how a download-mode install points at
-    /// Application Support — m23-n3). Otherwise walk up from a repo-relative
-    /// anchor looking for `Package.swift` and use `<repo>/Models`. That walk-up
-    /// is a dev-only heuristic, exactly as `SidecarManager` does it: a packaged
-    /// `.app` has no `Package.swift` anywhere near it and MUST set the knob.
-    public static func defaultSearchRoot(
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> URL? {
-        if let override = environment[searchRootEnvironmentKey], !override.isEmpty {
-            return URL(fileURLWithPath: override).standardizedFileURL
-        }
+    /// `~/Library/Application Support/DAWPro/Models` — where the weights live
+    /// once installed, alongside `SoundBanks`/`Autosave`/`VoiceDatasets`
+    /// (m23-n1, 2026-07-27). The Application-Support rule itself was open-coded
+    /// here until m23-n1b consolidated all nine copies into
+    /// `DAWCore.AppDirectories`; `relativeModelsPath` deliberately stays local
+    /// because it also names the BUNDLE and REPO model dirs, which have nothing
+    /// to do with Application Support.
+    public static func applicationSupportModelsDirectory() -> URL {
+        AppDirectories.applicationSupport(.models)
+    }
+
+    /// `<App>.app/Contents/Resources/Models` when the weights were sealed into
+    /// the bundle by `scripts/bundle.sh --with-weights`. Nil outside a bundle
+    /// (SwiftPM executables, the test runner).
+    public static func bundledModelsDirectory(bundle: Bundle = .main) -> URL? {
+        bundle.resourceURL?
+            .appendingPathComponent(relativeModelsPath, isDirectory: true)
+            .standardizedFileURL
+    }
+
+    /// Every location consulted, HIGHEST PRIORITY FIRST — the one home for
+    /// "where can weights be". Order and its reasoning:
+    ///   1. **Application Support** — user-installed weights beat shipped ones,
+    ///      so a small bundled default can be upgraded to large-v3-turbo by
+    ///      downloading, without reinstalling the app (the m23-n3 story).
+    ///   2. **The bundle** — a sealed, signed, tested copy; the offline case.
+    ///   3. **`<repo>/Models`** — dev-only walk-up anchored on `Package.swift`,
+    ///      kept so a checkout that still has weights in-tree keeps working.
+    /// The `DAWPRO_WHISPER_MODELS_DIR` override is NOT in this list: it wins
+    /// outright in `defaultSearchRoot`, ahead of the whole chain.
+    public static func searchRootCandidates(bundle: Bundle = .main) -> [URL] {
+        var out: [URL] = [applicationSupportModelsDirectory()]
+        if let bundled = bundledModelsDirectory(bundle: bundle) { out.append(bundled) }
         // Two anchors, tried in order: the process's current directory (SwiftPM
         // runs `swift run`/`swift test` with cwd = package root, so this is the
         // reliable one under the test runner) and argv[0] (correct for a plain
@@ -228,9 +254,40 @@ public struct WhisperModelCatalog: Sendable {
             },
         ].compactMap { $0 }
         for anchor in anchors {
-            if let found = walkUpForModelsDir(from: anchor) { return found }
+            if let found = walkUpForModelsDir(from: anchor) {
+                if !out.contains(found) { out.append(found) }
+                break
+            }
         }
-        return nil
+        return out
+    }
+
+    /// `DAWPRO_WHISPER_MODELS_DIR` wins OUTRIGHT if set — even if it holds
+    /// nothing, so pointing the knob at a deliberate place yields that place's
+    /// teaching error rather than silently resolving somewhere else.
+    ///
+    /// Otherwise walk `searchRootCandidates` and take **the first that actually
+    /// HAS a usable model**, not merely the first that exists — an empty
+    /// `Application Support/DAWPro/Models` must not shadow a good bundled copy.
+    /// Falling back: the first that exists (so the error names a directory that
+    /// was really inspected), then the primary (so it names where to put them).
+    public static func defaultSearchRoot(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundle: Bundle = .main
+    ) -> URL? {
+        if let override = environment[searchRootEnvironmentKey], !override.isEmpty {
+            return URL(fileURLWithPath: override).standardizedFileURL
+        }
+        let candidates = searchRootCandidates(bundle: bundle)
+        if let stocked = candidates.first(where: {
+            !WhisperModelCatalog(searchRoot: $0).installedModels().isEmpty
+        }) { return stocked }
+        if let existing = candidates.first(where: {
+            var isDir: ObjCBool = false
+            let there = FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDir)
+            return there && isDir.boolValue
+        }) { return existing }
+        return candidates.first
     }
 
     private static func walkUpForModelsDir(from start: URL) -> URL? {

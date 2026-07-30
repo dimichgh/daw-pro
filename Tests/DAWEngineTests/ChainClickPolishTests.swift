@@ -557,4 +557,66 @@ struct ChainClickPolishTests {
         #expect(sha(first)
             == "0a6fc1c5d68c025bbde78b7fb4c9c3062f606494a042936316ff323d743bcd45")
     }
+
+    /// m23-p1's bypass leg. The m23-p roadmap line cited the m22-a/b
+    /// fingerprint `04e86aec9a73c505` for this, inherited from the m23-r
+    /// line — but PC6 (ROADMAP.md:453) already established that pin is
+    /// STRUCTURALLY BLIND to anything outside `EQEffect`: it constructs an
+    /// `EQEffect` directly and compares it against an in-test
+    /// `LegacyEQReference`, and never enters the chain. "A bypassed insert is
+    /// byte-identical to no insert at all" is a CHAIN property, so it is
+    /// pinned here, in the null-era family, against the SAME literal SHA the
+    /// sibling above pins — a value measured on a tree that predates this
+    /// effect and therefore cannot have been fitted to it.
+    ///
+    /// The third leg is the one that matters: m23-r2a proved the SHA pin
+    /// above stays green under mutations it ought to catch, so "bypassed ==
+    /// absent" would also pass for an enhancer that simply does nothing.
+    /// Rendering the SAME chain with the enhancer ACTIVE and requiring a
+    /// DIFFERENT hash is what makes the first two legs mean something.
+    @Test("null era: a BYPASSED bass enhancer is byte-identical to no bass enhancer at all")
+    func bypassedBassEnhancerIsByteIdenticalToAbsence() throws {
+        let fixtures = try TestSignals.fixtures()
+        func track(_ tail: [EffectDescriptor]) -> Track {
+            Track(name: "SRC", kind: .audio,
+                  clips: [Clip(name: "clip", startBeat: 0, lengthBeats: 4,
+                               audioFileURL: fixtures.cos1k48)],
+                  effects: [
+                      EffectDescriptor(kind: .delay,
+                                       delay: DelayParams(timeMs: 250, feedback: 0.4,
+                                                          mix: 0.3)),
+                      EffectDescriptor(kind: .gain,
+                                       gain: GainParams(gainLinear: 0.5)),
+                      EffectDescriptor(kind: .saturator, isBypassed: true),
+                  ] + tail)
+        }
+        func sha(_ audio: RenderedAudio) -> String {
+            var hasher = SHA256()
+            for channel in audio.channelData {
+                channel.withUnsafeBufferPointer { samples in
+                    hasher.update(data: Data(buffer: samples))
+                }
+            }
+            return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        }
+        func render(_ effects: [EffectDescriptor]) throws -> String {
+            try sha(OfflineRenderer().render(
+                tracks: [track(effects)], tempoMap: TempoMap(constantBPM: 120),
+                fromBeat: 0, durationSeconds: 2.0))
+        }
+        let absent = try render([])
+        let bypassed = try render([EffectDescriptor(kind: .bassEnhancer, isBypassed: true)])
+        let active = try render([EffectDescriptor(kind: .bassEnhancer)])
+        print("[era] m23-p1 bypass — absent \(absent), bypassed \(bypassed), active \(active)")
+
+        // 1. The unchanged baseline still hashes to the pre-change literal:
+        //    merely ADDING an effect kind moved nothing.
+        #expect(absent
+            == "0a6fc1c5d68c025bbde78b7fb4c9c3062f606494a042936316ff323d743bcd45")
+        // 2. Bypassed is byte-identical to absent — the gate's claim.
+        #expect(bypassed == absent)
+        // 3. ANTI-VACUITY: the same fixture CAN tell the difference, so leg 2
+        //    is not passing because the effect is inert.
+        #expect(active != absent)
+    }
 }

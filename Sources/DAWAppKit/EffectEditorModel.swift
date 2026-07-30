@@ -218,6 +218,12 @@ public final class EffectEditorModel {
                 ("MODULATION", [("rateHz", nil), ("depthMs", nil)]),
                 ("OUTPUT", [("mix", nil)]),
             ]
+        case .bassEnhancer:
+            return [
+                ("SPEAKER", [("crossoverHz", nil)]),
+                ("HARMONICS", [("amount", nil)]),
+                ("OUTPUT", [("mix", nil)]),
+            ]
         case .audioUnit:
             // AU params are not on the generic surface (M3 vi-b).
             return []
@@ -643,6 +649,14 @@ public final class EffectEditorModel {
             switch name {
             case "rateHz": return p.rateHz
             case "depthMs": return p.depthMs
+            case "mix": return p.mix
+            default: return nil
+            }
+        case .bassEnhancer:
+            let p = effect.resolvedBassEnhancer
+            switch name {
+            case "crossoverHz": return p.crossoverHz
+            case "amount": return p.amount
             case "mix": return p.mix
             default: return nil
             }

@@ -158,16 +158,11 @@ public struct SoundBankLibrary: Sendable {
         ]
     }
 
-    /// Default central library dir (the `AutosaveManager.defaultDirectory`
-    /// shape): `~/Library/Application Support/DAWPro/SoundBanks/`.
+    /// Default central library dir:
+    /// `~/Library/Application Support/DAWPro/SoundBanks/` (m23-n1b —
+    /// `AppDirectories` owns the rule; this is one category of it).
     public static func defaultLibraryDirectory() -> URL {
-        let base = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return base
-            .appendingPathComponent("DAWPro", isDirectory: true)
-            .appendingPathComponent("SoundBanks", isDirectory: true)
+        AppDirectories.applicationSupport(.soundBanks)
     }
 
     /// `"gm"` → `systemGMBankPath`; `.file` → its path. Throws

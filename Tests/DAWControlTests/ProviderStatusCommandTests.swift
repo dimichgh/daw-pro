@@ -98,12 +98,18 @@ struct ProviderStatusCommandTests {
         }
     }
 
-    @Test("takes no params and ignores extras harmlessly")
+    // m23-n2h: `ai.providerStatus` used to be one of 26 verbs that never
+    // called `rejectUnknownKeys` at all, so an unrecognized param was
+    // silently ignored rather than harmless — the permissive behaviour this
+    // test's old name described was withdrawn for consistency with the
+    // other 135 (now 161) commands.
+    @Test("takes no params — an unknown extra is now rejected (m23-n2h)")
     func ignoresExtras() async throws {
         let router = makeRouter(store: InMemoryKeyStore(), environment: [:])
         let response = await router.handle(
             ControlRequest(id: "1", command: "ai.providerStatus", params: ["unused": .bool(true)]))
-        #expect(response.ok)
+        #expect(!response.ok)
+        #expect(response.error == "ai.providerStatus: unknown parameter 'unused' — ai.providerStatus takes no parameters")
     }
 
     /// m10-t wire limb: a stored-but-consent-gated keychain key reports through the

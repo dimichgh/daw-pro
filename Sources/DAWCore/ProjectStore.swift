@@ -176,9 +176,12 @@ public final class ProjectStore {
     /// autosaves overwrite one slot rather than littering. Not observed.
     @ObservationIgnored private let recoverySlug = String(UUID().uuidString.prefix(8))
     /// Base directory for untitled-recovery autosave bundles. Defaults to the
-    /// real Application Support location; a test seam points it at a temp dir so
-    /// autosave never writes into the user's real profile.
-    @ObservationIgnored var autosaveRecoveryDirectory = ProjectStore.defaultAutosaveDirectory()
+    /// real Application Support location in production; a test seam
+    /// (`autosaveRecoveryDirectory = someDir`) can still point it anywhere. As of
+    /// m23-aa the DEFAULT ITSELF is also safe in a test context — see
+    /// `autosaveRecoveryDefault()` — so a test that forgets to set this seam no
+    /// longer writes into the user's real profile.
+    @ObservationIgnored var autosaveRecoveryDirectory = ProjectStore.autosaveRecoveryDefault()
 
     /// Whether a launch crash-recovery offer is currently on the table (m10-s).
     /// OBSERVED (not `@ObservationIgnored`) so the launch sheet's host can react
@@ -447,13 +450,7 @@ public final class ProjectStore {
     /// Only the URL is minted here — the engine's writer creates parent dirs.
     private var sessionRecordingDir: URL {
         if let cachedSessionRecordingDir { return cachedSessionRecordingDir }
-        let base = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-        let dir = base
-            .appendingPathComponent("DAWPro", isDirectory: true)
-            .appendingPathComponent("Recordings", isDirectory: true)
+        let dir = AppDirectories.applicationSupport(.recordings)
             .appendingPathComponent("session-\(UUID().uuidString.prefix(8))", isDirectory: true)
         cachedSessionRecordingDir = dir
         return dir
@@ -1184,6 +1181,102 @@ public final class ProjectStore {
     /// engine injected) or when the session is stopped/silent.
     public func masterAnalysis() -> MasterAnalysisSnapshot {
         engine?.masterAnalysis() ?? .floor
+    }
+
+    // MARK: - Per-insert spectrum (m23-r3/r4)
+
+    /// Named-owner bookkeeping for `setInsertAnalysisArmed` (m23-r4, design
+    /// D1) — the ONE home for "who currently holds a control-plane arm on
+    /// this insert". Gates DISARM ONLY: an owner set is never consulted when
+    /// arming, so a stale entry can cost at most one deferred disarm, never
+    /// a wrong reading or a second cap. The engine's own N-tap cap
+    /// (`AudioEngineControlling.maxArmedInsertAnalysis`) is the sole cap
+    /// authority and is untouched by this dictionary.
+    private var insertAnalysisOwners: [InsertAnalysisTarget: Set<InsertAnalysisOwner>] = [:]
+
+    /// Arms/disarms the spectrum tap on ONE insert (nil `trackID` = the master
+    /// chain) on behalf of ONE named `owner` (m23-r4, design D1): the in-app
+    /// EQ card (`.ui`) and the wire's `fx.spectrum` TTL lease (`.control`)
+    /// each hold their own slot in `insertAnalysisOwners`, so one party's
+    /// disarm can never silently stomp the other's live tap. Arming inserts
+    /// the owner (and arms the engine only if that target's owner set was
+    /// empty); disarming removes ONLY that owner and reaches the engine's
+    /// disarm only once the set becomes empty again.
+    ///
+    /// Returns an `InsertArmOutcome` rather than a bare `Bool` (the pre-r4
+    /// contract) so a cap refusal can NAME the cap, and a model-lookup
+    /// failure is distinguishable from the engine's own refusal. Validated
+    /// in this order, and the order is load-bearing:
+    ///  1. no engine at all → `.unavailableHeadless`;
+    ///  2. an engine that cannot tap inserts at all
+    ///     (`maxArmedInsertAnalysis == 0`) → `.unsupported`, so a `cap: 0`
+    ///     message can never reach the wire (every `AudioEngineControlling`
+    ///     fake without an override lands here BY DEFAULT — this guard is
+    ///     what keeps that the common case, not the cap-full one);
+    ///  3. unknown track/effect → `.trackNotFound`/`.effectNotFound`;
+    ///  4. (arm only) the engine's own arm refusing (cap full) →
+    ///     `.refusedCapFull(cap:)`;
+    ///  5. success → `.armed`/`.released`.
+    /// Disarming shares steps 1–3 ("same validation") but never reaches step
+    /// 4 — there is no cap to refuse when releasing a slot.
+    @discardableResult
+    public func setInsertAnalysisArmed(trackID: UUID?, effectID: UUID, armed: Bool,
+                                       owner: InsertAnalysisOwner) -> InsertArmOutcome {
+        guard let engine else { return .unavailableHeadless }
+        guard engine.maxArmedInsertAnalysis > 0 else { return .unsupported }
+        if let trackID {
+            guard let ti = tracks.firstIndex(where: { $0.id == trackID }) else {
+                return .trackNotFound(trackID)
+            }
+            guard tracks[ti].effects.contains(where: { $0.id == effectID }) else {
+                return .effectNotFound(effectID)
+            }
+        } else {
+            guard masterEffects.contains(where: { $0.id == effectID }) else {
+                return .effectNotFound(effectID)
+            }
+        }
+        let target = InsertAnalysisTarget(trackID: trackID, effectID: effectID)
+        guard armed else {
+            insertAnalysisOwners[target]?.remove(owner)
+            if insertAnalysisOwners[target]?.isEmpty ?? true {
+                insertAnalysisOwners.removeValue(forKey: target)
+                engine.setInsertAnalysisArmed(trackID: trackID, effectID: effectID, armed: false)
+            }
+            return .released
+        }
+        guard engine.setInsertAnalysisArmed(trackID: trackID, effectID: effectID, armed: true) else {
+            return .refusedCapFull(cap: engine.maxArmedInsertAnalysis)
+        }
+        insertAnalysisOwners[target, default: []].insert(owner)
+        return .armed
+    }
+
+    /// Latest spectrum measured POST one armed insert (nil `trackID` = the
+    /// master chain); nil when that insert is not armed or when running
+    /// headless — no reading at all, never a floor snapshot that would read
+    /// like a live silent meter (the `liveLoudness` convention, not the
+    /// `masterAnalysis` one).
+    ///
+    /// This DRAINS the tap's ring, but N consumers are safe PROVIDED they
+    /// are all on the main actor (m23-r4 finding, corrects the prior
+    /// "exactly ONE consumer" warning here — see
+    /// design-m23r4-fx-spectrum-lease.md §1): the tap's SPSC ring's
+    /// single-consumer contract is about THREADS, and `ProjectStore` being
+    /// `@MainActor` is what enforces it. `drainAndSnapshot()` accumulates
+    /// samples across calls and every consumer then reads the same fresher
+    /// `snapshot()` (a pure read that advances nothing) — no frames are
+    /// lost and no caller "runs slow" the way the old comment claimed. What
+    /// is NOT safe is an UNOWNED disarm — `setInsertAnalysisArmed`'s
+    /// named-owner `Set<InsertAnalysisOwner>` exists precisely so one
+    /// caller's release can never silently stomp another's live tap.
+    /// Honest residue: ballistics run in analyzed-frame time, and a poller
+    /// slower than ~12 Hz falls behind wall-clock because the ring's
+    /// `maxDrainFrames` (4096) drops the OLDEST frames rather than
+    /// blocking — never pin an exact dB value across differing poll rates,
+    /// pin the band INDEX instead.
+    public func insertAnalysis(trackID: UUID?, effectID: UUID) -> MasterAnalysisSnapshot? {
+        engine?.insertAnalysis(trackID: trackID, effectID: effectID)
     }
 
     /// Latest goniometer/vectorscope frame (m22-d) as the engine reports it
@@ -2083,9 +2176,14 @@ public final class ProjectStore {
     /// Human display name for an effect kind, used in undo labels ("Add EQ to
     /// 'Vox'") — matches the granular-verb send labels. Acronyms upper-case
     /// wholesale; everything else title-cases the raw value.
+    /// NOTE: the `default` branch title-cases the RAW VALUE, so any kind whose
+    /// raw value is not a single lower-case word needs its own case here or it
+    /// reads as camelCase in the undo stack ("Add BassEnhancer to 'Vox'").
+    /// The compiler cannot catch that — this switch is not exhaustive.
     private static func effectDisplayName(_ kind: EffectDescriptor.Kind) -> String {
         switch kind {
         case .eq: return "EQ"
+        case .bassEnhancer: return "Bass Enhancer"
         default: return kind.rawValue.prefix(1).uppercased() + kind.rawValue.dropFirst()
         }
     }
@@ -2563,6 +2661,15 @@ public final class ProjectStore {
             default: return
             }
             effect.chorus = params
+        case .bassEnhancer:
+            var params = effect.resolvedBassEnhancer
+            switch name {
+            case "crossoverHz": params.crossoverHz = value
+            case "amount": params.amount = value
+            case "mix": params.mix = value
+            default: return
+            }
+            effect.bassEnhancer = params
         case .audioUnit:
             // Unreachable: specs(for: .audioUnit) is empty, so name validation
             // in setEffectParam rejects every name first. AU params are not
@@ -3007,7 +3114,10 @@ public final class ProjectStore {
         guard let index = tracks.firstIndex(where: { $0.id == id }) else {
             throw ProjectError.trackNotFound(id)
         }
-        guard tracks[index].kind == .instrument else {
+        // `Track.canHoldMIDIClips` (m23-v), not a local `kind == .instrument`:
+        // the arrange lanes draw their empty-lane hint from the SAME predicate,
+        // so an affordance can never advertise a create this guard would refuse.
+        guard tracks[index].canHoldMIDIClips else {
             throw ProjectError.midiClipsRequireInstrumentTrack(tracks[index].kind)
         }
 
@@ -3284,14 +3394,13 @@ public final class ProjectStore {
     /// (`ArrangeSelection.resolved(in:)`), so a stale selected id can never reach
     /// here; an agent calling with a bad id still gets told.
     ///
-    /// TODO(wire, deliberately not shipped in m23-g1): this verb has no control
-    /// command yet, by the orchestrator's explicit "zero wire growth" direction
-    /// for this item — the arrange SELECTION it serves is UI state and lives on
-    /// the `debug.arrangeSelection` seam (the `debug.arrangeDrop` snap-picker
-    /// precedent). The domain effect is already agent-reachable as N× `clip.remove`;
-    /// the only delta is undo atomicity. When that delta is wanted, the command is
-    /// `clip.removeMany {ids:[uuid]}` in `Sources/DAWControl/Commands.swift` and
-    /// the MCP tool is `daw_clip_remove_many` in `mcp-server/src/server.ts`.
+    /// WIRED (m23-w): reachable as `clip.removeMany {ids:[uuid]}` in
+    /// `Sources/DAWControl/Commands.swift` and the MCP tool `clip_remove_many`
+    /// in `mcp-server/src/server.ts` — the wire half deliberately deferred at
+    /// m23-g1 under the orchestrator's "zero wire growth" direction for that
+    /// item (the arrange SELECTION this verb serves is still UI state, on the
+    /// `debug.arrangeSelection` seam; only the group-delete DOMAIN effect
+    /// itself gained a direct route).
     @discardableResult
     public func removeClips(ids: [UUID]) throws -> [Clip] {
         var seen = Set<UUID>()
@@ -3807,13 +3916,11 @@ public final class ProjectStore {
     /// applies to all of them; what does not exist is moving a clip to a
     /// DIFFERENT track.
     ///
-    /// TODO(wire, deliberately not shipped in m23-g2): filed as roadmap item
-    /// m23-w together with group delete's. The command is
-    /// `clip.moveMany {ids:[uuid], byBeats:Double}` in
-    /// `Sources/DAWControl/Commands.swift` and the MCP tool is
-    /// `daw_clip_move_many` in `mcp-server/src/server.ts`. The domain effect is
-    /// already agent-reachable as N× `clip.move`; the deltas are undo atomicity
-    /// and the non-contiguous overlap handling.
+    /// WIRED (m23-w): reachable as `clip.moveMany {ids:[uuid],
+    /// byBeats:Double}` in `Sources/DAWControl/Commands.swift` and the MCP
+    /// tool `clip_move_many` in `mcp-server/src/server.ts` — the wire half
+    /// deliberately deferred at m23-g2 under the same "zero wire growth"
+    /// direction as `removeClips` above.
     @discardableResult
     public func moveClips(ids: [UUID], byBeats delta: Double) throws -> ClipsMoveResult {
         var seen = Set<UUID>()
@@ -3968,7 +4075,8 @@ public final class ProjectStore {
         // Type-check by content against the destination track's kind (the
         // clip-add rules, reused verbatim).
         if source.isMIDI {
-            guard tracks[dt].kind == .instrument else {
+            // The `addMIDIClip` guard's ONE home (m23-v) — same rule, same refusal.
+            guard tracks[dt].canHoldMIDIClips else {
                 throw ProjectError.midiClipsRequireInstrumentTrack(tracks[dt].kind)
             }
         } else {
@@ -6141,39 +6249,64 @@ public final class ProjectStore {
 
     /// Default autosave/recovery directory:
     /// `~/Library/Application Support/DAWPro/Autosave/`.
+    ///
+    /// DELEGATES to `AutosaveManager.defaultDirectory()` (m23-n1b). The rolling
+    /// snapshot the manager writes and the legacy per-slug recovery bundles this
+    /// store scans cohabit ONE directory, and until m23-n1b these were two
+    /// independent computations that had to agree and were not made to. There is
+    /// now a single producer: re-inlining the rule here would put the recovery
+    /// scan back in a directory the writer need not use.
     static func defaultAutosaveDirectory() -> URL {
-        let base = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return base
-            .appendingPathComponent("DAWPro", isDirectory: true)
-            .appendingPathComponent("Autosave", isDirectory: true)
+        AutosaveManager.defaultDirectory()
+    }
+
+    /// A fresh per-PROCESS temp root for `autosaveRecoveryDefault()`, computed
+    /// once and shared by every `ProjectStore` built in this process — mirroring
+    /// production, where every default-constructed store shares the one real
+    /// Autosave directory (so a bundle written via one store is discoverable via
+    /// a fresh one, e.g. `untitledRecoveryBundles()`). `nil` outside a detected
+    /// test process, so production pays this static initializer nothing beyond
+    /// one `TestEnvironment.isRunningTests` read. Created eagerly (not lazily
+    /// on first write) so a test that asserts a bundle exists right after a
+    /// transition never races an unmade parent directory.
+    private static let testAutosaveRoot: URL? = {
+        guard TestEnvironment.isRunningTests else { return nil }
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DAWPro-test-autosave-\(UUID().uuidString)", isDirectory: true)
+        // SAME path math as production (`AppDirectories.applicationSupport`),
+        // just a different `systemBase` — not a second, hand-rolled computation.
+        let root = AppDirectories.applicationSupport(.autosave, systemBase: base)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }()
+
+    /// The default value for `autosaveRecoveryDirectory` (m23-aa). Production:
+    /// exactly `defaultAutosaveDirectory()` — unchanged, still the real profile
+    /// location `AppDirectoriesTests.autosaveDirectoriesAgree` pins equal to
+    /// `AutosaveManager.defaultDirectory()` / `AppDirectories.applicationSupport(.autosave)`.
+    /// Under a detected Swift test process: a redirected temp root, so a bare
+    /// `ProjectStore()` that reaches `flushForTransition()` (a dirty untitled
+    /// `newProject()`/`openProject()`) or `autosaveIfNeeded()` without the test
+    /// ever mentioning `autosaveRecoveryDirectory` still cannot write into the
+    /// user's real `~/Library/Application Support/DAWPro/Autosave/`. This is
+    /// layered ABOVE `defaultAutosaveDirectory()`, not a replacement for it —
+    /// `AppDirectories`/`AutosaveManager`/`defaultAutosaveDirectory()` are
+    /// untouched and remain the one, always-real computation.
+    static func autosaveRecoveryDefault() -> URL {
+        testAutosaveRoot ?? defaultAutosaveDirectory()
     }
 
     /// Default home for imported generated audio (M6 iii-a). Sibling of the
     /// recordings scratch under Application Support so it persists across the
     /// volatile sidecar temp cache and undo/redo resurrection.
     static func defaultGenerationImportsDirectory() -> URL {
-        let base = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return base
-            .appendingPathComponent("DAWPro", isDirectory: true)
-            .appendingPathComponent("Generations", isDirectory: true)
+        AppDirectories.applicationSupport(.generations)
     }
 
     /// Default home for imported reference audio (m22-g) — the Generations
     /// sibling under Application Support (design §3.3).
     static func defaultReferenceImportsDirectory() -> URL {
-        let base = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return base
-            .appendingPathComponent("DAWPro", isDirectory: true)
-            .appendingPathComponent("References", isDirectory: true)
+        AppDirectories.applicationSupport(.references)
     }
 
     /// Readable reason from any error (LocalizedError message when present).

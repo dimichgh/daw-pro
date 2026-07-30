@@ -377,9 +377,12 @@ struct ReferenceLaneTransparencyTests {
         }
         defer { engine.shutdown() }
 
-        // A limiter strip gives the session real PDC latency (240-sample
+        // A limiter strip gives the session real PDC latency (the fixed 5 ms
         // lookahead — the masterChainEditIsNeverTopology figure), so the D7
-        // anchor delay is a NON-ZERO measured quantity here.
+        // anchor delay is a NON-ZERO measured quantity here. 240 is only
+        // `LimiterParams.lookaheadSamples(sampleRate: 48_000)` — the ONE HOME
+        // (m23-ab-1) — since this machine's graph rate follows the current
+        // audio device, never hardcode the sample count.
         let fixtures = try TestSignals.fixtures()
         let track = Track(name: "L", kind: .audio,
                           clips: [Clip(name: "c", startBeat: 0, lengthBeats: 8,
@@ -387,7 +390,9 @@ struct ReferenceLaneTransparencyTests {
                           effects: [EffectDescriptor(kind: .limiter)])
         engine.tracksDidChange([track])
         let report = try #require(engine.pdcReport())
-        #expect(report.outputLatencySamples == 240)
+        let expectedLatencySamples = LimiterParams.lookaheadSamples(
+            sampleRate: engine.graph.graphSampleRate)
+        #expect(report.outputLatencySamples == expectedLatencySamples)
 
         // D8 pin: with the lane present, the master tap rides the CHAIN
         // HOST — upstream of the gate: meters keep reading the MIX while B
@@ -413,7 +418,8 @@ struct ReferenceLaneTransparencyTests {
 
         // Roll start from beat 0: mapping is exact — file time −5 splits
         // into fileStart 0 + playerDelay 5; the anchor carries the D7
-        // latency delay (240 samples at the graph rate).
+        // latency delay (the ONE-HOME lookahead sample count at the graph
+        // rate — see the m23-ab-1 comment above; never a literal numerator).
         var transport = TransportState()
         transport.isPlaying = true
         engine.startPlayback(transport)
@@ -422,7 +428,9 @@ struct ReferenceLaneTransparencyTests {
         #expect(sched.fileStartSeconds == 0)
         #expect(sched.playerDelaySeconds == 5)
         let graphRate = engine.graph.graphSampleRate
-        #expect(abs(sched.latencySeconds - 240.0 / graphRate) < 1e-12)
+        let expectedLatencySeconds =
+            Double(LimiterParams.lookaheadSamples(sampleRate: graphRate)) / graphRate
+        #expect(abs(sched.latencySeconds - expectedLatencySeconds) < 1e-12)
 
         // Mid-play offset change → player-local re-anchor at the newly
         // mapped position: fileStart = timeline(W) + 1 ≥ 1, no deferral.

@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-07-30 — Our tests were leaving DAW Pro convinced it had crashed
+
+When DAW Pro starts, it writes a small marker file to say "a session is running",
+and deletes it on a clean exit. If that marker is still there at the next launch,
+the app concludes the previous session crashed and offers to recover your unsaved
+work. That is exactly what you want after a real crash.
+
+Our automated checks launch DAW Pro and then stop it abruptly, which skips the
+clean-exit path — so every check run left that marker behind. The next time you
+opened the app for real, it would offer to recover from a crash that never
+happened. Test tooling has no business telling you that.
+
+The teardown step now removes the marker, and does it in one shared place rather
+than leaving each check to remember. The safety rule is that it only ever removes
+a marker it can prove belongs to the copy it started: it compares the recorded
+process against its own, and if there is any doubt at all — the file is missing,
+unreadable, malformed, or names a different session — it leaves the file alone.
+Your real recovery marker is never a candidate for deletion.
+
+Two things worth being straight about:
+
+- **A check run started while you have DAW Pro open will still disturb this.** The
+  app writes that marker to a fixed location, so a second copy overwrites the
+  first one's. The cleanup cannot undo that, so the check now refuses to run at
+  all if it sees DAW Pro already running. The deeper fix — giving test runs their
+  own private data folder instead of sharing yours — is written up as its own
+  task, because test runs currently share your recordings, autosaves and
+  generated-audio folders too.
+- **Two checks are not covered yet** (`m23o1`, `m23o2`). They still stop the app
+  their own way and still leave a marker. They are next.
+
+While verifying this we also found that our leak detector — the thing that
+reports whether a check left a stray copy of the app running — was reporting
+stray copies that did not exist, by matching against its own search command. It
+had already been wrong in the other direction last week. It has been rewritten
+and moved into the repository so it stops being re-invented.
+
 ## 2026-07-30 — Our own test tooling was quietly checking the wrong app
 
 Nothing in DAW Pro itself changed here. This is a fix to the automated checks we

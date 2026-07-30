@@ -423,6 +423,16 @@ final class AppModel {
     /// any focused view sees the key, so the routing must live here.
     var pianoRollEditorFocused = false
 
+    /// Whether the open roll has NOTES selected, reported by the view (m23-x).
+    ///
+    /// NOT a second focus flag, and not interchangeable with one: the roll
+    /// self-focuses on appear and opens for ANY single selected MIDI clip, so
+    /// `pianoRollEditorFocused` alone is already true when the user has merely
+    /// clicked a clip in the arrange. This is the extra term that separates
+    /// "user is editing notes" from "user selected a clip" — see
+    /// `PianoRollNoteSelectionBridge` for the measurement that forced it.
+    let pianoRollNoteSelection = PianoRollNoteSelectionBridge()
+
     // MARK: Arrange pointer affordances (m17-c)
 
     /// The staged pointer event `debug.arrangePointer` injects (nil in normal
@@ -455,6 +465,25 @@ final class AppModel {
     /// ONLY by the view's own create callback; the seam clears it before staging
     /// a double-click so the echo can never describe a previous one.
     var arrangeCreatedClipID: UUID?
+
+    /// The empty-lane hints the arrange lanes are DRAWING (m23-v), reported UP by
+    /// the very layer that draws them — never recomputed here.
+    ///
+    /// That distinction is the item, not plumbing. `DAWApp` has no test target,
+    /// so a hint composed in a `body` is invisible to everything under `Tests/`
+    /// (m23-m3b measured the consequence: a mutant that broke a `DAWApp`-only
+    /// binding left 3979 tests / 405 suites entirely green). An `AppModel`-side
+    /// re-derivation of `ArrangeEmptyLaneHints.hints(for: store.tracks)` would
+    /// echo `true` from a build whose lanes draw nothing at all — the echo would
+    /// be decoration. Reading the drawing layer's own report means a view that
+    /// does not draw structurally cannot claim it did.
+    var arrangeEmptyLaneHints: [ArrangeEmptyLaneHint] = []
+    /// Bumped every time the lanes report their hint set (the
+    /// `arrangePointerReportSeq` discipline). Nothing renders it: it is the
+    /// seam's proof that a render has been through the view since a caller last
+    /// looked, which is what lets a staged read WAIT for a hint to appear or go
+    /// after a `track.add` / `clip.addMIDI` rather than sleep and hope.
+    var arrangeEmptyLaneHintSeq = 0
 
     // MARK: Arrange audio-drop staging (m23-f)
 
@@ -618,6 +647,55 @@ final class AppModel {
         // one-shot flag would leave the arrange permanently unfocused for MIDI.
         arrangeKeyFocusNonce &+= 1
         return intent
+    }
+
+    /// The ONE arrange TRACK-HEADER click handler (m23-y): the `TrackRow` tap and
+    /// the `debug.arrangeSelection {act:"clickTrack"}` seam both land here, so the
+    /// seam cannot drift from the gesture. `clickClip`'s twin, in the same shape
+    /// and for the same reasons.
+    ///
+    /// Policy is the headless type's (`ArrangeTrackSelection.apply` — including
+    /// what "this track's clips" means, the shared chord table, and the
+    /// all-or-none set toggle); this owns only composition. Nothing here decides
+    /// anything, which is what keeps the whole rule inside `Tests/DAWAppKitTests`
+    /// while `DAWApp` has no test target.
+    ///
+    /// Returns nil for an unknown track id — and does NOT bump the focus nonce in
+    /// that case: nothing was selected, so asserting arrange key focus would be a
+    /// side effect with no cause. The seam turns the nil into a thrown error with
+    /// the id in it (`debug.trackHeaderDrag`'s "no track with id" convention),
+    /// rather than answering a silent no-op a gate would read as green.
+    ///
+    /// THE NONCE BUMP IS LOAD-BEARING, exactly as it is on `clickClip`: it is what
+    /// moves keyboard focus onto the arrange workspace (`ArrangeDeleteKey`'s
+    /// `.onChange(of: model.arrangeKeyFocusNonce)`), so DELETE reaches the clips
+    /// the header click just selected with no separate "click the background
+    /// first" step. Bumped on EVERY header click, including one that changed
+    /// nothing, for `clickClip`'s stated reason — opening the piano roll steals
+    /// focus back, so a one-shot flag would leave the arrange permanently
+    /// unfocused.
+    ///
+    /// A CONSEQUENCE THIS MAKES NEWLY REACHABLE, stated because it is a real
+    /// arbitration and not an accident: `ArrangeSelection.replace(with:)` KEEPS a
+    /// focus that survives into the new set, so clicking the header of the track
+    /// holding the open editor clip leaves the piano roll OPEN while this bump
+    /// moves key focus to the arrange. DELETE then has two candidate consumers.
+    /// The arbitration is SwiftUI's and is structural — `PianoRollView` owns
+    /// `.onKeyPress(.delete)` as a DESCENDANT of `ArrangeDeleteKey`, so a focused
+    /// roll with notes selected consumes the key first and this path never runs.
+    /// What is decided HERE, and is the half a gate can observe, is the other
+    /// branch: when `handleArrangeDeleteKey` DOES run it has no piano-roll term
+    /// among its four guards (unlike `handleArrangeNudgeKey`'s fifth), so it
+    /// deletes the whole union INCLUDING the clip the roll is open on, atomically,
+    /// and `openEditorClip` resolves the now-dead id to nil and closes the editor.
+    /// There is no partial state in between: the delete is one `performEdit`.
+    @discardableResult
+    func clickTrack(id: UUID, modifiers: ArrangeClickModifiers) -> ArrangeTrackClickOutcome? {
+        guard let track = store.tracks.first(where: { $0.id == id }) else { return nil }
+        let outcome = ArrangeTrackSelection.apply(
+            click: track, modifiers: modifiers, to: &arrangeSelection)
+        arrangeKeyFocusNonce &+= 1
+        return outcome
     }
 
     /// The ONE arrange MARQUEE handler (m23-g3): the lanes' `DragGesture` and
@@ -887,6 +965,262 @@ final class AppModel {
         return deleteArrangeSelection()
     }
 
+    // MARK: - Arrow-key nudge (m23-x)
+
+    /// WHICH guard refused a nudge — echoed by the `debug.arrangeSelection
+    /// {act:"nudge"}` seam so a CONTROLLED-PAIR gate can prove the guard it is
+    /// aiming at is the one that fired. A bare `handled:false` cannot: a leg
+    /// that meant to test the text-editing guard would pass identically if the
+    /// selection had quietly emptied, which is how a dead handler slips through
+    /// a refusal-only test.
+    enum ArrangeNudgeRefusal: String {
+        case workspace
+        case modal
+        case textEditing = "text-editing"
+        case emptySelection = "empty-selection"
+        /// The chord carries ⌘ or ⌃ — not ours, pass it through.
+        case chord
+        /// The piano roll is open with NOTES SELECTED — the editor owns ← / →.
+        /// Named for the note edit, not for focus: focus is explicitly not a
+        /// term in the predicate (see `handleArrangeNudgeKey`).
+        case pianoRollNoteEdit = "piano-roll-note-edit"
+        /// The store refused (a take-comp member); `refusal` carries its words.
+        case store
+    }
+
+    /// What one arrow press actually did.
+    ///
+    /// `handled` AND `effectiveDeltaBeats` ARE DIFFERENT QUESTIONS and must
+    /// never be conflated in an assertion. `handled` means "the arrange
+    /// CONSUMED this key" and drives `.handled` vs `.ignored`; it is TRUE for a
+    /// nudge the beat-0 clamp reduced to nothing, deliberately — an arrow that
+    /// fell through at the wall would scroll the timeline out from under the
+    /// user instead of doing nothing. Whether anything MOVED is
+    /// `effectiveDeltaBeats` / `movedIDs`, read from the store's own
+    /// `ClipsMoveResult`, never recomputed here.
+    ///
+    /// TWO OUTCOMES SET `handled: true` WHILE CHANGING NOTHING, and they are the
+    /// same rule seen twice: the fully-clamped nudge at the beat-0 wall, and the
+    /// `.pianoRollNoteEdit` refusal. Both are states where the user pressed an
+    /// arrow and nothing should visibly happen — so the key must be EATEN, or
+    /// `TimelineLanesView`'s horizontal `ScrollView` answers it by scrolling the
+    /// timeline instead. Every other refusal (`workspace`, `modal`,
+    /// `textEditing`, `emptySelection`, `chord`, `store`) genuinely is not ours
+    /// and must fall through. If a third `handled: true` refusal ever appears,
+    /// check it against that test rather than copying the shape.
+    struct ArrangeNudgeOutcome {
+        var handled: Bool = false
+        var refusedBy: ArrangeNudgeRefusal?
+        /// The step the ONE producer (`ArrangeNudge.step`) chose, echoed rather
+        /// than recomputed. Nil when a guard refused before it was consulted.
+        var stepBeats: Double?
+        var stepSource: String?
+        /// What the STORE was asked for (`ClipsMoveResult.requestedDeltaBeats`).
+        /// Unlike the drag path there is no gesture-side floor on this route, so
+        /// this always equals the step's own signed delta and `clamped` is the
+        /// whole reduction story — no `gestureFlooredAtZero` twin is needed.
+        var requestedDeltaBeats: Double = 0
+        var effectiveDeltaBeats: Double = 0
+        /// The WHOLE-GROUP beat-0 clamp inside `ProjectStore.moveClips` engaged.
+        var clamped: Bool = false
+        var movedIDs: [UUID] = []
+        var trimmedIDs: [UUID] = []
+        var removedIDs: [UUID] = []
+        var refusal: String?
+        /// True when the store was actually mutated — the debug seam only waits
+        /// on a re-render when there is one to wait for.
+        var changed: Bool {
+            effectiveDeltaBeats != 0 || !trimmedIDs.isEmpty || !removedIDs.isEmpty
+        }
+    }
+
+    /// The ONE arrow-key nudge handler: `ArrangeDeleteKey`'s `.onKeyPress` and
+    /// the `debug.arrangeSelection {act:"nudge"}` seam both land here, so the
+    /// seam cannot drift from the key.
+    ///
+    /// GUARDS MIRROR `handleArrangeDeleteKey` EXACTLY, in the same order and for
+    /// the same reasons (read that method and `isModalPresented` for the full
+    /// argument; it is not repeated here). One of them carries MORE weight for
+    /// arrows than for DELETE: `isArrangeTextEditingFocused`. A Backspace typed
+    /// into a rename field is a rare accident; ← and → are pressed inside text
+    /// fields constantly, by every user, in every rename — so on this path that
+    /// guard is load-bearing rather than defence in depth.
+    ///
+    /// THE SELECTION IS DELIBERATELY *NOT* CLEARED, which is where this parts
+    /// company with delete: you keep nudging the same clips. That is also what
+    /// makes the undo coalescing work — `ProjectStore.moveClipsKey(ids:)` is
+    /// selection-stable, so a burst of presses on an unchanged selection folds
+    /// into ONE journal entry.
+    ///
+    /// ↑/↓ ARE NOT HANDLED, AND THAT IS A DECISION — see the note at the top of
+    /// `ArrangeNudge`: no cross-track move verb exists anywhere in the app, so
+    /// a vertical nudge is a new domain verb, not a keyboard layer.
+    ///
+    /// THE FIFTH GUARD IS NOT IN THE DELETE HANDLER, AND THAT ASYMMETRY IS THE
+    /// POINT. `handleArrangeDeleteKey`'s four guards are sufficient partly
+    /// because of a STRUCTURAL fact that does NOT transfer to arrows:
+    /// `PianoRollView` and `AutomationLaneEditor` each own `.onKeyPress(.delete)`
+    /// on their own surfaces and are DESCENDANTS of `ArrangeDeleteKey`, so a
+    /// focused editor consumes DELETE and this file never sees it. Nothing
+    /// anywhere in the app consumes ← / → — grep: the only arrow `.onKeyPress`
+    /// is the one that calls this method — so without a guard here the clip
+    /// slides underneath the open editor. Measured on staging before the fix:
+    /// roll open and focused, → moved the clip 12 → 16 with `refusedBy: nil`.
+    ///
+    /// THE PREDICATE IS "ROLL ON SCREEN **AND** NOTES SELECTED". It mirrors what
+    /// the roll's OWN delete handler does — `guard !model.selection.isEmpty else
+    /// { return .ignored }`, i.e. consume only when there is a note selection,
+    /// else fall through and let the arrange act on the clip.
+    ///
+    /// TWO SIMPLER PREDICATES WERE IMPLEMENTED AND MEASURED WRONG FIRST, which
+    /// is why this one looks over-specified. (1) `pianoRollEditorFocused` ALONE
+    /// refuses every single-MIDI-clip nudge — the roll self-focuses and opens
+    /// for any single selected MIDI clip, so the flag is already true in the
+    /// ordinary "clicked one clip" state (measured: 0 → 0 with
+    /// `refusedBy` set, and 9 of 46 gate assertions red, every one a CONTROL
+    /// half). (2) Focus as an EXTRA term makes the guard INTERMITTENT: the flag
+    /// alternates deterministically on clip switches (6 true / 6 false over 12
+    /// consecutive selections, editor open on all 12), so the clip would slide
+    /// underneath the editor every other time. Measurements:
+    /// `PianoRollNoteSelectionBridge`.
+    ///
+    /// KNOWN, MEASURED CONSEQUENCE — A GROUP NUDGE CAN GO DEAD. `openEditorClip`
+    /// stays non-nil when a selection is EXTENDED past one clip, and the roll
+    /// does not drop its note selection on a shift-click, so: select a MIDI clip,
+    /// select notes in the roll, shift-click two more clips, press → and nothing
+    /// happens (measured: `refusedBy: piano-roll-note-edit`, starts 0/8/16
+    /// unchanged). The refusal is CORRECT by this predicate — notes really are
+    /// selected in an open editor — but the user's intent is plainly the group.
+    /// Left as-is deliberately rather than re-cut a third time: the honest fix
+    /// is for the roll to drop its note selection when the arrange selection
+    /// grows past the clip it is open on, which is the editor's business, not
+    /// this handler's. Filed for the roadmap.
+    ///
+    /// STILL NOT CLOSED, HONESTLY: whether a REAL arrow keypress reaches an
+    /// ancestor `.onKeyPress` while a descendant holds `@FocusState` is not
+    /// measurable here — the unbundled staging binary does not route real key
+    /// events (m23-g1). This guard rests on handler-level certainty plus
+    /// SwiftUI's ancestor bubbling, not on an end-to-end measurement.
+    ///
+    /// THE AUTOMATION LANE EDITOR HAS THE IDENTICAL EXPOSURE AND IS NOT FIXED
+    /// HERE: `AutomationLaneEditor` has its own `@FocusState private var
+    /// focused` but never reports it to the model, so guarding it needs new
+    /// plumbing. Filed as its own roadmap item — do not bolt it on here.
+    ///
+    /// Snap, step and clamp each have exactly one home: `effectiveClipSnap`
+    /// (which grid), `ArrangeNudge.step` (how far), `ProjectStore.moveClips`
+    /// (the WHOLE-GROUP beat-0 clamp and every resulting position). This method
+    /// only routes between them and reports what they said.
+    @discardableResult
+    func handleArrangeNudgeKey(direction: ArrangeNudgeDirection,
+                               modifiers: TransportKeyModifiers) -> ArrangeNudgeOutcome {
+        guard workspaceMode == .arrange else { return ArrangeNudgeOutcome(refusedBy: .workspace) }
+        guard !isModalPresented else { return ArrangeNudgeOutcome(refusedBy: .modal) }
+        guard !isArrangeTextEditingFocused else {
+            return ArrangeNudgeOutcome(refusedBy: .textEditing)
+        }
+        // THE ROLL WOULD HAVE CONSUMED THIS KEY: it is on screen AND holds a
+        // note selection — precisely the test its own `.onKeyPress(.delete)`
+        // applies before deciding to consume or fall through.
+        //
+        // `pianoRollEditorFocused` IS DELIBERATELY NOT A TERM HERE. Both of its
+        // plausible readings were implemented and MEASURED to be wrong: alone it
+        // refuses every single-MIDI-clip nudge (the roll self-focuses and opens
+        // for any single MIDI clip), and as an extra term it makes the guard
+        // INTERMITTENT — the flag alternates deterministically on clip switches
+        // (measured 6 true / 6 false over 12 consecutive selections, strictly
+        // alternating, editor open throughout), so the clip would slide
+        // underneath the editor on every other selection. Full measurements:
+        // `PianoRollNoteSelectionBridge`.
+        // `openEditorClip != nil` IS NOT AN INDEPENDENTLY PROVEN TERM, and is
+        // kept knowingly: deleting it reddens NOTHING (mutation, m23-x), because
+        // `hasSelection` already implies a mounted roll — the bridge is cleared
+        // in `.onDisappear`. It is belt-and-braces against exactly that clear
+        // being missed, where a latched `true` would kill the arrow keys for the
+        // whole session. Structural, cheap, and not to be mistaken for tested.
+        // CONSUMED, NOT PASSED THROUGH — the N6e twin. `handled: true` here
+        // while every OTHER refusal returns false, because this is the one
+        // refusal whose fall-through has a visible consequence:
+        // `TimelineLanesView`'s `ScrollView(.horizontal)` takes an `.ignored`
+        // arrow and scrolls the timeline sideways. That would swap the surprise
+        // this guard removes (the clip sliding) for a different one (the view
+        // sliding), which is exactly the reasoning that already makes a
+        // fully-clamped nudge at the beat-0 wall report `handled: true`.
+        //
+        // It costs the future note-nudge feature nothing: `PianoRollView` is a
+        // DESCENDANT of the arrow mount in `ArrangeDeleteKey`, and a descendant's
+        // `.onKeyPress` sees the key first — once the roll handles arrows itself
+        // it consumes them and this handler never runs.
+        guard !(openEditorClip != nil && pianoRollNoteSelection.hasSelection) else {
+            return ArrangeNudgeOutcome(handled: true, refusedBy: .pianoRollNoteEdit)
+        }
+        guard !arrangeSelection.isEmpty else {
+            return ArrangeNudgeOutcome(refusedBy: .emptySelection)
+        }
+        guard let step = ArrangeNudge.step(
+            direction: direction, modifiers: modifiers, snap: effectiveClipSnap,
+            // A rigid translation has no position, so there is no "bar I am in"
+            // to ask about under a meter map (see `ArrangeNudge.step`). Beat 0's
+            // meter, read from `transport.meterMap` — the SAME map the drag path
+            // and the lanes apply — is the one number that applies to the whole
+            // move; taking it from `transport.timeSignature` instead would read
+            // a field a `meterMapOverride` can contradict.
+            beatsPerBar: store.transport.meterMap.beatsPerBar(atBeat: 0)) else {
+            return ArrangeNudgeOutcome(refusedBy: .chord)
+        }
+        // Stale ids are a silent skip (the `ArrangeSelection.resolved(in:)`
+        // policy the drag path uses) — a clip can vanish under the selection
+        // via undo or an agent's `clip.remove`, and that must never reach the
+        // store as a thrown refusal at the user.
+        let live = Set(store.tracks.flatMap { $0.clips.map(\.id) })
+        let targets = arrangeSelection.resolved(in: live)
+        guard !targets.isEmpty else {
+            return ArrangeNudgeOutcome(refusedBy: .emptySelection,
+                                       stepBeats: step.magnitudeBeats,
+                                       stepSource: step.source.rawValue)
+        }
+        do {
+            let result = try store.moveClips(ids: Array(targets), byBeats: step.deltaBeats)
+            return ArrangeNudgeOutcome(
+                handled: true,
+                stepBeats: step.magnitudeBeats, stepSource: step.source.rawValue,
+                requestedDeltaBeats: result.requestedDeltaBeats,
+                effectiveDeltaBeats: result.effectiveDeltaBeats,
+                clamped: result.clamped,
+                movedIDs: result.clips.map(\.id),
+                trimmedIDs: result.trimmedClipIDs,
+                removedIDs: result.removedClipIDs)
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            // The DRAG path's de-duplicating presenter, not the bare one: a HELD
+            // arrow repeats, and `presentArrangeSplitRefusal` spawns a six-second
+            // auto-dismiss `Task` PER CALL. Without this, holding → on a
+            // take-comp member would spawn hundreds of sleeping tasks for one
+            // bubble — the exact hazard m23-g2 found on the drag.
+            if let clipID = arrangeSelection.focusID ?? targets.first {
+                presentArrangeDragRefusal(error, message: message, clipID: clipID)
+            }
+            return ArrangeNudgeOutcome(
+                refusedBy: .store, stepBeats: step.magnitudeBeats,
+                stepSource: step.source.rawValue, refusal: message)
+        }
+    }
+
+    /// Maps SwiftUI's `EventModifiers` (what `KeyPress` carries) onto the
+    /// headless `TransportKeyModifiers` the nudge policy speaks — the
+    /// `transportKeyModifiers(_:)` twin for the `.onKeyPress` route, which
+    /// reports SwiftUI's type rather than `NSEvent.ModifierFlags`. Only the four
+    /// chord modifiers; caps lock / numeric pad deliberately do not participate.
+    static func keyPressModifiers(_ flags: EventModifiers) -> TransportKeyModifiers {
+        var mods: TransportKeyModifiers = []
+        if flags.contains(.command) { mods.insert(.command) }
+        if flags.contains(.option) { mods.insert(.option) }
+        if flags.contains(.control) { mods.insert(.control) }
+        if flags.contains(.shift) { mods.insert(.shift) }
+        return mods
+    }
+
     /// The clip the piano roll is ACTUALLY open on: `selectedClipID` resolved
     /// against the live store and filtered to MIDI. This is the ONE rule —
     /// `ContentView`'s editor branch renders exactly when this is non-nil, and
@@ -1087,6 +1421,15 @@ final class AppModel {
     /// density, explain mode is a per-session aid, off by default.
     let explain = ExplainModel()
 
+    /// The explain overlay's presentation coordinator — the ONE home for every
+    /// `.explainable` control's measured frame (id → one rect per rendered
+    /// instance, in the `explainRoot` coordinate space). Hoisted out of
+    /// `ContentView`'s `@State` (the `arrangeHScroll` / `selectedClipID` idiom) so
+    /// the `debug.explainFrames` staging command reads the SAME frames the live
+    /// overlay anchors on — a gate that asserts a control's measured Y must read
+    /// the window's own geometry, never a second computation of it.
+    let explainCoordinator = ExplainCoordinator()
+
     /// The "first song in ten minutes" guided-tour state machine (M8 ob-b). Owned
     /// here with the UserDefaults backing (key `onboarding.state`) so mid-tour
     /// progress + the two terminals survive relaunch; offered once on first launch
@@ -1136,6 +1479,41 @@ final class AppModel {
     /// by seeding — a view-side override, the `debug.vibeSeed` precedent.
     var scopeSeed: StereoScopeSeed?
 
+    /// ── THE LIVE-LAYER TICK WITNESS (m23-r3b) ────────────────────────────
+    ///
+    /// Every continuously-redrawing layer reports the values it drew, once per
+    /// frame, into this one object; `debug.liveLayers` publishes them. It
+    /// exists because the m22-e poll-discipline law's failure mode is INVISIBLE
+    /// to every other probe in the app: a layer that froze because it was
+    /// paused on window-inactive is pixel-identical to a live one until the
+    /// data moves, and neither the goniometer trail nor the mono-safety
+    /// readouts keep any smoothed state a probe could read (the trick m23-r3
+    /// used on `EQCurveEditorModel.spectrumHeights` does not generalize).
+    ///
+    /// `@ObservationIgnored` is REQUIRED, not tidiness: these fields are
+    /// written from inside `TimelineView` closures during view updates, so an
+    /// observed property would schedule an invalidation per frame on every
+    /// meter in the app (and trip "Modifying state during view update"). The
+    /// `VibeSmoother` / `EQSpectrumClock` scratch-object pattern.
+    @ObservationIgnored let liveLayers = LiveLayerWitness()
+
+    /// ── THE INSERT-ROW LABEL WITNESS (m23-s) ─────────────────────────────
+    ///
+    /// Every rendered `InsertRow` reports the name it DREW — the string, the
+    /// `.fixedSize` pin flag, the drawn frame, the string's single-line ideal
+    /// width, the name line's width — plus every gain-reduction underline frame.
+    /// `debug.insertLabels` publishes them.
+    ///
+    /// It exists because m23-s was filed from a pixel-reviewed capture: nothing
+    /// in this app reported a drawn insert label, so "a control label never
+    /// truncates" was a rule no assertion could reach.
+    ///
+    /// `@ObservationIgnored` is REQUIRED, not tidiness (the `liveLayers` note
+    /// above): these fields are written from inside `GeometryReader` and
+    /// `TimelineView` closures during view updates, so an observed property
+    /// would schedule an invalidation per layout pass on every insert row.
+    @ObservationIgnored let insertLabels = InsertLabelWitness()
+
     /// A synthetic gain-reduction reading the GR meters (the dynamics editor
     /// cards' GAIN REDUCTION block + the insert chips' mini-bar, m22-e) prefer
     /// over the live store polls. nil in normal use (the meters read
@@ -1155,6 +1533,308 @@ final class AppModel {
             return store.effectGainReductionDb(trackID: trackID, effectID: effectID)
         }
         return store.masterEffectGainReductionDb(effectID: effectID)
+    }
+
+    // MARK: - Per-insert spectrum (m23-r3)
+
+    /// A synthetic per-insert spectrum the open TRACK EQ card's spectrum layer
+    /// prefers over the live `store.insertAnalysis` poll. nil in normal use;
+    /// the debug-tier `debug.insertSpectrumSeed` command sets it so a headless
+    /// capture / E2E gets a deterministic silhouette without real audio (the
+    /// `debug.vibeSeed` precedent — which stays the MASTER card's override, so
+    /// the two surfaces are staged independently). The ENGINE is never touched
+    /// by seeding, and because seeding bypasses `store.insertAnalysis`
+    /// entirely, an UNSEEDED reading is honest evidence that the live tap ticks.
+    var insertSpectrumSeed: MasterAnalysisSnapshot?
+
+    /// ── THE SINGLE-CONSUMER INVARIANT (m23-r3, constraint c) ──────────────
+    ///
+    /// `store.insertAnalysis` DRAINS the tap's ring (`InsertSpectrumTap
+    /// .drainAndSnapshot` advances `readIndex`), and when zero frames are
+    /// available it hands back the analyzer's PREVIOUS snapshot rather than a
+    /// floor — so a second consumer does not surface as a dead meter or an
+    /// error, it surfaces as a plausible STALE one that nothing anywhere
+    /// reports. Exactly one consumer per armed insert, therefore, is a
+    /// correctness requirement and not a performance note.
+    ///
+    /// The UI keeps that invariant STRUCTURALLY, three ways:
+    ///
+    /// 1. **One slot.** These two properties are the only UI-side arm. At most
+    ///    ONE insert is armed by the UI at any instant, and the one view that
+    ///    owns it (`EQSpectrumLayer`, whose `.task(id:)` calls `holdInsertSpectrum`)
+    ///    is the only thing that polls it. Layer exists ⟺ armed ⟺ polled.
+    /// 2. **A generation token, because `.task(id:)` cancellation is NOT
+    ///    ordered before the next task's start.** On a target change SwiftUI
+    ///    cancels the old task and starts the new one without awaiting the
+    ///    cancellation, so an old A-task's release can land AFTER a new A-task
+    ///    has re-armed A (arm A → B → back to A). A release therefore only bites
+    ///    when it still holds the CURRENT token; a stale one is a no-op. Both
+    ///    interleavings then end with exactly A armed.
+    /// 3. **Arming a new target releases the old one first**, so the slot can
+    ///    never leak an arm when the release loses the race.
+    ///
+    /// A NON-UI consumer (m23-r4's wire path) must take its OWN arm and must
+    /// never poll an insert this slot holds: the engine's cap is 8 armed taps
+    /// and REFUSES rather than evicts, so a second arm is cheap — a second
+    /// POLL of the same insert is the bug.
+    private var insertSpectrumArmedTarget: EffectEditorTarget?
+    private var insertSpectrumArmToken = 0
+
+    /// True while the OPEN card's spectrum layer is genuinely measuring: a
+    /// master card always (`masterAnalysis()` is unconditional), a track card
+    /// only while its per-insert tap is armed. Drives the card's help fork, so
+    /// a REFUSED arm (engine cap full, insert gone, headless) never has the
+    /// tooltip promising a live reading over a floor silhouette.
+    var effectEditorSpectrumIsMeasuring: Bool {
+        guard let target = effectEditorTarget else { return false }
+        guard target.trackID != nil else { return true }
+        return insertSpectrumArmedTarget == target
+    }
+
+    /// The open EQ card's `.help` caption — resolved ONCE, here, and handed to
+    /// the plot as a plain String. `debug.effectEditor` reports THIS property,
+    /// so the gate reads the very value the card draws rather than a parallel
+    /// re-derivation of it: a tooltip is invisible to `debug.captureUI`, and
+    /// the pre-fader / post-fader distinction is too load-bearing to be pinned
+    /// only as a function nobody can prove is wired up (m23-r3).
+    var effectEditorCurveHelp: String {
+        EQCurveEditorModel.curveHelp(for: effectEditorTarget,
+                                     isMeasuring: effectEditorSpectrumIsMeasuring)
+    }
+
+    /// The open card's HONESTY DISCLOSURE (m23-p2) — the drawn admission an
+    /// effect owes when its benefit is phrased as revelation and its mechanism
+    /// is synthesis. nil for every kind that has no such gap.
+    ///
+    /// Resolved ONCE, here, and handed to the card as a plain value — the
+    /// `effectEditorCurveHelp` precedent, for the same reason: `debug
+    /// .effectEditor` reports THIS property, so a gate reads the very value the
+    /// card draws instead of a parallel re-derivation that happens to agree.
+    /// Every wording decision lives in `DAWAppKit.EffectHonestyNote`, which has
+    /// a test target; this line is a call, not a rule.
+    var effectEditorHonestyNote: EffectHonestyNote? {
+        EffectHonestyNote.note(for: effectEditor.kind)
+    }
+
+    /// The open EQ card's INSTRUMENT FREQUENCY GUIDE (m23-o2) — m23-o1's cited
+    /// reference table, resolved for the card's own track.
+    ///
+    /// Resolved ONCE, here, and handed to the card as a plain value — the
+    /// `effectEditorCurveHelp` precedent, for the same reason: `debug
+    /// .effectEditor` reports THIS property, so the gate reads the very value
+    /// the card draws rather than a parallel re-derivation that happens to
+    /// agree (the m23-r2a hand-assignment hole).
+    ///
+    /// Every decision inside it lives in `DAWAppKit.EQInstrumentGuide`, which
+    /// has a test target; this line is a call, not a rule. In particular the
+    /// FAMILY comes from `InstrumentFamilyResolver` — DAWCore's one home — and
+    /// there is no name heuristic anywhere on this path.
+    var effectEditorInstrumentGuide: EQInstrumentGuide {
+        EQInstrumentGuide.resolve(target: effectEditorTarget, tracks: store.tracks)
+    }
+
+    /// The guidance plot's MEASURED width, reported by `EQCurveEditor` from its
+    /// own `GeometryReader` (`onPlotWidth`). nil until the card has laid out.
+    ///
+    /// ⚠️ THE PROBE MUST REPORT WHAT WAS DRAWN, NOT WHAT WAS INTENDED. Deriving
+    /// `debug.effectEditor`'s x positions from `EQGuidanceLayout.contentWidth`
+    /// while the Canvas draws from `size.width` makes the two agree only because
+    /// the card is a fixed 560 pt frame — and since `DAWApp` has NO test target,
+    /// a staging gate is the only instrument that can see this path at all. A
+    /// gate checking "x is consistent with the width the probe names" would then
+    /// be self-consistent and blind, certifying a card that had drifted to a
+    /// different frame. Reported provenance (`widthSource`) makes the fallback
+    /// assertable instead of invisible.
+    ///
+    /// Cleared when the editor closes so a stale width can never be reported
+    /// against a freshly opened card.
+    var effectEditorPlotWidth: Double?
+
+    /// The open card's MEASURED height (m23-p2), reported by
+    /// `EffectEditorOverlay` from its own `GeometryReader`. nil until the card
+    /// has laid out, and cleared on close.
+    ///
+    /// It exists because m23-p2 grew this card: the honesty disclosure is the
+    /// first thing on it whose height is a function of PROSE, and the card is
+    /// a modal with no scroll of its own, so a longer future disclosure is a
+    /// card that outgrows `WindowFloor.minHeight`. `debug.effectEditor` reports
+    /// this number so a gate can assert the fit instead of a human squinting at
+    /// a screenshot — and it reports what was DRAWN, never `sectionsHeight`,
+    /// which is arithmetic over layout constants and cannot see a block that
+    /// wraps (the m23-o2 widthSource lesson: a probe deriving its answer from
+    /// the same constants the view ignores is self-consistent and blind).
+    var effectEditorCardHeight: Double?
+
+    /// The open card's MEASURED width (m23-p2), from the same `GeometryReader`.
+    ///
+    /// The card is a FLOATING modal — it is not constrained by the mixer
+    /// strip's width budget, and it takes two different widths (the 340 pt
+    /// house strip, or the wider curve card when an EQ plot shows). Every
+    /// line-count assumption behind the disclosure's fit is a claim about this
+    /// number, so the gate asserts the width the card was DRAWN at rather than
+    /// restating a constant from the view.
+    var effectEditorCardWidth: Double?
+
+    /// The FACE and INK the open disclosure actually drew, per role, reported
+    /// by `EffectEditorOverlay.honestyText` from the same parameters its `Text`
+    /// modifiers consume (m23-p2, review round).
+    ///
+    /// Four claims in the design language ride on this block's ink — never SF
+    /// Mono, never violet, never amber, never dimmer than the knob labels — and
+    /// before this dictionary existed every one of them was enforced by nothing
+    /// but a doc comment. The reviewer's mutation proved it: the prose redrawn
+    /// in `DAWTheme.ai` (violet = AI-authored content in this app, so a
+    /// disclosure ABOUT synthesis would have been claiming the disclosure
+    /// itself was synthesized) left the gate 42/42 green.
+    ///
+    /// Values are resolved sRGB hex from `DAWTheme.hexString`, never token
+    /// names: a probe echoing the token it INTENDED agrees with itself while
+    /// the view draws something else.
+    ///
+    /// A plain `final class`, NOT an observed property, and that is load
+    /// bearing: the card reports from inside its own modifier arguments —
+    /// during `body` evaluation — which is what makes the report inseparable
+    /// from the draw. A tracked write at that moment would invalidate the view
+    /// that just made it. Nothing here drives rendering; it is read only by the
+    /// probe.
+    let effectEditorHonestyStyle = EffectEditorOverlay.EffectHonestyStyleLedger()
+
+    /// Where the piano-roll bar-ops readout's DRAWN text and ink land (m23-t) —
+    /// the `effectEditorHonestyStyle` shape, for the same reason and with the
+    /// same non-observable discipline: the roll's header reports from inside its
+    /// own `Text`/`.foregroundStyle` arguments, during `body`. Read only by
+    /// `debug.pianoRollBarOps`.
+    let pianoRollBarOpsStyle = PianoRollView.BarOpsStyleLedger()
+
+    /// Maps the guide's transport enum onto the wire's `JSONValue`. DAWAppKit
+    /// must not depend on `DAWControl`, so the value crosses as
+    /// `EQInstrumentGuide.ProbeValue` and is widened here. Deliberately a bare
+    /// five-case switch with no logic: anything smarter than this belongs in
+    /// the module that has tests.
+    static func guideProbeJSON(_ value: EQInstrumentGuide.ProbeValue) -> JSONValue {
+        switch value {
+        case .string(let text): return .string(text)
+        case .strings(let list): return .array(list.map { JSONValue.string($0) })
+        case .number(let number): return .number(number)
+        case .numbers(let list): return .array(list.map { JSONValue.number($0) })
+        case .bool(let flag): return .bool(flag)
+        }
+    }
+
+    /// The spectrum layer's lifecycle hold — the body of its `.task(id:)`.
+    /// Arms the open card's insert on entry, holds until SwiftUI cancels the
+    /// task (target change, card close, density flip to the knob table, window
+    /// teardown), then releases. A MASTER card arms nothing and holds nothing:
+    /// `masterAnalysis()` needs no tap.
+    ///
+    /// The layer keys its `.task` on `EffectEditorModel.target` while this body
+    /// reads `effectEditorTarget` — two properties, and the task would arm the
+    /// WRONG insert if they could ever disagree when it runs. They cannot:
+    /// `openEffectEditor` sets both (`effectEditor.prepare` then the app-model
+    /// target) in ONE synchronous @MainActor body, as does `closeEffectEditor`,
+    /// and SwiftUI cannot render — so cannot start a task — between two
+    /// statements of a main-actor function. Keep them adjacent; splitting an
+    /// `await` between them is what would break this.
+    @MainActor
+    func holdInsertSpectrum() async {
+        guard let target = effectEditorTarget, target.trackID != nil else { return }
+        let token = armInsertSpectrum(target)
+        defer { releaseInsertSpectrum(token: token) }
+        // Hold until cancelled — the sleep throws on cancellation, so the loop
+        // falls out and `defer` releases (the SketchpadView/VoicePanel poll-hold
+        // idiom). The interval is a liveness backstop only; nothing is polled
+        // here (the layer's TimelineView does the polling).
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(60))
+        }
+    }
+
+    /// Takes the single UI arm slot for `target`, releasing whatever it held.
+    /// Returns the generation token the matching `releaseInsertSpectrum` must
+    /// present. A REFUSED arm still consumes a token (so the release path stays
+    /// symmetric) but leaves the slot empty — the card then draws the honest
+    /// floor and `effectEditorSpectrumIsMeasuring` reads false.
+    @discardableResult
+    private func armInsertSpectrum(_ target: EffectEditorTarget) -> Int {
+        if let held = insertSpectrumArmedTarget, held != target {
+            store.setInsertAnalysisArmed(trackID: held.trackID,
+                                         effectID: held.effectID, armed: false, owner: .ui)
+            insertSpectrumArmedTarget = nil
+        }
+        insertSpectrumArmToken += 1
+        // m23-r4: the store's owner set means this call can never stomp a
+        // wire lease (`fx.spectrum`'s `.control` owner) on the same insert.
+        let outcome = store.setInsertAnalysisArmed(trackID: target.trackID,
+                                                    effectID: target.effectID,
+                                                    armed: true, owner: .ui)
+        insertSpectrumArmedTarget = (outcome == .armed) ? target : nil
+        return insertSpectrumArmToken
+    }
+
+    /// Releases the arm slot IF it is still the one `token` took. A stale token
+    /// (a cancelled task resuming after a newer task already re-armed) is a
+    /// no-op — see the invariant note above.
+    private func releaseInsertSpectrum(token: Int) {
+        guard token == insertSpectrumArmToken else { return }
+        if let held = insertSpectrumArmedTarget {
+            store.setInsertAnalysisArmed(trackID: held.trackID,
+                                         effectID: held.effectID, armed: false, owner: .ui)
+        }
+        insertSpectrumArmedTarget = nil
+    }
+
+    /// Which reading the open EQ card's spectrum layer is drawing. Reported by
+    /// `debug.effectEditor` — and the SAME value `effectEditorSpectrum()`
+    /// switches on, so the label can never describe a branch the poll does not
+    /// take.
+    enum SpectrumSource: String {
+        /// No card open — nothing polls.
+        case none
+        /// The live whole-mix reading, POST master fader.
+        case master
+        /// `debug.vibeSeed`'s staged master snapshot.
+        case masterSeed
+        /// This insert's live tap, POST the insert and PRE the strip fader.
+        case insert
+        /// `debug.insertSpectrumSeed`'s staged per-insert snapshot.
+        case insertSeed
+    }
+
+    var effectEditorSpectrumSource: SpectrumSource {
+        guard let target = effectEditorTarget else { return .none }
+        guard target.trackID != nil else { return vibeSeed != nil ? .masterSeed : .master }
+        return insertSpectrumSeed != nil ? .insertSeed : .insert
+    }
+
+    /// ONE spectrum poll for the open EQ card's layer, resolved against the
+    /// card's CURRENT target each tick (the `gainReductionDb` idiom):
+    ///
+    /// - MASTER target → `vibeSeed ?? store.masterAnalysis()`, byte-identical
+    ///   to m22-b. That curve is measured POST-fader, over the whole mix.
+    /// - TRACK target → `insertSpectrumSeed ?? store.insertAnalysis(...)`,
+    ///   the spectrum POST this insert and PRE the strip fader.
+    ///
+    /// `insertAnalysis` returns nil for "not armed" and `.floor` for "armed but
+    /// silent, or still warming (< ~2048 frames)" — a deliberate engine
+    /// distinction, because a floor snapshot on an UNARMED tap would read like
+    /// a live, silent meter. The DRAWN layer has no third thing to draw, so it
+    /// collapses both to a floor silhouette; the distinction is carried instead
+    /// by `effectEditorSpectrumIsMeasuring`, which forks the card's help text
+    /// and backs `debug.effectEditor`'s `spectrumArmed` field.
+    func effectEditorSpectrum() -> MasterAnalysisSnapshot {
+        switch effectEditorSpectrumSource {
+        case .none, .master:
+            return store.masterAnalysis()
+        case .masterSeed:
+            return vibeSeed ?? store.masterAnalysis()
+        case .insertSeed:
+            return insertSpectrumSeed ?? .floor
+        case .insert:
+            guard let target = effectEditorTarget, let trackID = target.trackID
+            else { return .floor }
+            return store.insertAnalysis(trackID: trackID,
+                                        effectID: target.effectID) ?? .floor
+        }
     }
 
     /// A synthetic reference slot / monitor status / mix-side evidence the
@@ -2028,10 +2708,20 @@ final class AppModel {
                 return try self.synthEditorDebug(params)
             case "debug.explainMode":
                 return try self.setExplainMode(params)
+            case "debug.explainFrames":
+                return try self.explainFrames(params)
             case "debug.vibeSeed":
                 return try self.setVibeSeed(params)
+            case "debug.insertSpectrumSeed":
+                return try self.setInsertSpectrumSeed(params)
             case "debug.scopeSeed":
                 return try self.setScopeSeed(params)
+            case "debug.liveLayers":
+                return self.liveLayersDebug(params)
+            case "debug.insertLabels":
+                return self.insertLabelsDebug(params)
+            case "debug.pianoRollBarOps":
+                return self.pianoRollBarOpsDebug(params)
             case "debug.grSeed":
                 return try self.setGRSeed(params)
             case "debug.referenceSeed":
@@ -2705,6 +3395,24 @@ final class AppModel {
             "selectedClipId": selectedClipID.map { .string($0.uuidString) } ?? .null,
             "editorClipId": openEditorClip.map { .string($0.id.uuidString) } ?? .null,
             "createdClipId": arrangeCreatedClipID.map { .string($0.uuidString) } ?? .null,
+            // m23-v: the empty-lane hints the LANES ARE DRAWING right now, as the
+            // drawing layer reported them (never re-derived here — see
+            // `arrangeEmptyLaneHints`). `text` is the string on screen, so a copy
+            // change shows up here; `laneIndex` names the ladder row so a caller
+            // can compute the band it expects the ink in. `emptyLaneHintSeq`
+            // advances on every report, so a caller that just added or removed a
+            // clip can poll for a fresh render instead of sleeping.
+            //
+            // This costs ZERO wire surface: `debug.*` sits off `allCommands` and
+            // off MCP.
+            "emptyLaneHints": .array(arrangeEmptyLaneHints.map {
+                .object([
+                    "trackId": .string($0.trackID.uuidString),
+                    "laneIndex": .number(Double($0.laneIndex)),
+                    "text": .string($0.text),
+                ])
+            }),
+            "emptyLaneHintSeq": .number(Double(arrangeEmptyLaneHintSeq)),
         ])
     }
 
@@ -2875,11 +3583,30 @@ final class AppModel {
     ///     `AppModel.clickClip` the ClipBlock tap runs, with EXPLICIT modifiers.
     ///     The one thing it does not exercise is `NSEvent.modifierFlags` (a
     ///     synthesized tap carries no chord) — see `ArrangeClickModifiers.current`.
+    ///   - `{act:"clickTrack", trackId, shift?, command?}` (m23-y) — runs the SAME
+    ///     `AppModel.clickTrack` the `TrackRow` tap runs, with EXPLICIT modifiers,
+    ///     for the same reason. Echoes `trackClickIntent` / `trackClickEffect` /
+    ///     `trackClipIds`, all carried off `ArrangeTrackClickOutcome` rather than
+    ///     recomputed: without the EFFECT a gate cannot tell "⇧ added this track's
+    ///     three clips" from "⇧ found them already selected and removed nothing",
+    ///     since both can leave the same `selectedIds`. An unknown id THROWS.
     ///   - `{act:"clear"}` — deselect everything.
     ///   - `{act:"delete"}` — the group delete, through the SAME
     ///     `deleteArrangeSelection` the DELETE key calls.
     ///   - `{act:"keyHandler"}` — the DELETE key's HANDLER body including its
     ///     guards (`handleArrangeDeleteKey`), for proving the text-editing guard.
+    ///   - `{act:"nudge", direction:"left"|"right", option?, shift?, command?,
+    ///     control?, repeat?}` (m23-x) — the ARROW key's HANDLER body including
+    ///     its guards (`handleArrangeNudgeKey`), the `keyHandler` twin. The chord
+    ///     is passed EXPLICITLY, per the house convention above: a synthesized
+    ///     press carries no `NSEvent.modifierFlags`, so the whole modifier policy
+    ///     lives in `ArrangeNudge.step` and this exercises exactly the rule the
+    ///     real key does. `repeat` (default 1, capped) runs the handler N times
+    ///     back to back with NO awaits between — key repeat, faithfully — which
+    ///     is what makes the undo-coalescing leg measurable: interleaving a
+    ///     render wait per press would blow past `UndoJournal.coalescingWindow`
+    ///     (800 ms) and the burst would stop folding for a reason that has
+    ///     nothing to do with the app.
     ///   - `{act:"keyDelete"}` — the STRONGER probe: synthesizes a real DELETE
     ///     key-down and sends it through `NSApp.sendEvent`, i.e. the actual
     ///     responder chain and SwiftUI's focus arbitration. When `delivered` is
@@ -2896,6 +3623,9 @@ final class AppModel {
         var deleted: Bool?
         var intent: ArrangeClickIntent?
         var delivered: Bool?
+        var nudge: ArrangeNudgeOutcome?
+        var nudgeRepeats: Int?
+        var trackClick: ArrangeTrackClickOutcome?
         if let act = params["act"]?.stringValue {
             let reportsBefore = arrangeSelectionRenderSeq
             switch act {
@@ -2908,6 +3638,50 @@ final class AppModel {
                 if params["shift"]?.boolValue == true { mods.insert(.shift) }
                 if params["command"]?.boolValue == true { mods.insert(.command) }
                 intent = clickClip(id: id, modifiers: mods)
+            case "clickTrack":
+                // m23-y — the TRACK HEADER click, through the SAME
+                // `AppModel.clickTrack` the `TrackRow` tap runs. `workspaceMode`
+                // IS forced to `.arrange` here, matching "click" and NOT "nudge":
+                // the header column only exists in the arrange, so a gate that
+                // had to remember to set the workspace would be fighting the
+                // fixture rather than the feature. ("nudge" refuses to, on
+                // purpose — the workspace guard is one of the four IT exists to
+                // let a gate prove; there is no such guard on this path.)
+                guard let raw = params["trackId"]?.stringValue else {
+                    throw DebugError("act \"clickTrack\" needs a 'trackId' UUID")
+                }
+                guard let id = UUID(uuidString: raw) else {
+                    throw DebugError("'trackId' is not a valid UUID: \(raw)")
+                }
+                workspaceMode = .arrange
+                var mods: ArrangeClickModifiers = []
+                if params["shift"]?.boolValue == true { mods.insert(.shift) }
+                if params["command"]?.boolValue == true { mods.insert(.command) }
+                guard let outcome = clickTrack(id: id, modifiers: mods) else {
+                    // The `debug.trackHeaderDrag` convention: an unknown id is
+                    // TOLD, never answered as a silent no-op a gate reads as green.
+                    throw DebugError("no track with id \(raw)")
+                }
+                trackClick = outcome
+            case "pianoRollNotes":
+                // m23-x: put the OPEN ROLL into (or out of) the state where it
+                // would consume ← / → — a real selection in the roll's own
+                // `@State private` model, reached the only way anything outside
+                // can reach it (the `follow.externalScrollNonce` nonce seam), so
+                // the controlled pair drives the SHIPPED wiring end to end and
+                // not a flag a gate set for itself.
+                guard let select = params["select"]?.boolValue else {
+                    throw DebugError("act \"pianoRollNotes\" needs 'select' (bool)")
+                }
+                pianoRollNoteSelection.stage(selectAll: select)
+                // The roll applies this in an `.onChange`, i.e. on the next main
+                // runloop turn — answer only once it has, or the caller reads
+                // the PREVIOUS state (the m23-e one-call-lag class).
+                let noteDeadline = Date().addingTimeInterval(0.30)
+                while pianoRollNoteSelection.hasSelection != select,
+                      Date() < noteDeadline {
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+                }
             case "clear":
                 arrangeSelection.clear()
             case "delete":
@@ -2920,6 +3694,37 @@ final class AppModel {
                 // cannot delete the user's clips, WITHOUT depending on whether
                 // an unbundled staging binary routes real key events.
                 deleted = handleArrangeDeleteKey()
+            case "nudge":
+                // The ARROW key's HANDLER body, guards and all (m23-x) — the
+                // `keyHandler` twin. `workspaceMode` is NOT forced to `.arrange`
+                // here (unlike "click"), deliberately: the workspace guard is
+                // one of the four this seam exists to let a gate PROVE, and a
+                // seam that silently repaired it would make that leg vacuous.
+                guard let raw = params["direction"]?.stringValue,
+                      let direction = ArrangeNudgeDirection(rawValue: raw) else {
+                    throw DebugError("act \"nudge\" needs 'direction' — \"left\" or \"right\" "
+                        + "(there is no vertical nudge: see ArrangeNudge)")
+                }
+                var mods: TransportKeyModifiers = []
+                if params["option"]?.boolValue == true { mods.insert(.option) }
+                if params["shift"]?.boolValue == true { mods.insert(.shift) }
+                if params["command"]?.boolValue == true { mods.insert(.command) }
+                if params["control"]?.boolValue == true { mods.insert(.control) }
+                // Capped so a typo cannot wedge the main actor. 200 presses is
+                // ~2.5 s of real key repeat, far more than any leg needs.
+                let times = min(200, max(1, Int(params["repeat"]?.doubleValue ?? 1)))
+                nudgeRepeats = times
+                let layoutBefore = arrangeClipLayoutRenderSeq
+                var last: ArrangeNudgeOutcome?
+                for _ in 0..<times {
+                    last = handleArrangeNudgeKey(direction: direction, modifiers: mods)
+                }
+                nudge = last
+                // A nudge changes no SELECTION, so `arrangeSelectionRenderSeq`
+                // will never bump for it — waiting on that (the m23-g2 finding)
+                // would always time out and report whatever the last selection
+                // change left behind. The clip-layout seq is the move's signal.
+                if last?.changed == true { awaitClipLayoutRendered(after: layoutBefore) }
             case "keyDelete":
                 guard let event = NSEvent.keyEvent(
                     with: .keyDown, location: .zero, modifierFlags: [],
@@ -2945,10 +3750,20 @@ final class AppModel {
                 RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15))
                 delivered = arrangeSelection.ids != before
             default:
-                throw DebugError("unknown act \"\(act)\" — expected \"click\", \"clear\", "
-                    + "\"delete\", \"keyHandler\", or \"keyDelete\"")
+                throw DebugError("unknown act \"\(act)\" — expected \"click\", \"clickTrack\", "
+                    + "\"clear\", \"delete\", \"keyHandler\", \"nudge\", "
+                    + "\"pianoRollNotes\", or \"keyDelete\"")
             }
-            awaitSelectionRendered(after: reportsBefore)
+            // "nudge" opts OUT: it changes no selection, so this wait can only
+            // burn its full deadline, and burning ~0.3 s per seam call is not
+            // free here — two calls a gate means to coalesce would then sit
+            // 800 ms apart and stop folding for a reason that is the seam's,
+            // not the app's. It waits on the CLIP LAYOUT seq instead, above.
+            // "pianoRollNotes" opts out for the same reason and waits on its own
+            // condition (the roll reporting the staged state) inside the case.
+            if act != "nudge", act != "pianoRollNotes" {
+                awaitSelectionRendered(after: reportsBefore)
+            }
         }
         var object: [String: JSONValue] = [
             "selectedIds": .array(arrangeSelection.ids.map { .string($0.uuidString) }
@@ -2975,14 +3790,85 @@ final class AppModel {
             // `arrangeKeyFocusNonce`, which asserts focus on the workspace scope —
             // this is the only way to see whether that nonce is racing the roll's
             // focus, i.e. whether note DELETE inside the roll can still win the key.
-            // It is a MEASUREMENT, not a proof: note selection is not drivable from
-            // any seam here, so the roll's note-delete path still needs a human.
+            // m23-x UPDATED THE SECOND HALF OF THIS NOTE: note selection IS now
+            // drivable, via `act:"pianoRollNotes"`, so the pair below is a real
+            // controlled instrument rather than a measurement. (The roll's own
+            // note-DELETE path still needs a human — that is about key DELIVERY,
+            // which no unbundled staging binary can exercise; m23-g1.)
             "pianoRollEditorFocused": .bool(pianoRollEditorFocused),
+            // m23-x: the OTHER half of the nudge's fifth guard. Both terms are
+            // echoed separately so a red leg says WHICH one was not in the state
+            // the leg assumed — focus alone is true for any single selected MIDI
+            // clip and is NOT sufficient to refuse (see `handleArrangeNudgeKey`).
+            "pianoRollNoteSelection": .bool(pianoRollNoteSelection.hasSelection),
             "renderSeq": .number(Double(arrangeSelectionRenderSeq)),
+            // m23-y: the KEY-FOCUS nonce, echoed on every read so a gate can take
+            // a baseline with the same call it asserts with. This is the
+            // mechanism that moves keyboard focus onto the arrange workspace
+            // (`ArrangeDeleteKey`'s `.onChange(of: model.arrangeKeyFocusNonce)`),
+            // so DELETE reaches the clips a click just selected.
+            //
+            // WHAT IT PROVES AND WHAT IT DOES NOT: that the BUMP happened. It
+            // does NOT prove focus actually moved — that is SwiftUI's focus
+            // arbitration, which no seam in this app can observe (the roll's own
+            // `pianoRollEditorFocused` flag was measured ALTERNATING 6/6 across
+            // clip switches at m23-x and must not be used as one). Without this
+            // field, dropping the bump would be invisible to every gate, which
+            // is worse than an honestly-partial assertion.
+            "keyFocusNonce": .number(Double(arrangeKeyFocusNonce)),
+            // m23-x instruments, echoed on EVERY read (not just after a nudge)
+            // so a gate can take a baseline with the same call it asserts with.
+            //
+            // `editSeq` is the VACUITY DISCRIMINATOR the nudge legs turn on.
+            // `performEdit` ticks it for EVERY journaled edit including a
+            // COALESCED one, while the undo DEPTH only grows on a fresh entry —
+            // so "5 presses folded into 1 entry" (seq +5, depth +1) and "1 press
+            // landed and 4 were silently dropped" (seq +1, depth +1), which an
+            // undo-depth assertion alone cannot tell apart, are distinguishable
+            // here. Read from the STORE's own `lastEditEvent`, never counted by
+            // this seam.
+            "editSeq": .number(Double(store.lastEditEvent?.seq ?? 0)),
+            "undoDepth": .number(Double(store.undoHistory().undo.count)),
+            "undoLabel": store.undoHistory().undo.first.map { .string($0) } ?? .null,
+            // The grid a bare arrow steps by. Both, per the m23-c2 corollary:
+            // Simple density locks the effective grid to `.bar` regardless of the
+            // picker, so a gate that set `sixteenth` and read back only `snap`
+            // would sweep a table the app never applied.
+            "snap": .string(clipSnap.rawValue),
+            "effectiveSnap": .string(effectiveClipSnap.rawValue),
         ]
         if let deleted { object["deleted"] = .bool(deleted) }
         if let intent { object["intent"] = .string(intent.rawValue) }
         if let delivered { object["delivered"] = .bool(delivered) }
+        if let trackClick {
+            // m23-y. `trackClipIds` is the set `ArrangeTrackSelection.clipIDs(on:)`
+            // ACTUALLY RETURNED, carried out on the outcome — never a fresh
+            // `track.clips.map(\.id)` computed here. A seam that recomputed it
+            // would agree with a broken rule by construction and could not see a
+            // mutation to the rule at all.
+            object["trackClickIntent"] = .string(trackClick.intent.rawValue)
+            object["trackClickEffect"] = .string(trackClick.effect.rawValue)
+            object["trackClipIds"] = .array(trackClick.clipIDs.map { .string($0.uuidString) }
+                .sorted { a, b in (a.stringValue ?? "") < (b.stringValue ?? "") })
+        }
+        if let repeats = nudgeRepeats { object["nudgeRepeats"] = .number(Double(repeats)) }
+        if let nudge {
+            // GROUND TRUTH from the handler's own outcome — `stepBeats` is the
+            // number `ArrangeNudge.step` produced, never a second computation
+            // here (a seam that recomputed the step could agree with the handler
+            // by luck and hide a wiring bug, the m23-f finding).
+            object["nudged"] = .bool(nudge.handled)
+            object["refusedBy"] = nudge.refusedBy.map { .string($0.rawValue) } ?? .null
+            object["stepBeats"] = nudge.stepBeats.map { .number($0) } ?? .null
+            object["stepSource"] = nudge.stepSource.map { .string($0) } ?? .null
+            object["requestedDeltaBeats"] = .number(nudge.requestedDeltaBeats)
+            object["effectiveDeltaBeats"] = .number(nudge.effectiveDeltaBeats)
+            object["clamped"] = .bool(nudge.clamped)
+            object["movedIds"] = .array(nudge.movedIDs.map { .string($0.uuidString) }
+                .sorted { a, b in (a.stringValue ?? "") < (b.stringValue ?? "") })
+            object["trimmedIds"] = .array(nudge.trimmedIDs.map { .string($0.uuidString) })
+            object["removedIds"] = .array(nudge.removedIDs.map { .string($0.uuidString) })
+        }
         if let refusal = arrangeSplitRefusal { object["refusal"] = .string(refusal.message) }
         return .object(object)
     }
@@ -3641,6 +4527,54 @@ final class AppModel {
         ])
     }
 
+    /// `debug.explainFrames {ids?}` — reads back the MEASURED frame of every
+    /// `.explainable` control currently in the tree, keyed by `ExplainID` to a list
+    /// of rects (one per rendered instance, tree order) in the `explainRoot`
+    /// coordinate space. READ-ONLY, always (the m11-a law): it stages nothing and
+    /// touches neither the store nor the engine — it is the wire's window onto the
+    /// geometry the live overlay already anchors cards on.
+    ///
+    /// **Why it exists.** A layout promise ("the fader sits at the same Y on every
+    /// strip, whatever the insert count") can only be proven by measuring the real
+    /// window; a gate that recomputed the budget would merely restate the code it is
+    /// meant to check. Frames flow only while explain mode is on (or a tour step is
+    /// active) — the reporter is inert otherwise — so a caller must `debug.explainMode
+    /// {on:true}` first; the result says which state it read in (`explainActive`) so
+    /// an empty dict is never mistaken for "the control is missing".
+    ///
+    /// App-level, debug tier ONLY — off `allCommands`/MCP (the `debug.explainMode`
+    /// precedent: explain is UI chrome). Optional `ids` filters to the named
+    /// `ExplainID`s; an unknown id teaches rather than returning silence.
+    private func explainFrames(_ params: [String: JSONValue]) throws -> JSONValue {
+        var wanted: Set<ExplainID>?
+        if let raw = params["ids"]?.arrayValue {
+            var ids: Set<ExplainID> = []
+            for value in raw {
+                guard let name = value.stringValue, let id = ExplainID(rawValue: name) else {
+                    throw DebugError("unknown explain id \"\(value.stringValue ?? "?")\" — expected an ExplainID (e.g. \"mixerFader\")")
+                }
+                ids.insert(id)
+            }
+            wanted = ids
+        }
+        var out: [String: JSONValue] = [:]
+        for (id, rects) in explainCoordinator.frames where wanted?.contains(id) ?? true {
+            out[id.rawValue] = .array(rects.map { rect in
+                .object([
+                    "x": .number(Double(rect.minX)),
+                    "y": .number(Double(rect.minY)),
+                    "width": .number(Double(rect.width)),
+                    "height": .number(Double(rect.height)),
+                ])
+            })
+        }
+        return .object([
+            "explainActive": .bool(explain.isActive),
+            "tourStep": .bool(onboarding.currentStep != nil),
+            "frames": .object(out),
+        ])
+    }
+
     /// `debug.vibeSeed {bands?, levelDB?, peakDB?, centroidHz?, flux?}` — stages a
     /// synthetic master-analysis snapshot the session vibe meter prefers over the live
     /// engine poll, so a capture / E2E can show a specific mix feel without real audio
@@ -3670,6 +4604,49 @@ final class AppModel {
         let snapshot = MasterAnalysisSnapshot(bands: bands, levelDB: levelDB, peakDB: peakDB,
                                               centroidHz: centroidHz, flux: flux)
         vibeSeed = snapshot
+        return .object([
+            "levelDB": .number(Double(levelDB)),
+            "peakDB": .number(Double(peakDB)),
+            "centroidHz": .number(Double(centroidHz)),
+            "flux": .number(Double(flux)),
+            "bands": .array(bands.map { .number(Double($0)) }),
+        ])
+    }
+
+    /// `debug.insertSpectrumSeed {bands?, levelDB?, peakDB?, centroidHz?, flux?, clear?}`
+    /// — the `debug.vibeSeed` twin for the m23-r3 PER-INSERT spectrum: stages a
+    /// synthetic snapshot the open TRACK EQ card's spectrum layer prefers over
+    /// its live `store.insertAnalysis` poll, so a capture / E2E gets a
+    /// deterministic silhouette without real audio. App-level, debug tier ONLY
+    /// — off `allCommands`/MCP (it's UI chrome; agents drive the real audio
+    /// path). The ENGINE is never touched, and the ARM is not faked either: a
+    /// seeded card is still armed by the layer's `.task`, so seeding proves
+    /// PIXELS, never liveness. `{clear: true}` drops back to the live poll.
+    ///
+    /// Deliberately separate from `vibeSeed`, which stays the MASTER card's (and
+    /// the vibe meter's) override: the two curves are different measurements —
+    /// master POST-fader over the whole mix, a strip insert PRE-fader — so one
+    /// seed must never stage both.
+    private func setInsertSpectrumSeed(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["clear"]?.boolValue == true {
+            insertSpectrumSeed = nil
+            return .object(["cleared": .bool(true)])
+        }
+        let bandCount = MasterAnalysisSnapshot.bandCount
+        var bands = [Float](repeating: -30, count: bandCount)
+        if let raw = params["bands"]?.arrayValue {
+            guard raw.count == bandCount else {
+                throw DebugError("debug.insertSpectrumSeed bands must have exactly \(bandCount) values (got \(raw.count))")
+            }
+            bands = raw.map { Float($0.doubleValue ?? Double(MasterAnalysisSnapshot.floorDB)) }
+        }
+        let levelDB = params["levelDB"]?.doubleValue.map(Float.init) ?? -10
+        let peakDB = params["peakDB"]?.doubleValue.map(Float.init) ?? (levelDB + 4)
+        let centroidHz = params["centroidHz"]?.doubleValue.map(Float.init) ?? 2000
+        let flux = params["flux"]?.doubleValue.map(Float.init) ?? 0.3
+        let snapshot = MasterAnalysisSnapshot(bands: bands, levelDB: levelDB, peakDB: peakDB,
+                                              centroidHz: centroidHz, flux: flux)
+        insertSpectrumSeed = snapshot
         return .object([
             "levelDB": .number(Double(levelDB)),
             "peakDB": .number(Double(peakDB)),
@@ -3732,6 +4709,196 @@ final class AppModel {
             "width": .number(Double(seed.width)),
             "balance": .number(Double(seed.balance)),
             "pairs": .number(Double(MasterScopeFrame.pairCount)),
+        ])
+    }
+
+    /// `debug.liveLayers {reset?}` — reports the **live-layer tick witness**
+    /// (m23-r3b): for each continuously-redrawing meter, how many frames it has
+    /// DRAWN and the values it drew on the last one. `reset: true` zeroes the
+    /// counts (keeping the values) so a caller can measure "frames since now".
+    ///
+    /// This is the only probe that can see the m22-e poll-discipline failure.
+    /// A layer paused on window-inactive is pixel-identical to a live one until
+    /// the data moves, so the check that matters is: hold focus ELSEWHERE,
+    /// change the seed, and prove the DRAWN value followed. A frozen layer
+    /// reports `ticks: 0` beside a stale value; a live one reports both moving.
+    ///
+    /// `appActive` is the measurement's own precondition, not decoration: it is
+    /// what `controlActiveState` follows, so a focus-theft harness that silently
+    /// failed (no automation permission, an app that refuses to yield) would
+    /// otherwise produce a green run that proves nothing at all. Assert it
+    /// FALSE in any leg whose claim is about the unfocused case.
+    ///
+    /// `mixerVisible` / `scopeShown` are CONTEXT for whoever reads the payload —
+    /// the two gates the block's call site reads (`workspaceMode == .mix`, and
+    /// the goniometer well being Pro-only). The load-bearing claims are the
+    /// counts and the drawn values; presence proves itself, because a layer that
+    /// is not on screen cannot tick.
+    /// `debug.insertLabels {reset?, resetBarTicks?}` — reports every mixer
+    /// insert row's DRAWN name (m23-s), keyed by effect id, plus each row's
+    /// gain-reduction underline reading. App-level, debug tier ONLY — off
+    /// `allCommands`/MCP (the `debug.liveLayers` / `debug.explainFrames`
+    /// precedent: this is UI geometry, and agents drive the protocol directly).
+    ///
+    /// **Every field is a measurement, not a re-derivation.** `label` is the
+    /// string the `Text` was built from, `pinned` is the argument handed to
+    /// `.fixedSize(horizontal:)`, `drawn` is that `Text`'s own frame, `intrinsic`
+    /// is the same string's single-line ideal measured by a hidden twin built by
+    /// the same builder, and `line` is the name line's own width. A probe that
+    /// recomputed `effectDisplayName` and compared it against a layout constant
+    /// would agree with itself while the view truncated — the m23-p2 law.
+    ///
+    /// Derived, but only from those measurements: `available = line − originX`
+    /// (exact on a built-in row, which carries no trailing chrome; an AU row's
+    /// glyph makes it an over-estimate there, which is why the AU leg asserts
+    /// `truncated`, not `available`), and `truncated = intrinsic > drawn`.
+    ///
+    /// `{reset:true}` drops every reading — for a gate that rebuilt a chain and
+    /// must not read a removed insert's stale row. `{resetBarTicks:true}` zeroes
+    /// the underline tick counts and KEEPS their last drawn values, so
+    /// `ticks == 0` beside a live value stays the freeze signature.
+    private func insertLabelsDebug(_ params: [String: JSONValue]) -> JSONValue {
+        if params["reset"]?.boolValue == true { insertLabels.clear() }
+        if params["resetBarTicks"]?.boolValue == true { insertLabels.resetBarTicks() }
+        let rows: [JSONValue] = insertLabels.labels.values
+            .sorted { $0.label < $1.label }
+            .map { reading in
+                let line = insertLabels.lines[reading.effectID]
+                let intrinsic = insertLabels.intrinsics[reading.effectID]
+                var fields: [String: JSONValue] = [
+                    "effectId": .string(reading.effectID.uuidString),
+                    "trackId": reading.trackID.map { JSONValue.string($0.uuidString) } ?? .null,
+                    "chain": .string(reading.trackID == nil ? "master" : "track"),
+                    "kind": .string(reading.kind),
+                    "label": .string(reading.label),
+                    "pinned": insertLabels.pins[reading.effectID].map { JSONValue.bool($0) } ?? .null,
+                    "drawn": .number(Double(reading.drawnWidth)),
+                    "originX": .number(Double(reading.originX)),
+                    "intrinsic": intrinsic.map { JSONValue.number(Double($0)) } ?? .null,
+                    "line": line.map { JSONValue.number(Double($0)) } ?? .null,
+                ]
+                if let intrinsic {
+                    fields["truncated"] = .bool(intrinsic > reading.drawnWidth + 0.5)
+                }
+                if let line {
+                    fields["available"] = .number(Double(max(0, line - reading.originX)))
+                    fields["overflows"] = .bool(reading.originX + reading.drawnWidth > line + 0.5)
+                }
+                if let bar = insertLabels.bars[reading.effectID] {
+                    fields["bar"] = .object([
+                        "ticks": .number(Double(bar.ticks)),
+                        "fraction": .number(bar.fraction),
+                        "width": .number(Double(bar.width)),
+                    ])
+                }
+                return .object(fields)
+            }
+        return .object([
+            "appActive": .bool(NSApplication.shared.isActive),
+            "mixerVisible": .bool(workspaceMode == .mix),
+            "mixerDensity": .string(
+                panelDensity.density(forPanel: MixerView.panelID) == .pro ? "pro" : "simple"),
+            "rows": .array(rows),
+        ])
+    }
+
+    /// `debug.pianoRollBarOps {reset?}` — reports the piano-roll header's
+    /// bar-ops readout exactly as it was DRAWN (m23-t). App-level, debug tier
+    /// ONLY — off `allCommands`/MCP (this is UI ink, and agents drive the
+    /// protocol directly; the `debug.grSeed`/`debug.scopeSeed` tier rule). A
+    /// bare call is READ-ONLY (the m11-a law); `{reset:true}` drops the ledger
+    /// so a gate that closed the editor cannot read a stale row.
+    ///
+    /// `roles` carries what the view PUBLISHED FROM INSIDE its own
+    /// `Text(...)`/`.foregroundStyle(...)` arguments — the string is the string
+    /// `Text` was built from and the ink is that colour resolved to sRGB hex,
+    /// not the token name it was meant to be. A role present with a null half
+    /// means a call site was replaced by a literal, and that is a FAILURE for
+    /// whoever reads this, never something to skip over.
+    ///
+    /// `inkTokens` is the REFERENCE side, named rather than measured, so no gate
+    /// has to hardcode the palette to say which token was used. `playback` is
+    /// listed first because it is the one this readout must never wear again:
+    /// cyan is the transport playhead in this very view, and the bar number is
+    /// the +/− buttons' operand, not a position.
+    ///
+    /// Deliberately NOT reported: the target bar as an Int. The DRAWN STRING is
+    /// the claim; a number re-derived here would agree with itself while the
+    /// header drew something else. A caller wanting the bar reads it out of the
+    /// string, and asserts the transport independently through
+    /// `project.overview` — a different subsystem.
+    private func pianoRollBarOpsDebug(_ params: [String: JSONValue]) -> JSONValue {
+        if params["reset"]?.boolValue == true { pianoRollBarOpsStyle.clear() }
+        let roles: [String: JSONValue] = pianoRollBarOpsStyle.entries.mapValues { entry in
+            JSONValue.object([
+                "text": entry.text.map { JSONValue.string($0) } ?? .null,
+                "ink": entry.ink.map { JSONValue.string($0) } ?? .null,
+            ])
+        }
+        return .object([
+            // The SAME gate `ContentView` puts the roll behind (`openEditorClip`,
+            // which additionally requires the clip to be MIDI) — not the looser
+            // `selectedClipID != nil`, which is true with an AUDIO clip selected
+            // and no roll on screen. On a cycle about a field claiming more than
+            // it measures, this one does not get to.
+            "editorOpen": .bool(openEditorClip != nil),
+            "density": .string(
+                panelDensity.density(forPanel: PianoRollView.panelID) == .pro ? "pro" : "simple"),
+            "roles": .object(roles),
+            // How many times the cluster REPORTED since the last reset (two per
+            // body — the string and the ink — so this is not a frame count), and
+            // how many of those cost an `NSColor` resolution. This readout sits
+            // in a view fed `positionBeats`, so it redraws while the transport
+            // runs (0 reports idle over 2 s, 118 over 2.007 s playing = 59
+            // bodies, ~29 redraws/s), and drawing
+            // code does not get to allocate per frame. `inkResolutions` must
+            // stay FLAT while `ticks` climbs — that gap IS the memo, and it is
+            // unobservable from outside without these two numbers.
+            "ticks": .number(Double(pianoRollBarOpsStyle.ticks)),
+            "inkResolutions": .number(Double(pianoRollBarOpsStyle.inkResolutions)),
+            "inkTokens": .object([
+                "playback": .string(DAWTheme.hexString(DAWTheme.playback)),
+                "textPrimary": .string(DAWTheme.hexString(DAWTheme.textPrimary)),
+                "textDim": .string(DAWTheme.hexString(DAWTheme.textDim)),
+                "textFaint": .string(DAWTheme.hexString(DAWTheme.textFaint)),
+                "ai": .string(DAWTheme.hexString(DAWTheme.ai)),
+            ]),
+        ])
+    }
+
+    private func liveLayersDebug(_ params: [String: JSONValue]) -> JSONValue {
+        if params["reset"]?.boolValue == true { liveLayers.resetTicks() }
+        let isPro = panelDensity.density(forPanel: MixerView.panelID) == .pro
+        let mixerVisible = workspaceMode == .mix
+        let vibe = liveLayers.vibe
+        let trail = liveLayers.trail
+        let readouts = liveLayers.readouts
+        return .object([
+            "appActive": .bool(NSApplication.shared.isActive),
+            "mixerVisible": .bool(mixerVisible),
+            "mixerDensity": .string(isPro ? "pro" : "simple"),
+            "scopeShown": .bool(mixerVisible && isPro),
+            "readoutsShown": .bool(mixerVisible),
+            "vibe": .object([
+                "ticks": .number(Double(vibe.ticks)),
+                "brightness": .number(vibe.brightness),
+                "hue": .number(vibe.hue),
+                "motion": .number(vibe.motion),
+                "dormant": .bool(vibe.isDormant),
+            ]),
+            "trail": .object([
+                "ticks": .number(Double(trail.ticks)),
+                "points": .number(Double(trail.points)),
+                "calm": .bool(trail.calm),
+                "zone": .string(trail.zone.rawValue),
+            ]),
+            "readouts": .object([
+                "ticks": .number(Double(readouts.ticks)),
+                "correlation": .number(readouts.correlation),
+                "width": .number(readouts.width),
+                "balance": .number(readouts.balance),
+                "zone": .string(readouts.zone.rawValue),
+            ]),
         ])
     }
 
@@ -5004,6 +6171,21 @@ final class AppModel {
         effectEditorTarget = nil
         effectEditor.clear()
         eqCurveEditor = nil
+        // The plot is gone, so its measured width is no longer a fact about
+        // anything on screen. Dropping it makes the next card report
+        // `widthSource: layoutConstant` until it has actually laid out, rather
+        // than a stale number from the card that just closed.
+        effectEditorPlotWidth = nil
+        // Same reason (m23-p2): a size measured on the card that just closed is
+        // not a fact about the card that opens next — and the width in
+        // particular would be a LIE across a kind change, since the curve kinds
+        // draw a wider card than the knob strip.
+        effectEditorCardHeight = nil
+        effectEditorCardWidth = nil
+        // Same reason again: ink reported by a card that has closed describes
+        // nothing on screen, and a stale entry here would let a kind that draws
+        // NO disclosure inherit the last one's clean bill of health.
+        effectEditorHonestyStyle.clear()
     }
 
     /// The UI insert add funnel (m17-a): adds a built-in effect through the
@@ -5259,6 +6441,54 @@ final class AppModel {
             "bypassed": .bool(effectEditor.isBypassed),
             "values": .object(values),
         ]
+        // m23-p2: the card's drawn HONESTY DISCLOSURE, reported for EVERY kind
+        // (null when the kind has no note) rather than nested inside a
+        // `kind == .bassEnhancer` block. A field that only exists for the one
+        // kind that has a note cannot catch the wiring error that matters —
+        // the card drawing the note for the WRONG kind, or for none. Reports
+        // `effectEditorHonestyNote`, the SAME property ContentView hands the
+        // card, so a mis-wired disclosure reddens here instead of agreeing with
+        // a re-derivation. The words are otherwise pixels only: `.help` is
+        // invisible to `debug.captureUI`, and so is a string nobody echoes.
+        fields["honestyNote"] = effectEditorHonestyNote.map { note in
+            JSONValue.object([
+                "headline": .string(note.headline),
+                "body": .string(note.body),
+                "footnote": .string(note.footnote),
+                // `drawnStrings`, not three re-listed fields: the gate's
+                // readout-token sweep runs over THIS array, so a fourth drawn
+                // string added to the type is swept the day it is added
+                // instead of the day someone remembers to name it here.
+                "drawn": .array(note.drawnStrings.map(JSONValue.string)),
+            ])
+        } ?? .null
+        // m23-p2: the card's MEASURED size and the floor it has to fit inside.
+        // The floor travels with it so a gate never has to hardcode the floor —
+        // if `WindowFloor.minHeight` moves, the assertion moves with it. null
+        // while no card has laid out.
+        // m23-p2 (review round): the DRAWN face and ink, per role. Reported for
+        // every kind — an empty object for a kind with no disclosure is the
+        // honest answer and lets a gate catch ink reported for a card that
+        // draws no copy. `inkTokens` carries the tokens a gate has to compare
+        // AGAINST (violet = AI, amber = record/warning, and the knob label the
+        // prose must not sit below), so no gate hardcodes a hex — the drawn
+        // side is measured, the reference side is named.
+        fields["honestyStyle"] = .object(effectEditorHonestyStyle.entries.mapValues { entry in
+            JSONValue.object([
+                "face": entry.face.map { JSONValue.string($0) } ?? .null,
+                "ink": entry.ink.map { JSONValue.string($0) } ?? .null,
+            ])
+        })
+        fields["inkTokens"] = .object([
+            "ai": .string(DAWTheme.hexString(DAWTheme.ai)),
+            "record": .string(DAWTheme.hexString(DAWTheme.record)),
+            "knobLabel": .string(DAWTheme.hexString(KnobControl.labelInk)),
+            "textSecondary": .string(DAWTheme.hexString(DAWTheme.textSecondary)),
+        ])
+        fields["cardHeight"] = effectEditorCardHeight.map { JSONValue.number($0) } ?? .null
+        fields["cardWidth"] = effectEditorCardWidth.map { JSONValue.number($0) } ?? .null
+        fields["cardMaxHeight"] = .number(Double(EffectEditorOverlay.maxCardHeight))
+        fields["windowMinHeight"] = .number(Double(WindowFloor.minHeight))
         // m22-b: an open EQ card additionally reports which surface renders
         // (Simple = curve, Pro = knobs — the density store is the truth) and
         // the curve model's selected band.
@@ -5268,6 +6498,76 @@ final class AppModel {
                     ? "knobs" : "curve")
             fields["selectedBand"] = eqCurveEditor?.selectedBand
                 .map { JSONValue.string($0.rawValue) } ?? .null
+            // m23-r3: the spectrum layer's state, for the gate.
+            //
+            // NONE of this drains the tap. `spectrumShown` reads the ONE-home
+            // gates the CARD itself passes down (invert either and this field
+            // moves with it — the m23-r2a hand-assignment hole, closed by
+            // construction); `spectrumArmed` reads the AppModel arm slot and
+            // NOT `store.insertAnalysis(...) != nil`, which would make this
+            // probe a second consumer of a ring that has room for exactly one;
+            // and `spectrumHeights` is the layer's own smoothed output —
+            // DOWNSTREAM of the drain, so it proves the layer polled AND
+            // smoothed, and a floor silhouette (heights climb toward a seeded
+            // shape) can never be mistaken for a MISSING layer (heights stay
+            // flat at zero, because nothing is advancing them).
+            let showsCurve = EffectEditorOverlay.showsCurveSurface(
+                kind: effectEditor.kind, hasCurveModel: eqCurveEditor != nil,
+                density: panelDensity.density(forPanel: EffectEditorOverlay.panelID))
+            fields["spectrumShown"] = .bool(
+                showsCurve && EQCurveEditorModel.showsSpectrum(for: effectEditorTarget))
+            fields["spectrumArmed"] = .bool(effectEditorSpectrumIsMeasuring)
+            fields["spectrumSource"] = .string(effectEditorSpectrumSource.rawValue)
+            fields["spectrumHeights"] = .array(
+                (eqCurveEditor?.spectrumHeights ?? []).map { JSONValue.number($0) })
+            // The plot's `.help` caption — the SAME property ContentView hands
+            // the card, not a re-derivation of it, so a mis-wired caption
+            // reddens here. A tooltip is invisible to `debug.captureUI`, so
+            // without this field the pre-fader / post-fader labelling law —
+            // this cycle's headline decision — would be pinned as a FUNCTION
+            // and unpinned as a WIRE. Null when there is no plot on screen (Pro
+            // density draws the knob table): the field mirrors the view's own
+            // existence rather than describing a caption nobody can read.
+            fields["curveHelp"] = showsCurve ? .string(effectEditorCurveHelp) : .null
+            // m23-o2: the instrument frequency guide's state, for the gate.
+            //
+            // Reports `effectEditorInstrumentGuide` — the SAME property
+            // ContentView hands the card — mapped through the value's own
+            // `probeFields`, which is the function the drawing layer's geometry
+            // also goes through. There is no second computation here to drift.
+            //
+            // Both Hz AND on-plot x ride in the payload on purpose: "the
+            // bracket is at the right frequency" and "the bracket is in the
+            // right place on this axis" are different claims, and a
+            // coordinate-space bug satisfies the first while failing the
+            // second. The width they are computed at is reported beside them.
+            //
+            // Null when there is no plot on screen (Pro density draws the knob
+            // table), mirroring `curveHelp`: the field describes a drawing that
+            // exists, never one nobody can see.
+            //
+            // ⚠️ THE WIDTH IS THE ONE THE PLOT MEASURED, not the layout
+            // constant. `EQCurveEditor` reports its `GeometryReader` width up
+            // through `onPlotWidth`, so the x values below come from the same
+            // number `EQGuidanceLayer.draw` lays its tags out at. The constant
+            // is a FALLBACK for the window between opening the card and its
+            // first layout, and the payload NAMES which one was used — a gate
+            // that asserted x against a width the probe itself chose would be
+            // self-consistent and blind, and `DAWApp` has no test target, so a
+            // staging gate is the only thing that can see this path.
+            if showsCurve {
+                var guideFields: [String: JSONValue] = [:]
+                let measured = effectEditorPlotWidth
+                for (key, value) in effectEditorInstrumentGuide
+                    .probeFields(width: measured ?? EQGuidanceLayout.contentWidth,
+                                 widthSource: measured == nil
+                                     ? .layoutConstant : .measured) {
+                    guideFields[key] = Self.guideProbeJSON(value)
+                }
+                fields["instrumentGuide"] = .object(guideFields)
+            } else {
+                fields["instrumentGuide"] = .null
+            }
         }
         if let responseDb {
             fields["responseDb"] = responseDb

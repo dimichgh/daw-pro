@@ -54,7 +54,17 @@ struct EngineWatchdogCommandTests {
         #expect(engine.reads == 1)
     }
 
-    @Test("no params required; unknown extras are ignored (house style)")
+    // m23-n2h: `engine.watchdogStatus` used to be one of 26 verbs that never
+    // called `rejectUnknownKeys` at all — unknown extras were silently
+    // ignored, contrary to the 135-of-161-command house style claimed by
+    // this test's old name. Withdrawn for consistency: unrecognized keys on
+    // this zero-param verb are now a teaching error. This also doubles as
+    // the ORDERING witness required by the roadmap item: `FakeWatchdogEngine`
+    // increments `reads` on every real `watchdogStatus()` call, so asserting
+    // it stays at 0 proves the guard ran BEFORE the engine was touched, not
+    // merely that a `rejectUnknownKeys` call site exists somewhere in the
+    // case body.
+    @Test("no params accepted; unknown extras are rejected before the engine is touched (m23-n2h)")
     func noParamsTolerance() async throws {
         let (router, store) = makeRouter()
         let engine = FakeWatchdogEngine()
@@ -65,10 +75,10 @@ struct EngineWatchdogCommandTests {
 
         let sloppy = await router.handle(ControlRequest(
             id: "1", command: "engine.watchdogStatus",
-            params: ["bogus": .number(7), "reset": .bool(true)]))
-        #expect(sloppy.ok)
-        #expect(sloppy.result?["state"]?.stringValue == "ok")
-        #expect(sloppy.result?["restartCount"]?.doubleValue == 1)
+            params: ["bogus": .number(7)]))
+        #expect(!sloppy.ok)
+        #expect(sloppy.error == "engine.watchdogStatus: unknown parameter 'bogus' — engine.watchdogStatus takes no parameters")
+        #expect(engine.reads == 0, "the guard must run before watchdogStatus() is ever called")
     }
 }
 

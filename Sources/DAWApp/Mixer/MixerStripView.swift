@@ -5,8 +5,12 @@ import DAWAppKit
 /// Built-in inserts a user can add from the strip's "+" menu. Hosted Audio
 /// Units need a component picker (not in this view's scope) and are added over
 /// the control plane, so they're excluded here.
+/// HAND-MAINTAINED, not `Kind.allCases` — a new built-in kind is INVISIBLE in
+/// the "+" menu until it is appended here (the compiler cannot catch the
+/// omission).
 private let addableEffectKinds: [EffectDescriptor.Kind] =
-    [.gain, .eq, .compressor, .limiter, .reverb, .delay, .saturator, .gate, .chorus]
+    [.gain, .eq, .compressor, .limiter, .reverb, .delay, .saturator, .gate, .chorus,
+     .bassEnhancer]
 
 /// One channel or bus strip. Channels (audio/instrument) show the full anatomy;
 /// bus strips drop arm, sends, and the output picker (buses always sum to
@@ -67,7 +71,7 @@ struct MixerChannelStrip: View {
         GeometryReader { proxy in
             stripBody(available: proxy.size.height)
         }
-        .frame(width: 132)
+        .frame(width: MixerStripLayout.channelStripWidth)
         .frame(maxHeight: .infinity)
         .background(isBus ? DAWTheme.panel.opacity(0.55) : DAWTheme.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -117,7 +121,7 @@ struct MixerChannelStrip: View {
                 .explainable(.mixerFader)
             controlButtons
         }
-        .padding(10)
+        .padding(MixerStripLayout.channelStripHorizontalPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
@@ -148,18 +152,36 @@ struct MixerChannelStrip: View {
     ///
     /// Net effect: the region is INFLEXIBLE at `min(content, room)`, so the greedy
     /// fader below takes every remaining point. Chain first up to the bound, fader
-    /// throw with the rest. Strips therefore hug independently and their dividers
-    /// do NOT line up across the console — that is deliberate (see DESIGN-LANGUAGE):
-    /// a uniform divider costs every strip the tallest strip's chain height.
+    /// throw with the rest.
+    ///
+    /// **The "strips hug independently" rule was REVERSED by the user — do not
+    /// restore it as a regression fix.** m23-a's note here read: *"Strips therefore
+    /// hug independently and their dividers do NOT line up across the console — that
+    /// is deliberate: a uniform divider costs every strip the tallest strip's chain
+    /// height."* That reasoning was sound and its cost was real, but it left the
+    /// thing the user actually complained about untouched: inside a strip the chain
+    /// still pushed the PAN row, the fader, the dB readout, the sends and the output
+    /// picker DOWN — 121 pt of travel across five inserts, measured — so a control
+    /// moved under the hand on every add/remove and no two strips agreed on where
+    /// the fader was. Told the price, the user chose it: **the inserts ROWS now sit
+    /// in a fixed 3-slot viewport** (`MixerStripLayout.insertsViewportHeight`), whose
+    /// height is a function of `room` alone. `room` is identical for every strip in
+    /// the console, so the block below the inserts now starts at the same Y on every
+    /// strip and stays there — and a strip with one insert carries two rows of
+    /// deliberate empty space, which is the trade, not a bug.
+    ///
+    /// SENDS and OUTPUT still hug (only the inserts block is reserved), so the
+    /// output picker still moves when a SEND is added — out of scope, and unlike
+    /// inserts a send is rarely added mid-mix.
     private func signalFlow(room: CGFloat) -> some View {
-        ScrollView(.vertical) { signalFlowContent }
+        ScrollView(.vertical) { signalFlowContent(room: room) }
             .scrollIndicators(.visible)
             .frame(maxHeight: max(0, room))
             .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder
-    private var signalFlowContent: some View {
+    private func signalFlowContent(room: CGFloat) -> some View {
         VStack(spacing: MixerStripLayout.stripSpacing) {
             MixerInsertsSection(
                 store: store,
@@ -183,7 +205,23 @@ struct MixerChannelStrip: View {
                 isCollapsed: layoutStore.mixerInsertsCollapsed,
                 onToggleCollapsed: {
                     layoutStore.setMixerInsertsCollapsed(!layoutStore.mixerInsertsCollapsed)
-                }
+                },
+                // The fixed reserve. Computed from `room` and the strip CLASS —
+                // NEVER from `track.effects.count`, which is exactly why no strip's
+                // fader moves when an insert is added (see `signalFlow(room:)`).
+                //
+                // m23-ax: a BUS reserves five rows where a channel reserves three.
+                // It can afford them because it draws no sends section and no output
+                // picker, and it needs them because a bus is a summing point whose
+                // chain is a glue chain. Channels are untouched — the user asked for
+                // "master and bus", and holding the channel at 3 keeps every existing
+                // assertion about it a live control on this change.
+                rowsViewportHeight: MixerStripLayout.insertsViewportHeight(
+                    room: room,
+                    isCollapsed: layoutStore.mixerInsertsCollapsed,
+                    slots: isBus ? MixerStripLayout.busInsertsReservedSlots
+                                 : MixerStripLayout.insertsReservedSlots),
+                onRowProbe: { model.insertLabels.record($0) }
             )
             .explainable(.mixerInserts)
             if !isBus {
@@ -544,6 +582,27 @@ struct MixerInsertsSection: View {
     var isCollapsed: Bool = false
     /// Flips `isCollapsed`. nil = no disclosure at all (a host that never folds).
     var onToggleCollapsed: (() -> Void)?
+    /// Fixed height for the ROWS area — the strip's insert reserve, which is what
+    /// keeps the fader, the dB readout and Mute/Solo/Arm on one line however long a
+    /// chain grows. Rows past the reserve scroll INSIDE it.
+    ///
+    /// Every strip class the app renders now passes one, and they DIFFER (m23-ax):
+    /// a channel reserves 3 rows, a bus 5 (`insertsViewportHeight(room:isCollapsed:slots:)`,
+    /// valve included), the master a flat 5 (`masterInsertsViewportHeight`, no valve —
+    /// it rides its own scroller and so cannot clip).
+    ///
+    /// **nil = hug the rows, the pre-reserve behaviour.** ⚠️ This USED to be the
+    /// master's mode, and the note here used to explain why the master kept hugging
+    /// on purpose. m23-ax reversed that on the user's request — hugging is exactly
+    /// what made every master insert push the fader and the LOUDNESS / STEREO IMAGE /
+    /// REFERENCE blocks 28 pt further down. nil now means PREVIEWS and unit hosts
+    /// only. A plain value input, like every other input here.
+    var rowsViewportHeight: CGFloat?
+    /// Reports what each row DREW (m23-s): its label, the pin flag, the
+    /// intrinsic width, the name line's width, and every GR underline frame.
+    /// A plain optional closure — nil in previews and unit hosts, so the section
+    /// still stands alone; the app hands it `AppModel.insertLabels`.
+    var onRowProbe: ((InsertRowProbe) -> Void)?
 
     /// Collapsed hides the ROWS, never the header: the section label, the count of
     /// what's hidden, and the "+" add menu stay reachable, so a folded chain can
@@ -551,7 +610,11 @@ struct MixerInsertsSection: View {
     private var showsRows: Bool { !isCollapsed }
 
     var body: some View {
-        VStack(spacing: 4) {
+        // The spacing is `MixerStripLayout`'s, not a local 4: that constant is what
+        // the measured reserve is COMPUTED from, so a view that spelled its own gap
+        // could drift from the budget silently — the viewport would keep claiming to
+        // seat three rows while seating two and a sliver.
+        VStack(spacing: MixerStripLayout.insertRowSpacing) {
             HStack(spacing: 4) {
                 if let onToggleCollapsed {
                     disclosure(onToggleCollapsed)
@@ -569,41 +632,144 @@ struct MixerInsertsSection: View {
             if !showsRows {
                 EmptyView()
             } else if effects.isEmpty {
-                Text("No inserts")
-                    .font(.system(size: 9))
-                    .foregroundStyle(DAWTheme.textSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 2)
-            } else {
-                ForEach(effects) { effect in
-                    InsertRow(
-                        store: store,
-                        trackID: trackID,
-                        effect: effect,
-                        onToggleBypass: { toggleBypass(effect) },
-                        onRemove: { remove(effect) },
-                        // AU inserts get one open-window button (M3 vi-b); built-in
-                        // effects get the in-window effect editor card instead
-                        // (m17-a, `onOpenEditor` below), and the master chain never
-                        // hosts AUs so the window button stays nil there.
-                        onOpenWindow: (trackID != nil && effect.kind == .audioUnit)
-                            ? { onOpenWindow?(effect.id) }
-                            : nil,
-                        // Built-in kinds only: click the row (or its slider glyph)
-                        // to toggle the generic param editor — AU rows keep their
-                        // plugin-window affordance and never open the card (v1).
-                        onOpenEditor: effect.kind != .audioUnit
-                            ? { onOpenEditor(effect.id) }
-                            : nil,
-                        // Dynamics kinds only (m22-e): the chip's GR activity
-                        // bar poll — every other kind stays bar-free (and
-                        // never polls).
-                        gainReduction: GainReductionMeterModel.isDynamicsKind(effect.kind)
-                            ? { gainReductionFor(effect.id) }
-                            : nil
-                    )
+                emptyState
+            } else if let rowsViewportHeight {
+                // The reserve. A chain past 3 rows scrolls INSIDE this viewport, so
+                // the section's height — and therefore every control below it on the
+                // strip — never moves. Nested inside the region's own scroller, the
+                // m23-m3c "inner per-section scrollers keep their own caps" idiom.
+                ScrollView(.vertical) {
+                    VStack(spacing: MixerStripLayout.insertRowSpacing) {
+                        rows
+                        remainderSlots
+                    }
                 }
+                .scrollIndicators(.visible)
+                .frame(height: rowsViewportHeight)
+            } else {
+                rows
             }
+        }
+    }
+
+    /// The chain's rows. One `InsertRow` per effect, in chain order.
+    private var rows: some View {
+        VStack(spacing: MixerStripLayout.insertRowSpacing) {
+            ForEach(effects) { effect in
+                InsertRow(
+                    store: store,
+                    trackID: trackID,
+                    effect: effect,
+                    onToggleBypass: { toggleBypass(effect) },
+                    onRemove: { remove(effect) },
+                    // AU inserts get one open-window button (M3 vi-b); built-in
+                    // effects get the in-window effect editor card instead
+                    // (m17-a, `onOpenEditor` below), and the master chain never
+                    // hosts AUs so the window button stays nil there.
+                    onOpenWindow: (trackID != nil && effect.kind == .audioUnit)
+                        ? { onOpenWindow?(effect.id) }
+                        : nil,
+                    // Built-in kinds only: click the row (or its slider glyph)
+                    // to toggle the generic param editor — AU rows keep their
+                    // plugin-window affordance and never open the card (v1).
+                    onOpenEditor: effect.kind != .audioUnit
+                        ? { onOpenEditor(effect.id) }
+                        : nil,
+                    // Dynamics kinds only (m22-e): the chip's GR activity
+                    // bar poll — every other kind stays bar-free (and
+                    // never polls).
+                    gainReduction: GainReductionMeterModel.isDynamicsKind(effect.kind)
+                        ? { gainReductionFor(effect.id) }
+                        : nil,
+                    onProbe: onRowProbe
+                )
+            }
+        }
+    }
+
+    /// The EMPTY slots that finish a partial chain, so the reserve reads as "three
+    /// slots, one filled" rather than as a chip above an unexplained void — the state
+    /// the user judged worse than the empty strip, because a chip over blank space
+    /// reads as content that failed to load.
+    ///
+    /// Same chrome as the empty well (`InsertSlotWell` — one vocabulary, structurally,
+    /// not two copies of the same modifiers). Nothing is drawn once the chain fills
+    /// the reserve, so a 3-insert strip and a 4-insert strip look IDENTICAL at rest
+    /// and only scrolling tells them apart: there is no 3→4 transition to smooth.
+    ///
+    /// The count comes from `MixerStripLayout`, which measures the chain by its rows'
+    /// ACTUAL heights (a keyable compressor row is 42 pt, not 24) — so the remainder
+    /// can never overflow the viewport and can never make it scroll when it wasn't.
+    @ViewBuilder
+    private var remainderSlots: some View {
+        let count = MixerStripLayout.insertsRemainderSlots(
+            viewport: rowsViewportHeight ?? 0,
+            filledRowsHeight: filledRowsHeight)
+        if count > 0 {
+            ForEach(0..<count, id: \.self) { _ in
+                // `Color.clear`, NOT `EmptyView()`: an EmptyView contributes no
+                // layout node, so the well's frame/fill/stroke would hang off
+                // nothing and the slot would silently not draw — measured, the
+                // arithmetic tests stayed green while the rack showed no slots.
+                InsertSlotWell(height: MixerStripLayout.insertRowHeight) { Color.clear }
+            }
+        }
+    }
+
+    /// What the chain occupies right now, row by row. NOT `effects.count × 24`: a
+    /// keyable insert is taller, and scoring it short would draw one slot too many.
+    private var filledRowsHeight: CGFloat {
+        MixerStripLayout.insertsFilledRowsHeight(
+            rowHeights: effects.map {
+                InsertRow.isKeyable(effect: $0, trackID: trackID)
+                    ? MixerStripLayout.keyableInsertRowHeight
+                    : MixerStripLayout.insertRowHeight
+            })
+    }
+
+    /// The empty chain, in its two presentations.
+    ///
+    /// **Reserved** (a channel/bus strip): the space is held open whether or not the
+    /// track has effects, so the empty state has to read as **deliberate space**, not
+    /// as a panel that failed to draw. It fills the whole reserve with a dashed
+    /// hairline outline — the house's "prospective content" chrome, the same one the
+    /// ghost note lane and the automation lane hint wear — around centred, dim copy:
+    /// the existing "No inserts" label (one vocabulary) over a fainter line pointing
+    /// at the affordance that fills it. No glow (Rule 3 — nothing static glows), no
+    /// accent (an empty chain is not an earned state), and no claim about how many
+    /// slots there are, so the copy stays true if the reserve ever degrades.
+    ///
+    /// **Unreserved** (previews and unit hosts — no longer the master, m23-ax):
+    /// byte-identical to the pre-reserve line. The well exists because there is space
+    /// to hold open; where nothing is held open, an outlined box around one word would
+    /// be decoration.
+    @ViewBuilder
+    private var emptyState: some View {
+        if let rowsViewportHeight {
+            // ONE well with the copy in it — deliberately NOT three empty outlines.
+            // A whole empty chain has something to say ("No inserts / Add with +"),
+            // and three boxes around one label is the grid-of-empty-boxes the design
+            // rules warn against. The partial chain draws per-slot wells instead
+            // (`remainderSlots`) because there the slots are what needs saying. Same
+            // chrome either way — `InsertSlotWell` is the single definition.
+            InsertSlotWell(height: rowsViewportHeight) {
+                VStack(spacing: 2) {
+                    Text("No inserts")
+                        .font(.system(size: 9))
+                        .foregroundStyle(DAWTheme.textSecondary)
+                    Text("Add with +")
+                        .font(.system(size: 8))
+                        .foregroundStyle(DAWTheme.textFaint)
+                }
+                .lineLimit(1)
+            }
+            .help("No effects on this track yet. The strip keeps this space open either way, so the fader never moves when you add one.")
+        } else {
+            Text("No inserts")
+                .font(.system(size: 9))
+                .foregroundStyle(DAWTheme.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 2)
         }
     }
 
@@ -694,6 +860,41 @@ struct MixerInsertsSection: View {
     }
 }
 
+/// The house's "prospective content" chrome — a dashed hairline outline over a
+/// barely-raised fill, the same vocabulary the ghost note lane and the automation
+/// lane hint wear. It says "something belongs here", never "something is missing".
+///
+/// **ONE definition for BOTH places the inserts reserve shows held-open space**: the
+/// labelled empty well (a whole empty chain) and the empty slots that finish a
+/// partial chain. Two copies of these modifiers would drift and the two states would
+/// stop reading as the same idea — the `ArrangeDropSnap` "make divergence
+/// unrepresentable" idiom, applied at view scale.
+///
+/// Deliberately quiet, and it has to stay that way: most strips run one or two
+/// inserts, so these outlines are visible across the whole rack. No glow and no
+/// accent (Rule 3 — an unused slot is not an earned state), a hairline stroke rather
+/// than a border, and a fill barely above the panel. Against a filled chip's solid
+/// ground and lit bypass dot it recedes, which is what keeps the rack reading as
+/// recessed structure instead of a grid of empty boxes competing with the chips.
+private struct InsertSlotWell<Content: View>: View {
+    var height: CGFloat
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(DAWTheme.panelRaised.opacity(0.25))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(DAWTheme.hairline, style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+            )
+            .frame(height: height)
+    }
+}
+
 /// The master strip: accent-bordered and wider, pinned at the right of the
 /// console. Volume fader + stereo output meter + digital dB readout, and — in
 /// Pro (m13-d) — the master INSERT chain: effects on the whole mix, post-fader
@@ -747,8 +948,8 @@ struct MixerMasterStrip: View {
             }
             .scrollIndicators(.visible)
         }
-        .padding(12)
-        .frame(width: 156)
+        .padding(MixerStripLayout.masterStripHorizontalPadding)
+        .frame(width: MixerStripLayout.masterStripWidth)
         .frame(maxHeight: .infinity)
         .background(DAWTheme.panelRaised)
         .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -796,7 +997,22 @@ struct MixerMasterStrip: View {
                     isCollapsed: layoutStore.mixerInsertsCollapsed,
                     onToggleCollapsed: {
                         layoutStore.setMixerInsertsCollapsed(!layoutStore.mixerInsertsCollapsed)
-                    }
+                    },
+                    // m23-ax — the master's reserve. Until now this was nil: the
+                    // master HUGGED its chain, so every insert pushed the fader, the
+                    // dB readout, LOUDNESS, STEREO IMAGE and the REFERENCE row 28 pt
+                    // further down (205 pt across an 8-insert chain, measured), and a
+                    // long chain had nowhere to scroll except by scrolling the whole
+                    // strip past everything else.
+                    //
+                    // **No `room` argument, deliberately** — see
+                    // `masterInsertsViewportHeight`. The valve a channel needs exists
+                    // to stop an over-tall reserve clipping the fader inside a region
+                    // that cannot scroll; the master's whole anatomy already rides the
+                    // scroller above, so the reserve can be flat.
+                    rowsViewportHeight: MixerStripLayout.masterInsertsViewportHeight(
+                        isCollapsed: layoutStore.mixerInsertsCollapsed),
+                    onRowProbe: { model.insertLabels.record($0) }
                 )
                 .explainable(.mixerMasterInserts)
                 Divider().overlay(DAWTheme.playback.opacity(0.25))
@@ -842,6 +1058,16 @@ struct MixerMasterStrip: View {
                         return seeded
                     }
                     return store.masterAnalysis()
+                },
+                // The m23-r3b tick witness. TWO reporters, because the trail and
+                // the readouts tick in SEPARATE TimelineViews at different rates
+                // and either can freeze alone — one shared reporter could not
+                // tell which site stopped.
+                onTrailFrame: { points, calm, zone in
+                    model.liveLayers.recordTrailFrame(points: points, calm: calm, zone: zone)
+                },
+                onReadoutFrame: { snapshot, zone in
+                    model.liveLayers.recordReadoutFrame(snapshot, zone: zone)
                 }
             )
             // Reference track (m22-g): rendered ONLY when the project carries a

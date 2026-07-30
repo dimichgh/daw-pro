@@ -76,21 +76,29 @@ struct LiveThruRenderTests {
         // suite could never see it — see AuditionSustainTests for the audio
         // proof against a real synth.
         #expect(!harness.pull())
+        #expect(harness.renderer.openLiveCount == 2)
 
-        // The tail is BOUNDED: an idle node cannot render forever. After
-        // `liveTailSeconds` past the last event the fast path resumes.
-        //
-        // KNOWN RESIDUAL DEFECT (thru only, filed not fixed): the two notes
-        // above are STILL HELD here, so this silence is wrong — it cuts a held
-        // thru voice. Unlike audition (`openAuditionCount`), the thru path
-        // tracks no open-voice count, so the tail expires regardless. In
-        // practice this is masked: `schedule == nil` only holds on a node where
-        // a schedule was never published, and after any playback one stays
-        // published. Fixing it means touching 6b's ID-pairing branches, which
-        // the m16-b3 §4.3 C11 rules govern — out of m23-d's scope.
+        // HELD PAST THE TAIL (m23-u — this block used to record the defect).
+        // Until m23-u the thru path tracked no open-voice count, so after
+        // `liveTailSeconds` the tail expired and this node fell silent
+        // underneath two keys that were never released: the assertion here read
+        // `#expect(harness.pull())` and a comment called it a masked corner
+        // case, on the false premise that `schedule == nil` needed a cold app.
+        // It does not — every stop/seek/tempo change unpublishes (see step 7's
+        // comment in InstrumentSourceNode) — so this was the ordinary
+        // stopped-transport path. Now `openLiveCount` keeps 6d re-arming.
         let tailQuanta = Int(InstrumentRenderer.liveTailSeconds * rate) / 512  // `pull()`'s quantum
+        for _ in 0..<(tailQuanta + 4) { #expect(!harness.pull()) }
+
+        // Release both, and only NOW is the tail bounded: an idle node cannot
+        // render forever. The release itself must still ring out (cutting it
+        // here is a click), so the off's own quantum is NOT silent.
+        harness.pushLive(kind: ScheduledMIDIEvent.noteOff, pitch: 60)
+        harness.pushLive(kind: ScheduledMIDIEvent.noteOff, pitch: 64)
+        #expect(!harness.pull())
+        #expect(harness.renderer.openLiveCount == 0)   // pins the DECREMENT path
         for _ in 0..<tailQuanta { _ = harness.pull() }
-        #expect(harness.pull())
+        #expect(harness.pull())                        // bounded-tail, preserved
     }
 
     @Test("a scheduled note-off at the same frame precedes a live note-on (schedule wins ties)")

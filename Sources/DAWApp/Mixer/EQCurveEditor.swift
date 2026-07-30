@@ -8,14 +8,20 @@ import DAWAppKit
 /// density — direct manipulation on the response curve itself, over the
 /// exact §5.3 four-layer stack. Bottom → top inside the plot:
 ///
-/// 1. **Spectrum Canvas** (master-chain EQ ONLY — a track EQ draws an ABSENT
-///    layer, never a fake one): its own `TimelineView(.animation)` paused
-///    when the window is inactive, fed by the injected snapshot closure
-///    (`appModel.vibeSeed ?? store.masterAnalysis()`, the `VibeMeterView`
-///    pattern verbatim), display-smoothed by the model's §4.1 asymmetric
-///    one-pole, bands drawn at their TRUE 40 Hz–16 kHz geometric edges as a
-///    bottom-anchored filled path. Signal-green at low opacity — live healthy
-///    signal semantics, context under the curve, never a measurement readout.
+/// 1. **Spectrum Canvas** (m22-b: master chain only; SINCE m23-r3: every EQ
+///    card, master or track — the per-insert tap m23-r1/r2a/r2b built is what
+///    m22-b's "display honesty" was waiting for): its own UNPAUSED 60 Hz
+///    `TimelineView(.periodic)` — the m22-e poll-discipline law, which this
+///    layer violated from m22-b until m23-r3 measured the freeze — fed by the
+///    injected snapshot closure (`appModel.effectEditorSpectrum()`, the
+///    `VibeMeterView` pattern verbatim), display-smoothed by the model's §4.1
+///    asymmetric one-pole, bands drawn at their TRUE 40 Hz–16 kHz geometric
+///    edges as a bottom-anchored filled path. Signal-green at low opacity —
+///    live healthy signal semantics, context under the curve, never a
+///    measurement readout. **The two curves do not mean the same thing** — a
+///    master card measures POST-fader over the whole mix, a track card measures
+///    POST this insert and PRE the strip fader — so they are LABELLED
+///    differently (see `plot`'s help fork).
 /// 2. **Grid Canvas** — hairlines every 6 dB + the beginner-readable decade
 ///    marks with SF Mono dim labels; redraws on size change only.
 /// 3. **Curves Canvas** — per-band dim neutral curves (the selected band's
@@ -40,13 +46,56 @@ struct EQCurveEditor: View {
     /// The headless curve model (handle layout, interaction laws, spectrum
     /// smoother, selection state).
     var model: EQCurveEditorModel
-    /// Master-chain gate (§4.1): true iff `editor.target?.trackID == nil`.
-    /// Track-strip EQ editors draw NO spectrum in v1 — display honesty.
+    /// The spectrum-layer gate, computed at ONE home
+    /// (`EQCurveEditorModel.showsSpectrum(for:)`) — since m23-r3, true for a
+    /// track card as well as the master's.
     var showsSpectrum: Bool
-    /// Polled once per spectrum frame — `appModel.vibeSeed ??
-    /// store.masterAnalysis()` in the app, a fake in previews. A closure, so
-    /// no engine coupling here (the `VibeMeterView` seam).
+    /// The plot's `.help` caption, RESOLVED by the caller through the one-home
+    /// `EQCurveEditorModel.curveHelp(for:isMeasuring:)` (master / track /
+    /// not-measuring / no-spectrum, whole). It arrives as a plain String on
+    /// purpose: a tooltip is invisible to `debug.captureUI`, so if this view
+    /// picked the branch itself, the pre-fader labelling law would be pinned as
+    /// a function and unpinned as a wire — no test and no capture could tell a
+    /// mis-wired caption from a correct one. Resolved once, in the app model,
+    /// where `debug.effectEditor` reports the SAME value it passes here.
+    var help: String
+    /// Polled once per spectrum frame — `appModel.effectEditorSpectrum()` in
+    /// the app, a fake in previews. A closure, so no engine coupling here (the
+    /// `VibeMeterView` seam).
     var spectrum: () -> MasterAnalysisSnapshot
+    /// The INSTRUMENT FREQUENCY GUIDE's whole state (m23-o2), resolved by the
+    /// caller at its one home (`AppModel.effectEditorInstrumentGuide` →
+    /// `EQInstrumentGuide.resolve`). It arrives as a plain value for the same
+    /// reason `help` does: `debug.effectEditor` reports that very property, so
+    /// the gate reads the value the card draws instead of a re-derivation.
+    ///
+    /// Required, never defaulted. A `= .notApplicable` default is exactly how
+    /// this becomes a silent no-op at some future call site — and its failure
+    /// mode is invisible, because "no guidance" looks identical to "this track
+    /// has no resolvable family".
+    var guide: EQInstrumentGuide
+    /// The tap's LIFECYCLE hold, run as the spectrum layer's `.task(id:)` body:
+    /// arms the open insert on entry, releases when SwiftUI cancels it. Hung on
+    /// the LAYER, not the card, so "the layer exists" ⟺ "the tap is armed" ⟺
+    /// "exactly one thing polls it" — the m23-r3 single-consumer invariant is
+    /// then structural rather than a convention (`insertAnalysis` DRAINS; a
+    /// second consumer yields a plausible STALE reading, never an error). A
+    /// master card's hold is a no-op: `masterAnalysis()` needs no tap.
+    /// Required, never defaulted — a `= {}` default is how this silently
+    /// becomes a no-op at some future call site.
+    var holdSpectrum: () async -> Void
+    /// Reports the plot's MEASURED width up to the app model, so
+    /// `debug.effectEditor` can report positions at the width that was actually
+    /// drawn rather than at `EQGuidanceLayout.contentWidth`.
+    ///
+    /// ⚠️ THIS CLOSURE IS THE ONLY THING THAT MAKES THE PROBE'S x VALUES
+    /// FALSIFIABLE. `DAWApp` has no test target, so nothing in `DAWAppKitTests`
+    /// can see this file; if the probe derived x from the layout CONSTANT while
+    /// this Canvas drew from `size.width`, the two would agree only because the
+    /// card happens to be a fixed 560 pt frame, and a staging gate checking
+    /// "x matches the width the probe names" would be self-consistent and blind.
+    /// Required, never defaulted — same reasoning as `guide` and `holdSpectrum`.
+    var onPlotWidth: (Double) -> Void
 
     /// The plot's fixed height (§6: plot ≈ 528×260 inside the 560 pt card).
     private static let plotHeight: CGFloat = 260
@@ -54,8 +103,57 @@ struct EQCurveEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             plot
+            guidanceRow
             EQBandStrip(editor: editor, model: model)
             footer
+        }
+    }
+
+    // MARK: - The guidance row (m23-o2) — DRAWN prose, never a tooltip
+
+    /// The instrument frequency guide's words, immediately under the plot.
+    ///
+    /// **This row exists because `.help` is a tooltip and `debug.captureUI`
+    /// photographs the window** — guidance that lived only in a tooltip is
+    /// guidance the gate cannot see and a user may never find. It is also what
+    /// makes the plot's compact SF Mono tags ("CUT BELOW 35 Hz") legible without
+    /// hovering: their expansion is drawn permanently 10 pt below them, in
+    /// words, rather than hidden behind a pointer. Those tags deliberately share
+    /// NO vocabulary with the band handles' own HP·LS·1·2·HS·LP micro-tags — see
+    /// `EQInstrumentGuide.Mark.tag`.
+    ///
+    /// Its height is FIXED (`EQGuidanceLayout.rowHeight`) — the footer's own
+    /// law one view down: the row keeps its height so the card never reflows
+    /// when the user retargets it. `EQInstrumentGuideTests` pins every string
+    /// inside the character budget that keeps both lines single.
+    ///
+    /// NEUTRAL ink, and that is the softness decision made visible: cyan is
+    /// earned playback state and green is a live measurement, so a REFERENCE —
+    /// published opinion, six of whose thirteen rows the m23-o1 review flagged
+    /// as softly sourced — gets neither. It reads as the marker-flag lineage
+    /// (navigation furniture, deliberately neutral), never as a readout.
+    @ViewBuilder
+    private var guidanceRow: some View {
+        // `.notApplicable` (master / bus) renders NOTHING, not an empty state:
+        // there is no instrument identity to find and no remedy to offer, so a
+        // row there would be chrome explaining a question nobody asked.
+        if guide.showsRow {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(guide.headline)
+                    .font(.system(size: EQGuidanceLayout.rowFontSize, weight: .semibold))
+                    .foregroundStyle(DAWTheme.textSecondary)
+                // SF Mono — this line is numbers (the house readout rule).
+                Text(guide.detail)
+                    .font(.system(size: EQGuidanceLayout.rowFontSize, design: .monospaced))
+                    .tracking(0.2)
+                    .foregroundStyle(DAWTheme.textDim)
+            }
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: EQGuidanceLayout.rowHeight)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Instrument frequency guide")
+            .accessibilityValue("\(guide.headline). \(guide.detail)")
         }
     }
 
@@ -80,8 +178,24 @@ struct EQCurveEditor: View {
                 ZStack(alignment: .topLeading) {
                     if showsSpectrum {
                         EQSpectrumLayer(model: model, snapshot: spectrum)
+                            // The arm rides the LAYER's identity: it appears
+                            // with the layer, re-fires when the card retargets
+                            // (`.task(id:)` on the open insert), and is
+                            // cancelled — releasing the tap — the moment the
+                            // layer leaves (close, retarget, Simple→Pro flip).
+                            .task(id: editor.target) { await holdSpectrum() }
                     }
                     EQGridLayer()
+                    // The m23-o2 guidance marks: ABOVE the grid so the dashes
+                    // are not lost among its hairlines, BELOW the curves so the
+                    // cyan composite — the thing the user is actually editing —
+                    // always wins. Static: no TimelineView (see the layer).
+                    // The layer reports its OWN Canvas width up through
+                    // `onPlotWidth` — deliberately NOT `geo.size.width` from
+                    // this outer reader, which would be the slot's width and
+                    // could silently differ from what the Canvas fills. See the
+                    // invariant on `EQGuidanceLayer`.
+                    EQGuidanceLayer(guide: guide, onPlotWidth: onPlotWidth)
                     curvesLayer(params: params, selected: selected,
                                 width: width, height: height)
                 }
@@ -118,9 +232,12 @@ struct EQCurveEditor: View {
             }
         }
         .frame(height: Self.plotHeight)
-        .help(showsSpectrum
-              ? "The green fill is the live master-mix spectrum — context only; its height is not the EQ's dB scale."
-              : "Drag a handle to shape the EQ curve.")
+        // The pre-fader / post-fader labelling law lives headless (and pinned)
+        // in EQCurveEditorModel — a master fill and a track fill are different
+        // measurements in identical ink, so they never share a caption. This
+        // view picks NOTHING: it draws the caption it is handed, which is the
+        // same value `debug.effectEditor` reports.
+        .help(help)
     }
 
     /// Layer 3: per-band dim curves + the glowing composite. The point arrays
@@ -212,12 +329,13 @@ struct EQCurveEditor: View {
     }
 }
 
-// MARK: - Layer 1: the spectrum (master EQ only, §4.1)
+// MARK: - Layer 1: the spectrum (§4.1; every EQ card since m23-r3)
 
 /// The spectrum overlay — the ONLY continuously-redrawing layer, isolated in
-/// its own `TimelineView(.animation)` so the 60 fps tick never invalidates the
-/// grid/curves/handle layers (§5.3 structure; §8.4 target). Paused when the
-/// window is inactive (the `VibeMeterView` guidance). Each frame advances the
+/// its own `TimelineView(.periodic)` so the 60 fps tick never invalidates the
+/// grid/curves/handle layers (§5.3 structure; §8.4 target). NEVER paused on
+/// window-inactive — see `pollInterval` for the law and the measured freeze it
+/// prevents. Each frame advances the
 /// model's §4.1 smoother by REAL elapsed time (the `VibeSmoother` clock idiom
 /// — the smoothed heights are `@ObservationIgnored` scratch, so the mutation
 /// schedules no invalidation; the timeline alone drives the next frame) and
@@ -231,10 +349,26 @@ private struct EQSpectrumLayer: View {
     /// invalidation.
     @State private var clock = EQSpectrumClock()
 
-    @Environment(\.controlActiveState) private var controlActiveState
+    /// **Poll discipline — the m22-e LAW** (`ReferencePanelView.swift:26`):
+    /// every live layer ticks in its own UNPAUSED periodic `TimelineView`, and
+    /// NEVER `.animation(paused: controlActiveState == .inactive)`. This layer
+    /// carried that forbidden idiom from m22-b, which predates the law — and it
+    /// froze exactly as the law predicts: with the app not frontmost the
+    /// smoother never advanced, so the fill sat at the floor while the tap was
+    /// armed and reading. **That is user-visible, not merely a test problem** —
+    /// this app is driven over a control socket by agents, so its window is
+    /// routinely NOT the active one, and a frozen spectrum under a live curve
+    /// is the dishonest-readout failure this project keeps closing.
+    /// (m23-r3; found by the m23-r3 gate's own liveness preconditions, whose
+    /// `masterSeed` reading proved the freeze independent of any audio.)
+    ///
+    /// 60 Hz, not the reference panel's 10 Hz: the EQ card is a MODAL that
+    /// exists only while its insert is being edited, so the cost is bounded and
+    /// short-lived, and m22-b's motion quality is a pinned design property.
+    private static let pollInterval = 1.0 / 60
 
     var body: some View {
-        TimelineView(.animation(paused: controlActiveState == .inactive)) { timeline in
+        TimelineView(.periodic(from: .now, by: Self.pollInterval)) { timeline in
             // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value
             // captures only, computed before the closure (the point buffer is
             // the VibeMeterView small-per-frame-buffer precedent).
@@ -295,6 +429,175 @@ private final class EQSpectrumClock {
         let dt = lastDate.map { min(max(date.timeIntervalSince($0), 0), 0.1) } ?? (1.0 / 60)
         lastDate = date
         return dt
+    }
+}
+
+// MARK: - Layer 1b: the instrument frequency guide (m23-o2)
+
+/// m23-o1's cited reference, drawn against the live curve: the instrument's
+/// fundamental range as a soft region, and its recommended high-pass /
+/// low-pass corners as dashed verticals — so a beginner can SEE whether the
+/// corner they are dragging sits below the instrument or inside it.
+///
+/// **NO TIMELINEVIEW, deliberately.** A reference row does not change 60 times
+/// a second, so this Canvas redraws only when its size or its `guide` value
+/// changes. The m22-e poll discipline says every LIVE layer ticks in its own
+/// UNPAUSED `.periodic` timeline; it does not say every layer gets one, and
+/// adding a timer here "for symmetry" would spend a frame budget on a picture
+/// that never moves. (The spectrum layer above genuinely is live and keeps its
+/// own 60 Hz timeline; nothing here is paused, because nothing here ticks.)
+///
+/// **THE INK IS THE SOFTNESS DECISION.** Everything this layer draws is DASHED
+/// and NEUTRAL — no cyan (earned playback/active state), no green (a live
+/// measurement), no violet (AI content, and this table is cited human research,
+/// not generated). The saturated colours on this plot all belong to things that
+/// are true right now about THIS track; guidance is published opinion about a
+/// KIND of instrument, six of whose thirteen rows the m23-o1 review flagged as
+/// softly sourced. So no guidance mark is ever drawn in a way that could be
+/// mistaken for a measurement, and none is drawn with a hard edge. The
+/// per-fact caveat that dashes cannot express — "a drum's pitch is a tuning
+/// choice" — is carried in words by the guidance row below the plot.
+///
+/// Every position comes from `EQInstrumentGuide`, which computes it through
+/// `EQCurveGeometry` — the plot's ONE axis, the same one the grid, the handles
+/// and the spectrum use. There is no second mapping here and no `if`: this
+/// view draws the marks it is handed, and an empty list draws nothing.
+private struct EQGuidanceLayer: View {
+    var guide: EQInstrumentGuide
+    /// Reports THIS CANVAS'S OWN laid-out width — see the invariant below.
+    var onPlotWidth: (Double) -> Void
+
+    var body: some View {
+        // Value-captured before the @Sendable renderer (the m16-a contract).
+        let marks = guide.marks
+        Canvas { @Sendable context, size in
+            Self.draw(&context, size: size, marks: marks)
+        }
+        // ─────────────────────────────────────────────────────────────────
+        // ⚠️ THE REPORTED WIDTH MUST BE THIS CANVAS'S OWN, NEVER THE SLOT'S.
+        //
+        // `debug.effectEditor` reports x positions computed at the width this
+        // closure hands up. `draw` above lays every mark out from the Canvas
+        // renderer's `size.width`. Those two MUST be the same rectangle, and
+        // the only way to guarantee it is to measure the Canvas ITSELF — which
+        // is what a `GeometryReader` in its `.background` does: the background
+        // is handed exactly the Canvas's laid-out frame.
+        //
+        // THE VERSION THIS REPLACED WAS WRONG, AND WRONG INVISIBLY. It read
+        // `geo.size.width` from the plot's outer `GeometryReader` and reported
+        // that. The two agreed only because this layer sat in the ZStack with
+        // no `.frame` and no padding — SwiftUI layout inheritance, stated
+        // nowhere and enforced by nothing. Adding `.padding(.horizontal, 20)`
+        // to this layer for aesthetics made the Canvas draw 40 pt narrower
+        // while the probe kept sincerely reporting the outer 528: every mark
+        // ~20 pt off on screen, with the payload internally consistent and a
+        // staging gate fully green. A gate CANNOT catch that — it can only read
+        // what the probe reports, and the probe was reporting a number that was
+        // honestly measured and simply not the one drawn at.
+        //
+        // So: if you inset, reframe or pad this lane, do it and change nothing
+        // else — both halves move together now, because they are one read.
+        // Do NOT hoist this measurement back out to the caller.
+        //
+        // The callback fires from the BACKGROUND view's modifier, not from
+        // inside the `@Sendable` renderer — the m16-a contract forbids touching
+        // the main actor there.
+        // ─────────────────────────────────────────────────────────────────
+        .background {
+            GeometryReader { proxy in
+                Color.clear
+                    .onChange(of: proxy.size.width, initial: true) { _, measured in
+                        onPlotWidth(Double(measured))
+                    }
+            }
+        }
+        // Context under the curve, and every word of it is repeated as real
+        // text in the guidance row — which is the accessible surface.
+        .accessibilityHidden(true)
+    }
+
+    private nonisolated static func draw(
+        _ context: inout GraphicsContext, size: CGSize,
+        marks: [EQInstrumentGuide.Mark]
+    ) {
+        let width = Double(size.width)
+        let height = Double(size.height)
+        guard width > 0, height > 0, !marks.isEmpty else { return }
+        // ⚠️ ONE WIDTH FOR BOTH COORDINATE SPACES. The tags are laid out from the
+        // SAME `size.width` the marks are drawn from, inside this closure —
+        // never from `EQGuidanceLayout.contentWidth` outside it. Those two are
+        // equal today only because the card is a fixed 560 pt frame; deriving
+        // the tag lane from the constant while the lines came from the live size
+        // is the dual-coordinate-space bug where "the bracket is at the right
+        // Hz" stays true while "the tag is over the bracket" quietly stops being.
+        // `EQGridLayer` calls `EQCurveGeometry.x(forFrequency:in:)` inside its
+        // own closure for the same reason.
+        let placements = EQInstrumentGuide.placements(marks, width: width)
+        let dashed = StrokeStyle(lineWidth: 1, dash: [3, 3])
+
+        for mark in marks {
+            if let span = EQInstrumentGuide.spanX(mark, width: width) {
+                // The fundamental region: a barely-there wash between two
+                // dashed edges. A FILLED confident block here would be a strong
+                // claim about a number that is, for three of these rows, a
+                // tuning choice.
+                context.fill(
+                    Path(CGRect(x: span.lo, y: 0,
+                                width: span.hi - span.lo, height: height)),
+                    with: .color(DAWTheme.textFaint.opacity(0.07)))
+                for x in [span.lo, span.hi] {
+                    context.stroke(verticalPath(x: x, height: height),
+                                   with: .color(DAWTheme.textSecondary.opacity(0.30)),
+                                   style: dashed)
+                }
+                // A rule tying the two edges together so the pair reads as ONE
+                // range, seated below both label lanes so it never crosses a tag.
+                var rule = Path()
+                let y = EQGuidanceLayout.cornerLaneY + 12
+                rule.move(to: CGPoint(x: span.lo, y: y))
+                rule.addLine(to: CGPoint(x: span.hi, y: y))
+                context.stroke(rule, with: .color(DAWTheme.textSecondary.opacity(0.30)),
+                               style: dashed)
+            } else if let x = EQInstrumentGuide.cornerX(mark, width: width) {
+                // A recommended corner: one dashed vertical, full height, so it
+                // reads against the handle the user is dragging toward it.
+                context.stroke(verticalPath(x: x, height: height),
+                               with: .color(DAWTheme.textSecondary.opacity(0.38)),
+                               style: dashed)
+            }
+        }
+
+        // The tags. Two lanes in the plot's TOP strip — the only region that is
+        // reliably free (the grid's frequency numbers own the bottom ~14 pt and
+        // the six band handles own the vertical middle).
+        for placement in placements {
+            context.draw(
+                Text(placement.text)
+                    .font(.system(size: EQGuidanceLayout.tagFontSize,
+                                  weight: .semibold, design: .monospaced))
+                    .foregroundStyle(DAWTheme.textSecondary),
+                at: CGPoint(x: placement.x, y: placement.y),
+                anchor: anchor(for: placement.anchor))
+        }
+    }
+
+    private nonisolated static func verticalPath(x: Double, height: Double) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: x, y: 0))
+        path.addLine(to: CGPoint(x: x, y: height))
+        return path
+    }
+
+    /// The model's anchor vocabulary → SwiftUI's. The lane y is the tag's TOP,
+    /// so every case hangs the text downward from its lane.
+    private nonisolated static func anchor(
+        for anchor: EQInstrumentGuide.Placement.Anchor
+    ) -> UnitPoint {
+        switch anchor {
+        case .leading: return .topLeading
+        case .center: return .top
+        case .trailing: return .topTrailing
+        }
     }
 }
 

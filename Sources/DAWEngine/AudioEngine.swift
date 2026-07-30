@@ -403,6 +403,25 @@ public final class AudioEngine: AudioEngineControlling {
     /// gets a visible stderr line instead of a silent ~1 s pre-roll gap.
     private static let maxStartLeadSeconds = 0.5
 
+    /// Simultaneously armed per-insert spectrum taps (m23-r2a, design §Q4).
+    /// The 9th arm is REFUSED, never evicted: eviction would silently stop a
+    /// previously armed tap producing (REFUSE-DON'T-CORRUPT), and the cap is
+    /// what turns "~230 KB per armed insert" from a stated budget into an
+    /// enforced bound.
+    static let maxArmedInsertAnalysis = 8
+
+    /// `AudioEngineControlling.maxArmedInsertAnalysis` conformance (m23-r4,
+    /// design S2) — the instance-side mirror the protocol requires. The
+    /// number itself has exactly one home: `Self.maxArmedInsertAnalysis`
+    /// immediately above.
+    public var maxArmedInsertAnalysis: Int { Self.maxArmedInsertAnalysis }
+
+    /// ONE HOME of the per-insert spectrum arm intent (m23-r2a). Held here so
+    /// it survives graph replacement: `wireGraphHooks` mirrors it into every
+    /// fresh graph and the graph re-applies it at the tail of each parameter
+    /// pass, once the strips actually exist.
+    private var spectrumArms: Set<InsertAnalysisKey> = []
+
     public private(set) var isRunning = false
     public private(set) var isTonePlaying = false
     /// Position + tempo map captured when the routing-rewire hook wound down
@@ -463,6 +482,16 @@ public final class AudioEngine: AudioEngineControlling {
         // manual gain rides along so the override rule can hand back.
         graph.masterAutomation = lastMasterAutomation
         graph.manualMasterVolume = masterVolume
+        // Per-insert spectrum arms (m23-r2a): the `masterEffects` republish
+        // twin. The intent lives HERE (`spectrumArms`) and the graph only
+        // mirrors it, so a fresh graph — init AND rebuild — carries every open
+        // editor's arm, and the rebuild's own parameter pass re-lands it once
+        // the strips exist. Without this a mid-session rebuild would leave the
+        // editor open and the spectrum permanently dead (the m3c failure
+        // class); note that re-applying at the `PlaybackGraph(...)` line
+        // itself could not work — the fresh graph has no strips until
+        // `reconcile`.
+        graph.analysisArms = spectrumArms
         // Hosted-AU tracks pull their prepared instrument from the registry;
         // nil (pending/missing/failed) falls back to the silent placeholder.
         // The registry OUTLIVES engine rebuilds — prepared instruments (and
@@ -1470,6 +1499,59 @@ public final class AudioEngine: AudioEngineControlling {
     /// the tail of every parameter pass; nil until the first pass runs.
     public func pdcReport() -> PDCReport? {
         graph.pdcReport
+    }
+
+    // MARK: - Per-insert spectrum (m23-r2a)
+
+    /// Arms/disarms the spectrum tap on one insert (nil `trackID` = the master
+    /// chain), the m22-e gain-reduction path verb for verb. Returns false when
+    /// the arm was REFUSED: no such live effect, or the N-tap cap is full.
+    ///
+    /// The arm INTENT lives here and only here (`spectrumArms`) — the graph
+    /// holds a mirror it re-applies on every parameter pass, so the arm
+    /// survives a strip rebuild AND a whole-engine rebuild. Disarming always
+    /// reports true: "not armed" is the requested state either way.
+    @discardableResult
+    public func setInsertAnalysisArmed(trackID: UUID?, effectID: UUID,
+                                       armed: Bool) -> Bool {
+        let key = InsertAnalysisKey(trackID: trackID, effectID: effectID)
+        guard armed else {
+            spectrumArms.remove(key)
+            graph.analysisArms = spectrumArms
+            graph.setAnalysisArmed(false, forInsert: key)
+            return true
+        }
+        if spectrumArms.contains(key) {
+            // Idempotent: the tap (and its ballistics) survives a re-arm.
+            graph.setAnalysisArmed(true, forInsert: key)
+            return true
+        }
+        // Drop intent whose effect or strip is gone BEFORE testing the cap —
+        // otherwise a delete-and-re-add cycle exhausts it with dead keys and
+        // the refusal below stops meaning "too many live taps".
+        if spectrumArms.count >= Self.maxArmedInsertAnalysis {
+            spectrumArms = spectrumArms.filter { graph.hasAnalysisTarget($0) }
+            // Mirror the prune HERE: both refusals below return without
+            // re-assigning, so deferring this would leave the graph holding
+            // keys the home has already dropped — two homes disagreeing, in
+            // the cycle whose whole thesis is ONE HOME.
+            graph.analysisArms = spectrumArms
+        }
+        guard spectrumArms.count < Self.maxArmedInsertAnalysis else { return false }
+        guard graph.setAnalysisArmed(true, forInsert: key) else { return false }
+        spectrumArms.insert(key)
+        graph.analysisArms = spectrumArms
+        return true
+    }
+
+    /// Latest spectrum measured POST one armed insert (nil `trackID` = the
+    /// master chain); nil when that insert is not armed — no reading at all,
+    /// rather than a floor snapshot that would read like a live silent meter.
+    /// Poll-based like `masterAnalysis()`, and drains the tap's ring as a side
+    /// effect, so it belongs on a UI-rate timer and nowhere else.
+    public func insertAnalysis(trackID: UUID?, effectID: UUID) -> MasterAnalysisSnapshot? {
+        graph.insertAnalysis(forInsert: InsertAnalysisKey(trackID: trackID,
+                                                          effectID: effectID))
     }
 
     public func masterVolumeChanged(_ volume: Double) {

@@ -107,7 +107,7 @@ struct MasterChainCommandTests {
         let (router, store) = makeRouter()
         let response = await addMaster(router, kind: "audioUnit")
         #expect(!response.ok)
-        #expect(response.error == "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus")
+        #expect(response.error == "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|bassEnhancer")
         #expect(store.masterEffects.isEmpty)   // nothing added on error
     }
 

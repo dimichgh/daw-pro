@@ -101,7 +101,61 @@ struct SoundBankHostingTests {
         }
         // §5.7: the GM selection-to-ready target is < ~300 ms — RECORD it.
         print("[measured] GM bank prepare-to-ready wall time: \(prepareTime)")
-        #expect(renderer.auRegistry.status[track.id] == .ready)
+        // m23-ab-3: a timed-out/failed prepare renders honest silence, so the
+        // three onset assertions below would ALL fail as if three things
+        // broke when really there is one root cause. `#require` stops here
+        // with ONE diagnostic instead of three, and — unlike loosening a
+        // threshold or adding a retry — still demands exactly the same
+        // `.ready` outcome the old `#expect` did.
+        //
+        // MEASURED (10 consecutive full-suite runs, 2026-07-29; full
+        // characterization in m23-ab-3): isolated (N=30) and even under
+        // heavy synthetic CPU load (N=15, 20 saturating background
+        // processes) this call completes in ~45–70 ms every time, zero
+        // failures. Under a full ~446-suite parallel run (N=10, 2 failed)
+        // the measured wall time was 20.4–23.0 s on ALL TEN runs — pass and
+        // fail alike — not a threshold gradually being approached: the
+        // entire distribution sits ABOVE the 10 s timeout, and elapsed time
+        // does NOT predict the outcome (the FASTEST of the ten, 20.42 s,
+        // failed; the SLOWEST, 22.96 s, passed). So the discriminator is not
+        // "did this call get slow enough to cross 10 s" — the THEN-current
+        // `raceAgainstTimeout` was two unstructured `Task { @MainActor in … }`
+        // closures (the real work and a `Task.sleep(for: 10s)` backstop), and
+        // which one's continuation actually got scheduled and resumed FIRST
+        // was what decided ready-vs-timed-out; under full-suite load both were
+        // held up by the same ~20 s of something (consistent with, but not
+        // directly measured as, main-actor executor contention from the ~78%
+        // of this suite's siblings that are also `@MainActor`-isolated), so
+        // which one won was decided by scheduling order, not by which
+        // finished "faster" in absolute time.
+        //
+        // ⚠️ EVERYTHING ABOVE DESCRIBES THE PRE-m23-at REGIME. It is kept
+        // because the characterization of WHY this test was flaky is still
+        // true — but the coin flip is GONE, and `raceAgainstTimeout` no longer
+        // exists. m23-at replaced it with `DAWCore.DeadlineRace`, whose
+        // deadline runs on the cooperative pool and so fires on wall time
+        // instead of needing to re-acquire a contended main actor.
+        //
+        // Two consequences, both counter-intuitive enough to state outright:
+        // (1) the prepare is no longer ABANDONED at 10 s, so it runs to
+        // completion and the measured wall time ROSE — 17–22 s before the
+        // policy, 24–27 s after it. (2) "raising the timeout would be the
+        // wrong fix", which was correct while the deadline was a coin flip,
+        // does NOT describe this code any more: the shipped wall is still
+        // 10 s, but a detected test process deliberately gets the higher
+        // `AUHostRegistry.testPrepareTimeout` (m23-at Phase B, pinned by
+        // `AUPrepareTimeoutPolicyTests` so the SHIPPED value cannot drift).
+        // What needs watching now is the MARGIN between the measured prepare
+        // and that test-time wall — see m23-aw.
+        let status = renderer.auRegistry.status[track.id]
+        try #require(status == .ready, """
+            AU prepare did not reach .ready (status: \(String(describing: status))) \
+            after \(prepareTime) (target ~300 ms, effective wall \
+            \(AUHostRegistry.defaultPrepareTimeout)) — the render below \
+            is silent by construction, so the onset assertions would read as three \
+            failures instead of one. See m23-ab-3: main-actor scheduling contention \
+            under full-suite parallel load, not an AU/driver stall.
+            """)
 
         let audio = try renderer.render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
                                         fromBeat: 0, durationSeconds: 3.0)

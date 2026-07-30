@@ -594,6 +594,76 @@ public protocol AudioEngineControlling: AnyObject {
     /// `masterEffects` array. Same semantics, same nil rule.
     func masterEffectGainReductionDb(effectID: UUID) -> Double?
 
+    /// Simultaneously-armed per-insert spectrum tap cap (m23-r2a design §Q4,
+    /// promoted to the protocol at m23-r4 design S2): the ONE home for "how
+    /// many inserts can this engine measure at once". `0` is the default for
+    /// every conformer without insert-tap capability (fakes, headless
+    /// engines) — "an engine that cannot tap inserts measures zero at once",
+    /// matching the other no-capability defaults just below. `AudioEngine`
+    /// overrides this with its real cap; `ProjectStore.setInsertAnalysisArmed`
+    /// reads it BEFORE the model lookup so a `cap: 0` engine is classified
+    /// `.unsupported`, never `.refusedCapFull(cap: 0)`.
+    var maxArmedInsertAnalysis: Int { get }
+
+    /// Arms or disarms the per-insert spectrum tap on ONE live insert
+    /// (m23-r2a). `trackID == nil` addresses the MASTER insert chain — the
+    /// m22-e track/master split, expressed as one nullable id instead of two
+    /// parallel methods. Arming allocates a bounded sample ring plus its own
+    /// analyzer (~230 KB) on the control plane; the render thread only ever
+    /// observes an atomic pointer, copies samples into the ring, and performs
+    /// NO analysis. A disarmed insert costs nothing at all.
+    ///
+    /// Returns false when the arm is REFUSED — unknown track/effect, or the
+    /// engine's simultaneous-tap cap (`maxArmedInsertAnalysis`) is full. A
+    /// refusal is never an eviction: an already-armed insert keeps measuring.
+    /// Disarming reports true.
+    ///
+    /// The arm SURVIVES chain edits, effect rebuilds and engine rebuilds; it
+    /// is dropped when the effect leaves the chain.
+    ///
+    /// This is the ENGINE'S OWN arm bookkeeping (one set, no owner concept).
+    /// `ProjectStore.setInsertAnalysisArmed` (m23-r4, design D1) layers a
+    /// NAMED-OWNER `Set<InsertAnalysisOwner>` on top of this single call so
+    /// the in-app EQ card and the wire's `fx.spectrum` lease can each hold
+    /// their own slot without one party's disarm silently stomping the
+    /// other's live tap; this method itself stays refcount-free by design.
+    @discardableResult
+    func setInsertAnalysisArmed(trackID: UUID?, effectID: UUID, armed: Bool) -> Bool
+
+    /// Latest spectrum snapshot measured POST one armed insert (m23-r2a):
+    /// the SAME 24 log-spaced bands, ballistics and geometry as
+    /// `masterAnalysis()`, because both funnel into one unmodified analyzer
+    /// implementation — a tapped insert and the master overlay are comparable
+    /// by shared code, not by shared constants. A STRIP insert (audio/bus/
+    /// instrument track) is measured PRE that track's own fader — the strip
+    /// sandwich is `sumMixer -> chainHost -> mixer`, so the fader sits
+    /// downstream of the chain walk and moving it does not move this reading
+    /// (measured delta < 0.5 dB, `InsertSpectrumCoverageTests`). A MASTER
+    /// insert (`trackID == nil`) is measured POST the MASTER fader instead —
+    /// `mainMixerNode.outputVolume` sits upstream of the master walk
+    /// (measured delta ~6.0206 dB, same suite). This was unconditionally
+    /// documented as "pre-fader" before m23-r4; that was only ever true for
+    /// `trackID != nil`. `InsertSpectrumTapPoint.forInsert(trackID:)` is the
+    /// one home for this label on the wire.
+    ///
+    /// nil = that insert is not armed (or the engine cannot tap inserts).
+    /// Poll-based like the meters, and it DRAINS the tap's ring as a side
+    /// effect. **N consumers are safe PROVIDED they are all on the main
+    /// actor** (m23-r4 finding — design-m23r4-fx-spectrum-lease.md §1,
+    /// correcting a prior "exactly one consumer" claim here): the tap's SPSC
+    /// ring's single-consumer contract is about THREADS, not call count —
+    /// `drainAndSnapshot()` accumulates samples across calls and every
+    /// caller then reads the same fresher `snapshot()` (a pure read that
+    /// advances nothing), never a corrupted or "slow" one. What is NOT safe
+    /// is an UNOWNED disarm, which is exactly what
+    /// `ProjectStore.setInsertAnalysisArmed`'s named-owner set exists to
+    /// prevent. A freshly armed tap honestly reads `.floor` until ~2048
+    /// frames have rendered; a poller slower than ~12 Hz falls behind
+    /// wall-clock because the ring's `maxDrainFrames` (4096) drops the
+    /// OLDEST frames rather than blocking — never pin an exact dB value
+    /// across differing poll cadences, pin the band INDEX instead.
+    func insertAnalysis(trackID: UUID?, effectID: UUID) -> MasterAnalysisSnapshot?
+
     /// The engine's latest latency-compensation report (M4 viii-c, spec §6):
     /// per-strip all-effects chain latency and applied ring targets plus the
     /// global stage maxima. Feeds the additive PDC snapshot fields. nil until
@@ -913,6 +983,21 @@ extension AudioEngineControlling {
     /// so the default is nil (no reading) and the wire omits the field.
     public func effectGainReductionDb(trackID: UUID, effectID: UUID) -> Double? { nil }
     public func masterEffectGainReductionDb(effectID: UUID) -> Double? { nil }
+
+    /// Per-insert spectrum analysis is optional capability (m23-r2a). Unlike
+    /// `masterAnalysis()`, whose `.floor` IS honest data from a real tap, an
+    /// engine that cannot tap an insert has nothing to report — a floor
+    /// snapshot from it would read as a live meter on a silent insert. So the
+    /// arm honestly REFUSES (false = unarmed, nothing was allocated) and the
+    /// read returns nil (no reading at all): the `liveLoudness` convention,
+    /// not the `masterAnalysis` one. The cap default (m23-r4) is `0` — "an
+    /// engine that cannot tap inserts measures zero at once" — right below.
+    public var maxArmedInsertAnalysis: Int { 0 }
+    @discardableResult
+    public func setInsertAnalysisArmed(trackID: UUID?, effectID: UUID,
+                                       armed: Bool) -> Bool { false }
+    public func insertAnalysis(trackID: UUID?,
+                               effectID: UUID) -> MasterAnalysisSnapshot? { nil }
 
     public func availableAudioUnits() -> [AudioUnitComponentInfo] { [] }
     public func audioUnitStatus(forTrack id: UUID) -> AudioUnitTrackStatus? { nil }

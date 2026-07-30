@@ -162,9 +162,11 @@ struct ClipFitToContentCommandTests {
         // clip.fitToContent is no longer LAST, but the additive-at-end law held
         // at ITS landing; count moved 142 -> 143 -> 144 -> 148 -> 152 -> 153
         // -> 154.
-        // …and m23-k4a's export pair after that; count 156 -> 158.
-        #expect(CommandRouter.allCommands.last == "track.exportMIDI")
-        #expect(CommandRouter.allCommands.count == 158)
+        // …and m23-k4a's export pair after that; count 156 -> 158. Then
+        // m23-n2b's clip.transcribe; count 158 -> 159. Then m23-n3b's
+        // install/status pair; count 159 -> 161 — clip.transcribe is no
+        // longer last (see SpeechModelInstallCommandTests for that leg).
+        #expect(CommandRouter.allCommands.count == 165)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w
         // The verb is additive: its clip.* neighbors are untouched.
         #expect(CommandRouter.allCommands.contains("clip.trim"))
         #expect(CommandRouter.allCommands.contains("clip.split"))

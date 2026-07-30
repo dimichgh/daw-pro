@@ -72,6 +72,20 @@ final class ChainEffectUnit: @unchecked Sendable {
     /// republish. 0, or a walk with no key delivered, is the self-keyed
     /// (bit-exact pre-sidechain) path.
     let useKeyFlag: UnsafeMutablePointer<daw_atomic_u32>
+    /// Per-insert spectrum tap (m23-r2a). nil = DISARMED, which costs the walk
+    /// one acquire load and a not-taken branch, and costs memory nothing (a
+    /// disarmed insert has no tap object at all). Non-nil = a `+1`-retained
+    /// `InsertSpectrumTap` the walk hands this unit's OUTPUT to.
+    ///
+    /// Armed like bypass and like the sidechain key: an atomic publish on the
+    /// EXISTING unit, never a chain republish and never a rebuild, so opening
+    /// and closing an effect editor cannot reset DSP state or click. Heap-
+    /// allocated for a stable address, per the CAtomics rule.
+    let tapSlot: UnsafeMutablePointer<daw_atomic_ptr>
+    /// Displaced taps, main actor ONLY (the `EffectChainProcessor.retired`
+    /// discipline): a render quantum still borrowing the old pointer can never
+    /// touch freed memory because nothing is released for ≥ 1 s.
+    private var retiredTaps: [(tap: InsertSpectrumTap, retiredAt: ContinuousClock.Instant)] = []
 
     init(id: UUID, kind: EffectDescriptor.Kind,
          instance: any EffectRendering, isBypassed: Bool) {
@@ -86,6 +100,8 @@ final class ChainEffectUnit: @unchecked Sendable {
         daw_atomic_u32_store(resetFlag, 0)
         useKeyFlag = .allocate(capacity: 1)
         daw_atomic_u32_store(useKeyFlag, 0)
+        tapSlot = .allocate(capacity: 1)
+        daw_atomic_ptr_init(tapSlot)
         dryScratch = .allocate(capacity: Self.scratchFrames * Self.scratchChannels)
         dryScratch.initialize(repeating: 0,
                               count: Self.scratchFrames * Self.scratchChannels)
@@ -99,6 +115,10 @@ final class ChainEffectUnit: @unchecked Sendable {
         bypassFlag.deallocate()
         resetFlag.deallocate()
         useKeyFlag.deallocate()
+        if let raw = daw_atomic_ptr_exchange(tapSlot, nil) {
+            Unmanaged<InsertSpectrumTap>.fromOpaque(raw).release()
+        }
+        tapSlot.deallocate()
         dryScratch.deallocate()
     }
 
@@ -143,6 +163,34 @@ final class ChainEffectUnit: @unchecked Sendable {
     @MainActor
     func setUsesKey(_ usesKey: Bool) {
         daw_atomic_u32_store(useKeyFlag, usesKey ? 1 : 0)
+    }
+
+    /// Publishes the per-insert spectrum tap (nil disarms) — the house
+    /// `publish` recipe verbatim (`EffectChainProcessor.publish`,
+    /// `InstrumentSourceNode.publish`, and ten more sites): the slot holds a
+    /// +1 retain, the displaced tap moves to the retire bin, and nothing is
+    /// released until it is older than 1 s.
+    ///
+    /// The OWNER of an armed tap is `EffectChainState` (it allocates at arm
+    /// time and drops at disarm); this slot is the render thread's view of
+    /// that decision, and the bin exists only so the hand-off is safe.
+    @MainActor
+    func publishTap(_ tap: InsertSpectrumTap?) {
+        let now = ContinuousClock.now
+        let newRaw = tap.map { UnsafeMutableRawPointer(Unmanaged.passRetained($0).toOpaque()) }
+        if let oldRaw = daw_atomic_ptr_exchange(tapSlot, newRaw) {
+            retiredTaps.append((Unmanaged<InsertSpectrumTap>.fromOpaque(oldRaw).takeRetainedValue(), now))
+        }
+        retiredTaps.removeAll { $0.retiredAt.duration(to: now) > .seconds(1) }
+    }
+
+    /// The published tap, or nil when disarmed (main-actor test seam — the
+    /// render side loads `tapSlot` directly inside the walk).
+    @MainActor
+    var publishedTap: InsertSpectrumTap? {
+        daw_atomic_ptr_load(tapSlot).map {
+            Unmanaged<InsertSpectrumTap>.fromOpaque($0).takeUnretainedValue()
+        }
     }
 
     // MARK: - Render surface (render thread, called only by the chain walk)
@@ -351,7 +399,19 @@ final class EffectChainProcessor: @unchecked Sendable {
         let snapshot = Unmanaged<EffectChainSnapshot>.fromOpaque(raw).takeUnretainedValue()
         let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
         snapshot.units.withUnsafeBufferPointer { units in
-            for index in 0..<units.count {
+            // `while`, NOT `for index in 0..<units.count` — MEASURED at
+            // m23-r2a: at `-Onone` the `Range` iteration itself raises ~2
+            // malloc/free events PER UNIT PER QUANTUM inside this walk (400
+            // quanta × 1 unit = 800 events; × 3 units = 2_400 — it scales with
+            // iterations, and an empty chain raises none). Optimized builds
+            // fold that away, but the render path must not depend on the
+            // optimizer to stay allocation-free, and the allocation gate in
+            // `InsertSpectrumChainTests` can only assert an ABSOLUTE zero —
+            // rather than an armed-minus-disarmed delta that would absorb any
+            // future regression — while this stays a `while`. Same law as the
+            // measured loops in that gate; do not tidy it back.
+            var index = 0
+            while index < units.count {
                 let unit = units[index]
                 // Reset countdown (m15-f): consume one pass per walk; a
                 // double-armed flush re-arms the remainder so the NEXT walk
@@ -376,6 +436,36 @@ final class EffectChainProcessor: @unchecked Sendable {
                 } else if !bypassedNow {
                     unit.processActive(buffers: buffers, key: key, frameCount: frameCount)
                 }
+                // Per-insert spectrum tap (m23-r2a) — POST this unit, by
+                // placement: it is the LAST statement of the loop body, so it
+                // reads what this unit HANDED ON to the next one. That is the
+                // processed output on the active path, the equal-power mix
+                // mid-toggle, and — on the steady-bypass path — the untouched
+                // input, which IS a bypassed unit's output (A/B-ing bypass
+                // therefore visibly moves the spectrum, design §Q1). A PRE
+                // reading would be a different feature and a different slot
+                // (design: "not built in v1").
+                //
+                // RT contract: one acquire load and a not-taken branch when
+                // disarmed; when armed, `InsertSpectrumTap.write` is at most
+                // four memcpys plus one release-store into a preallocated
+                // ring — no allocation, no locks, no ObjC, no dynamic cast
+                // (`InsertSpectrumTap` is final, the call is direct). It only
+                // COPIES, so an armed insert cannot change a rendered sample:
+                // the armed and disarmed walks are byte-identical, pinned.
+                if let rawTap = daw_atomic_ptr_load(unit.tapSlot) {
+                    Unmanaged<InsertSpectrumTap>.fromOpaque(rawTap)
+                        .takeUnretainedValue()
+                        .write(buffers: buffers, frameCount: frameCount)
+                }
+                // The step lives at the tail because nothing above it can
+                // `continue`. IF YOU EVER ADD A `continue` TO THIS BODY, move
+                // this increment into a `defer` at the TOP of the loop first —
+                // otherwise the render thread spins here forever and the audio
+                // device times out. (`defer`'s own `-Onone` cost was never
+                // measured; measure it with the m23-r2a probe before choosing
+                // it as the default form.)
+                index &+= 1
             }
         }
     }
@@ -394,6 +484,11 @@ final class EffectChainState {
     private var lastDescriptors: [EffectDescriptor] = []
     private var units: [UUID: ChainEffectUnit] = [:]
     private var preparedSampleRate: Double = 0
+    /// Live per-insert spectrum taps by effect id (m23-r2a) — the ONE OWNER
+    /// of the tap objects. `AudioEngine` owns the arm INTENT (which survives
+    /// graph rebuilds); this type owns the allocation, so a tap can never
+    /// outlive the chain state whose units feed it.
+    private var armedTaps: [UUID: InsertSpectrumTap] = [:]
 
     /// Resolves the live hosted instance for one `.audioUnit` effect id
     /// (M4 v); nil — not prepared yet, missing component, or no provider —
@@ -428,6 +523,15 @@ final class EffectChainState {
                 unit.setCrossfadeLength(sampleRate: sampleRate)
             }
             preparedSampleRate = sampleRate
+            // m23-r2a: an armed tap's band geometry AND its ballistics are
+            // rate-derived (`MasterMixAnalyzer(sampleRate:)`), so a live rate
+            // change re-allocates the tap at the new rate instead of
+            // reporting the old geometry's bands forever. The ARM survives;
+            // the sample history deliberately does NOT (fresh ring,
+            // `framesWritten` back to 0) — a device rate flip is a
+            // measurement discontinuity, not a gap to stitch across, which is
+            // the `resetLiveLoudness()` convention on the same event.
+            if !armedTaps.isEmpty { rearmTapsAtPreparedRate() }
         }
         guard descriptors != lastDescriptors else { return }
 
@@ -465,10 +569,24 @@ final class EffectChainState {
             // a key set/clear. The physical edge is PlaybackGraph's job; a
             // flag armed with no key delivered stays self-keyed by contract.
             unit.setUsesKey(descriptor.sidechainSourceTrackID != nil)
+            // Per-insert spectrum arm (m23-r2a): re-applied to whatever unit
+            // now backs this id, EVERY pass, idempotently. A unit REPLACED by
+            // a kind change or by `invalidateEffect(id:)` (the hosted-AU
+            // async-prepare hook) would otherwise come back disarmed while
+            // the editor stayed open — the spectrum silently dead with no
+            // event to notice. Arm state is deliberately absent from
+            // `IdentityKey`, so this can never republish the chain.
+            unit.publishTap(armedTaps[descriptor.id])
             next[descriptor.id] = unit
             ordered.append(unit)
         }
         units = next
+        // Arms whose effect left the chain are DROPPED here (m23-r2a): the
+        // removed unit dies with the retired snapshot ≥ 1 s later, and a dead
+        // arm must never keep occupying one of the engine's N tap slots.
+        if !armedTaps.isEmpty {
+            armedTaps = armedTaps.filter { next[$0.key] != nil }
+        }
         if newIdentity != oldIdentity {
             // Removed units die with the retired snapshot (≥ 1 s later).
             processor.publish(ordered.isEmpty ? nil : EffectChainSnapshot(units: ordered))
@@ -533,9 +651,77 @@ final class EffectChainState {
     /// OTHER unit survives via the `units` map, so their DSP state is kept.
     /// No-op for unknown ids. Never touches graph topology or playback.
     func invalidateEffect(id: UUID) {
-        guard units[id] != nil else { return }
+        guard let doomed = units[id] else { return }
+        // m23-r2a: the doomed unit stays in the PUBLISHED snapshot until the
+        // next sync republishes, so leaving its tap slot armed would have it
+        // keep filling a ring on behalf of an instance that is being thrown
+        // away. Unpublish here; the ARM itself survives in `armedTaps` and
+        // the replacement unit picks it up — the SAME tap object, so a hosted
+        // AU swapping in under an open editor never restarts the meter.
+        doomed.publishTap(nil)
         units[id] = nil
         lastDescriptors = []
+    }
+
+    // MARK: - Per-insert spectrum arms (m23-r2a)
+
+    /// Arms or disarms the spectrum tap on ONE live effect. Returns false ONLY
+    /// when an ARM could not be taken because the id has no live unit yet
+    /// (never synced, or already removed) — REFUSE rather than hold a phantom
+    /// arm that would occupy an engine tap slot forever. Disarming always
+    /// succeeds, including for ids this chain never knew.
+    ///
+    /// Idempotent in both directions: re-arming an already-armed effect keeps
+    /// the SAME tap (so a redundant re-application never resets the meter's
+    /// ballistics or its sample history).
+    ///
+    /// Allocation (~230 KB: ring + staging + one `MasterMixAnalyzer`) happens
+    /// HERE, on the main actor at human rate. The render thread only ever
+    /// observes the resulting atomic pointer.
+    @discardableResult
+    func setAnalysisArmed(_ armed: Bool, forEffect id: UUID) -> Bool {
+        guard armed else {
+            if armedTaps.removeValue(forKey: id) != nil {
+                units[id]?.publishTap(nil)
+            }
+            return true
+        }
+        guard let unit = units[id] else { return false }
+        guard armedTaps[id] == nil else { return true }
+        // A chain synced at least once has a real rate; 0 only happens for a
+        // directly constructed state in a test, where the analyzer's own
+        // 48 kHz fallback is the honest default.
+        let tap = InsertSpectrumTap(
+            sampleRate: preparedSampleRate > 0 ? preparedSampleRate : 48_000)
+        armedTaps[id] = tap
+        unit.publishTap(tap)
+        return true
+    }
+
+    /// Drains one armed insert's ring into its analyzer and returns the
+    /// resulting snapshot — the CONSUMER half, called at UI poll rate on the
+    /// main actor. nil = this effect is not armed (no reading at all; a floor
+    /// snapshot would read like a live, silent meter).
+    ///
+    /// A freshly armed tap legitimately returns `.floor`: the analyzer needs
+    /// ≥ 2048 frames (~43 ms @ 48 kHz) before any band leaves the floor.
+    func insertAnalysis(forEffect id: UUID) -> MasterAnalysisSnapshot? {
+        armedTaps[id]?.drainAndSnapshot()
+    }
+
+    /// Effect ids with a live tap on this chain.
+    var armedEffectIDs: Set<UUID> { Set(armedTaps.keys) }
+
+    /// Re-allocates every armed tap at `preparedSampleRate` after a live rate
+    /// change, republishing each onto its unit. See the call site for why the
+    /// sample history is deliberately discarded.
+    private func rearmTapsAtPreparedRate() {
+        let rate = preparedSampleRate > 0 ? preparedSampleRate : 48_000
+        for id in Array(armedTaps.keys) {
+            let tap = InsertSpectrumTap(sampleRate: rate)
+            armedTaps[id] = tap
+            units[id]?.publishTap(tap)
+        }
     }
 
     // MARK: - Test seams (@testable)
@@ -544,5 +730,13 @@ final class EffectChainState {
     /// edits compare instances.
     func unit(forEffect id: UUID) -> ChainEffectUnit? {
         units[id]
+    }
+
+    /// The live tap behind one armed effect id (m23-r2a). The gate needs the
+    /// tap OBJECT, not just its snapshot: `framesWritten` (did the ring
+    /// advance?) and non-floor bands (did the drain work?) are two
+    /// independent liveness facts and neither implies the other.
+    func analysisTap(forEffect id: UUID) -> InsertSpectrumTap? {
+        armedTaps[id]
     }
 }

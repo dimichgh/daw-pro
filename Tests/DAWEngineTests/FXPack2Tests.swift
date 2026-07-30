@@ -406,13 +406,13 @@ struct FXPack2Tests {
 
     // MARK: - Model: describe + persistence
 
-    @Test("all nine kinds describe; pack-2 params round-trip through the bundle")
+    @Test("all ten kinds describe; pack-2 params round-trip through the bundle")
     func fxPack2AllKindsPersistAndDescribe() throws {
-        // The kind table now spans both packs plus the M4 (v) hosted-AU kind
-        // (order = declaration order).
+        // The kind table now spans both packs, the m23-p1 bass enhancer, and
+        // the M4 (v) hosted-AU kind (order = declaration order).
         #expect(EffectDescriptor.Kind.allCases.map(\.rawValue) == [
             "gain", "eq", "compressor", "limiter",
-            "reverb", "delay", "saturator", "gate", "chorus", "audioUnit",
+            "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer", "audioUnit",
         ])
         #expect(EffectParamSpec.specs(for: .reverb).map(\.name)
                 == ["roomSize", "damping", "mix", "preDelayMs", "width"])

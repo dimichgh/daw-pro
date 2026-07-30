@@ -136,8 +136,17 @@ async def validation_teaching(request: Request, exc: RequestValidationError):
 
 # ---------------------------------------------------------------------------
 # Voice store — runtime/voices/<voiceId>/ with model.npz (MLX-runnable),
-# optional model.pth / model.index, optional voice.json metadata. Voices are
-# ONLY ever created by training on the user's own recordings (p-5/p-6).
+# optional model.pth / model.index, optional voice.json metadata. A voice
+# arrives either by training on a user-supplied dataset (p-5/p-6) or by the
+# user dropping in a third-party model folder — _scan_voices() is a plain
+# directory scan, so the latter needs no registration call.
+#
+# RIGHTS-RESPONSIBILITY POLICY: the product does not restrict whose voice
+# this is; the USER is responsible for holding the rights to whatever they
+# train on or import. This supersedes the own-voice-only rule stated here
+# before 2026-07-27, withdrawn on the project owner's instruction. No
+# provenance check belongs on this path. (Nothing is BUNDLED: the store
+# ships empty and "base" is the untrained smoke target, not a voice.)
 # ---------------------------------------------------------------------------
 
 

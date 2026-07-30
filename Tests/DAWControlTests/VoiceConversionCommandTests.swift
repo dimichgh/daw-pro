@@ -195,12 +195,22 @@ struct VoiceConversionCommandTests {
         #expect(!response.ok)
     }
 
-    @Test("vc.sidecarStatus takes no params and ignores any extras harmlessly")
+    // m23-n2h: `vc.sidecarStatus` used to be one of 26 verbs that never
+    // called `rejectUnknownKeys` at all — an unknown extra was silently
+    // ignored rather than harmless, contrary to the 135-of-161-command house
+    // style this test's old name claimed. Withdrawn for consistency: an
+    // unrecognized key on this zero-param verb is now a teaching error, and
+    // — since `rejectUnknownKeys` runs BEFORE `voiceConversionManager.status()`
+    // — the loopback health probe never fires for a rejected request.
+    @Test("vc.sidecarStatus takes no params — an unknown extra is rejected before the sidecar is probed (m23-n2h)")
     func statusNoParamsRequired() async throws {
-        let (router, _) = makeRouter()
+        let voiceConversion = FakeVoiceConversionManager()
+        let (router, _) = makeRouter(voiceConversion: voiceConversion)
         let response = await router.handle(
             ControlRequest(id: "1", command: "vc.sidecarStatus", params: ["unused": .bool(true)]))
-        #expect(response.ok)
+        #expect(!response.ok)
+        #expect(response.error == "vc.sidecarStatus: unknown parameter 'unused' — vc.sidecarStatus takes no parameters")
+        #expect(await voiceConversion.statusCalls == 0, "the guard must run before status() is ever called")
     }
 }
 

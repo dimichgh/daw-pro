@@ -26,10 +26,20 @@ import Foundation
 // out of a multi-selection leaves the others selected with NO focus (see
 // `toggle` for why that is the honest outcome).
 //
-// SCOPE: clips only — including the m23-g3 rubber band, which selects CLIPS.
-// TRACK selection is m23-y (split out of g3 by the orch pass), and it carries
-// its own semantics question ("does selecting a track select its clips?") that
-// this type takes no position on.
+// SCOPE: clips only — including the m23-g3 rubber band, which selects CLIPS,
+// and the m23-y track header click, which ALSO selects clips.
+//
+// m23-y ANSWERED THE SEMANTICS QUESTION THIS COMMENT USED TO LEAVE OPEN, and the
+// answer is recorded here because it is the reason this type still has exactly
+// one selection domain: **SELECTING A TRACK SELECTS ITS CLIPS.** A track is not
+// a member of `ids`, has no `isSelected` of its own, and is never a thing this
+// type knows about — `ArrangeTrackSelection` (the ONE home for the rule) resolves
+// a header click to that track's clip ids and runs them through the set mutators
+// below. So a mixed track+clip selection is just a bigger `ids` set, and group
+// delete keeps its single unambiguous meaning: it removes exactly `ids`, never a
+// whole track. The alternative reading — a track as a DISTINCT selectable object
+// — would need a second selection domain here and would force `deleteArrange-
+// Selection` to decide clips-vs-tracks; it ships only on the user's word.
 //
 // NOT FOLDED IN, deliberately: `PianoRollModel.selection` (notes). Its toggle
 // looks identical (`contains ? remove : insert`) but its INVARIANT is not — notes
@@ -176,6 +186,26 @@ public struct ArrangeSelection: Equatable, Sendable {
     /// `replace(with:)` reasons above.
     public mutating func formUnion(_ newIDs: Set<UUID>) {
         ids.formUnion(newIDs)
+    }
+
+    /// The TRACK HEADER's toggle-off half (m23-y): remove these from the
+    /// selection, leaving everything else — and, where it survives, the focus —
+    /// standing. The set-shaped mirror of `toggle`'s removal branch.
+    ///
+    /// FOCUS RULE — `toggle`'s, verbatim, one cardinality up: removing the
+    /// FOCUSED clip sets `focusID` to nil and leaves the rest of `ids` selected;
+    /// removing any other clip leaves the focus untouched. `toggle`'s doc carries
+    /// the full argument (promoting some OTHER member would open the note editor
+    /// on a clip the user never clicked, purely because they deselected a
+    /// different one) and it is not repeated here.
+    ///
+    /// Written as "the focus is no longer a member" rather than "the focus was in
+    /// the removed set" — under INV1 those are the same condition, and this form
+    /// RESTORES INV1 by construction instead of relying on it. INV2 then follows
+    /// for free: emptying `ids` necessarily removed the focus.
+    public mutating func subtract(_ removedIDs: Set<UUID>) {
+        ids.subtract(removedIDs)
+        if let focus = focusID, !ids.contains(focus) { focusID = nil }
     }
 
     /// Routes a click through `ArrangeClickIntent`. The ONE entry point the app's

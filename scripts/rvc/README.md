@@ -36,8 +36,13 @@ voice conversion. It never appears in `/v1/voice/list`.
 
 `runtime/voices/<voiceId>/` with `model.npz` (MLX-runnable), optional
 `model.pth` / `model.index`, optional `voice.json` (`{name, createdAt}`).
-Voices are ONLY created by training on the user's own recordings —
-no bundled voices, no celebrity/third-party checkpoints, ever.
+Voices are created by training on a dataset the user supplies, or by the
+user importing a third-party model file. RIGHTS-RESPONSIBILITY POLICY: the
+product does not restrict whose voice that is — the USER is responsible for
+holding the rights to whatever they train on or import. No voices are
+BUNDLED with the app (the store starts empty; `"base"` is the untrained
+smoke-test target, not a voice). Superseded the earlier own-voice-only rule
+on the project owner's instruction, 2026-07-27.
 
 ## Shipping gates (open)
 

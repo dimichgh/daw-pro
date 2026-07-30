@@ -58,6 +58,47 @@ struct PianoRollBarOpsTests {
         #expect(number(pos: 7, length: 12, bpb: 3) == 3)   // start 6 / 3 + 1
     }
 
+    /// m23-t: the DRAWN readout string, pinned here because `DAWApp` has no test
+    /// target — a label composed in a SwiftUI body is unreachable from `Tests/`.
+    /// The literals are the point: pinning against
+    /// `"BAR \(PianoRollBarOps.targetBarNumber(...))"` would write this file's
+    /// subject into its own expectation and pass for any formula.
+    @Test("the drawn readout is BAR + the one-based target bar")
+    func readoutLabel() {
+        func label(pos: Double, start: Double = 0, length: Double = 16, bpb: Int = 4) -> String {
+            PianoRollBarOps.barReadoutLabel(
+                position: pos, clipStartBeat: start, lengthBeats: length, beatsPerBar: bpb)
+        }
+        #expect(label(pos: 0) == "BAR 1")
+        #expect(label(pos: 3.9) == "BAR 1")
+        #expect(label(pos: 4) == "BAR 2")
+        #expect(label(pos: 8) == "BAR 3")
+        #expect(label(pos: 13) == "BAR 4")
+        // The gate's two staged transport states, in arithmetic: a clip at
+        // project beat 16, sixteen beats long. Off-clip → the bar-1 fallback;
+        // project beat 24 → clip-local 8 → bar 3.
+        #expect(label(pos: 40, start: 16) == "BAR 1")
+        #expect(label(pos: 24, start: 16) == "BAR 3")
+        // Meter-aware, and the clip-end edge belongs to the LAST bar.
+        #expect(label(pos: 7, length: 12, bpb: 3) == "BAR 3")
+        #expect(label(pos: 16, length: 16) == "BAR 4")
+    }
+
+    /// The readout is a template with a DATA operand — the number comes from
+    /// clip length and playhead position and is unbounded — so it is not a
+    /// closed vocabulary and must never be pinned to a fixed width. This pins
+    /// the shape rather than a length: the prefix is constant and everything
+    /// after it is the number, however many digits that takes.
+    @Test("the readout is BAR + an unbounded number, never a fixed-width token")
+    func readoutIsUnbounded() {
+        // A 300-bar clip: the label grows, and nothing in it is truncated.
+        let long = PianoRollBarOps.barReadoutLabel(
+            position: 1_000, clipStartBeat: 0, lengthBeats: 1_200, beatsPerBar: 4)
+        #expect(long == "BAR 251")
+        #expect(long.hasPrefix("BAR "))
+        #expect(Int(long.dropFirst(4)) == 251)
+    }
+
     @Test("delete is enabled only when the clip is longer than one bar (meter-aware)")
     func deleteGate() {
         #expect(PianoRollBarOps.canDeleteBar(lengthBeats: 8, beatsPerBar: 4))     // 2 bars

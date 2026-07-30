@@ -169,15 +169,10 @@ public final class DiagnosticsReporter {
         self.clock = clock
     }
 
-    /// Default feedback dir: `~/Library/Application Support/DAWPro/Feedback/`.
+    /// Default feedback dir: `~/Library/Application Support/DAWPro/Feedback/`
+    /// (m23-n1b — `AppDirectories` owns the rule; this is one category of it).
     public static func defaultOutputDir() -> URL {
-        let base = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return base
-            .appendingPathComponent("DAWPro", isDirectory: true)
-            .appendingPathComponent("Feedback", isDirectory: true)
+        AppDirectories.applicationSupport(.feedback)
     }
 
     /// Default crash-report dir: `~/Library/Logs/DiagnosticReports/`.

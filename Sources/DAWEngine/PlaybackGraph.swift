@@ -13,6 +13,16 @@ import Foundation
 /// file-rate frames — exact, with no cross-rate rounding in our code. The same
 /// type drives the live `AudioEngine` and the `OfflineRenderer` so scheduling
 /// behaves identically in both.
+/// One armed per-insert spectrum target (m23-r2a): `trackID == nil` is the
+/// MASTER insert chain, mirroring the m22-e gain-reduction track/master split
+/// (`effectGainReductionDb` / `masterEffectGainReductionDb`) with one key type
+/// instead of two parallel surfaces. Promoted to `DAWCore.InsertAnalysisTarget`
+/// at m23-r4 so `ProjectStore`'s named-owner bookkeeping and `DAWControl`'s
+/// TTL lease can share this exact key instead of re-deriving an equivalent
+/// one; the memberwise shape is identical, so every call site here keeps
+/// compiling unchanged.
+typealias InsertAnalysisKey = InsertAnalysisTarget
+
 @MainActor
 final class PlaybackGraph {
     /// Schedule-affecting identity of one clip. Parameter fields (volume, pan,
@@ -349,6 +359,18 @@ final class PlaybackGraph {
     /// §1-B fader position — mainMixer output ≡ chain-host input); while
     /// stopped the mixer previews `value(atBeat:)` (stopped WYSIWYG).
     var masterAutomation: [AutomationLane] = []
+
+    // MARK: Per-insert spectrum arms (m23-r2a)
+
+    /// MIRROR of `AudioEngine.spectrumArms`, which is the ONE HOME of the arm
+    /// intent — the `masterEffects` / `masterAutomation` republish twin.
+    /// `AudioEngine.wireGraphHooks` re-installs it into every fresh graph, so
+    /// both graph construction sites (`AudioEngine.swift:424` init and `:951`
+    /// rebuild) are covered by construction rather than by two remembered
+    /// call sites. `OfflineRenderer` builds its own graphs and never assigns
+    /// it, so an offline render is structurally tap-free (design C3) —
+    /// default-empty is the fail-safe direction.
+    var analysisArms: Set<InsertAnalysisKey> = []
 
     /// The manual master fader (`mixer.setMasterVolume`), cached so the
     /// override rule can hand the node back when a lane deactivates. Pushed
@@ -1211,6 +1233,49 @@ final class PlaybackGraph {
         masterChainState?.gainReductionDb(forEffect: effectID)
     }
 
+    // MARK: Per-insert spectrum (m23-r2a)
+
+    /// The chain state one `InsertAnalysisKey` addresses: a strip of any kind,
+    /// or the master chain for a nil track id.
+    private func analysisChainState(forTrack trackID: UUID?) -> EffectChainState? {
+        guard let trackID else { return masterChainState }
+        return effectChainState(forTrack: trackID)
+    }
+
+    /// Arms/disarms one insert's spectrum tap. False = the arm could not be
+    /// taken (no such strip, no such live effect) — surfaced through
+    /// `AudioEngine.setInsertAnalysisArmed`, which keeps the INTENT and
+    /// re-applies it on the next parameter pass.
+    @discardableResult
+    func setAnalysisArmed(_ armed: Bool, forInsert key: InsertAnalysisKey) -> Bool {
+        analysisChainState(forTrack: key.trackID)?
+            .setAnalysisArmed(armed, forEffect: key.effectID) ?? false
+    }
+
+    /// Latest spectrum measured POST one armed insert; nil when not armed.
+    func insertAnalysis(forInsert key: InsertAnalysisKey) -> MasterAnalysisSnapshot? {
+        analysisChainState(forTrack: key.trackID)?.insertAnalysis(forEffect: key.effectID)
+    }
+
+    /// True while `key` still resolves to a live unit — how `AudioEngine`
+    /// drops dead intent before testing its N-tap cap, so deleting and
+    /// re-adding armed effects can never silently exhaust it.
+    func hasAnalysisTarget(_ key: InsertAnalysisKey) -> Bool {
+        analysisChainState(forTrack: key.trackID)?.unit(forEffect: key.effectID) != nil
+    }
+
+    /// Re-applies the arm mirror to whatever chain states exist RIGHT NOW.
+    /// Idempotent by `EffectChainState.setAnalysisArmed`'s contract (an
+    /// already-armed effect keeps its existing tap), so running this on every
+    /// parameter pass costs one dictionary lookup per armed insert and never
+    /// disturbs a live measurement.
+    private func applyAnalysisArms() {
+        guard !analysisArms.isEmpty else { return }
+        for key in analysisArms {
+            setAnalysisArmed(true, forInsert: key)
+        }
+    }
+
     /// All-effects chain latency for one strip (bypassed effects INCLUDED —
     /// `chainLatencyAll`, spec §1): the stable reported total and the stage-
     /// maxima input. 0 for unknown ids.
@@ -1573,6 +1638,34 @@ final class PlaybackGraph {
                 publishMasterAutomation(activeMasterLane)
             }
         }
+        // Per-insert spectrum arms (m23-r2a) — the ONE re-application point,
+        // and it must be HERE, at the TAIL: an arm can only land on a unit
+        // that exists, and this is the only place where every strip's chain
+        // sync (`.sync(descriptors:sampleRate:)` in the track loop above) AND
+        // the master's have already run. It therefore covers BOTH holes with
+        // one implementation — a strip rebuilt mid-session (fresh
+        // `EffectChainState`, no arms) and a whole-graph rebuild
+        // (`wireGraphHooks` re-installs the mirror; this pass lands it).
+        // Re-applying at the graph CONSTRUCTION site instead would be a
+        // structural no-op: a fresh graph has no strips until `reconcile`.
+        //
+        // THE POSITION IS PINNED, not merely asserted here — at BOTH ends,
+        // because there are three placements and each fails differently
+        // (`InsertSpectrumChainTests`):
+        //  · HEAD of the function → track arms are dropped:
+        //    `armsAreReappliedAfterTheChainSyncNotBefore` and
+        //    `armHeldAcrossAnInsertAddLandsInThatSamePass` redden.
+        //  · BETWEEN the track loop and the master sync just above → track
+        //    arms land, MASTER arms are silently dropped, and ONLY
+        //    `armOnAMasterInsertLandsInThePassThatSyncsIt` reddens. That one
+        //    is why the master leg exists at all: the two track legs stay
+        //    green there, which is exactly how this claim went unpinned once.
+        //  · DELETED → all three, plus the presence leg
+        //    `graphReappliesArmsAtParameterPassTail`.
+        // Moving this is therefore not a style choice: it drops arms on every
+        // graph rebuild, and a user's open editor keeps metering nothing until
+        // some later model edit that may never arrive.
+        applyAnalysisArms()
         // PDC recompute (M4 viii-c) — AFTER every strip's chain sync above,
         // so the plan sees post-edit latencies (including a hosted AU that
         // just swapped in, or a rate re-prepare). Atomic target stores only.

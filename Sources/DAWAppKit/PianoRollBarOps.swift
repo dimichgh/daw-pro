@@ -39,6 +39,34 @@ public enum PianoRollBarOps {
         return Int((start / Double(max(1, beatsPerBar))).rounded(.down)) + 1
     }
 
+    /// The header cluster's DRAWN readout string.
+    ///
+    /// It lives HERE, beside the arithmetic it labels, rather than being
+    /// composed in the SwiftUI body: `DAWApp` is the package's one target with
+    /// no test suite, so a string built in a `body` is invisible to everything
+    /// under `Tests/`. The view draws exactly what this returns.
+    ///
+    /// **The word is still "BAR n" on purpose (m23-t).** What was dishonest was
+    /// the INK — the readout wore `DAWTheme.playback`, the cyan POSITION accent,
+    /// for a value that is the +/− buttons' OPERAND and follows the transport
+    /// only when the transport happens to be inside the clip. Cyan is now
+    /// refused here for the same reason this view's Middle C marker refuses it
+    /// (docs/DESIGN-LANGUAGE.md, the piano-roll entry): cyan in this very view
+    /// is the transport playhead. The noun never claimed a position; the colour
+    /// did. The cluster's own tooltips carry the rest of the sentence ("Insert
+    /// an empty bar at bar n, pushing later notes right"), and the explain card
+    /// says "at the marked spot" — both already the operand reading.
+    ///
+    /// Deliberately NOT lengthened to "TARGET BAR n" (Rule 6 — jargon) or "AT
+    /// BAR n" (still positional). A longer string would also spend header width
+    /// the soft, truncating clip name is the one paying for.
+    public static func barReadoutLabel(position: Double, clipStartBeat: Double,
+                                       lengthBeats: Double, beatsPerBar: Int) -> String {
+        let number = targetBarNumber(position: position, clipStartBeat: clipStartBeat,
+                                     lengthBeats: lengthBeats, beatsPerBar: beatsPerBar)
+        return "BAR \(number)"
+    }
+
     /// Whether "delete bar" is valid: only when the clip is STRICTLY longer than
     /// one bar, so removing a bar leaves real content. A one-bar-or-shorter clip
     /// would collapse to the store's floor — a delete that empties the clip is

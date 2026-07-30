@@ -5,7 +5,8 @@ import DAWAppKit
 /// The **session vibe meter** — the app's signature "glowing instrument" (M8 vm-b;
 /// VISION.md:16). One coherent glowing orb (NOT a bar-graph spectrum) that reads the
 /// whole mix's feel at a glance: a bilaterally-symmetric spectral silhouette around a
-/// hot ember core, drawn on `Canvas` at 60 fps via `TimelineView(.animation)`.
+/// hot ember core, drawn on `Canvas` at 60 fps via an UNPAUSED
+/// `TimelineView(.periodic)` (see `pollInterval` for the law and the measured rate).
 ///
 /// The mapping (all perceptual math is headless in `DAWAppKit.VibeMeterModel`, tested):
 /// - **brightness** (short-term level) → the core's size and glow — loud blazes, quiet
@@ -25,19 +26,56 @@ struct VibeMeterView: View {
     /// preferred over the live engine poll. A closure, so no engine coupling here.
     var snapshot: () -> MasterAnalysisSnapshot
 
+    /// Reports the smoothed state of every frame this view actually DRAWS (the
+    /// `LiveLayerWitness` seam, m23-r3b) — nil in previews and unit hosts. A frozen
+    /// meter is pixel-identical to a live one until the data moves, so this is the
+    /// only way "the orb is still ticking" is checkable from outside the process.
+    var onFrame: ((VibeMeterModel) -> Void)?
+
     /// Frame-to-frame smoothing state. A plain (non-observable) reference held in
     /// `@State` — the established "scratch object" pattern: advancing it inside the
     /// `TimelineView` closure schedules no view invalidation (the timeline drives the
     /// next frame), so the smoother persists across frames without an update loop.
     @State private var smoother = VibeSmoother()
 
-    /// Pause the display link when the window isn't active — no point burning frames
-    /// on an instrument nobody's looking at (the "pause when inactive" guidance).
-    @Environment(\.controlActiveState) private var controlActiveState
+    /// **Poll discipline — the m22-e LAW** (`Mixer/ReferencePanelView.swift:26`):
+    /// every live layer ticks in its own UNPAUSED `TimelineView`, and NEVER
+    /// `.animation(paused: controlActiveState == .inactive)`. This view carried that
+    /// forbidden idiom until m23-r3b, with the superseded "no point burning frames on
+    /// an instrument nobody's looking at" rationale written right here. That guidance
+    /// is Apple's, and it is wrong FOR THIS APP: agents drive DAW Pro over a control
+    /// socket, so its window is routinely not the frontmost one — and the orb then
+    /// froze mid-glow while the mix underneath it kept playing. A meter that looks
+    /// live and is stuck is the dishonest-readout failure this project keeps closing,
+    /// and the transport bar's orb is on screen at ALL times.
+    ///
+    /// **60 Hz, and the rate is measured, not inherited.** The floor is set by the
+    /// model's own ballistics: `VibeMeterModel.attackTau` is 50 ms (motion's is 40 ms),
+    /// so a 20 Hz tick would land ONE sample per attack time-constant and the
+    /// "breathing" attack would render as a single-frame jump — a strobe, which is the
+    /// exact artifact those asymmetric ballistics exist to prevent. 60 Hz puts ~3
+    /// samples inside the fastest tau, keeps the shimmer (2.2…7 rad/s) smooth, and
+    /// matches this file's documented 60 fps contract (VISION.md:16).
+    ///
+    /// **What the old schedule actually cost — MEASURED, because the first version of
+    /// this comment guessed and guessed low.** It said `.animation` "already ran the
+    /// display link at ~60 Hz there"; the m23-r3b gate measured **120 ticks/s while
+    /// frontmost**. `.animation` is display-LINKED — it inherits the refresh rate rather
+    /// than choosing one, so on a 120 Hz panel it ticks 120 and on a 60 Hz panel it
+    /// ticks 60. That is exactly why converting to `.periodic` is not a tuning change
+    /// but a decision being forced into the open: `.periodic` has no rate to inherit, so
+    /// someone must name one, and the number above is named from the ballistics.
+    ///
+    /// So the honest two-sided figure on the machine this was measured on:
+    /// frontmost **120/s → 60/s** (HALVED, not new cost), and unfocused
+    /// **0/s → 60/s** — the frozen case, which is the entire point of the fix.
+    /// Do not re-derive "~60" from the `1.0 / 60` below; it is the new rate, not the old.
+    private static let pollInterval = 1.0 / 60
 
     var body: some View {
-        TimelineView(.animation(paused: controlActiveState == .inactive)) { timeline in
+        TimelineView(.periodic(from: .now, by: Self.pollInterval)) { timeline in
             let state = smoother.advance(to: timeline.date, snapshot: snapshot())
+            let _ = onFrame?(state)   // `let _` — a bare call is a ViewBuilder expression
             let rgb = Self.components(for: state)
             let color = Color(.sRGB, red: rgb.r, green: rgb.g, blue: rgb.b, opacity: 1)
             // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures

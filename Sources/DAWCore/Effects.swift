@@ -25,6 +25,13 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         case gate
         /// 2-voice modulated-delay chorus — M4 (iv).
         case chorus
+        /// Psychoacoustic bass harmonic enhancer (m23-p1): synthesizes the
+        /// 2nd/3rd/4th partials OF the sub-crossover content and injects them
+        /// above the crossover, so a speaker that cannot reproduce the
+        /// fundamental still implies it (the "missing fundamental" effect).
+        /// NOT the broadband `saturator` — the shaper only ever sees the
+        /// low band, and its output is high-passed at the same corner.
+        case bassEnhancer
         /// A hosted Audio Unit effect ('aufx', see `audioUnit`) — M4 (v).
         case audioUnit
     }
@@ -41,6 +48,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
     public var saturator: SaturatorParams?
     public var gate: GateParams?
     public var chorus: ChorusParams?
+    public var bassEnhancer: BassEnhancerParams?
     /// Hosted Audio Unit selection (additive optional, reusing the instrument
     /// `AudioUnitConfig`: component triple + display names + saved
     /// `fullStateForDocument`). Unlike the instrument rule, `kind ==
@@ -67,6 +75,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
     public var resolvedSaturator: SaturatorParams { saturator ?? SaturatorParams() }
     public var resolvedGate: GateParams { gate ?? GateParams() }
     public var resolvedChorus: ChorusParams { chorus ?? ChorusParams() }
+    public var resolvedBassEnhancer: BassEnhancerParams { bassEnhancer ?? BassEnhancerParams() }
 
     public init(
         id: UUID = UUID(),
@@ -81,6 +90,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         saturator: SaturatorParams? = nil,
         gate: GateParams? = nil,
         chorus: ChorusParams? = nil,
+        bassEnhancer: BassEnhancerParams? = nil,
         audioUnit: AudioUnitConfig? = nil,
         sidechainSourceTrackID: UUID? = nil
     ) {
@@ -96,6 +106,7 @@ public struct EffectDescriptor: Identifiable, Codable, Sendable, Equatable {
         self.saturator = saturator
         self.gate = gate
         self.chorus = chorus
+        self.bassEnhancer = bassEnhancer
         self.audioUnit = audioUnit
         self.sidechainSourceTrackID = sidechainSourceTrackID
     }
@@ -365,6 +376,15 @@ public struct LimiterParams: Codable, Sendable, Equatable {
     /// Fixed lookahead in seconds; `latencySamples = round(lookahead × rate)`.
     public static let lookaheadSeconds: Double = 0.005
 
+    /// THE ONE HOME for the lookahead-delay-in-samples derivation (m23-ab-1).
+    /// `LimiterEffect.prepare` and every test that needs the expected
+    /// `latencySamples`/`outputLatencySamples` MUST call this rather than
+    /// re-deriving or hardcoding a rate-specific constant (240 is only
+    /// `round(0.005 × 48000)` — true at 48 kHz and nowhere else).
+    public static func lookaheadSamples(sampleRate: Double) -> Int {
+        max(1, Int((lookaheadSeconds * sampleRate).rounded()))
+    }
+
     public init(ceilingDb: Double = -1, releaseMs: Double = 50) {
         self.ceilingDb = ceilingDb.clamped(to: Self.ceilingRange)
         self.releaseMs = releaseMs.clamped(to: Self.releaseRange)
@@ -623,6 +643,78 @@ public struct ChorusParams: Codable, Sendable, Equatable {
     }
 }
 
+/// Parameters for the built-in psychoacoustic bass enhancer (m23-p1) — the
+/// RBass/MaxxBass class. Clamped on init (GainParams pattern).
+///
+/// WHAT IT DOES, honestly: the effect low-passes the input at `crossoverHz`,
+/// synthesizes the 2nd/3rd/4th harmonics OF THAT LOW BAND ONLY, high-passes
+/// the result at the same corner, and ADDS it to the untouched dry signal. A
+/// small speaker that rolls off below the crossover still hears the harmonic
+/// series, and the ear reconstructs the pitch of the fundamental it never
+/// received (the "missing fundamental" / residue-pitch effect). Nothing is
+/// subtracted and the dry path is never filtered, so the effect is PURELY
+/// ADDITIVE — with `amount` or `mix` at 0 the output is BIT-EXACT dry.
+///
+/// This is NOT the broadband `saturator`: the shaper only ever sees the low
+/// band, the generated series is truncated at the 4th partial (a waveshaper
+/// produces an unbounded series), and the harmonics are level-tracked so the
+/// character is the same on a quiet bass line as on a loud one.
+public struct BassEnhancerParams: Codable, Sendable, Equatable {
+    /// The split point, in Hz: harmonics are generated FROM content below it
+    /// and injected ABOVE it. Set it to the low limit of the speaker you are
+    /// worried about.
+    public var crossoverHz: Double
+    /// How much harmonic content is generated, 0…1. Raising it adds level AND
+    /// tilts the series toward the higher partials (see `harmonicWeights`) —
+    /// it is a generator control, not a plain output gain. 0 = no generation
+    /// at all (bit-exact dry).
+    public var amount: Double
+    /// Dry/wet, 0…1. Because the effect only ever ADDS material to an
+    /// untouched dry path, `mix` is exactly a master trim on everything the
+    /// effect contributes; 0 is bit-exact dry.
+    public var mix: Double
+
+    public static let crossoverRange: ClosedRange<Double> = 30...250
+    public static let amountRange: ClosedRange<Double> = 0...1
+    public static let mixRange: ClosedRange<Double> = 0...1
+
+    /// The generated series' relative weights at `amount`, as coefficients on
+    /// the Chebyshev polynomials T2/T3/T4 — so a unit-amplitude sinusoid at f
+    /// maps to partials at 2f/3f/4f with EXACTLY these amplitudes (T_n(cos θ)
+    /// = cos nθ). ONE HOME: the engine derives its render weights here and the
+    /// editor draws the series from the same call, so the picture can never
+    /// disagree with the sound.
+    ///
+    /// The shape: every weight rises with `amount`, but the higher partials
+    /// rise FASTER (h3 ∝ a², h4 ∝ a³), so a small amount is a warm 2nd-harmonic
+    /// lift and a large one is a bright, phone-speaker-friendly buzz. This is
+    /// what makes `amount` independent of `mix` rather than a second gain.
+    /// The peak sum is 0.9 at a = 1 (the partials all peak together), which
+    /// bounds the generated signal at 0.9 × the low band's own level.
+    public static func harmonicWeights(amount: Double)
+        -> (h2: Double, h3: Double, h4: Double) {
+        let a = amount.clamped(to: amountRange)
+        return (h2: a * (0.5 - 0.15 * a), h3: a * (0.30 * a), h4: a * (0.25 * a * a))
+    }
+
+    public init(crossoverHz: Double = 80, amount: Double = 0.5, mix: Double = 1) {
+        self.crossoverHz = crossoverHz.clamped(to: Self.crossoverRange)
+        self.amount = amount.clamped(to: Self.amountRange)
+        self.mix = mix.clamped(to: Self.mixRange)
+    }
+
+    private enum CodingKeys: String, CodingKey { case crossoverHz, amount, mix }
+
+    /// Decoding routes through the clamping init.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            crossoverHz: try c.decodeIfPresent(Double.self, forKey: .crossoverHz) ?? 80,
+            amount: try c.decodeIfPresent(Double.self, forKey: .amount) ?? 0.5,
+            mix: try c.decodeIfPresent(Double.self, forKey: .mix) ?? 1)
+    }
+}
+
 /// Static parameter schema for every effect kind — the single source of truth
 /// for `fx.describe`, control-layer validation, and MCP tool schemas.
 public struct EffectParamSpec: Sendable, Equatable {
@@ -819,6 +911,29 @@ public struct EffectParamSpec: Sendable, Equatable {
                                 defaultValue: 3, unit: "ms"),
                 EffectParamSpec(name: "mix", range: ChorusParams.mixRange,
                                 defaultValue: 0.5, unit: "linear"),
+            ]
+        case .bassEnhancer:
+            return [
+                EffectParamSpec(name: "crossoverHz", range: BassEnhancerParams.crossoverRange,
+                                defaultValue: 80, unit: "Hz",
+                                note: "The split point. Harmonics are generated FROM everything "
+                                    + "below this and added ABOVE it — set it to the low limit "
+                                    + "of the speaker you are worried about (a laptop is around "
+                                    + "150 Hz, a phone higher). It is not a filter on the sound "
+                                    + "you already have: the dry signal is never touched."),
+                EffectParamSpec(name: "amount", range: BassEnhancerParams.amountRange,
+                                defaultValue: 0.5, unit: "linear",
+                                note: "How much harmonic content is generated. It is NOT a plain "
+                                    + "level: raising it also tilts the series toward the higher "
+                                    + "partials (a low amount is a warm 2nd-harmonic lift; a high "
+                                    + "one is bright and carries further on tiny speakers). 0 "
+                                    + "generates nothing and the output is bit-exact dry."),
+                EffectParamSpec(name: "mix", range: BassEnhancerParams.mixRange,
+                                defaultValue: 1, unit: "linear",
+                                note: "Dry/wet. This effect only ADDS to an untouched dry path, "
+                                    + "so mix is a master trim on everything it contributes; 0 "
+                                    + "is bit-exact dry. Use `amount` to change the character "
+                                    + "and `mix` to change how much of it you hear."),
             ]
         case .audioUnit:
             // AU parameters are not on the generic name/value surface in v0;

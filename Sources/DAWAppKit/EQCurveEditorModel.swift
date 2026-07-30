@@ -663,6 +663,62 @@ public final class EQCurveEditorModel {
         kind == .eq
     }
 
+    // MARK: - Spectrum gate (m23-r3)
+
+    /// ONE HOME for "does the curve plot draw its spectrum layer?".
+    ///
+    /// m22-b answered "the MASTER chain only" — display honesty, because no
+    /// per-track tap existed. m23-r1/r2a/r2b built and proved that tap, so the
+    /// answer is now "whenever the curve surface is on screen": a master card
+    /// reads `masterAnalysis()`, a track card reads its own armed insert tap.
+    ///
+    /// It lives HERE, and not inline at the call site, because `EffectEditorOverlay`
+    /// (which passes it into `EQCurveEditor.showsSpectrum`) is not its only
+    /// reader — `debug.effectEditor`'s state read reports it too, and a probe
+    /// carrying its own copy of the rule would stay green while the real gate
+    /// was inverted (the m23-r2a hand-assignment failure, verbatim).
+    public static func showsSpectrum(for target: EffectEditorTarget?) -> Bool {
+        target != nil
+    }
+
+    /// ── THE PRE-FADER / POST-FADER LABELLING LAW (m23-r3) ─────────────────
+    ///
+    /// The plot's `.help` line, and the ONE home for a distinction that is NOT
+    /// cosmetic. Measured at m23-r2b: moving a TRACK fader 1.0 → 0.5 changes
+    /// that strip's tapped 1 kHz band by **0.0 dB**; the same move on the
+    /// MASTER fader changes the master reading by **6.0206 dB**. Strip inserts
+    /// tap PRE-fader, master inserts tap POST-fader — so the two green fills
+    /// are different measurements wearing identical ink, and a user who pulls a
+    /// track fader, sees the fill hold still, and concludes the meter is broken
+    /// is the failure this law exists to prevent.
+    ///
+    /// The MASTER string is byte-identical to m22-b's and must stay that way
+    /// (it is pinned): r3 changed nothing about that curve.
+    ///
+    /// It takes the TARGET, not an `isMaster` flag, on purpose. The two inputs
+    /// used to be `(Bool, Bool)`, which made "master?" and "measuring?" swappable
+    /// at the call site with no compiler complaint, no test failure and no pixel
+    /// change — `.help` is a tooltip, so `debug.captureUI` cannot see it. With
+    /// `EffectEditorTarget?` in the first slot the swap does not compile, and
+    /// `isMaster` is derived HERE rather than at any call site, so there is one
+    /// computation of it. A nil target draws no spectrum at all
+    /// (`showsSpectrum(for:)`), so it resolves to `curveOnlyHelp` — the card's
+    /// help line, whole, in one function.
+    public static func curveHelp(for target: EffectEditorTarget?,
+                                 isMeasuring: Bool) -> String {
+        guard let target, showsSpectrum(for: target) else { return curveOnlyHelp }
+        if target.trackID == nil {
+            return "The green fill is the live master-mix spectrum — context only; its height is not the EQ's dB scale."
+        }
+        if !isMeasuring {
+            return "The spectrum is not running for this insert right now — the flat green floor is honest, not a silent track. Drag a handle to shape the EQ curve."
+        }
+        return "The green fill is this track's live spectrum AFTER this EQ, measured BEFORE the fader — so moving the track fader will not move it. Context only; its height is not the EQ's dB scale."
+    }
+
+    /// The plot's help line when it draws no spectrum at all.
+    public static let curveOnlyHelp = "Drag a handle to shape the EQ curve."
+
     // MARK: - Spectrum display smoothing (§4.1)
 
     /// Band dB maps over −72…−6 (the vibe meter's punchy span,

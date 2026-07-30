@@ -13,10 +13,11 @@ struct ContentView: View {
     var controlPort: UInt16
 
     /// The "Explain this" overlay's presentation coordinator (M8 ex-a): tracks tagged
-    /// control frames + hover timing. View-local (`@State`) — it's pure view geometry;
-    /// the mode on/off flag lives on `AppModel.explain` so `debug.explainMode` can
-    /// drive it (and `debug.captureUI` renders the same state).
-    @State private var explainCoordinator = ExplainCoordinator()
+    /// control frames + hover timing. Lives on `AppModel` beside the mode's on/off
+    /// flag — it was view-local `@State` until the measured frames became wire-readable
+    /// (`debug.explainFrames`), and a debug command can only read state the model owns.
+    /// Still pure view geometry; nothing else about it changed.
+    private var explainCoordinator: ExplainCoordinator { model.explainCoordinator }
 
     /// Drag origins for the adjustable-layout splitters (beta m10-d): each is
     /// captured on the drag's first tick (the gesture reports translation from the
@@ -371,7 +372,33 @@ struct ContentView: View {
                 model: model.effectEditor,
                 curveModel: model.eqCurveEditor,
                 densityStore: model.panelDensity,
-                spectrum: { model.vibeSeed ?? store.masterAnalysis() },
+                // The EQ curve card's spectrum (m23-r3): resolved against the
+                // card's CURRENT target each tick — the master mix for a master
+                // insert, this insert's own armed tap for a track one — with
+                // the seed overrides first (the `vibeSeed`/`grSeed` idiom).
+                spectrum: { model.effectEditorSpectrum() },
+                // The plot's caption, resolved at its one home — the pre-fader
+                // (track) / post-fader (master) labelling law. `debug
+                // .effectEditor` reports this same property.
+                curveHelp: model.effectEditorCurveHelp,
+                // The instrument frequency guide (m23-o2), resolved at its one
+                // home — `debug.effectEditor` reports this same property.
+                instrumentGuide: model.effectEditorInstrumentGuide,
+                onPlotWidth: { model.effectEditorPlotWidth = $0 },
+                // The tap's arm lifecycle, run as the spectrum layer's
+                // `.task(id:)` body — the app owns the arm, the layer owns
+                // when it lives (the single-consumer invariant, AppModel).
+                holdSpectrum: { await model.holdInsertSpectrum() },
+                // The kind's drawn honesty disclosure (m23-p2), resolved at its
+                // one home — `debug.effectEditor` reports this same property.
+                honestyNote: model.effectEditorHonestyNote,
+                onCardMeasured: { width, height in
+                    model.effectEditorCardWidth = width
+                    model.effectEditorCardHeight = height
+                },
+                onHonestyStyle: { role, face, ink in
+                    model.effectEditorHonestyStyle.record(role: role, face: face, ink: ink)
+                },
                 // The dynamics kinds' GAIN REDUCTION poll (m22-e): resolved
                 // against the card's CURRENT target each tick (grSeed override
                 // first — the scopeSeed idiom — else the live store tap).
@@ -612,7 +639,20 @@ struct ContentView: View {
                 },
                 // m21-c: while the editor holds key focus, the View-menu
                 // ⌘+/⌘−/⌘0 zoom THIS editor instead of the arrange timeline.
-                onFocusChange: { model.pianoRollEditorFocused = $0 }
+                onFocusChange: { model.pianoRollEditorFocused = $0 },
+                // m23-x: the roll publishes whether it holds a NOTE selection,
+                // which is what the arrange's arrow-key nudge refuses on (with
+                // focus). Same object carries the debug seam's staged selection
+                // back in — see `PianoRollNoteSelectionBridge`.
+                noteSelection: model.pianoRollNoteSelection,
+                // m23-t: the bar-ops readout publishes the string and ink it
+                // DREW, from inside the drawing arguments themselves, so
+                // `debug.pianoRollBarOps` reports the pixels rather than a
+                // re-derivation. The ledger is deliberately non-observable —
+                // this write happens during `body`.
+                onBarOpsStyle: { role, text, ink in
+                    model.pianoRollBarOpsStyle.record(role: role, text: text, ink: ink)
+                }
             )
             .id(clip.id)
             .frame(height: geo.size.height * model.panelLayout.editorFraction)
@@ -778,6 +818,16 @@ struct ContentView: View {
                 } catch {
                     model.presentArrangeLaneRefusal(error, trackID: trackID, beat: beat)
                 }
+            },
+            // m23-v: the VISIBLE half of m23-e. The lanes compose the hint set
+            // once, draw it, and report THAT value up — never a re-derivation
+            // here, which is what keeps `debug.arrangePointer`'s echo an
+            // observation of the pixels rather than a second opinion about them.
+            onEmptyLaneHints: { hints in
+                model.arrangeEmptyLaneHints = hints
+                // Bumped LAST so the hints it announces are already stored (the
+                // `arrangePointerReportSeq` rule).
+                model.arrangeEmptyLaneHintSeq &+= 1
             },
             // Rubber band (m23-g3): the staged step flows down; the band + its
             // hits flow back up so `debug.arrangeMarquee` echoes ground truth,
@@ -1500,6 +1550,18 @@ struct ContentView: View {
 /// five modifiers inline on ContentView's body — that body is already at the
 /// type-checker's limit, and a 1-line call site keeps it there.
 ///
+/// SUPERSEDED IN PLACE AT m23-x, name kept deliberately: this modifier now hosts
+/// TWO arrange keys — DELETE and the ←/→ clip nudge. It was NOT renamed to
+/// something like `ArrangeKeyCommands` because `ArrangeDeleteKey` is the name
+/// the m23-g1 and m23-g2 roadmap records, this file's `arrangeDeleteKeyScope`,
+/// and `AppModel.handleArrangeDeleteKey`'s own comments all cite; renaming would
+/// have made five accurate references stale to gain a word. WHY THE ARROWS LIVE
+/// HERE AND NOT IN A SECOND MODIFIER: this one owns the workspace's `@FocusState`
+/// and its single `.focusable()`. A second modifier would bring a second
+/// `@FocusState` asserting focus on the same scope — precisely the focus fight
+/// `arrangeDeleteKeyScope`'s `VStack` note exists to prevent — and the arrows
+/// need exactly the focus DELETE already has.
+///
 /// PLACEMENT IS THE WHOLE SAFETY ARGUMENT. This is applied to the ARRANGE
 /// WORKSPACE (via `ContentView.arrangeDeleteKeyScope`) — not to the lanes, and
 /// deliberately NOT to the window root:
@@ -1556,6 +1618,40 @@ private struct ArrangeDeleteKey: ViewModifier {
             // cue (docs/DESIGN-LANGUAGE.md: one accent per meaning).
             .focusEffectDisabled()
             .onKeyPress(.delete) { model.handleArrangeDeleteKey() ? .handled : .ignored }
+            // ←/→ NUDGE the arrange selection (m23-x). Three things here are
+            // decisions, not defaults:
+            //
+            //   • `phases: [.down, .repeat]` — key REPEAT is load-bearing, and
+            //     this is the OPPOSITE of the space bar, whose predicate has
+            //     `guard !isRepeat` so a held space cannot machine-gun the
+            //     transport. Walking a clip into place by holding an arrow is
+            //     the whole gesture; the undo cost is paid by
+            //     `ProjectStore.moveClipsKey`'s selection-stable coalescing key.
+            //   • NO ↑/↓. Not forgotten — there is no cross-track move verb in
+            //     this app at all (see the note atop `ArrangeNudge`). Unhandled
+            //     keys keep passing through to whatever wants them.
+            //   • The whole modifier POLICY lives in `ArrangeNudge.step`, not
+            //     here: ⌥ fine, ⇧ bar, ⌘/⌃ pass through. This closure only
+            //     translates SwiftUI's vocabulary into the headless one, so the
+            //     policy stays unit-testable (`DAWApp` has no test target) and
+            //     the `debug.arrangeSelection {act:"nudge"}` seam — which passes
+            //     the chord EXPLICITLY, because a synthesized press carries none
+            //     — exercises the SAME rule the real key does.
+            .onKeyPress(keys: [.leftArrow, .rightArrow], phases: [.down, .repeat]) { press in
+                let character = press.key.character
+                let direction: ArrangeNudgeDirection
+                if character == KeyEquivalent.leftArrow.character {
+                    direction = .left
+                } else if character == KeyEquivalent.rightArrow.character {
+                    direction = .right
+                } else {
+                    return .ignored
+                }
+                let outcome = model.handleArrangeNudgeKey(
+                    direction: direction,
+                    modifiers: AppModel.keyPressModifiers(press.modifiers))
+                return outcome.handled ? .handled : .ignored
+            }
             .onChange(of: model.arrangeKeyFocusNonce) { _, _ in focused = true }
     }
 }

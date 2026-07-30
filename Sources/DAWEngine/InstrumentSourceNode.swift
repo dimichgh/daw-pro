@@ -117,8 +117,20 @@ final class InstrumentRenderer: @unchecked Sendable {
     private var nextLiveNoteID: UInt64 = 1 << 63
     /// pitch → the open live note-on's ID (0 = none), so the off carries its
     /// on's ID. Same-pitch collision across two omni devices may orphan one
-    /// voice until flush — documented v0 limit.
+    /// voice until flush — documented v0 limit. `openLiveCount` below is this
+    /// map's POPCOUNT and is maintained wherever the map changes.
     private let pitchToLiveID: UnsafeMutablePointer<UInt64>
+    /// Open live-THRU voices — the thru analogue of `openAuditionCount`, and the
+    /// term 6d's re-arm needs so the tail cannot expire under a key the user is
+    /// still physically holding down (m23-u).
+    ///
+    /// INVARIANT: `openLiveCount == #{ p : pitchToLiveID[p] != 0 }`. It is a
+    /// POPCOUNT OF THE PITCH MAP and nothing else. Maintained ONLY where the map
+    /// itself changes — the note-on branch (0 → id) and the MATCHED note-off
+    /// branch (id → 0) — and zeroed by every bulk clear of the map. Two branches
+    /// must NOT touch it: kind ≥ 2 (controllers never enter the map, m16-b3 §4.3
+    /// C11) and the orphan-off branch (nothing to pair with).
+    private(set) var openLiveCount = 0
     /// pitch → the open AUDITION note-on's ID (0 = none), m23-d. Deliberately
     /// NOT `pitchToLiveID`: two live sources sharing one pitch-keyed map orphan
     /// each other's voices (an audition on C4 while hardware holds C4 steals the
@@ -358,7 +370,7 @@ final class InstrumentRenderer: @unchecked Sendable {
         // 1. Flush flag → all-notes-off before anything else this quantum.
         if daw_atomic_u32_exchange(flushFlag, 0) == 1 {
             instrument.reset()
-            pitchToLiveID.update(repeating: 0, count: 128)
+            clearLiveVoices()
             clearAuditionVoices()
             // `reset()` contracts silence until the next noteOn, so no tail is
             // owed — anything drained below re-arms it.
@@ -370,7 +382,7 @@ final class InstrumentRenderer: @unchecked Sendable {
         // lifts the pedal on every instrument (design-m16b §4.3/§8.3, C15).
         if daw_atomic_u32_exchange(thruRing.droppedFlag, 0) == 1 {
             instrument.reset()
-            pitchToLiveID.update(repeating: 0, count: 128)
+            clearLiveVoices()
             clearAuditionVoices()
             liveTailRemaining = 0
         }
@@ -554,10 +566,37 @@ final class InstrumentRenderer: @unchecked Sendable {
                 } else if event.kind == ScheduledMIDIEvent.noteOn {
                     id = nextLiveNoteID
                     nextLiveNoteID &+= 1
-                    pitchToLiveID[Int(event.pitch & 0x7F)] = id
+                    let p = Int(event.pitch & 0x7F)
+                    // GUARD IS LOAD-BEARING (m23-u). The slot is overwritten
+                    // UNCONDITIONALLY on the next line, so a retrigger of an
+                    // already-open pitch — real hardware does this, and so does
+                    // any source that drops an off — would increment twice and
+                    // decrement once on the single matching off. `openLiveCount`
+                    // would never return to zero and 6d would re-arm the tail
+                    // FOREVER: this node renders its instrument every quantum
+                    // for the life of the app. A silence bug traded for
+                    // permanent wakefulness. Do NOT simplify this to an
+                    // unconditional increment.
+                    //
+                    // If a defensive retrigger CLOSE is ever added here (the
+                    // audition path has one at 6c), this guard must be REPLACED
+                    // by a decrement inside that close, never kept alongside it:
+                    // the close would decrement while the slot is still
+                    // non-zero, this guard would then decline to increment, and
+                    // the counter would read 0 with a voice open — m23-u,
+                    // restored, on the retrigger path.
+                    if pitchToLiveID[p] == 0 { openLiveCount += 1 }
+                    pitchToLiveID[p] = id
                 } else if pitchToLiveID[Int(event.pitch & 0x7F)] != 0 {
                     id = pitchToLiveID[Int(event.pitch & 0x7F)]
                     pitchToLiveID[Int(event.pitch & 0x7F)] = 0
+                    // Slot was non-zero ⇒ it was counted and not yet discounted;
+                    // cannot underflow. Inside THIS branch on purpose: the
+                    // orphan-off branch below must never decrement (nothing to
+                    // pair with), and a decrement hoisted out of the if/else
+                    // chain would fire there too, drift the counter negative and
+                    // silently restore m23-u.
+                    openLiveCount -= 1
                 } else {
                     // Orphan off (its on was dropped or pre-fanout): mint an
                     // ID no voice holds — well-behaved instruments no-op it.
@@ -623,9 +662,17 @@ final class InstrumentRenderer: @unchecked Sendable {
 
         // 6d. Arm / age the live tail (m23-d follow-up). Placed AFTER both
         // drains so the quantum that OPENS a voice arms it: `openAuditionCount`
-        // must already reflect 6c's work. `liveCount > 0` covers the thru path
-        // and 6a's watchdog offs as well as audition.
-        if liveCount > 0 || openAuditionCount > 0 {
+        // and `openLiveCount` must already reflect 6b/6c's work. `liveCount > 0`
+        // covers the quantum an event arrives in — including 6a's watchdog offs
+        // — and the two open-voice counts cover every event-free quantum after
+        // it.
+        //
+        // `openLiveCount > 0` is m23-u: it is what keeps a PHYSICALLY HELD key
+        // alive. Without it the tail aged out under a finger that never left the
+        // key, because hardware thru sends nothing at all while a note is held.
+        // Note it counts KEYS, not VOICES — a CC64-sustained voice whose key has
+        // been released is still cut at `liveTailSeconds` (filed separately).
+        if liveCount > 0 || openLiveCount > 0 || openAuditionCount > 0 {
             liveTailRemaining = liveTailFrames
         } else if liveTailRemaining > 0 {
             let elapsed = UInt64(frameCount)
@@ -639,9 +686,18 @@ final class InstrumentRenderer: @unchecked Sendable {
         //
         // The tail term is what makes a HELD note sound: without it this
         // returns before step 9's `instrument.render`, so an instrument with an
-        // open voice is skipped on every event-free quantum. `schedule == nil`
-        // is only true before a schedule has ever been published, which is
-        // exactly audition's headline case — cold app, transport stopped.
+        // open voice is skipped on every event-free quantum.
+        //
+        // `schedule == nil` holds whenever the TRANSPORT IS STOPPED — every
+        // stop, seek, and tempo change routes through
+        // `PlaybackGraph.stopAllPlayers()`, which unpublishes and flushes every
+        // instrument node and then clears `midiRollContext`, so nothing
+        // republishes until playback starts again — as well as before a schedule
+        // was ever published. So this fast path is the ORDINARY stopped-transport
+        // path, not a cold-app corner: everything holding sound must be
+        // represented in 6d's condition above. (An earlier revision of this
+        // comment claimed the opposite, and that claim is what let m23-u be
+        // filed as a corner case for three passes running.)
         if schedule == nil, liveCount == 0, liveTailRemaining == 0 {
             zeroFill(output, frameCount: Int(frameCount))
             if chain.hasPublishedChain {
@@ -744,6 +800,21 @@ final class InstrumentRenderer: @unchecked Sendable {
         pitchToAuditionID.update(repeating: 0, count: 128)
         openAuditionCount = 0
         auditionCutAll = false
+    }
+
+    /// RENDER THREAD: forget every open live-THRU voice (m23-u). Called from the
+    /// reset paths ONLY, exactly where `clearAuditionVoices()` is called — the
+    /// map and its popcount must never be cleared apart, which is why they are
+    /// cleared through ONE function and never inline. Pointer fill, no
+    /// allocation.
+    ///
+    /// Deliberately SEPARATE from `clearAuditionVoices()`: step 1c cuts audition
+    /// voices only, so folding the live counter into that helper would zero it
+    /// under a held thru note and reintroduce m23-u.
+    @inline(__always)
+    private func clearLiveVoices() {
+        pitchToLiveID.update(repeating: 0, count: 128)
+        openLiveCount = 0
     }
 
     private func zeroFill(_ output: UnsafeMutableAudioBufferListPointer, frameCount: Int) {

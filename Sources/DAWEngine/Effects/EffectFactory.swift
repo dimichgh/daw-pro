@@ -41,6 +41,8 @@ enum EffectFactory {
             return GateEffect(params: descriptor.resolvedGate)
         case .chorus:
             return ChorusEffect(params: descriptor.resolvedChorus)
+        case .bassEnhancer:
+            return BassEnhancerEffect(params: descriptor.resolvedBassEnhancer)
         case .audioUnit:
             // Reached only when the registry has no prepared instance yet
             // (the chain state consults its provider first): bit-exact
@@ -71,6 +73,8 @@ enum EffectFactory {
             (instance as? GateEffect)?.apply(params: descriptor.resolvedGate)
         case .chorus:
             (instance as? ChorusEffect)?.apply(params: descriptor.resolvedChorus)
+        case .bassEnhancer:
+            (instance as? BassEnhancerEffect)?.apply(params: descriptor.resolvedBassEnhancer)
         case .audioUnit:
             // AU params are not on the generic surface in v0 — no-op.
             break

@@ -82,12 +82,47 @@ struct EnginePerformanceCommandTests {
             id: "2", command: "engine.performanceStats",
             params: ["reset": .bool(false)]))
         // House style for optional params: a wrong-typed value falls back to
-        // the default, and unknown extra params are ignored, never an error.
+        // the default.
         let sloppy = await router.handle(ControlRequest(
             id: "3", command: "engine.performanceStats",
-            params: ["reset": .string("yes"), "bogus": .number(1)]))
+            params: ["reset": .string("yes")]))
         #expect(sloppy.ok)
         #expect(engine.resetFlags == [true, false, false])
+    }
+
+    // m23-n2h: `engine.performanceStats` used to be one of 26 verbs that
+    // never called `rejectUnknownKeys` at all — an unknown key was silently
+    // ignored, never an error, contrary to the 135-of-161-command house
+    // style. Withdrawn for consistency. This is also the ORDERING witness
+    // required by the roadmap item: `rejectUnknownKeys` must run BEFORE the
+    // engine call, not merely exist somewhere in the case body — proven here
+    // by asserting `resetFlags` (which `FakePerformanceEngine.performanceStats`
+    // appends to on every real call) stays EMPTY when the request carries an
+    // unknown key, even though `reset: true` is also present.
+    @Test("unknown extra params are rejected BEFORE the engine is touched (m23-n2h ordering witness)")
+    func unknownParamRejectedBeforeEngineCall() async throws {
+        let (router, store) = makeRouter()
+        let engine = FakePerformanceEngine()
+        store.engine = engine
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "engine.performanceStats",
+            params: ["reset": .bool(true), "bogus": .number(1)]))
+        #expect(!response.ok)
+        #expect(response.error == "engine.performanceStats: unknown parameter 'bogus' — valid keys are 'reset'")
+        #expect(engine.resetFlags.isEmpty, "the guard must run before performanceStats(reset:) is ever called")
+    }
+
+    @Test("engine.performanceStats succeeds with no params at all (optional-param over-rejection guard)")
+    func noParamsAtAllSucceeds() async throws {
+        let (router, store) = makeRouter()
+        let engine = FakePerformanceEngine()
+        store.engine = engine
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "engine.performanceStats"))
+        #expect(response.ok)
+        #expect(engine.resetFlags == [false])
     }
 }
 
