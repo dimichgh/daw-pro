@@ -53,11 +53,16 @@
 //
 // Setup: none — run it.
 //
-//   swift build && node scripts/gates/m23g3-marquee.mjs
+//   node scripts/gates/m23g3-marquee.mjs
+//
+// (m23-ac-2a) This line used to read `swift build && node …`. A usage comment
+// is not a build step, and the original m23-ac filing read exactly this comment
+// as evidence the gate built first. `buildOrAbort()` below does the real thing.
 import fs from "fs";
 import crypto from "crypto";
-import { spawn } from "child_process";
+import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
 
+const GATE = "m23g3";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
 const OUT = process.env.M23G3_OUT || "/tmp/m23g3";
 const PIDFILE = process.env.M23G3_PIDFILE || "/tmp/m23g3-staging.pid";
@@ -95,22 +100,17 @@ async function connect() {
   throw new Error("no connect");
 }
 
-// ── launch staging (pidfile-exact teardown of any previous run) ─────────────
-if (fs.existsSync(PIDFILE)) {
-  const oldPid = Number(fs.readFileSync(PIDFILE, "utf8").trim());
-  if (Number.isFinite(oldPid) && oldPid > 1) {
-    try { process.kill(oldPid); } catch {}      // pidfile-EXACT; never pkill/pgrep
-    await sleep(1500);
-  }
-}
-const log = fs.openSync(`${OUT}/staging.log`, "a");
-const child = spawn(BINARY, [], {
-  cwd: REPO, detached: true, stdio: ["ignore", log, log],
-  env: { ...process.env, DAW_CONTROL_PORT: PORT },
+// ── launch staging through the ONE home (m23-ac-2a) ─────────────────────────
+// `buildOrAbort` is the half this gate never had: before this it ran whatever
+// was compiled last. `startStaging` keeps the pidfile-exact teardown of a
+// previous run and refuses port 17600 in ONE place. Every M23G3_* override is
+// preserved — they let the gate be pointed at a bundle, which is deliberate.
+buildOrAbort();
+const { pid: stagingPid } = startStaging({
+  gate: GATE, root: REPO, port: PORT, binary: BINARY, pidfile: PIDFILE,
+  outDir: OUT, detached: true, logPath: `${OUT}/staging.log`,
 });
-child.unref();
-fs.writeFileSync(PIDFILE, String(child.pid));
-console.log(`staging pid ${child.pid} on :${PORT}`);
+console.log(`staging pid ${stagingPid} on :${PORT}`);
 await sleep(4500);
 
 const { ws, req } = await connect();
@@ -521,15 +521,13 @@ try {
   fs.writeFileSync(`${OUT}/result.json`, JSON.stringify({ checks, skips }, null, 2));
   clearTimeout(killer);
   ws.close();
-  const pid = Number(fs.readFileSync(PIDFILE, "utf8").trim());
-  if (Number.isFinite(pid) && pid > 1) { try { process.kill(pid); } catch {} }
+  stopStaging(GATE, PIDFILE);   // m23-ac-2a: same pidfile-exact kill, one home
   process.exit(bad.length ? 1 : 0);
 } catch (e) {
   console.error("GATE ERROR", e);
   fs.writeFileSync(`${OUT}/result.json`, JSON.stringify({ checks, skips, error: String(e) }, null, 2));
   clearTimeout(killer);
   try { ws.close(); } catch {}
-  const pid = Number(fs.readFileSync(PIDFILE, "utf8").trim());
-  if (Number.isFinite(pid) && pid > 1) { try { process.kill(pid); } catch {} }
+  stopStaging(GATE, PIDFILE);   // m23-ac-2a: same pidfile-exact kill, one home
   process.exit(2);
 }

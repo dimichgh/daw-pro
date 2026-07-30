@@ -32,8 +32,9 @@
 //
 //   M23D_PIDFILE=<scratch>/staging.pid node scripts/gates/m23d-note-audition.mjs
 import fs from "fs";
-import { spawn } from "child_process";
+import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
 
+const GATE = "m23d";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
 const OUT = process.env.M23D_OUT || "/tmp/m23d";
 const PIDFILE = process.env.M23D_PIDFILE || "/tmp/m23d-staging.pid";
@@ -86,22 +87,19 @@ async function connect() {
   throw new Error("no connect");
 }
 
-// ── launch staging (pidfile-exact teardown of any previous run) ───────────
-if (fs.existsSync(PIDFILE)) {
-  const oldPid = Number(fs.readFileSync(PIDFILE, "utf8").trim());
-  if (Number.isFinite(oldPid) && oldPid > 1) {
-    try { process.kill(oldPid); } catch {}      // pidfile-EXACT; never pkill/pgrep
-    await sleep(1500);
-  }
-}
-const log = fs.openSync(`${OUT}/staging.log`, "a");
-const child = spawn(BINARY, [], {
-  cwd: REPO, detached: true, stdio: ["ignore", log, log],
-  env: { ...process.env, DAW_CONTROL_PORT: PORT },
+// ── launch staging through the ONE home (m23-ac-2a) ───────────────────────
+// `buildOrAbort` is the half this gate never had: before this it ran whatever
+// was compiled last, so restoring a mutated source left the mutant on disk for
+// the next run to adopt. `startStaging` keeps the pidfile-exact teardown of a
+// previous run, and refuses port 17600 in ONE place rather than per caller.
+// Every M23D_* env override is preserved — they let the gate be pointed at a
+// bundle, which is deliberate.
+buildOrAbort();
+const { pid: stagingPid } = startStaging({
+  gate: GATE, root: REPO, port: PORT, binary: BINARY, pidfile: PIDFILE,
+  outDir: OUT, detached: true, logPath: `${OUT}/staging.log`,
 });
-child.unref();
-fs.writeFileSync(PIDFILE, String(child.pid));
-console.log(`staging pid ${child.pid} on :${PORT}`);
+console.log(`staging pid ${stagingPid} on :${PORT}`);
 await sleep(3500);
 
 let { ws, req } = await connect();
@@ -376,4 +374,11 @@ for (const c of checks) {
 }
 fs.writeFileSync(`${OUT}/gate.json`, JSON.stringify({ readyAfterMs, checks }, null, 2));
 console.log(`\n${checks.length - failed}/${checks.length} checks passed`);
-clearTimeout(killer); ws.close(); process.exit(failed === 0 ? 0 : 1);
+clearTimeout(killer); ws.close();
+// ⚠️ m23-ac-2a: this gate LEAKED. It spawned detached + unref and then exited
+// with no teardown at all — its only kill was a startup teardown of the
+// PREVIOUS run's pidfile. Measured on 2026-07-30: the orphan it left on 17695
+// was silently adopted by the eight gates that ran after it, producing five
+// false greens and three false reds. The teardown is not tidiness.
+stopStaging(GATE, PIDFILE);
+process.exit(failed === 0 ? 0 : 1);

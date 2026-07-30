@@ -31,7 +31,13 @@
 //
 // Setup: none — run it.
 //
-//   swift build && node scripts/gates/m23g1-arrange-multiselect.mjs
+//   node scripts/gates/m23g1-arrange-multiselect.mjs
+//
+// (m23-ac-2a) This line used to read `swift build && node …`. It was deleted
+// because a usage comment is not a build step, and the original m23-ac filing
+// read exactly this comment — in this file and in m23g2/m23g3 — as evidence the
+// gate built first, scoring three gates SAFE that were not. The build is now
+// performed by `buildOrAbort()` below, where it cannot be misread.
 //
 // The pixel probe is compiled ON DEMAND into `.build/` (below). It used to be a
 // hand-built `/tmp` binary named only in this comment, which meant a re-run on a
@@ -40,8 +46,10 @@
 // not a gate. Env overrides (M23G1_PROBE/OUT/PIDFILE/BINARY/REPO) still work.
 import fs from "fs";
 import path from "path";
-import { spawn, execFileSync } from "child_process";
+import { execFileSync } from "child_process";
+import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
 
+const GATE = "m23g1";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
 const OUT = process.env.M23G1_OUT || "/tmp/m23g1";
 const PIDFILE = process.env.M23G1_PIDFILE || "/tmp/m23g1-staging.pid";
@@ -104,22 +112,17 @@ async function connect() {
   throw new Error("no connect");
 }
 
-// ── launch staging (pidfile-exact teardown of any previous run) ─────────────
-if (fs.existsSync(PIDFILE)) {
-  const oldPid = Number(fs.readFileSync(PIDFILE, "utf8").trim());
-  if (Number.isFinite(oldPid) && oldPid > 1) {
-    try { process.kill(oldPid); } catch {}      // pidfile-EXACT; never pkill/pgrep
-    await sleep(1500);
-  }
-}
-const log = fs.openSync(`${OUT}/staging.log`, "a");
-const child = spawn(BINARY, [], {
-  cwd: REPO, detached: true, stdio: ["ignore", log, log],
-  env: { ...process.env, DAW_CONTROL_PORT: PORT },
+// ── launch staging through the ONE home (m23-ac-2a) ─────────────────────────
+// `buildOrAbort` is the half this gate never had: before this it ran whatever
+// was compiled last. `startStaging` keeps the pidfile-exact teardown of a
+// previous run and refuses port 17600 in ONE place. Every M23G1_* override is
+// preserved — they let the gate be pointed at a bundle, which is deliberate.
+buildOrAbort();
+const { pid: stagingPid } = startStaging({
+  gate: GATE, root: REPO, port: PORT, binary: BINARY, pidfile: PIDFILE,
+  outDir: OUT, detached: true, logPath: `${OUT}/staging.log`,
 });
-child.unref();
-fs.writeFileSync(PIDFILE, String(child.pid));
-console.log(`staging pid ${child.pid} on :${PORT}`);
+console.log(`staging pid ${stagingPid} on :${PORT}`);
 await sleep(4500);
 
 const { ws, req } = await connect();
@@ -575,8 +578,7 @@ try {
   check("FATAL", false, String(err && err.stack ? err.stack : err));
 } finally {
   try { ws.close(); } catch {}
-  const pid = Number(fs.readFileSync(PIDFILE, "utf8").trim());
-  try { process.kill(pid); } catch {}          // pidfile-EXACT teardown
+  stopStaging(GATE, PIDFILE);   // m23-ac-2a: same pidfile-exact kill, one home
   clearTimeout(killer);
   const bad = checks.filter((c) => !c.ok);
   console.log(`\n${checks.length - bad.length}/${checks.length} assertions passed`

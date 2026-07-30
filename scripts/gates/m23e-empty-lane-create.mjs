@@ -36,8 +36,9 @@
 //
 //   M23E_PIDFILE=<scratch>/staging.pid node scripts/gates/m23e-empty-lane-create.mjs
 import fs from "fs";
-import { spawn } from "child_process";
+import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
 
+const GATE = "m23e";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
 const OUT = process.env.M23E_OUT || "/tmp/m23e";
 const PIDFILE = process.env.M23E_PIDFILE || "/tmp/m23e-staging.pid";
@@ -83,22 +84,17 @@ async function connect() {
   throw new Error("no connect");
 }
 
-// ── launch staging (pidfile-exact teardown of any previous run) ───────────
-if (fs.existsSync(PIDFILE)) {
-  const oldPid = Number(fs.readFileSync(PIDFILE, "utf8").trim());
-  if (Number.isFinite(oldPid) && oldPid > 1) {
-    try { process.kill(oldPid); } catch {}      // pidfile-EXACT; never pkill/pgrep
-    await sleep(1500);
-  }
-}
-const log = fs.openSync(`${OUT}/staging.log`, "a");
-const child = spawn(BINARY, [], {
-  cwd: REPO, detached: true, stdio: ["ignore", log, log],
-  env: { ...process.env, DAW_CONTROL_PORT: PORT },
+// ── launch staging through the ONE home (m23-ac-2a) ───────────────────────
+// `buildOrAbort` is the half this gate never had: before this it ran whatever
+// was compiled last. `startStaging` keeps the pidfile-exact teardown of a
+// previous run and refuses port 17600 in ONE place. Every M23E_* override is
+// preserved — they let the gate be pointed at a bundle, which is deliberate.
+buildOrAbort();
+const { pid: stagingPid } = startStaging({
+  gate: GATE, root: REPO, port: PORT, binary: BINARY, pidfile: PIDFILE,
+  outDir: OUT, detached: true, logPath: `${OUT}/staging.log`,
 });
-child.unref();
-fs.writeFileSync(PIDFILE, String(child.pid));
-console.log(`staging pid ${child.pid} on :${PORT}`);
+console.log(`staging pid ${stagingPid} on :${PORT}`);
 await sleep(3500);
 
 const { ws, req } = await connect();
@@ -469,7 +465,6 @@ const pass = checks.filter((c) => c.ok).length;
 console.log(`\nM23E ${pass}/${checks.length}`);
 fs.writeFileSync(`${OUT}/results.json`, JSON.stringify(checks, null, 2));
 try { ws.close(); } catch {}
-const pid = Number(fs.readFileSync(PIDFILE, "utf8").trim());
-if (Number.isFinite(pid) && pid > 1) { try { process.kill(pid); } catch {} }
+stopStaging(GATE, PIDFILE);   // m23-ac-2a: same pidfile-exact kill, one home
 clearTimeout(killer);
 process.exit(pass === checks.length ? 0 : 1);

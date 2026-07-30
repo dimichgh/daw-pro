@@ -43,8 +43,9 @@
 //
 //   M23F_PIDFILE=<scratch>/staging.pid M23F_FIXTURES=<dir> node scripts/gates/m23f-arrange-drop.mjs
 import fs from "fs";
-import { spawn } from "child_process";
+import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
 
+const GATE = "m23f";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
 const OUT = process.env.M23F_OUT || "/tmp/m23f";
 const PIDFILE = process.env.M23F_PIDFILE || "/tmp/m23f-staging.pid";
@@ -110,22 +111,17 @@ async function connect() {
   throw new Error("no connect");
 }
 
-// ── launch staging (pidfile-exact teardown of any previous run) ─────────────
-if (fs.existsSync(PIDFILE)) {
-  const oldPid = Number(fs.readFileSync(PIDFILE, "utf8").trim());
-  if (Number.isFinite(oldPid) && oldPid > 1) {
-    try { process.kill(oldPid); } catch {}      // pidfile-EXACT; never pkill/pgrep
-    await sleep(1500);
-  }
-}
-const log = fs.openSync(`${OUT}/staging.log`, "a");
-const child = spawn(BINARY, [], {
-  cwd: REPO, detached: true, stdio: ["ignore", log, log],
-  env: { ...process.env, DAW_CONTROL_PORT: PORT },
+// ── launch staging through the ONE home (m23-ac-2a) ─────────────────────────
+// `buildOrAbort` is the half this gate never had: before this it ran whatever
+// was compiled last. `startStaging` keeps the pidfile-exact teardown of a
+// previous run and refuses port 17600 in ONE place. Every M23F_* override is
+// preserved — they let the gate be pointed at a bundle, which is deliberate.
+buildOrAbort();
+const { pid: stagingPid } = startStaging({
+  gate: GATE, root: REPO, port: PORT, binary: BINARY, pidfile: PIDFILE,
+  outDir: OUT, detached: true, logPath: `${OUT}/staging.log`,
 });
-child.unref();
-fs.writeFileSync(PIDFILE, String(child.pid));
-console.log(`staging pid ${child.pid} on :${PORT}`);
+console.log(`staging pid ${stagingPid} on :${PORT}`);
 await sleep(4000);
 
 const { ws, req } = await connect();
@@ -350,5 +346,8 @@ try {
   console.log(`\nORCH_M23F pass=${pass} fail=${checks.length - pass} of ${checks.length}`);
   ws.close();
   await sleep(200);
+  // ⚠️ m23-ac-2a: this gate LEAKED — detached + unref, then exit with no
+  // teardown. Its orphan is adopted by whatever gate runs next.
+  stopStaging(GATE, PIDFILE);
   process.exit(checks.every((c) => c.ok) ? 0 : 1);
 }

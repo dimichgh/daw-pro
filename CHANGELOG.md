@@ -1,6 +1,1049 @@
 # Changelog
 
-## 2026-07-27 — Design: how a track EQ gets its own live spectrum
+## 2026-07-30 — Our own test tooling was quietly checking the wrong app
+
+Nothing in DAW Pro itself changed here. This is a fix to the automated checks we
+run against the app before calling a feature done — and it is worth writing down
+because for a while those checks could pass without proving anything.
+
+The checks work by launching DAW Pro and driving it like a very fast user. Eight
+of them were launching it *without rebuilding first*, so they were testing
+whatever version happened to be lying around from earlier — possibly hours old,
+possibly missing the very change being tested.
+
+While fixing that we found something worse. Four of the eight never shut their
+copy of the app down when they finished. The abandoned copy kept holding the
+connection, so the *next* check would fail to start its own copy and silently
+talk to the leftover one instead. We watched this happen: five checks reported a
+clean pass against an app they had not launched — one of them finishing in a
+single second — and three others reported failures that were not real, caused
+purely by inheriting leftover state. False passes and false failures from the
+same root cause.
+
+All eight now build first, and every one shuts down after itself, on success and
+on failure alike. We also replaced the tool that audits these checks: it had been
+looking for a specific line of code that an earlier cleanup had replaced with a
+shared helper, so it had stopped being able to see the very thing it was built to
+count. It now checks itself against a known-good list so it cannot go blind
+again without saying so.
+
+Two things this left on the machine while we were fixing it, both now cleaned up
+and worth knowing about:
+
+- **Three copies of DAW Pro were left running.** They had no window and no
+  connection — they were the copies that lost the race for the connection and
+  kept running anyway — so our own "did anything get left behind?" check, which
+  looked at the connection, reported all clear. It only looks at connections; a
+  leftover copy without one is invisible to it. It now looks for the copies
+  themselves.
+- **A stale recovery marker.** Shutting a copy down abruptly leaves behind the
+  file DAW Pro uses to detect a crash, so the next launch can offer to recover
+  from a crash that never happened. If you have seen an unexpected recovery
+  prompt, that is where it came from. Only one of these checks currently cleans
+  that up after itself; making all of them do it is the next task, and it will
+  always leave alone any marker belonging to a copy you are actually running.
+
+## 2026-07-30 — More insert slots on the master and bus strips, and they stay put
+
+You asked for this one: the master and bus strips now hold **five** insert slots
+by default instead of three, the slots are drawn whether or not you've filled
+them, and a longer chain scrolls inside its own space.
+
+The master strip is where the difference is biggest, because it never had any of
+this. Until now it simply grew as you added effects — so every insert pushed the
+volume fader, the loudness meters, the stereo display and the reference row a
+little further down. Measured on the real window, an eight-effect master chain
+moved the fader **205 points** down the strip. Add a compressor and the fader
+you were reaching for had moved. Now the insert area is a fixed size: the fader
+and everything under it stay exactly where they were, and effects past the fifth
+scroll within the insert list rather than shoving the rest of the strip around.
+
+Bus strips already held their shape; they were just cramped at three slots. A bus
+is where a glue chain lives — compressor, EQ, saturation, limiter — so they now
+get five as well. Ordinary channel strips are unchanged at three, deliberately:
+they're the most numerous strips in the console and they don't need the space.
+
+Two honest notes. On the master, holding five slots open costs the room the strip
+used to give the fader when the chain was short, so the master now scrolls a
+little sooner than it did — it already started scrolling at the third insert
+before this change, so the difference is small, but it's real. And on a short
+window a bus quietly gives slots back rather than squeezing the fader, dropping
+to four or three; every bus does it at the same moment, so the console stays
+even with itself.
+
+## 2026-07-30 — Making the checks that guard the app check the right app
+
+No change you can see in the DAW today. This is work on the machinery that
+verifies it, and it was overdue.
+
+Alongside the automated tests there are 42 "gates" — scripts that launch the
+app for real and drive it the way a person would, because some things only a
+live run can see. The trouble was that most of them never launched anything.
+They connected to whatever copy of the app happened to be running, which might
+have been built hours earlier from different code. Run one after a change and
+it would report a confident pass that meant nothing at all.
+
+The build-and-launch steps that a handful of gates did get right had been
+copy-pasted seven times over, so there was no single place to fix. There is now:
+one shared module that builds the app, launches its own private copy, and shuts
+it down afterwards. Getting a connection without a fresh build is no longer
+possible, and the rule that these scripts must never touch the copy of the app
+you have open is enforced in that one place instead of being remembered
+separately in every file.
+
+All seven gates that already launched their own copy now use it, each checked
+assertion-by-assertion against a recording of its previous run to prove nothing
+changed in the process. The last two needed the shared module to grow a little
+first — they start the app in a different mode, and a shared thing that cannot
+accommodate real differences just gets worked around, which is how seven copies
+came to exist in the first place. Still ahead: the eleven gates that launch
+without building, and the twenty-four that never launch at all.
+
+One of the gates turned out to have been failing quietly for several days — it
+counts the app's commands and had not been told about two that were added on
+purpose. A check nobody runs is indistinguishable from a check that passes.
+
+## 2026-07-29 — The safety net for a stuck plug-in was never actually attached
+
+Yesterday's investigation turned up a defect in the code that is supposed to
+stop a misbehaving plug-in from hanging the app. Today it is fixed, and the fix
+is smaller and stranger than it sounds.
+
+When the app loads an instrument or effect plug-in, it starts a ten-second
+countdown alongside it. If the plug-in has not finished by then, the app gives
+up and reports it as stalled instead of freezing. That was the design. The
+problem was that the countdown itself was scheduled on the same main thread the
+plug-in runs on — so the alarm could only ring once the main thread was free,
+which is to say once the problem had already gone away. It was a smoke detector
+wired to the light switch in the room it was watching.
+
+This was not theoretical. Measured side by side under identical conditions, with
+the main thread deliberately held busy for one second and a 200-millisecond
+countdown: the old arrangement fired zero times out of six, always returning
+"finished successfully" a full second later. The new one fired six times out of
+six, every time within about 201 milliseconds. An intermediate version — which
+changed everything *except* moving the countdown off the main thread — also
+scored zero out of six, which pins the cause precisely.
+
+The countdown now runs independently of the main thread, so the deadline is a
+real deadline. The mechanism lives in one place with its own tests rather than
+being hand-rolled at each site.
+
+**What this does not fix, stated plainly.** The app now *decides* on time that a
+plug-in has overrun. It still has to get back onto the main thread to record
+that decision — so a plug-in that is actively holding the main thread hostage
+can still freeze the app, which is the worst case this guard was imagined for.
+Genuinely solving that means running plug-ins outside the app's own process, and
+that is a much larger piece of work; it is written down rather than glossed over.
+No timeout can interrupt code that is already running.
+
+One honest side effect. Several audio-plug-in tests had been passing on what
+turned out to be a coin flip — the old countdown lost the race most of the time,
+so a load that genuinely took twenty-odd seconds was recorded as success. With a
+working deadline they started failing truthfully. The cause is the test machine,
+not the app: the same load takes about half a second when run on its own, and
+twenty-six seconds when several hundred other tests compete for the same thread.
+Test runs now get a longer allowance while the shipped app keeps its ten-second
+limit, and a new test pins that shipped value so it cannot quietly drift upward.
+
+Full suite: 4421 tests across 448 suites, green on eight consecutive runs.
+
+## 2026-07-29 — Chasing the last "flaky" test found a real bug in a safety net
+
+The last of four intermittent test failures was measured rather than guessed
+at, and the measurement turned up something more important than the test.
+
+The numbers: loading a General MIDI sound bank takes about 45 milliseconds when
+that test runs alone, and about 20 to 24 seconds when the full suite runs
+around it — a 400-fold difference. Deliberately starving the machine of CPU
+did *not* reproduce it, which rules out plain slowness. Strangest of all, the
+test passes most of the time despite always exceeding its own 10-second limit,
+and how long it takes doesn't predict whether it passes: a 19.6-second run
+failed and a 23.8-second run passed.
+
+The reason is a real defect, now filed. The 10-second limit is implemented as a
+timer that has to get back onto the app's main thread to fire. When the main
+thread is busy, the timer is stuck behind whatever is holding it — so it isn't
+really a deadline at all, and whether it or the actual work finishes first is a
+coin flip. That matters well beyond tests: this limit exists to stop the app
+hanging on a plug-in that has seized up, and seizing up the main thread is
+exactly what a bad plug-in does. The safety net fails in the precise case it
+was built for.
+
+The test itself now reports one clear failure naming the timeout, instead of
+three that looked like three unrelated problems.
+
+Suite: 4413 tests / 446 suites.
+
+## 2026-07-29 — Two more "flaky" tests fixed, and one of them was lying
+
+Two tests only ever failed when the whole suite ran at once. Both were
+measuring something that belongs to the entire machine rather than to the code
+under test.
+
+The first checked that redrawing an EQ curve finishes in under a millisecond —
+a fair thing to want, but an absolute stopwatch reading taken while every core
+is busy measures the machine's mood, not the code. It now times a fixed
+reference calculation in the same run and checks the curve redraw stays within
+a multiple of it, so the answer no longer depends on how loaded the machine is.
+The multiple was chosen from measurements across idle, full-suite, and
+deliberately overloaded conditions rather than picked to make one run pass, and
+a companion test deliberately triggers a slowdown to prove the budget still
+catches one.
+
+The second checked that a real-time audio path never allocates memory. It used
+two probes, and the noisy one turned out to be worse than noisy: under load it
+reported a *negative* number of retained allocations on a loop that only ever
+retains — impossible, and caused by other threads freeing memory at the same
+time. It was also blind to exactly the kind of allocation it was supposed to
+catch. Removed. The surviving probe watches only the calling thread, catches
+both transient and retained allocations, and was confirmed to fail when a test
+allocation was deliberately added.
+
+Suite: 4413 tests / 446 suites, verified across three consecutive clean runs.
+One genuinely intermittent test remains and is being worked separately.
+
+## 2026-07-29 — A "flaky" test turned out to be a real bug about sample rates
+
+One of four tests we'd written off as randomly failing wasn't random at all. It
+checked that the limiter reports 240 samples of lookahead delay — but 240 is
+just 5 milliseconds at 48 kHz. Plug in an audio device running at 44.1 kHz and
+the correct answer is 221, so the test failed every single time at that rate.
+It only *looked* intermittent because the engine follows whichever audio device
+is active, and this machine has several installed.
+
+The rule that turns 5 milliseconds into a sample count now lives in exactly one
+place, and both the limiter and the tests read it from there, so they cannot
+drift apart. A new test pins the derivation at 44.1 kHz, 48 kHz and 96 kHz
+directly, without needing any audio hardware.
+
+Worth stating plainly: every past run that shrugged this off as "the known
+flake" was mis-attributing a genuine rate-dependence bug. Three genuinely
+intermittent tests remain and are being worked separately.
+
+Suite: 4412 tests / 446 suites.
+
+## 2026-07-29 — Running the tests no longer litters your recovery sessions
+
+Running the test suite used to write crash-recovery snapshots into your real
+application-support folder, and the app would then offer that junk back to you
+on next launch as sessions to recover — empty projects with names like
+`Recovered` and `T`. Merely running the tests dirtied your data.
+
+Test processes now write their recovery bundles into a throwaway temporary
+folder instead. The shipped app is unaffected: it still uses the real location,
+and the rule that decides where files live is unchanged and still has exactly
+one definition, so the autosave writer and the recovery scanner cannot drift
+apart.
+
+The five stray bundles already in your folder were deliberately left alone —
+deleting things in your data directory is your call, not the fix's. They are at
+`~/Library/Application Support/DAWPro/Autosave/` if you want them gone.
+
+Verified by running the whole suite twice and confirming the real folder was
+untouched both times, while the redirected temporary folders were confirmed to
+have actually been created — proving the writes were diverted rather than
+simply not happening. Suite: 4411 tests / 445 suites.
+
+## 2026-07-29 — Voice training: use any voice you have the rights to
+
+The rule that you could only train a voice on your own recordings is gone, on
+the project owner's instruction. Train on whatever dataset you supply, or drop
+in a third-party voice model — the app does not check whose voice it is, and it
+will not refuse one on provenance grounds. **Responsibility for holding the
+rights to a voice sits with you**, including if you choose to use one you are
+not authorised to.
+
+The app, the control surface and the MCP tool descriptions were already
+relaxed. What was still contradicting the policy was documentation and agent
+guidance, which is now aligned: the AI-agent wire reference no longer instructs
+agents to refuse third-party voices, and the voice sidecar's README and
+voice-store comment no longer claim voices can only come from your own
+recordings. No behaviour changed and no logic was touched — the sidecar edit is
+comment-only.
+
+Unchanged: nothing is bundled — the voice store still ships empty, and `base`
+remains an untrained smoke-test target rather than a voice. Importing a model
+file you supply is supported; going out and finding voice models at scale is
+not something the app does.
+
+## 2026-07-29 — Note-level vocal pitch correction: design spike says GO
+
+No user-facing change. This is a decision, not a feature.
+
+We investigated what it would take to build Melodyne/Auto-Tune-class pitch
+correction — split a vocal into notes and edit each one's pitch and timing —
+and the answer is **GO**. The expensive half turns out to be already built: the
+time-stretch library we ship for clip stretching can also shift pitch while
+keeping formants intact (so a corrected vocal still sounds like the same
+singer, not a chipmunk), and it can do it on a curve that changes over time
+rather than one fixed amount per clip. The missing half is a pitch detector,
+which we can write ourselves on an FFT already in the app, adding no new
+licensing obligations.
+
+First shippable piece is an automatic tuning pass an AI agent can drive,
+estimated 4.5–5.5 weeks; the full note-by-note editor is 14.5–19.5 weeks. The
+largest genuine unknown is how it sounds on real voices — a listening test that
+is scheduled as the first half-week of work rather than assumed away.
+
+Two documents landed in `docs/research/`: a survey of pitch-detection
+algorithms and note segmentation, and the design with the GO/NO-GO. They were
+written independently, and comparing them surfaced an open question — the
+design picked a hand-written detector without having seen a small MIT-licensed
+model that may do the job better. That is filed as `m23-ap` and must be settled
+before implementation starts.
+
+## 2026-07-29 — Click a track header to select everything on it
+
+Click a track's header in the sidebar and every clip on that track is selected —
+ready to move, nudge, or delete as one. Hold Shift (or Command) and click a
+second header to add its clips to what you already had, and click it again to
+take them back off. Mix and match freely: a header click, then a Shift-click on
+one more clip, and the whole lot deletes in a single undoable step.
+
+Selecting a track selects its *clips* — a track is not a separate thing you can
+select, so group delete never has to guess whether you meant "these clips" or
+"this whole track". Clicking the header of an empty track simply clears the
+selection, the same way clicking empty space in the timeline does.
+
+One deliberate quiet moment: selecting a track does **not** open the piano roll
+on any of its clips. A header has no one clip you pointed at, and opening the
+note editor on whichever happened to sort first is the kind of surprise that is
+worse than doing nothing. Clicking a clip still opens it, exactly as before.
+
+## 2026-07-29 — Arrow keys nudge clips in the arrange
+
+Select a clip — or twenty — and tap the left and right arrow keys to walk them
+along the timeline. Each press moves the selection by one grid step, so what the
+arrow does always matches the grid you can see. Hold Shift for a whole bar,
+Option for a fine 1/32-beat step, and hold the key down to slide something into
+place; a burst of presses collapses into a single undo rather than forty.
+
+A nudge MOVES your clips, it does not tidy them up. A clip sitting deliberately
+off the grid keeps its offset and simply travels — and a group keeps its internal
+spacing exactly, including when it runs into the start of the song, where the
+whole selection stops together instead of stacking up at beat zero. If snapping
+is off, the arrows still work, one beat at a time.
+
+Arrows stay out of the way when they belong to something else. Renaming a track,
+typing in any field, or working with a modal open, the arrow keys do what they
+always did. And while you have notes selected in the note editor, the arrows are
+left alone rather than sliding the clip out from under you.
+
+Up and down do not move clips between tracks yet — that needs groundwork we have
+not built.
+
+## 2026-07-29 — AI assistants can now delete and move clips in groups, as one undo
+
+Ask the assistant to delete four clips and it used to issue four separate
+commands, leaving you four separate undos to walk back. Now it sends one, and one
+Cmd-Z puts everything back — the same single-step behaviour you already got when
+you selected and dragged clips by hand.
+
+Group moves also report what actually happened. If you ask to shift a selection
+eight beats earlier but the leftmost clip is only two beats from the start, the
+whole group stops at the edge together, keeping its spacing, and the assistant is
+told it moved two beats rather than eight — so it can adjust instead of quietly
+compounding the mistake on its next move.
+
+## 2026-07-29 — A new instrument track now tells you what to do with it
+
+Add an instrument track and its lane no longer sits there blank. A quiet
+"Double-click to add a clip" appears on it, and stays until the lane actually has
+a clip. Add one and the hint goes; delete it and the hint comes back.
+
+The double-click itself has worked since the previous round. The problem was that
+nobody could tell — a gesture you cannot see is not an affordance, and the report
+that prompted this used exactly that word. So the fix is the sentence, not the
+behaviour.
+
+It only appears where it is true. Audio and bus lanes refuse MIDI clips, so they
+never show it; the hint asks the same question the refusal does, rather than a
+second one that happens to agree today. And it is about the lane's contents and
+nothing else — add a track while the transport is rolling and it still appears,
+because an empty lane is empty either way.
+
+It is deliberately dim and deliberately not clever: no arrow, no exclamation, no
+animation. In a project with four fresh tracks you see it four times at once, and
+anything louder would read as clutter rather than help.
+
+## 2026-07-29 — Hold a key after pressing stop, and it no longer goes quiet on you
+
+Play something, press stop, then hold a key down on your MIDI keyboard. Until now the note
+sounded for eight seconds and then died underneath your finger, while the key was still
+down. Nothing you could do brought it back except letting go and pressing again.
+
+This was filed as an obscure corner case — supposedly it needed a freshly-launched app and a
+track that had never played. That turned out to be wrong, and a comment inside the engine
+asserting the false version is what kept it filed that way. Every stop, seek and tempo change
+unpublishes the track's schedule, so the affected state is simply "the transport is stopped":
+the ordinary condition for practising, auditioning a sound, or noodling between takes.
+
+The engine now counts how many thru keys are actually held down and keeps the instrument
+rendering while any of them are. A note held for a minute sounds for a minute. Releasing it
+still lets the tail ring out and then genuinely goes idle, so a stopped project costs nothing.
+
+Two limits are documented rather than hidden. A note sustained by the pedal alone — key
+already released — is still cut, because the count tracks keys rather than voices. And if a
+note-off is genuinely lost (a cable pulled mid-note), the note stays stuck, which is honest —
+the voice really is stuck — but there is still no panic button to clear it. Both are filed.
+
+## 2026-07-29 — The note editor's BAR readout stops pretending to be the playhead
+
+In the note editor's header, beside the buttons that add or remove a whole bar, sits a small
+`BAR 1` readout. It was drawn in the same glowing cyan the app uses everywhere for "here is
+where playback is" — so if the playhead was sitting four bars away from the part you were
+editing, the header still lit up `BAR 1` in playback cyan. It looked like a position. It
+never was one: it is simply the bar those two buttons will act on.
+
+It now reads in the same quiet grey as the zoom percentage a few chips to its left. The
+words and the number have not changed, and neither has what the buttons do — the only thing
+that was lying was the colour. Cyan in the note editor means the playhead, and now it only
+ever means the playhead.
+
+## 2026-07-29 — Your effects have their names back
+
+Insert slots in the mixer used to eat their own labels. A compressor read `Compr...`, a
+limiter read `Lim...`, and the newest effect read `Bass Enh...` — which is worse than it
+sounds, because `Co...` is not obviously a compressor rather than a chorus. You were being
+asked to recognise your effects by their first few letters.
+
+Every built-in effect now shows its full name, on every strip, whether or not it is working.
+There are only ten of these names and we know all of them, so there is no good reason for
+any of them to be cut short.
+
+Making the room meant moving the little activity meter on compressors, limiters and gates.
+It used to be a small bar squeezed in beside the name; it is now a thin line running under
+the whole row, lighting up the same way. It is a fair trade but it is a trade: the meter is
+easier to miss at a glance than it was, and in exchange the name it was crowding is
+readable. Built-in slots also lost their small "edit" glyph — clicking anywhere on the slot
+opens the controls, which it already did.
+
+Plug-ins are different and stay different. A third-party plug-in's name comes from its
+maker and can be any length, so those still shorten with a `…` when they have to. A name we
+chose is a label; a name someone else chose is data.
+
+## 2026-07-29 — The bass enhancer tells you what it is doing
+
+The knobs are in the mixer now. Add **Bass Enhancer** from a channel's "+" menu and you get
+the three controls: **crossover** (set it to the low limit of the speaker you are worried
+about), **amount**, and **mix**.
+
+The card also tells you something most plug-ins in this category do not. Above the knobs,
+before you touch anything, it says: **adds harmonics that are not in your recording**. Both
+things about this effect are true at once — it makes bass audible on small speakers, *and*
+what it makes audible is new sound rather than something uncovered. A beginner should not
+have to work that out from a spectrum analyser. So the card says it plainly, says the
+harmonics print into your bounce, and explains what the knob ranges cannot. Where to
+put the crossover — the lowest note your speaker plays. That amount sets how loud *and* how
+bright the harmonics are, and that the character holds whether the part is quiet or loud.
+That mix trims how much of them you hear and never turns your own signal down.
+
+None of that is a tooltip. It is drawn on the card, in plain type, and it carries no
+numbers: a number sitting an inch above the real readouts would read as a measurement of
+your track, and it is not one.
+
+If you want to hear the point of the effect, play a sub-heavy bassline on a laptop speaker
+with the enhancer bypassed and then active. Rendered through a simulated small speaker, the
+dry part loses around 31–40 dB of what it started with, and the enhanced part still delivers
+11–17 dB more than the dry one does — most where the note is lowest, which is where the
+speaker is worst.
+
+## 2026-07-29 — Bass that survives a phone speaker
+
+A laptop speaker cannot move enough air to reproduce a 50 Hz note. It never will. But
+your ear will happily *infer* that note if it hears the harmonics that sit above it — the
+missing-fundamental effect, and the reason a bassline can still read as a bassline through
+a phone.
+
+There is now a bass enhancer that does exactly this. It listens to the low end below a
+crossover you choose, generates the harmonics that low end *would* have produced, and mixes
+them back in above the crossover. Your original low end is untouched; the harmonics are
+added on top. On a big system you hear the real bass, on a small one you hear the
+harmonics and infer the rest.
+
+It is not a distortion or a saturator, and the difference is audible. A saturator shapes
+everything you feed it, so it colours the whole track. This works on the low band alone,
+and it normalizes that band's level before shaping it — which means the effect sounds the
+same on a quiet passage and a loud one, instead of getting harsher as the part gets louder.
+Two controls do the work: **amount** sets how much harmonic content is generated and how
+bright it is, **mix** sets how much of it you hear.
+
+Turn either control to zero and the audio is bit-for-bit what went in — not "almost the
+same", byte-identical.
+
+You will find it in the "+" menu on any mixer insert slot, alongside the other effects, and
+your AI assistant can add it for you by name.
+
+One thing we want to be straight about, because it is easy to sell this the wrong way: this
+effect **adds sound that was not in your recording**. It is not uncovering bass that was
+hidden in there — it is manufacturing new overtones and printing them into your bounce. That
+is the honest description of what every enhancer of this kind does, and the effect's own
+panel says so above its controls rather than leaving you to find out later.
+
+## 2026-07-29 — The EQ now shows you where the instrument lives
+
+The frequency reference stopped being something only the AI assistant could read. Open the
+EQ on a bass or a guitar track and the plot itself now shows you two things: a soft shaded
+band where that instrument's notes actually sit, and a dashed line at the frequency below
+which there is nothing worth keeping. You can see, while you drag, whether you are cutting
+rumble or cutting the instrument.
+
+The guidance deliberately does not look like your settings. Everything bright on that plot
+means something true about *your* track right now — the cyan curve is what you built, the
+green is what is actually being measured. A reference is published advice about a *kind* of
+instrument, so it is drawn in neutral dashes, and its labels read `TYPICAL 41–98 Hz` and
+`CUT BELOW 30 Hz` rather than borrowing the wording of the real controls. Advice should
+never be able to pass for a readout.
+
+Where the app does not know, it says so plainly instead of inventing a range. A recorded
+audio track gets "the app cannot know what was recorded"; a track with no instrument chosen
+asks you to choose one; a drum kit points out that each piece has its own range and suggests
+asking the Copilot about the kick or the snare specifically. And where the underlying
+research is soft — a drum's pitch is a tuning choice, not a physical constant — the row says
+so on the face of it.
+
+Being straight about the reach: today this draws for pianos, guitars and basses. Other
+instruments are in the reference the assistant reads, but cannot yet be identified from the
+track alone well enough to draw on your plot.
+
+## 2026-07-28 — Your AI assistant now knows where an instrument actually lives
+
+Ask an assistant to "clean up this bass" and until now it was guessing. It could add a
+high-pass filter and it could measure the result, but it had no idea where a bass guitar's
+lowest note actually sits — so it had no way to tell a cut that removes rumble from a cut
+that removes the instrument.
+
+There is now a built-in frequency reference the assistant can read: for each instrument
+family, the range its fundamental notes occupy, the regions that make it sound like itself,
+the regions engineers usually clean up, and a recommended high-pass corner it can act on
+directly. Ask for the vocabulary with no arguments and it lists every family it knows. Point
+it at a track and it works out the family from the instrument, or from the drum note you
+name. When it cannot tell, it says so and tells you how to be specific — it never guesses.
+
+**Every number is cited to a source, and the sources were checked.** Each entry carries the
+verbatim sentence it came from, the page it came from, and the date it was read. Where the
+honest answer was "no reliable source says this", the entry was **removed rather than filled
+in with something plausible** — seven instrument families were dropped for exactly that
+reason, mostly because no trustworthy source gives an instrument-specific filter setting for
+them. Three drum entries ship with an explicit note in the text the assistant reads, saying
+their pitch is a tuning choice rather than a fixed property, because that is true and
+pretending otherwise would be the kind of confident-sounding advice that ruins a mix.
+
+
+## 2026-07-28 — An AI assistant can now hear what an effect is doing
+
+Until now an agent working on your mix could read the master output and nothing else. It could
+add an EQ, change its settings, and have no idea what came out the other side — it was mixing
+with its eyes shut. `fx.spectrum` lets it measure any single effect on any track, or on the
+master, and get back the same twenty-four frequency bands the master analyser has always
+reported.
+
+The measurement tells you where it was taken, because that turns out to matter. An effect on a
+track is measured *before* that track's fader, so moving the fader does not change the reading.
+An effect on the master is measured *after* the master fader, so moving that one does. The two
+numbers mean genuinely different things, and a reading that did not say which it was would make
+a strip and the master look like they disagreed when both were right.
+
+Measuring costs something, so it is leased rather than left running: a measurement stays live
+for three seconds and lapses on its own if nobody asks again. Eight effects can be measured at
+once. Ask for a ninth and it says no, and tells you the limit, rather than quietly switching one
+of the others off. If you have an EQ window open on the same effect the assistant is measuring,
+neither one can turn the other off — they each hold their own.
+
+## 2026-07-28 — Your meters keep moving when you click away from DAW Pro
+
+Three more live displays used to freeze the moment DAW Pro stopped being the frontmost window:
+the vibe orb in the transport bar, the goniometer's trail, and the stereo correlation numbers
+beside it. Click into your browser to look something up, or into a plugin window, and they
+stopped where they were — still lit, still showing a number, just no longer telling you the
+truth. Come back and they'd jump to catch up.
+
+That is the same freeze the master EQ analyser had, and this is the sweep that found the rest
+of them rather than fixing one and hoping. They now update continuously: the orb sixty times a
+second, the goniometer trail twenty, the correlation readouts ten.
+
+If you are wondering about battery: while DAW Pro is in front, nothing costs more than it did,
+and the orb actually costs less — it had been running at the display's own rate, 120 times a
+second, and now holds a steady 60. The whole of the added work is in the background, which is
+exactly the work that was missing. That is the difference between a meter that tells you the
+truth and one that lies to you, which is not a trade a DAW gets to make. Deliberately absent:
+any "pause it when the window is hidden" behaviour. That idea is what caused this in the first
+place.
+
+## 2026-07-28 — Channel strips stop shuffling when you add an effect
+
+Every channel strip now keeps a fixed space for three inserts. The fader, the dB number, the
+Mute/Solo/Arm buttons, the sends and the output all sit at the same height on every strip, and
+they stay there whether a track has no effects or twelve. Add a fourth insert and the list
+scrolls inside its own little window instead of shoving everything below it downward.
+
+Before this, a strip grew as you added effects. Five ordinary inserts pushed that strip's pan
+row, fader and dB readout down by 121 points while the strip next to it stayed put, so the
+console never lined up and the controls moved under your cursor as you worked.
+
+Folding the inserts away still gives the fader more room — it hands back the whole reserved
+space, not just the rows you were using, because a fold that kept three empty rows would be a
+button that does nothing.
+
+The reserved space explains itself rather than sitting there blank. A strip with no effects
+shows a dashed outline saying "No inserts"; a strip with one or two shows the effects you have
+and then dashed outlines for the rest, so it reads as "three slots, one filled" instead of
+looking like something failed to appear. The outlines are deliberately faint — a hairline, not
+a grid of boxes competing with the effect names.
+
+Two honest notes. Compressors and gates are taller rows than the others, so two of them fill
+the space and start scrolling sooner — the controls below still do not move. And adding a
+*send* can still nudge the rows beneath it; only the inserts are pinned so far.
+
+## 2026-07-28 — The EQ on any track now shows the frequencies, not just the master
+
+This is the one you asked for. Open the EQ on any track and the moving green spectrum is
+there behind the curve, exactly like the master EQ has always had. Before today only the
+master showed it, because only the master had a meter running; the last three rounds of
+groundwork built one that any effect can borrow, and this turns it on.
+
+One thing on the card is worth reading once. The green fill on a track's EQ is measured
+*before* that track's fader — so if you pull the fader down, the picture does not move.
+That is correct, not a broken meter: it is showing what the EQ is working on, not what is
+leaving the channel. The master EQ's fill is measured *after* the master fader, so that one
+does follow its fader. The two look identical, so each card now says in plain words which
+one you are looking at when you hover it.
+
+If the meter cannot run for some reason, the card shows a flat floor and tells you it is not
+running, rather than drawing something that looks like silence. Nothing is ever invented.
+
+Only the EQ card you have open is measured — closing it, or switching the card to the knob
+view, stops the measurement. Nothing is running in the background on inserts you are not
+looking at.
+
+**Also fixed, and it was there before today:** the master EQ's spectrum froze whenever DAW Pro
+was not the frontmost app — click your browser, and the green fill stopped moving while still
+looking like a live meter. It has been that way since the curve editor shipped. It now keeps
+running whether or not the window has focus, which also matters because an AI agent driving
+the app leaves the window in the background most of the time.
+
+## 2026-07-28 — Proving the chain probe works everywhere, not just somewhere
+
+No visible change again — this is the last groundwork entry before the feature surfaces.
+
+The probe was attached to effect chains in the previous entry. The question this one answers
+is whether it works on *every* kind of track, or only the one that happened to get tested.
+Instrument tracks, audio tracks, buses and the master output are built differently inside the
+app, and a probe that quietly worked on three of them would look fine right up until someone
+tried the fourth.
+
+All four are now covered, along with the awkward moments: switching one effect for another
+while the probe is running, a plugin being swapped underneath it, changing the audio device's
+sample rate, and turning an effect off and back on. In each case the reading has to keep
+working without a gap, and now has to keep working, because a test fails if it doesn't.
+
+There is also a limit on how much this can cost. A probe that made playback stutter would be
+worse than no probe. Eight can run at once, and the measured cost of all eight together is
+about 0.7 microseconds per audio block — roughly one part in fifteen thousand of the time
+available. The ceiling is enforced by a test rather than by hope.
+
+One thing worth knowing came out of the measurements, and it will be visible when the
+displays arrive: a probe on a track reads the sound *before* that track's volume fader, while
+a probe on the master output reads it *after* the master fader. Both are correct and useful,
+but they answer slightly different questions, so the two displays will say which is which.
+
+## 2026-07-28 — Connecting the chain probe, without disturbing the sound
+
+Still nothing visible, and still deliberately so. The previous entry built the piece that
+carries audio safely off the processing thread. This one attaches it to the effect chains
+themselves, so any single effect on any track can be asked to report what it is hearing.
+
+Two things had to be true, and both are now proven rather than assumed. The first is that
+turning the probe on cannot change your audio in any way — not the sound, not the timing,
+not a single sample. Switching it on and off mid-session leaves the output bit-for-bit
+identical, and none of an effect's internal state is disturbed, so nothing clicks and no
+reverb tail gets cut short when you open or close a display.
+
+The second is subtler. When the audio engine restarts itself — which it does on its own
+after certain changes, without telling you — everything gets rebuilt from scratch. A probe
+that was switched on before that point has to still be switched on after it. Otherwise the
+display stays open showing a reading that stopped updating, which is worse than showing
+nothing at all: it looks like silence rather than like a failure. That case now has a test
+that fails loudly if it ever breaks.
+
+One unrelated improvement came out of the work. Measuring the audio path closely enough to
+prove it never pauses for memory revealed that the effect-chain loop itself had been asking
+for small amounts of memory on every pass — harmless in practice, but exactly the kind of
+thing that becomes a click under load. It no longer does.
+
+## 2026-07-28 — Groundwork for seeing inside an effect chain
+
+Nothing changes for you in this release. This is the first piece of a feature that will let
+you watch the spectrum at any point in an effect chain — before the compressor, after the
+EQ — instead of only at the master output.
+
+The hard part is that audio processing happens on a thread that must never be interrupted.
+It cannot wait for anything, and it cannot ask the system for memory; if it stalls even
+briefly, you hear a click. So the measuring cannot happen there. What landed here is the
+handover: the audio thread does nothing but copy samples into a fixed buffer it already
+owns, and all the actual analysis happens elsewhere, on the same code that already draws the
+master spectrum. Not a copy of that code — the same code, so the two readings can never
+drift apart.
+
+The buffer has a fixed size, which means it can fill up if the display side stalls, such as
+when the window is hidden. Rather than lag further and further behind or show a torn
+half-updated reading, it keeps the newest audio, discards the oldest, and counts exactly how
+much it dropped — so the display can be honest about what it missed instead of quietly
+lying.
+
+None of this is wired to anything yet: no meter, no menu, no visible change. It ships now,
+tested on its own, because getting the handover wrong is the kind of bug that shows up as an
+occasional click during playback and is nearly impossible to trace later.
+
+## 2026-07-28 — The commands that quietly accepted anything
+
+Twenty-six of DAW Pro's 161 commands used to ignore options they didn't recognise. Ask one
+for a project overview and misspell an option, and it would hand back the overview as if
+nothing were wrong. Nothing was corrupted — every one of the twenty-six only *reads* — but
+a typo looked exactly like success, which is the one response that teaches you nothing.
+
+All twenty-six now answer the way the other 135 already did: they name the option you got
+wrong, and either list the ones they accept or tell you they take none. The check runs
+before the command does any work, so a mistyped request never reaches a sidecar, a plugin
+scan, or the telemetry counters it would otherwise have reset.
+
+This one reversed a decision rather than filling a gap. Six tests asserted the old
+permissive behaviour on purpose — one called it "house style", which it had stopped being
+some time ago, once 135 commands did the opposite. Those tests now assert the new
+behaviour and say why it changed.
+
+The safeguard is that a command can no longer be added without this check: a test reads
+the source, compares it against the command list, and names any command that slipped
+through. Worth noting what that test *can't* do — it proves the check exists, not that it
+runs first. So the ordering is verified separately, by confirming a rejected request never
+touches the engine at all. Moving the check later in one command left the source test
+perfectly green and only the ordering test caught it.
+
+Because stricter input checking can break whatever was already sending the old, sloppier
+requests, the AI-agent bridge was checked too: every one of the twenty-six sends either no
+options at all or exactly the ones now allowed, and its test suite passes unchanged.
+
+## 2026-07-28 — A comment that said the work was done
+
+Eighteen commands in DAW Pro take no options at all. Misspell an option on one of them
+and it tells you so by name. That behaviour was only actually *checked* for one of the
+eighteen — the other seventeen were running on trust.
+
+They are all checked now, from a single table, with the exact sentence pinned rather than
+a loose "does it mention the word I typed". Adding a nineteenth such command is a one-line
+addition, and if someone forgets, a test reads the source and fails — it no longer depends
+on anyone remembering.
+
+What made this worth doing was finding *why* the gap survived. A comment in the test file
+announced itself as a completed survey and listed eight commands as covered. Three were.
+The other five had never been tested anywhere, and every later count — including the one
+that scheduled this work, and the one this session took to double-check it — inherited the
+claim without re-deriving it. The comment has been corrected to say what it actually
+covers. A comment is not coverage.
+
+Verified on the live control port: four of the five untested commands were driven over the
+real connection and answered exactly as pinned, including one that starts a background
+process — it refused the bad option without starting anything.
+
+One more thing surfaced while measuring: twenty-six other commands accept misspelled
+options *silently*, with no complaint at all. They are all read-only, so nothing can be
+damaged, but an assistant that typos an option gets a cheerful success instead of being
+told. That is filed as its own item.
+
+## 2026-07-28 — Packaging the app somewhere other than on top of your copy
+
+The script that assembles DAW Pro into a real `.app` could only ever build it in one
+place: `dist/DAWPro.app` — the copy you actually launch. That made the packaging path
+awkward to test. Checking that a bundle with the speech-model weights sealed inside it
+still passes Apple's signature check meant overwriting your app with a 1.5 GB version of
+itself, so the check kept getting deferred instead of run.
+
+It now takes `--output`, so a throwaway bundle can be built off to the side and verified
+without your copy being touched at all. Both modes were exercised that way and both pass
+the stricter signature check.
+
+Two details worth naming. The script registers the bundle with macOS so "quit DAW Pro"
+resolves by name — and that registration is machine-wide and outlives the folder, so a
+throwaway bundle would leave a ghost entry competing with your real app. Registration is
+now skipped for any non-default output. And because the new flag feeds a path straight
+into `rm -rf`, an empty path or one that doesn't end in `.app` is refused outright.
+
+The check that mattered most was the one asked before any of this: does the app actually
+look inside its own bundle for those weights? It does. But nothing tested that it did —
+the neighbouring tests covered every other location, so that one could have quietly
+disappeared and left them all green while every weights-bundled build shipped a gigabyte
+and a half the app then ignored. That test exists now.
+
+The bundled mode was exercised with a small stand-in for the weights rather than the real
+1.5 GB. That proves the payload lands inside the signature and the app finds it; it does
+not prove a copy that size completes. That run is filed and waits for you.
+
+## 2026-07-28 — An error message that trailed off mid-sentence
+
+Ask the DAW to play, and misspell one of the options you pass it, and the error you got
+back stopped in the middle: "unknown parameter 'bogus' — valid keys are ". Nothing after
+"are". That happened for the eighteen commands that take no options at all — there were
+no valid keys to list, so the sentence simply ended. Commands that do take options were
+always fine.
+
+Those eighteen now say what is actually true: "transport.play takes no parameters."
+Commands with real options are untouched, down to the byte.
+
+The interesting part is what the tests said. The change to the wording should have
+broken every test that checked the old sentence — and it broke none of them. Not because
+the tests were weak, but because for these particular commands there was nothing
+checking that part of the message at all: eight of the eighteen checked only that an
+error happened, and ten had no such test whatsoever. The message had been wrong for a
+while with nothing to notice.
+
+There are now checks on the corrected wording, including the plural form, which turned
+out to be unguarded even after the first fix. The ten commands with no coverage are
+written down as work rather than left as a quiet gap.
+
+## 2026-07-28 — The voice tools no longer refuse what the product permits
+
+The voice panel and the voice tools carried a rule that had been withdrawn. They said
+you could only train and convert with your own voice, never anyone else's — and that
+line was still being shown to you in the app and told to any AI agent connected to the
+DAW, long after the decision had gone the other way. An assistant asking what it could
+do with voices was reading a prohibition that no longer existed.
+
+The product now says what it actually does: third-party voice models are supported, and
+you are responsible for having the rights to any voice you train or convert with. That
+is a statement about who carries the responsibility, not about what you are allowed to
+attempt. One phrase survived the change untouched — "a voice you have the rights to
+use" — because what was withdrawn was the prohibition, not the requirement that you
+have the rights.
+
+The old wording lived in fifteen places, which is roughly twice as many as anyone had
+written down. Two tests were guarding the old copy; both were pointed at the new copy
+rather than deleted, so the words stay guarded. A new check now walks the entire family
+of voice tools and fails if the withdrawn rule reappears in any of them — and it earned
+its place immediately, catching a description that a hand-written search had missed.
+
+One layer still disagrees: the local voice-conversion sidecar's own documentation
+continues to assert the old rule. Those files are on a do-not-touch list, so that
+correction is filed and waiting rather than quietly skipped.
+
+## 2026-07-27 — Starting a speech-model download and checking in on it, instead of waiting on it
+
+The speech-model installer from the previous entry could only be driven from inside the
+app itself. Now an agent can ask for a model by name and get an answer back immediately
+— not the finished model, just an acknowledgment that the download has begun. Checking
+whether it succeeded is a separate question, asked as many times as you like, with no
+consequence to asking again.
+
+That split matters because the honest cost of this download is unknown in advance: it
+could be forty megabytes or a couple of gigabytes, and the network could be fast or
+slow or unavailable. A command that waited for the answer would either time out on a
+slow connection or hold a conversation hostage on a fast one. So starting the download
+and checking on it became two different questions, the same way an audio time-stretch
+already works: kick it off, then look in on it whenever you like.
+
+The one rule that had to be enforced rather than assumed: only one of these downloads
+ever runs at a time. Nothing before this stopped two requests from both deciding a
+model wasn't installed yet and both writing into the same folder at once — the kind of
+mistake that only shows up the day someone actually asks twice, which an agent that
+doesn't remember asking already might well do. A second request while one is already
+running is turned away, told which one is currently in progress, rather than queued or
+silently merged with the first.
+
+Checking in on progress meant confronting a small annoyance in how progress normally
+gets reported: it arrives on its own schedule, from code that has no idea an agent is
+waiting, and there's no guarantee it arrives in order if you're not careful about how
+you listen to it. The fix was to always keep only the latest update rather than a
+running log — a poller doesn't want history, it wants "where are things right now," and
+that question has one right answer at any moment, however the updates arrived.
+
+## 2026-07-27 — Downloading a speech model, and the folder nobody would have looked in
+
+DAW Pro can now fetch a Whisper model for itself instead of expecting one to already
+be sitting on disk. The download is WhisperKit's own — we do not own an HTTP client
+for this, the same way we do not own a resampler.
+
+The whole item was one mismatch. WhisperKit hands its download to Hugging Face's Hub
+client, which files things away as `<base>/models/<repo-id>/<variant>/`. Our catalog
+scans the *immediate children* of the models folder. Point one at the other and you
+get a complete, correct, multi-gigabyte download that the app reports as "no speech
+model installed" — no error, no warning, nothing to search for. So the download is
+staged and then moved into the shape the catalog actually reads, and the installer
+refuses to call itself finished until the catalog's own scan can find what it just
+wrote.
+
+Staging happens inside the models folder as a dot-prefixed directory, not in a temp
+folder. Two reasons: same volume means the move is a rename rather than a second copy
+of 1.5 GB, and the scan skips hidden files, so a half-finished download can never
+show up as a broken model. It is deleted on failure, which was confirmed the hard way
+— a real fetch timed out mid-install and left nothing behind.
+
+The tokenizer turned out to be a second download from a different repository
+altogether: the WhisperKit model folder contains no tokenizer at all. Without it the
+first transcription would quietly go online, which is the one thing on-device
+transcription is supposed to avoid. It now lands per-variant, because an English-only
+model cannot borrow a multilingual model's tokenizer.
+
+One behaviour is now written down rather than merely true: the model used when nobody
+names one is the first in alphabetical order. Install `base` next to `large-v3-turbo`
+and every transcription silently switches to `base`. That is pinned by a test so the
+decision to change it is a decision, not an accident.
+
+The MCP server's test command used to name its 24 test files one by one. That works
+until someone adds the 25th: it compiles, it produces output, and it never runs. The
+suite reports all green and the exit code is zero, because nothing was ever told the
+file existed.
+
+It now globs the directory instead. A list is something you maintain; a query is
+something that stays true.
+
+This was proved rather than assumed, by putting one deliberately failing test on disk
+and running both versions against it. The old command: **exit 0, 262 passed, 0
+failed**. The new one: **exit 1, 263 tests, 1 failed**. Same file, sitting there
+compiled, in both runs — the old gate simply never looked at it.
+
+The glob matches `*.test.js` specifically rather than sweeping the whole directory,
+because Node treats *anything* under a folder named `test/` as a test file. A future
+shared helper would have been executed as a suite — which is the same class of
+surprise, just pointing the other way.
+
+## 2026-07-27 — Transcription is now something you can ask for
+
+`clip.transcribe` (and the `clip_transcribe` MCP tool) turns a clip on the timeline
+into words with beats attached. An agent can now ask "what is sung here?" and get an
+answer it can edit against.
+
+The interesting decisions were about what to *refuse*.
+
+**A time-stretched clip is refused, not mapped.** A stretched clip's audio no longer
+lines up with its source file, so every returned timing would be wrong — but
+plausibly wrong, which is worse than an error. It now throws and names the ratio,
+telling you to run `clip.setStretch ratio 1` first. The refusal triggers on exact
+identity: a ratio of 1.0001 is refused too, because "close enough" silently
+reintroduces the drift. Pitch-shift alone is *not* refused — it doesn't move the
+timeline — and there is a test whose only job is to hold that line, because the
+neighbouring `isStretchIdentity` property bundles the two together and would have
+been the easy, wrong guard to reach for.
+
+MIDI clips and unknown clip IDs are refused the same way, with errors that say what
+to do instead rather than just what went wrong.
+
+**It blocks rather than returning a job handle.** That follows the precedent already
+set by `vc.convertVocals`, not a fresh preference. The MCP timeout is a new 300-second
+tier, sized off the measured ~94-second first-run cost on a cold machine — a one-time
+Neural Engine compilation, not a per-length cost, so it sits between the render tier
+and the voice-conversion tier rather than scaling with clip duration.
+
+The clip-window-to-file-range mapping reuses the existing rule rather than restating
+it, and WhisperKit turned out to already clamp a range that overruns the end of a
+file, so a clip whose window extends past its source degrades to "read to the end"
+instead of reading out of bounds.
+
+One hazard found in passing and **not** silently absorbed: the MCP server's test
+script is a hand-maintained list of files rather than a directory glob, so a brand-new
+test suite can compile, produce output, and never run — passing green by omission. The
+new suite was added to the list; making that structural is filed as its own item
+rather than folded in here.
+
+## 2026-07-27 — The DAW can hear words, and knows which beat each one lands on
+
+`WhisperTranscriber` turns an audio file — or a sub-range of one — into text with
+**segment and word timings expressed in beats**, not just seconds. Local, on-device,
+nothing leaves the machine.
+
+Beats are the point. Seconds are what a speech model returns; beats are what a DAW
+can act on. The mapping goes through the project's existing `TempoMap`, so a
+transcript stays correct across a tempo change instead of drifting after the first
+one.
+
+Three things were measured by running the path rather than reading documentation,
+and each changed the work:
+
+- **The resampling was already handled.** The plan called for converting audio to
+  16 kHz mono ourselves. WhisperKit does that, and accepts a time range while it is
+  at it. Writing our own would have been a second copy of a rule it already owns.
+- **Word timings depend on the model, not just the flag.** They require alignment
+  heads in the compiled decoder; ours has them, confirmed before a line was written.
+- **First transcription on a machine costs ~90 seconds; every later one ~1 second.**
+  That is one-time CoreML compilation for the Neural Engine, cached afterwards. It
+  is why the transcriber holds a single loaded model rather than constructing one
+  per call — and why the forthcoming control command has an explicit decision to
+  make about whether it may block.
+
+Two bugs found by running rather than assuming: raw transcripts came back full of
+`<|startoftranscript|>` markers because that stripping is off by default; and the
+first concurrency test was blind — three simultaneous jobs returned correct text
+even with the lock disabled, so "the results agree" could not observe the bug at
+all. The invariant is now counted and asserted instead.
+
+Not user-visible yet: there is no command to call this. That is the next step.
+
+## 2026-07-27 — One home for "where DAW Pro keeps things on disk", and an autosave bug that was never going to announce itself
+
+The rule for `~/Library/Application Support/DAWPro/<Category>/` was open-coded in
+**nine places across six files in three modules**. It now lives once, in
+`DAWCore/AppDirectories.swift`, behind a `Category` enum whose raw value *is* the
+on-disk directory name — so renaming a case can no longer orphan a user's files.
+
+**The refactor was the excuse; this was the actual find.**
+`ProjectStore.defaultAutosaveDirectory()` and `AutosaveManager.defaultDirectory()`
+each computed `DAWPro/Autosave` independently. The manager *writes* the rolling
+autosave there; the store *scans* that directory for recovery bundles. Nothing
+made them agree — they simply happened to. Had either drifted, autosaves would
+have been written faithfully and never offered back, and the failure would have
+surfaced only to someone who had already lost work.
+
+They now agree by construction: one producer, the other delegates. A test pins
+the equality.
+
+Worth stating plainly, because it is the argument for having done this at all:
+when that delegation is deliberately broken, **the new test is the only thing in
+the suite that notices**. Fifty tests across eight suites ran against the broken
+version and every pre-existing autosave and recovery test stayed green.
+
+Also preserved deliberately: the fallback expression
+`systemBase ?? URL(…).appendingPathComponent("Library/Application Support")` binds
+as `first ?? (home + "Library/Application Support")`, because member access binds
+tighter than `??`. A well-meant parenthesis would silently make the fallback the
+bare home directory. That behaviour is unchanged and now has its own test.
+
+Not covered, on purpose: the scratch paths under `NSTemporaryDirectory()/DAWPro`
+and the sidecar logs under `~/Library/Logs/DAWPro` are a different rule with a
+different lifetime — purgeable rather than durable user data — and folding them in
+would let a change to one silently move the other.
+
+## 2026-07-27 — Speech-model weights move out of the repo, and the app learns where to look
+
+The 1.5 GB of Whisper weights no longer live in the working tree. They now sit in
+`~/Library/Application Support/DAWPro/Models/`, beside `SoundBanks/`, `Autosave/`
+and `VoiceDatasets/` — the same place the rest of the app already keeps large
+user-managed assets.
+
+**The app no longer has one place to look; it has an ordered list.**
+`WhisperModelCatalog` walks candidates highest-priority first and takes the first
+that actually *holds* a usable model:
+
+1. `DAWPRO_WHISPER_MODELS_DIR` — wins outright when set, even if empty, so
+   pointing the knob somewhere deliberate yields that place's teaching error
+   instead of quietly resolving elsewhere.
+2. `~/Library/Application Support/DAWPro/Models` — user-installed weights.
+3. `<App>.app/Contents/Resources/Models` — a copy sealed into the bundle.
+4. `<repo>/Models` — the dev walk-up, anchored on `Package.swift`.
+
+Application Support deliberately outranks the bundle: it means a small model can
+ship inside the app and still be upgraded to large-v3-turbo by dropping the
+bigger one in, with no reinstall. The rule is "first **stocked**", not "first that
+exists" — otherwise an empty Application Support folder would shadow a perfectly
+good bundled copy.
+
+**Packaging is now a choice, defaulting to slim.** `scripts/bundle.sh` ships a
+small app and expects the weights to be installed separately;
+`./scripts/bundle.sh --with-weights` instead seals them in for a self-contained,
+offline-capable bundle — the right call behind a restrictive proxy, at the cost of
+re-shipping and re-notarizing ~1.5 GB on every update. The copy happens before
+`codesign`, so the weights land inside the seal rather than breaking it.
+
+Not user-visible yet: nothing transcribes. This is the plumbing that decides where
+a model comes from, ahead of the capability that uses one.
 
 No shipped behaviour today — this is a design cycle, and the tree's audio path is untouched.
 
