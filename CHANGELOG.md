@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-07-30 — Groundwork: playing at the right speed on any audio device
+
+Nothing you can see yet — this is a measurement that clears the way for
+something you will.
+
+Audio devices run at a fixed speed. Most run at 48,000 samples a second, but
+plenty run at 44,100, and some hardware insists on its own. A project also has
+a speed. When the two disagree, something has to convert between them, and
+*where* that conversion happens decides whether it costs you anything.
+
+We wanted to do the conversion at the very last step, on the way out to the
+device, so everything before it stays at one clean speed. The open question was
+the price: would it drift out of tune, arrive late, or fall over when you
+switch headphones mid-song?
+
+Measured, on a real loopback device: a 997 Hz tone through a 48 k project on a
+44.1 kHz device comes out at **996.991 Hz** — 0.009 Hz off, where getting it
+wrong would have landed at 1085 Hz. The conversion adds **0.004 ms** of delay,
+which is at the limit of what the measurement can even resolve, against a
+15 ms budget. And flipping the device between 44.1, 48 and 96 kHz *while audio
+is playing* recovered correctly all ten times.
+
+One genuinely useful surprise: conversion at the output is essentially free,
+but doing the same conversion earlier in the chain — at the mixer, where it
+happens today — costs about **0.94 ms**. That is the argument for the change,
+and we would not have known it without measuring both.
+
 ## 2026-07-30 — A Panic button, for when a note will not stop
 
 **There is now a way out of a stuck note.** Every so often a note gets stuck
