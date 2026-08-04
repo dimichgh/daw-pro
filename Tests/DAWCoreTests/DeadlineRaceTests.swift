@@ -96,9 +96,25 @@ struct DeadlineRaceTests {
     /// The absolute budget-proximity check is stated on the MEDIAN, not on
     /// each arming, on purpose: one descheduled cooperative-pool thread under
     /// full-suite load can stretch a single arming without the deadline being
-    /// main-actor-bound, and reddening on that would be a false alarm. The
-    /// median still has full teeth against the defect — the broken shape's
-    /// median sits at the hog duration, 5× the ceiling.
+    /// main-actor-bound, and reddening on that would be a false alarm.
+    ///
+    /// The median does NOT have teeth against the m23-at defect itself
+    /// (m23-as-2c correction — a prior version of this comment claimed the
+    /// opposite and was wrong, and it contradicted this file's own line
+    /// above: "old always returning `.value` at t ≈ the hog duration"). Under
+    /// the broken shape EVERY arming resolves `.value` before the hog
+    /// releases — measured 0 of 32 armings counted across 8 rounds — so
+    /// `elapsedInsideWindow` is EMPTY and `secs[secs.count / 2]` below never
+    /// executes; there is no median to have teeth. The defect is instead
+    /// caught by the threshold-free per-arming discriminator added in
+    /// m23-as-2c (see below, ahead of the starvation `#require`), which runs
+    /// over EVERY arming — counted AND discarded — rather than only the
+    /// counted set the old `#expect(m.timedOut, …)` was limited to. The
+    /// median ceiling's real remaining job, once that discriminator exists,
+    /// is narrower and orthogonal: catching a deadline that DOES fire on the
+    /// cooperative pool but grossly late — a different defect from
+    /// main-actor-binding, since the discriminator only requires
+    /// `.timedOut`, not `.timedOut` within any particular latency.
     ///
     /// One hog covers FOUR armings rather than one per iteration: N=12 costs
     /// ~3 s of main-actor starvation instead of ~12 s, which matters because
@@ -109,7 +125,40 @@ struct DeadlineRaceTests {
     func timeoutFiresWhileMainActorIsHogged() async throws {
         let hogDuration = Duration.milliseconds(1_000)
         let budget = Duration.milliseconds(200)
-        let medianCeiling = Duration.milliseconds(600)
+        // m23-as-2c: coupled to `budget`, not a bare constant. Before this,
+        // `budget` and `medianCeiling` drifted independently — retune
+        // `budget` to 50 ms and the bare 600 ms ceiling silently became a
+        // 550 ms tolerance instead of the intended 400 ms.
+        //
+        // ⚠️ What the additive tie fixes is NOT the multiple. `budget + 400`
+        // at a 50 ms budget is still 9× the budget; the ratio blows up either
+        // way and that was never the point. What it fixes is that the term
+        // being tolerated — wake-up LATENESS — is ADDITIVE and does not scale
+        // with the budget, so it belongs in an additive tie. A multiplicative
+        // tie between an additive pair is the m23-as-2a category error.
+        //
+        // ⚠️ And on how much lateness this actually tolerates: MEASURED
+        // lateness is ~7–8 ms (median 0.207–0.208 s against a 200 ms budget),
+        // so 400 ms is a ~50× margin on the only term that varies. By the
+        // m23-as-2a taxonomy that makes this a TRIPWIRE, not a budget — it
+        // cannot flake, and "grossly late" has to be very gross indeed before
+        // it speaks. That is a deliberate accepted trade, not an oversight:
+        // the defect this suite exists for is now caught by the per-arming
+        // discriminator below, which needs no margin at all.
+        //
+        // This is a COUPLING fix, NOT a
+        // robustness fix: measured inflation for this quantity is ~1.00×
+        // (isolated `--filter` runs, 5×12 armings: median 0.207–0.208 s;
+        // full parallel suite, 4693 tests / 483 suites, 94.0 s: median
+        // 0.208 s) — there is no load contamination here to defend against,
+        // unlike the AU-prepare quantities in m23-as-2a/2b. Its remaining
+        // job is narrow: catching a deadline that DOES fire (so the
+        // per-arming discriminator below is silent) but grossly late on the
+        // cooperative pool — a distinct defect from main-actor-binding. At
+        // the current 200 ms budget this evaluates to EXACTLY the old bare
+        // 600 ms, so this is a behavior-preserving refactor today; the only
+        // thing that changes is what happens if `budget` is ever retuned.
+        let medianCeiling = budget + .milliseconds(400)
         let requiredArmings = 10
         let armingsPerRound = 4
         let maxRounds = 8
@@ -118,6 +167,11 @@ struct DeadlineRaceTests {
         var discarded = 0
         var round = 0
         let clock = ContinuousClock()
+        // m23-as-2c: violations of the threshold-free per-arming rule
+        // below, tallied across every round and EVERY arming — counted or
+        // discarded alike. Populated only by a real regression; see the
+        // `#require` that reads it after the loop.
+        var deadlineBoundViolations: [(elapsed: Duration, describe: String)] = []
 
         while elapsedInsideWindow.count < requiredArmings && round < maxRounds {
             round += 1
@@ -164,6 +218,41 @@ struct DeadlineRaceTests {
             let spinEnd = try #require(window.endInstant,
                                        "the hog finished without recording its end instant")
             for m in roundMeasurements {
+                // m23-as-2c: a THRESHOLD-FREE rule, checked on EVERY arming
+                // regardless of the counted/discarded split below. If the
+                // deadline (arming start + budget) fell strictly before the
+                // hog released, `work`'s @MainActor task cannot even be
+                // SCHEDULED until the hog releases the actor — the hog is a
+                // synchronous spin, not a suspension point — while the
+                // deadline task needs no actor at all. So if the deadline's
+                // own wall-clock sleep resolves before that release, it
+                // reaches the once-gate first and the outcome MUST be
+                // `.timedOut`; only a main-actor-bound deadline (m23-at) can
+                // turn that into `.value`. This is what the old counted-only
+                // `#expect(m.timedOut, …)` below lacked: under the m23-at
+                // defect `elapsedInsideWindow` stays empty (nothing is ever
+                // counted), so that `#expect` never runs even once, and the
+                // regression escapes as the starvation message further down.
+                // Checking it here, ahead of the discard, means it still has
+                // armings to examine either way.
+                //
+                // Soundness caveat, stated rather than hidden: this assumes
+                // the cooperative pool schedules the DEADLINE task itself
+                // promptly enough to sleep out `budget` before `spinEnd`. If
+                // the pool were saturated enough to delay the deadline
+                // task's own wake-up past the hog's release, a CORRECT
+                // implementation could land here too and read as a false
+                // violation — this rule's soundness is not delay-immune the
+                // way the relative `m.end < spinEnd` discard below is.
+                // Measured against a full parallel suite (4693 tests / 483
+                // suites, ~92 s) this rule did not fire — 12/12 armings
+                // landed `.timedOut` at ~0.205–0.210 s median, same shape as
+                // isolated — but that is one observation, not a proof the
+                // pool can never be starved that badly.
+                if m.start.advanced(by: budget) < spinEnd, !m.timedOut {
+                    deadlineBoundViolations.append((m.start.duration(to: m.end), m.describe))
+                }
+
                 guard m.end < spinEnd else {
                     // The hog's 1 s spin expired before this arming completed,
                     // so it no longer proves anything about a HELD actor.
@@ -187,6 +276,30 @@ struct DeadlineRaceTests {
         print("[measured] m23-at leg 1: \(secs.count) armings inside the hog window "
               + "(\(discarded) discarded, \(round) rounds), budget 200 ms, hog 1000 ms — "
               + "elapsed s: " + secs.map { String(format: "%.3f", $0) }.joined(separator: ", "))
+
+        // m23-as-2c: THE headline fix. Asserted before the starvation
+        // `#require` below on purpose, so that when both conditions hold on
+        // a loaded machine the regression message — not the starvation one
+        // — is what the reader sees. This is what the mutation test proved
+        // was missing: mutating `DeadlineRace.run` back to the pre-m23-at
+        // `Task { @MainActor in … }` shape produced 0 counted armings (32
+        // discarded, 8 rounds), and the test failed ONLY with "the machine
+        // was too starved to run the experiment" — exactly backwards for a
+        // real regression, and exactly the message an autonomous loop or CI
+        // triages as flake and ignores.
+        let violationCount = deadlineBoundViolations.count
+        let example = deadlineBoundViolations.first.map { "\($0.describe) after \($0.elapsed)" }
+            ?? "n/a"
+        try #require(deadlineBoundViolations.isEmpty, """
+            \(violationCount) arming(s) had a deadline that should have fired strictly \
+            inside the hog window (arming start + \(budget) budget < hog end) but \
+            instead resolved \(example). The main actor was provably held through the \
+            whole budget, so @MainActor work could not have run — this means the \
+            deadline itself is main-actor-bound again (m23-at). This is NOT machine \
+            starvation: starvation (checked next) means too FEW armings landed inside \
+            the hog window to reach the required sample size, never a qualifying \
+            arming that resolves the wrong way.
+            """)
 
         try #require(elapsedInsideWindow.count >= requiredArmings, """
             only \(elapsedInsideWindow.count) of the required \(requiredArmings) armings \

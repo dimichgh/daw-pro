@@ -1,0 +1,24 @@
+◇ Test run started.
+[measured] GM bank prepare-to-ready wall time: 29.287 seconds, horizon 60.0 seconds, margin 2.049
+[measured] m19-e contended prepares: n=32, min 0.052400 s, median 4.637244 s, p90 11.059 s, max 20.574 s, under1s 9, horizon 60.0 seconds
+✔ Test run with 4716 tests in 487 suites passed after 97.421 seconds.
+
+◇ Test run started.
+[measured] GM bank prepare-to-ready wall time: 29.410 seconds, horizon 60.0 seconds, margin 2.040
+[measured] m19-e contended prepares: n=32, min 0.079429 s, median 2.486943 s, p90 12.049 s, max 18.879 s, under1s 9, horizon 60.0 seconds
+✔ Test run with 4716 tests in 487 suites passed after 98.113 seconds.
+
+◇ Test run started.
+[measured] GM bank prepare-to-ready wall time: 29.776 seconds, horizon 60.0 seconds, margin 2.014
+[measured] m19-e contended prepares: n=32, min 0.055827 s, median 3.567406 s, p90 13.173 s, max 17.111 s, under1s 9, horizon 60.0 seconds
+✔ Test run with 4716 tests in 487 suites passed after 96.877 seconds.
+
+◇ Test run started.
+[measured] GM bank prepare-to-ready wall time: 30.652 seconds, horizon 60.0 seconds, margin 1.957
+[measured] m19-e contended prepares: n=32, min 0.070061 s, median 3.645403 s, p90 14.370 s, max 15.455 s, under1s 9, horizon 60.0 seconds
+✔ Test run with 4716 tests in 487 suites passed after 99.500 seconds.
+
+◇ Test run started.
+[measured] GM bank prepare-to-ready wall time: 30.994 seconds, horizon 60.0 seconds, margin 1.936
+[measured] m19-e contended prepares: n=32, min 0.062069 s, median 2.291965 s, p90 13.847 s, max 24.675 s, under1s 9, horizon 60.0 seconds
+✔ Test run with 4716 tests in 487 suites passed after 95.204 seconds.

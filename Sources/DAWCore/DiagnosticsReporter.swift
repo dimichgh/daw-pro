@@ -160,7 +160,7 @@ public final class DiagnosticsReporter {
     public static let crashReportCap = 10
 
     public init(
-        outputDir: URL = DiagnosticsReporter.defaultOutputDir(),
+        outputDir: URL = DiagnosticsReporter.outputDirDefault(),
         crashReportsDir: URL = DiagnosticsReporter.defaultCrashReportsDir(),
         clock: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -171,8 +171,47 @@ public final class DiagnosticsReporter {
 
     /// Default feedback dir: `~/Library/Application Support/DAWPro/Feedback/`
     /// (m23-n1b — `AppDirectories` owns the rule; this is one category of it).
+    /// UNCHANGED by m23-aq — this stays the one, always-real computation;
+    /// `AppDirectoriesTests.migratedEntryPointsResolveTheirCategories` pins it.
     public static func defaultOutputDir() -> URL {
         AppDirectories.applicationSupport(.feedback)
+    }
+
+    /// A fresh per-PROCESS temp root for `outputDirDefault()`, computed once and
+    /// shared by every `DiagnosticsReporter` built in this process — mirroring
+    /// production, where every default-constructed reporter shares the one real
+    /// Feedback directory. `nil` outside a detected test process, so production
+    /// pays this static initializer nothing beyond one `TestEnvironment.isRunningTests`
+    /// read. Created eagerly (not lazily on first write) so a test that asserts a
+    /// bundle exists right after `writeBundle` never races an unmade parent
+    /// directory. Mirrors `ProjectStore.testAutosaveRoot` (m23-aa) exactly, just
+    /// for a different `AppDirectories.Category` — a SEPARATE root, unlike
+    /// `crashRecovery`'s reuse of the autosave one, because in production the
+    /// Feedback directory does not cohabit with anything else.
+    private static let testOutputDirRoot: URL? = {
+        guard TestEnvironment.isRunningTests else { return nil }
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DAWPro-test-feedback-\(UUID().uuidString)", isDirectory: true)
+        // SAME path math as production (`AppDirectories.applicationSupport`),
+        // just a different `systemBase` — not a second, hand-rolled computation.
+        let root = AppDirectories.applicationSupport(.feedback, systemBase: base)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }()
+
+    /// The default value for `outputDir` (m23-aq — the same shape as
+    /// `ProjectStore.autosaveRecoveryDefault()`, m23-aa). Production: exactly
+    /// `defaultOutputDir()` — unchanged, still the real profile location. Under
+    /// a detected Swift test process: a redirected temp root, so a bare
+    /// `DiagnosticsReporter()` (what `ProjectStore.diagnostics` default-constructs)
+    /// that reaches `writeBundle(...)` without the test ever mentioning `outputDir`
+    /// still cannot write into the user's real
+    /// `~/Library/Application Support/DAWPro/Feedback/`. This is layered ABOVE
+    /// `defaultOutputDir()`, not a replacement for it — `AppDirectories` and
+    /// `defaultOutputDir()` are untouched and remain the one, always-real
+    /// computation.
+    public static func outputDirDefault() -> URL {
+        testOutputDirRoot ?? defaultOutputDir()
     }
 
     /// Default crash-report dir: `~/Library/Logs/DiagnosticReports/`.

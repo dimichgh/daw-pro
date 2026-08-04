@@ -26,6 +26,16 @@ struct AutomationLaneEditor: View {
     var contentWidth: CGFloat
     /// Submits the whole point array (wired to `setAutomationPoints`).
     var onCommit: ([AutomationPoint]) -> Void
+    /// m23-ai: where this lane publishes "I hold a breakpoint selection, so I
+    /// would consume ← / →", and where the debug seam stages one in. Optional
+    /// because not every mount is under the arrange's arrow-key handler, and
+    /// deliberately WITHOUT a default: there are N mounts of this view, so a
+    /// future third one must be made to decide rather than silently inherit
+    /// `nil` (the same reason `RescheduleCause` and `StartAnchorPolicy` carry no
+    /// defaults — let the compiler enumerate the call sites). This is where it
+    /// parts company with `PianoRollView`, which defaults its bridge because it
+    /// has exactly one mount.
+    var pointSelection: AutomationPointSelectionBridge?
 
     /// Local working copy. Every interaction mutates this; it is submitted on
     /// each change and re-seeded from the canonical lane when a gesture ends.
@@ -37,12 +47,14 @@ struct AutomationLaneEditor: View {
     @FocusState private var focused: Bool
 
     init(lane: AutomationLane, param: AutomationParam, geometry: AutomationGeometry,
-         contentWidth: CGFloat, onCommit: @escaping ([AutomationPoint]) -> Void) {
+         contentWidth: CGFloat, onCommit: @escaping ([AutomationPoint]) -> Void,
+         pointSelection: AutomationPointSelectionBridge?) {
         self.lane = lane
         self.param = param
         self.geometry = geometry
         self.contentWidth = contentWidth
         self.onCommit = onCommit
+        self.pointSelection = pointSelection
         _draft = State(initialValue: lane.points)
     }
 
@@ -83,6 +95,53 @@ struct AutomationLaneEditor: View {
             // (undo, an agent edit, or our own committed gesture landing sorted).
             .onChange(of: lane.points) { _, points in
                 if drag == .idle { draft = points; selection = nil }
+            }
+            // m23-ai: publish whether THIS lane would consume a keystroke — the
+            // same `liveSelectionIndex` test the DELETE handler just above
+            // applies to decide between consuming and falling through. The
+            // arrange's arrow-key nudge refuses while any lane claims, so ← with
+            // a breakpoint selected edits the breakpoint instead of sliding the
+            // whole clip underneath the user (`AutomationPointSelectionBridge`).
+            //
+            // KEYED ON THE PREDICATE, NOT ON `selection`, deliberately: the test
+            // has two terms and `draft` is the other one. A draft that shrinks
+            // under a stale index leaves `selection` unchanged while the editor
+            // stops consuming keys, and `.onChange(of: selection)` would never
+            // see it — the bridge would keep claiming a key this editor no
+            // longer wants. `draft` is `@State` here, so a mutation
+            // re-evaluates `body` and this comparison runs.
+            //
+            // `.onChange`, never `body` (the `PianoRollView` reason: this gates
+            // a keyboard path, so it must be an observable transition), and
+            // `initial: true` so a lane that appears already selected reports it
+            // rather than waiting for a change.
+            .onChange(of: liveSelectionIndex != nil, initial: true) { _, claims in
+                pointSelection?.report(lane: lane.id, hasSelection: claims)
+            }
+            // m23-ai: the debug seam's staged selection — the
+            // `follow.externalScrollNonce` pattern (watch the NONCE, so a gate
+            // asking for the same state twice still applies). This is the only
+            // way anything outside can reach `selection` and `draft`, which are
+            // `@State private`.
+            //
+            // AN EMPTY LANE CANNOT BE ARMED: `draft.indices.first` is nil, so
+            // `select: true` on a lane with no breakpoints selects nothing and
+            // this editor keeps claiming nothing. That is left visible on
+            // purpose — `arrangeSelectionDebug` THROWS when the state it staged
+            // never arrives, so a gate whose fixture forgot to add a breakpoint
+            // fails loudly instead of certifying a guard that was never armed.
+            .onChange(of: pointSelection?.stageNonce) { _, _ in
+                guard let pointSelection else { return }
+                selection = pointSelection.stagedSelect ? draft.indices.first : nil
+            }
+            .onDisappear {
+                // m23-ai: drop THIS lane's claim, and only this lane's. A
+                // latched id would kill the arrange's arrow keys for the rest
+                // of the session with nothing on screen to explain why; a bare
+                // clear-everything would let a closing lane cancel a sibling
+                // lane's live claim, which is the clobber the bridge's `Set`
+                // exists to prevent.
+                pointSelection?.clear(lane: lane.id)
             }
     }
 
@@ -289,8 +348,18 @@ struct AutomationLaneEditor: View {
         onCommit(draft)
     }
 
+    /// The breakpoint a key press would act on — nil when this editor would let
+    /// the key fall through instead. THE ONE HOME for "would this lane consume
+    /// it?": the DELETE handler below and the m23-ai arrow-key report in `body`
+    /// both read this property, so the shielded surface's own test and the guard
+    /// that mirrors it cannot drift apart.
+    private var liveSelectionIndex: Int? {
+        guard let index = selection, draft.indices.contains(index) else { return nil }
+        return index
+    }
+
     private func deleteSelection() -> KeyPress.Result {
-        guard let index = selection, draft.indices.contains(index) else { return .ignored }
+        guard let index = liveSelectionIndex else { return .ignored }
         commit(AutomationEdit.removePoint(draft, index: index))
         selection = nil
         return .handled

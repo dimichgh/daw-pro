@@ -353,7 +353,17 @@ try {
   //         The gate had been sitting RED since m23-w; nobody ran it in between,
   //         which is the m23-ac hazard wearing its other face — a gate nobody
   //         runs is indistinguishable from one that passes.
-  const EXPECTED_VERBS = 165;
+  //   171 — m23-aj-2, 2026-08-03. Bumped from 165, which had been RED since
+  //         before this cycle. ⚠️ HONESTY NOTE ON THIS BUMP: only the LAST 2 of
+  //         the 6 added verbs are audited. m23-aj-2 added `clip.moveManyByTracks`
+  //         + `clip.moveManyToTrack` (169 -> 171) deliberately. The 165 -> 169
+  //         interim was NOT audited here, and it CANNOT be audited by position:
+  //         m20-j inserted `output.listDevices`/`output.setDevice` into the
+  //         `output.*` GROUPING at array positions 114-115 rather than appending,
+  //         so the array tail is NOT the chronology and reading the last N entries
+  //         gives a confidently wrong answer (measured 2026-08-03). Anyone
+  //         re-auditing this number must use git history, not array order.
+  const EXPECTED_VERBS = 171;
   ck(`W1 allCommands still holds ${EXPECTED_VERBS} verbs (counted off the ARRAY body, not the case labels)`,
      verbs.length === EXPECTED_VERBS, String(verbs.length));
   ck("W2 the probe added NO wire verb — nothing bar-ops-shaped is in allCommands",

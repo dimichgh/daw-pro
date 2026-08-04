@@ -287,8 +287,14 @@ struct FXPack1Tests {
     func limiterReportsAndExhibitsLookaheadLatency() throws {
         let limiter = LimiterEffect()
         limiter.prepare(sampleRate: 48_000, maxFramesPerQuantum: 512, channelCount: 2)
+        // 240 = round(0.005 × 48 000). m23-ar: the literal is the ORACLE and
+        // must stay one. A second `#expect` re-deriving the formula used to sit
+        // here; it was deleted rather than routed through
+        // `LimiterParams.lookaheadSamples` — `latencySamples` IS
+        // `lookaheadSamples` (LimiterEffect.swift:137), so routing it would
+        // assert `x == x`, and re-typing it spelled `0.005` bare, free to go
+        // stale the moment `lookaheadSeconds` moves.
         #expect(limiter.latencySamples == 240)
-        #expect(limiter.latencySamples == Int((0.005 * 48_000).rounded()))
 
         // A below-ceiling impulse at frame 100 must arrive EXACTLY at 340.
         var dry = [Float](repeating: 0, count: 1_024)
@@ -311,9 +317,12 @@ struct FXPack1Tests {
         // PDC expectations in MasterChainRenderTests C7 / EngineRebuildTests.
         let limiter24 = LimiterEffect()
         limiter24.prepare(sampleRate: 24_000, maxFramesPerQuantum: 512, channelCount: 2)
+        // 120 = round(0.005 × 24 000), stated independently for the same reason
+        // as the 48 kHz leg above (m23-ar). These three rate literals — 240,
+        // 221, 120 — plus LimiterLookaheadDerivationTests' 221/240/480 are the
+        // whole independent-oracle surface for the derivation; every other
+        // expectation in the tree now routes through the one home.
         #expect(limiter24.latencySamples == 120)
-        #expect(limiter24.latencySamples
-            == Int((LimiterParams.lookaheadSeconds * 24_000).rounded()))
     }
 
     // MARK: - Chain latency + determinism (graph level)

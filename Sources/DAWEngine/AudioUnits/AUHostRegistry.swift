@@ -1,5 +1,6 @@
 import AVFAudio
 import AudioToolbox
+import CryptoKit
 import DAWCore
 import Foundation
 
@@ -104,6 +105,155 @@ public final class AUHostRegistry {
 
     /// Per-track serialization: each prepare chains behind the previous one.
     private var prepareChains: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
+
+    /// m23-av — THE IN-FLIGHT LEDGER, and it is `nonisolated` on purpose.
+    ///
+    /// Everything else on this class is main-actor-isolated, which is correct
+    /// (AU property access must be) but means that when a plugin's prepare
+    /// synchronously holds the actor — the Surge XT case, minutes — NOTHING
+    /// here is readable, including the fact that a prepare is stuck and its
+    /// deadline has already passed. m23-at made that deadline DECIDE on wall
+    /// time; this makes the decision OBSERVABLE while the actor is still held.
+    ///
+    /// It stores EVIDENCE only (armed-at, deadline, component) and derives the
+    /// verdict at read time — see `AUPrepareLedger`. It is never a mirror of
+    /// `status`, and it does NOT unwedge anything.
+    nonisolated let prepareLedger = AUPrepareLedger()
+
+    /// The `nonisolated` read: any thread, any executor, no main actor. Both
+    /// the healthy path (`prepareStats()` below) and the wedged path
+    /// (`ControlServer.wedgeIntercept`, via `AudioEngine.auPrepareInFlight()`)
+    /// come through here — ONE producer, one shape, two response envelopes.
+    nonisolated func inFlightSnapshot() -> [EngineAUPrepareStats.InFlightEntry] {
+        prepareLedger.snapshot()
+    }
+
+    // MARK: - Prepare bookkeeping (m23-br-1)
+
+    /// m23-br-1 — the four MONOTONE lifetime counters `engine.auPrepareStats`
+    /// publishes. They exist so a gate can assert an EXACT INTEGER ("this
+    /// device flip re-prepared nothing") instead of inferring an absence from
+    /// ~18 000 `note.audition` samples, which is what m20-e had to do.
+    ///
+    /// ⚠️ WHERE THEY COUNT IS THE WHOLE DESIGN — see the two increment sites:
+    /// the prepare counters count prepare BODIES PAST THE IDEMPOTENCY GUARD,
+    /// not successful instantiations, and the release counters count only
+    /// REAL removals. The rationale lives on `EngineAUPrepareStats` (DAWCore),
+    /// which is where a reader of the wire payload will look.
+    ///
+    /// NO reset seam, ever: `AudioEngine.auRegistry` is a `let`, so a
+    /// `rebuildEngine`/`recoverEngine` keeps this same registry and these
+    /// same numbers — that survival is exactly what a before/after
+    /// subtraction across an engine rebuild depends on, and a reset verb
+    /// would hand a caller a way to break it from the outside.
+    /// `AUPrepareStatsTests` pins both properties.
+    public private(set) var instrumentPrepareCount = 0
+    /// Instrument releases that removed a REAL instance (never the
+    /// bookkeeping-only no-op path).
+    public private(set) var instrumentReleaseCount = 0
+    /// The insert-effect mirror of `instrumentPrepareCount`.
+    public private(set) var effectPrepareCount = 0
+    /// The insert-effect mirror of `instrumentReleaseCount`.
+    public private(set) var effectReleaseCount = 0
+
+    /// The wire snapshot behind `engine.auPrepareStats` — counters plus one
+    /// entry per known track/effect slot, each carrying the digest of the
+    /// LAST ATTEMPTED prepare key (`attempted[id]` / `effectAttempted[id]`,
+    /// i.e. the exact value the idempotency guard compares against, so it is
+    /// what changes when a re-prepare genuinely fires) and the hosting
+    /// status in the wire's one spelling.
+    ///
+    /// Sorted by uuidString so two reads can be diffed positionally — a
+    /// dictionary's iteration order is randomized per process and would make
+    /// a gate's diff nondeterministic.
+    public func prepareStats() -> EngineAUPrepareStats {
+        let trackEntries = knownTrackIDs
+            .map { id in
+                EngineAUPrepareStats.TrackEntry(
+                    trackId: id.uuidString,
+                    keyDigest: attempted[id].map(Self.digest(of:)),
+                    status: status[id]?.wireLabel)
+            }
+            .sorted { $0.trackId < $1.trackId }
+        let effectEntries = knownEffectIDs
+            .map { id in
+                EngineAUPrepareStats.EffectEntry(
+                    effectId: id.uuidString,
+                    keyDigest: effectAttempted[id].map(Self.digest(of:)),
+                    status: effectStatus[id]?.wireLabel)
+            }
+            .sorted { $0.effectId < $1.effectId }
+        return EngineAUPrepareStats(
+            instrumentPrepares: instrumentPrepareCount,
+            instrumentReleases: instrumentReleaseCount,
+            effectPrepares: effectPrepareCount,
+            effectReleases: effectReleaseCount,
+            tracks: trackEntries, effects: effectEntries,
+            // m23-av — the SAME producer the wedged path reads. Embedding it
+            // here (rather than letting the wire assemble a second one) is
+            // what keeps the healthy and wedged answers from diverging.
+            inFlight: inFlightSnapshot())
+    }
+
+    /// A stable, cross-process digest of one `PrepareKey` — 16 hex chars of
+    /// SHA256 over a canonical encoding of the key's four fields.
+    ///
+    /// ⚠️ SHA256, NEVER Swift's `Hasher`/`hashValue`: the standard library's
+    /// hasher is SEEDED PER PROCESS, so the same key digests differently in
+    /// every run and anyone comparing a digest across runs (which is the
+    /// entire point of publishing one) would be reading silent nonsense.
+    /// `AUPrepareStatsTests` pins a GOLDEN hex literal for a fixed key, which
+    /// is what actually reddens if someone swaps the implementation.
+    ///
+    /// ⚠️ `PrepareKey.stateData` is an opaque `Data?` — a plugin's full
+    /// document state, potentially megabytes and potentially private. It must
+    /// never reach the wire raw; the digest is the whole reason this function
+    /// exists, and the truncation to 16 hex chars (64 bits) is a readability
+    /// choice for a value only ever tested for EQUALITY between two reads of
+    /// the same process's registry.
+    ///
+    /// Canonical encoding: every component is fed to the hash LENGTH-PREFIXED
+    /// (`"<byteCount>:<bytes>"`), so no concatenation of one field's tail with
+    /// the next field's head can collide with a different split. `nil`
+    /// stateData feeds a distinct marker from EMPTY stateData (both are
+    /// reachable: `.soundBank` forces nil by LAW L3, an `.audioUnit` config
+    /// can legally carry `Data()`), and the sample rate is fed as its exact
+    /// IEEE-754 BIT PATTERN rather than an interpolated string, which has no
+    /// stability contract across formatting changes.
+    static func digest(of key: PrepareKey) -> String {
+        var hasher = SHA256()
+        func feed(_ text: String) {
+            let bytes = Data(text.utf8)
+            hasher.update(data: Data("\(bytes.count):".utf8))
+            hasher.update(data: bytes)
+        }
+        func feed(_ bytes: Data) {
+            hasher.update(data: Data("\(bytes.count):".utf8))
+            hasher.update(data: bytes)
+        }
+        feed("auPrepareKey/v1")
+        feed(key.component.type)
+        feed(key.component.subType)
+        feed(key.component.manufacturer)
+        feed(String(key.sampleRate.bitPattern))
+        if let stateData = key.stateData {
+            feed("state")
+            feed(stateData)
+        } else {
+            feed("noState")
+        }
+        if let address = key.soundBankAddress {
+            feed("bank")
+            feed(address.source.rawString)
+            feed(String(address.program))
+            feed(String(address.bankMSB))
+            feed(String(address.bankLSB))
+        } else {
+            feed("noBank")
+        }
+        let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return String(hex.prefix(16))
+    }
 
     /// Test seam: replaces `AUAudioUnit.instantiate` so tests can simulate a
     /// hung or failing component without any real plugin.
@@ -272,6 +422,12 @@ public final class AUHostRegistry {
         attempted[id] = nil
         status[id] = nil
         guard let instrument = instruments.removeValue(forKey: id) else { return }
+        // m23-br-1 — counted HERE, past the guard: exactly where a REAL
+        // instance left the table (the same instant `onRelease` fires), never
+        // on the bookkeeping-only no-op path above. A release counter that
+        // ticked for no-ops would make "instrument churn" indistinguishable
+        // from "a reconcile pass walked the tracks".
+        instrumentReleaseCount += 1
         // Invalidate any plugin window BEFORE the AU's render resources go — the
         // window (and any observing vendor view) detaches against a live AU.
         onRelease?(.instrument(trackID: id))
@@ -356,6 +512,9 @@ public final class AUHostRegistry {
         effectAttempted[id] = nil
         effectStatus[id] = nil
         guard let effect = effects.removeValue(forKey: id) else { return }
+        // m23-br-1 — the instrument path's release count site, mirrored: a
+        // REAL removal only.
+        effectReleaseCount += 1
         // Invalidate any plugin window BEFORE the AU's render resources go (the
         // instrument-path ordering — §2.2).
         onRelease?(.effect(effectID: id))
@@ -385,8 +544,12 @@ public final class AUHostRegistry {
         let key = PrepareKey(component: config.component, sampleRate: sampleRate,
                              stateData: config.stateData, soundBankAddress: nil)
         guard effectAttempted[effectID] != key else { return }  // idempotent per identity
+        // m23-br-1 — the instrument path's count site, mirrored. Same rule,
+        // same reason: past the guard, before any of the early returns.
+        effectPrepareCount += 1
 
-        // A different config replaces the old effect wholesale.
+        // A different config replaces the old effect wholesale (bumping the
+        // release counter too — the instrument path's arithmetic).
         if effects[effectID] != nil { releaseEffect(forEffect: effectID) }
         effectAttempted[effectID] = key
 
@@ -405,6 +568,11 @@ public final class AUHostRegistry {
             & AudioComponentFlags.isV3AudioUnit.rawValue != 0
 
         effectStatus[effectID] = .pending
+        // m23-av — THE ONE EFFECT ARM SITE, the instrument path's mirror:
+        // where `.pending` is published and the race begins, past every early
+        // return that never enters a race.
+        prepareLedger.arm(slot: .effect, id: effectID, component: key.component,
+                          deadlineSeconds: AUPrepareLedger.seconds(timeout))
         let stateData = config.stateData
         let outcome = await DeadlineRace.run(timeout: timeout) { [instantiator] in
             let au: AUAudioUnit
@@ -471,6 +639,9 @@ public final class AUHostRegistry {
             effectStatus[effectID] = .failed(
                 "Audio Unit preparation timed out after \(timeout) — component may be stalled")
         }
+        // m23-av — THE ONE EFFECT DISARM SITE. Same shape, same ordering
+        // rationale as the instrument path's; see `performPrepare`.
+        prepareLedger.disarm(slot: .effect, id: effectID)
     }
 
     // MARK: - Internals
@@ -511,8 +682,25 @@ public final class AUHostRegistry {
             return
         }
         guard attempted[id] != key else { return }  // idempotent per identity
+        // m23-br-1 — THE COUNT SITE, and it is deliberately HERE rather than
+        // at instantiation. What `engine.auPrepareStats` exists to detect is a
+        // re-prepare STORM, and a storm is made of prepare bodies that were
+        // not short-circuited above: the `.missing` (no matching component)
+        // and `.failed` (bank resolve / instantiate / allocate) early returns
+        // below are all real re-prepare work and all count. Counting only
+        // successful instantiations would report ZERO for a session whose
+        // every prepare fails — the worst storm there is.
+        //
+        // NOT counted, deliberately: the `guard let key … else` bail a few
+        // lines above (legal descriptor with nothing selected → `.missing`
+        // placeholder). It never reaches the idempotency guard, so it has no
+        // prepare BODY to count and would fire on every `tracksDidChange`
+        // pass for such a track, which is noise rather than signal.
+        instrumentPrepareCount += 1
 
-        // A different config replaces the old instrument wholesale.
+        // A different config replaces the old instrument wholesale. (This is
+        // why a config-change re-prepare bumps BOTH counters: the line above,
+        // then `releaseInstrument`'s.)
         if instruments[id] != nil { releaseInstrument(forTrack: id) }
         attempted[id] = key
 
@@ -550,6 +738,13 @@ public final class AUHostRegistry {
             & AudioComponentFlags.isV3AudioUnit.rawValue != 0
 
         status[id] = .pending
+        // m23-av — THE ONE INSTRUMENT ARM SITE, here because this is where
+        // `.pending` is published and the race begins. Arming any earlier
+        // would leave phantom records on the three paths above that never
+        // enter a race at all (the `guard let key … else` bail, the
+        // bank-resolve failure, the no-matching-component return).
+        prepareLedger.arm(slot: .instrument, id: id, component: key.component,
+                          deadlineSeconds: AUPrepareLedger.seconds(timeout))
         let outcome = await DeadlineRace.run(timeout: timeout) { [instantiator] in
             let au: AUAudioUnit
             if isV3 {
@@ -656,6 +851,22 @@ public final class AUHostRegistry {
             status[id] = .failed(
                 "Audio Unit preparation timed out after \(timeout) — component may be stalled")
         }
+        // m23-av — THE ONE INSTRUMENT DISARM SITE, and it is AFTER the switch
+        // rather than inside each case, for two reasons:
+        //  · ONE site makes "someone missed a case" unrepresentable. Three
+        //    calls would be three homes for one fact.
+        //  · ORDER MATTERS to an off-main reader. It takes only the ledger's
+        //    lock, so it interleaves freely with main-actor execution.
+        //    Publishing first and disarming second means a reader can see
+        //    (in flight, status not yet published) or (not in flight, status
+        //    published) — never (not in flight, status STILL pending), which
+        //    is the one combination that would make the payload lie.
+        //
+        // Deliberately NOT also disarmed in `releaseInstrument`: that would be
+        // a second disarm home and a race with the resuming prepare. If a
+        // track is deleted mid-prepare the record lingers until the prepare
+        // resumes — under a wedge that is exactly the reporting we want.
+        prepareLedger.disarm(slot: .instrument, id: id)
     }
 
     /// m19-j — DLS-family `allocateRenderResources` on the bank gate. The

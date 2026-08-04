@@ -153,6 +153,8 @@ struct PersistenceTests {
         #expect(!json.contains("meters"))
         #expect(!json.contains("lastRecordingError"))
         #expect(!json.contains("selectedInputDeviceUID"))
+        // m20-j: which rig you are on is a property of the room, not the song.
+        #expect(!json.contains("selectedOutputDeviceUID"))
         // Persisted header + a couple of persisted fields are present.
         #expect(json.contains("\"schemaVersion\" : 1"))
         #expect(json.contains("\"savedAt\""))

@@ -69,6 +69,30 @@ final class FakeEngine: AudioEngineControlling {
         selectedInputUID = uid
     }
 
+    /// m20-j output twin. `outputDevices` is the raw hardware list WITHOUT
+    /// `isSelected` set; `availableOutputDevices()` stamps it from
+    /// `selectedOutputUID` exactly as `AudioEngine` does via
+    /// `OutputDevices.enumerate(selectedUID:)`, so the wire tests exercise the
+    /// real "following the default" vs "pinned" distinction rather than a
+    /// hand-written flag.
+    var outputDevices: [AudioOutputDevice] = []
+    private(set) var selectedOutputUID: String?
+
+    func availableOutputDevices() -> [AudioOutputDevice] {
+        outputDevices.map {
+            var device = $0
+            device.isSelected = selectedOutputUID != nil && $0.uid == selectedOutputUID
+            return device
+        }
+    }
+
+    func setOutputDevice(uid: String?) throws {
+        if let uid, !outputDevices.contains(where: { $0.uid == uid }) {
+            throw ProjectError.outputDeviceNotFound(uid)
+        }
+        selectedOutputUID = uid
+    }
+
     func startRecording(_ transport: TransportState, to url: URL,
                         completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {
         startRecordingURLs.append(url)
@@ -973,6 +997,142 @@ struct CommandRouterTests {
         #expect(engine.selectedInputUID == nil)  // never reached the engine
     }
 
+    // MARK: - Output devices (m20-j)
+
+    /// Two-device fixture shared by the output.* route tests. Deliberately
+    /// shaped like a real rig: the built-in speakers ARE the system default,
+    /// the loopback is not — so `isDefault` and `isSelected` can be told apart.
+    private func outputFixture() -> (CommandRouter, ProjectStore, FakeEngine) {
+        let engine = FakeEngine()
+        engine.outputDevices = [
+            AudioOutputDevice(uid: "builtin-speakers", name: "MacBook Pro Speakers",
+                              sampleRate: 48_000, channelCount: 2, isDefault: true),
+            AudioOutputDevice(uid: "BlackHole2ch_UID", name: "BlackHole 2ch",
+                              sampleRate: 44_100, channelCount: 2, isDefault: false),
+        ]
+        let (router, store) = makeRouter(engine: engine)
+        return (router, store, engine)
+    }
+
+    @Test("output.listDevices returns the {devices: [...]} contract shape")
+    func listOutputDevices() async throws {
+        // store.engine is weak — the engine binding must live to the end.
+        let (router, _, engine) = outputFixture()
+
+        let response = await router.handle(ControlRequest(id: "1", command: "output.listDevices"))
+        #expect(response.ok)
+        guard case .array(let devices)? = response.result?["devices"] else {
+            Issue.record("result has no devices array")
+            return
+        }
+        try #require(devices.count == 2)
+        #expect(devices.map { $0["uid"]?.stringValue } == engine.outputDevices.map { $0.uid })
+        #expect(devices[0]["uid"]?.stringValue == "builtin-speakers")
+        #expect(devices[0]["name"]?.stringValue == "MacBook Pro Speakers")
+        #expect(devices[0]["sampleRate"]?.doubleValue == 48_000)
+        #expect(devices[0]["channelCount"]?.doubleValue == 2)
+        #expect(devices[0]["isDefault"]?.boolValue == true)
+        // Nothing pinned yet — the app is FOLLOWING the system default, which
+        // is not the same as having selected the default device.
+        #expect(devices[0]["isSelected"]?.boolValue == false)
+        #expect(devices[1]["uid"]?.stringValue == "BlackHole2ch_UID")
+        #expect(devices[1]["isDefault"]?.boolValue == false)
+        #expect(devices[1]["isSelected"]?.boolValue == false)
+    }
+
+    @Test("output.setDevice selects, rejects unknown uids, and null resets")
+    func setOutputDevice() async {
+        let (router, store, engine) = outputFixture()
+
+        let select = await router.handle(ControlRequest(
+            id: "1", command: "output.setDevice", params: ["uid": .string("BlackHole2ch_UID")]
+        ))
+        #expect(select.ok)
+        #expect(store.selectedOutputDeviceUID == "BlackHole2ch_UID")
+        #expect(engine.selectedOutputUID == "BlackHole2ch_UID")
+        // Success result = the same device-list shape, selection ALREADY
+        // applied — the caller reads the new pin straight off isSelected.
+        guard case .array(let devices)? = select.result?["devices"] else {
+            Issue.record("setDevice result has no devices array")
+            return
+        }
+        #expect(devices.count == 2)
+        #expect(devices[0]["isSelected"]?.boolValue == false)  // the default, not selected
+        #expect(devices[1]["isSelected"]?.boolValue == true)   // the pin
+        #expect(devices[1]["isDefault"]?.boolValue == false)   // and it is NOT the default
+
+        let unknown = await router.handle(ControlRequest(
+            id: "2", command: "output.setDevice", params: ["uid": .string("ghost")]
+        ))
+        #expect(!unknown.ok)
+        #expect(unknown.error == "no output device with uid 'ghost' — use output.listDevices")
+        #expect(store.selectedOutputDeviceUID == "BlackHole2ch_UID")  // untouched on failure
+
+        let reset = await router.handle(ControlRequest(
+            id: "3", command: "output.setDevice", params: ["uid": .null]
+        ))
+        #expect(reset.ok)
+        #expect(store.selectedOutputDeviceUID == nil)
+        #expect(engine.selectedOutputUID == nil)
+        guard case .array(let afterReset)? = reset.result?["devices"] else {
+            Issue.record("reset result has no devices array")
+            return
+        }
+        #expect(afterReset.allSatisfy { $0["isSelected"]?.boolValue == false })
+    }
+
+    /// The F5 "omit = destructive default" shape, copied from input.setDevice
+    /// on purpose: omitting `uid` RESETS to the system default, so a typo'd key
+    /// must be refused rather than silently bouncing the user's sound back to
+    /// the laptop speakers and returning ok.
+    @Test("output.setDevice: omitting uid resets, but a typo'd key is refused first")
+    func setOutputDeviceOmittedAndTypo() async {
+        let (router, store, engine) = outputFixture()
+        #expect(await router.handle(ControlRequest(
+            id: "1", command: "output.setDevice", params: ["uid": .string("BlackHole2ch_UID")]
+        )).ok)
+
+        // A typo'd key does NOT reset the pin — it teaches.
+        let typo = await router.handle(ControlRequest(
+            id: "2", command: "output.setDevice", params: ["device": .string("BlackHole2ch_UID")]
+        ))
+        #expect(!typo.ok)
+        #expect(typo.error == "output.setDevice: unknown parameter 'device' — valid keys are 'uid'. "
+                + "omit 'uid' (or pass it null) to select the system-default output")
+        #expect(store.selectedOutputDeviceUID == "BlackHole2ch_UID")  // pin survived the typo
+        #expect(engine.selectedOutputUID == "BlackHole2ch_UID")
+
+        // An OMITTED uid is the deliberate reset path.
+        let omitted = await router.handle(ControlRequest(id: "3", command: "output.setDevice"))
+        #expect(omitted.ok)
+        #expect(store.selectedOutputDeviceUID == nil)
+        #expect(engine.selectedOutputUID == nil)
+
+        // A non-string, non-null uid is a type error, not a reset.
+        let wrongType = await router.handle(ControlRequest(
+            id: "4", command: "output.setDevice", params: ["uid": .number(3)]
+        ))
+        #expect(!wrongType.ok)
+        #expect(wrongType.error == "'uid' must be a string or null")
+    }
+
+    @Test("output.setDevice while recording reports transportBusy verbatim")
+    func setOutputDeviceWhileRecording() async throws {
+        // store.engine is weak — the engine binding must live to the end.
+        let (router, store, engine) = outputFixture()
+        let track = store.addTrack(kind: .audio)
+        try store.setTrackArm(id: track.id, armed: true)
+        #expect(await router.handle(ControlRequest(id: "1", command: "transport.record")).ok)
+
+        let response = await router.handle(ControlRequest(
+            id: "2", command: "output.setDevice", params: ["uid": .string("BlackHole2ch_UID")]
+        ))
+        #expect(!response.ok)
+        #expect(response.error == "cannot switch output device while recording — stop first")
+        #expect(store.selectedOutputDeviceUID == nil)
+        #expect(engine.selectedOutputUID == nil)  // never reached the engine
+    }
+
     // 19.
     @Test("edit.undo after track.add returns the undone label and the post-undo snapshot")
     func editUndoRoundTrip() async throws {
@@ -1449,6 +1609,15 @@ struct CommandRouterTests {
             // ClipGroupEditCommandTests.
             "clip.removeMany": ["ids": .array([])],
             "clip.moveMany": ["ids": .array([]), "byBeats": .number(0)],
+            // clip.moveManyByTracks/clip.moveManyToTrack (m23-aj-2): appended
+            // at the very END of allCommands, by which point track.remove has
+            // already deleted the shared audio `trackID` — so toTrackId names
+            // `instTrackID` (survives the whole loop, same reasoning as
+            // track.reorder above). An empty `ids` is a legal no-op for both
+            // (moveManyToTrack still validates toTrackId even so). Full
+            // coverage in ClipCrossTrackMoveCommandTests.
+            "clip.moveManyByTracks": ["ids": .array([]), "byTracks": .number(0)],
+            "clip.moveManyToTrack": ["ids": .array([]), "toTrackId": .string(instTrackID)],
             // Project-wide bar edits (m15-d) — no clip id needed; they run before
             // transport.record in allCommands order, so the transport is not yet
             // recording when their turn comes. bar 1 = beat 0. Full coverage in
@@ -1467,6 +1636,14 @@ struct CommandRouterTests {
             "input.listDevices": [:],
             // uid omitted = system default, always valid.
             "input.setDevice": [:],
+            "output.listDevices": [:],
+            // m20-j. uid omitted = follow the system default, always valid —
+            // and on this router's FakeEngine that is a pure state reset, no
+            // hardware touched. Both output verbs sit BEFORE transport.record
+            // in `allCommands`, which matters: output.setDevice is refused
+            // while recording, and this loop is mid-take by the time it
+            // reaches the verbs after transport.record.
+            "output.setDevice": [:],
             // Sound-bank program listing (m10-n): "gm" is present on every macOS,
             // so it routes with no filesystem setup. instrument.listSoundBanks
             // (no params) also stays IN the loop — a scan never errors.

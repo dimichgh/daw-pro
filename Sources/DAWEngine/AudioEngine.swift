@@ -163,6 +163,94 @@ public final class AudioEngine: AudioEngineControlling {
         /// False when the anchor had to be host-clock-only (no valid
         /// lastRenderTime at start) — derivedBeats then skips the sample path.
         let hasSampleAnchor: Bool
+
+        /// The host-domain projection — THE ONLY THING A CONTINUATION MAY
+        /// CARRY ACROSS AN ENGINE BOUNCE (m23-bs-3a, design §14.2). See
+        /// `AnchorLine` for why the omitted fields are the point.
+        var line: AnchorLine {
+            AnchorLine(startBeats: startBeats, tempoMap: tempoMap,
+                       anchorHostTime: anchorHostTime)
+        }
+    }
+
+    /// ONE ANCHOR'S LINE IN THE HOST DOMAIN (m23-bs-3a, design §14.2): the
+    /// beat, the instant that beat occurs at, and the map that connects them.
+    /// Everything a continuation needs to RE-DERIVE its resume beat for an
+    /// arbitrary future instant — and nothing that stops being meaningful when
+    /// the engine object is replaced.
+    ///
+    /// ⚠️ THE OMISSIONS ARE THE POINT, AND THEY ARE WHY THIS TYPE EXISTS AT
+    /// ALL. `PlaybackAnchor` also carries `anchorSampleTime`,
+    /// `outputSampleRate` and `hasSampleAnchor` — fields whose meaning does not
+    /// survive an engine REPLACEMENT. A resume state that carried them across a
+    /// rebuild would make representable precisely the state the m23-bq defect
+    /// was made of: a stale sample clock, still structurally valid-looking,
+    /// available to be read against a NEW render session. The derivation needs
+    /// exactly these three fields and the host clock is monotonic across a
+    /// bounce, so narrowing costs nothing and removes a whole failure class
+    /// **by representability rather than by comment** — the `ArrangeDropSnap`
+    /// model.
+    ///
+    /// ⚠️ THE OTHER HALF OF THE FROZEN-BEAT FIX IS THE ABSENCE OF A BEAT FIELD.
+    /// Before bs-3a the resume state was `(beats:, tempoMap:)` — a beat frozen
+    /// at quiesce, handed to a start an arbitrary amount of work later. Anchor
+    /// that stale beat at a NEW instant and you have the m19-f shifted-origin
+    /// hazard dressed as a fix. A LINE has no "when"; it can only be evaluated
+    /// AT an instant, which is what forces every consumer to name one.
+    ///
+    /// ⚠️ NESTED AND `private`, DELIBERATELY — VERIFIED NAME COLLISION.
+    /// `RecoveryAnchorContinuityGateTests.swift` declares its own `AnchorLine`
+    /// (the test's raw (beat, host) pair) inside an `extension
+    /// RecoveryPlayheadTests`. A MODULE-SCOPE `AnchorLine` in DAWEngine would
+    /// be shadowed by that one inside the extension: the test would keep
+    /// compiling while silently meaning something else. Every consumer of this
+    /// type is inside `AudioEngine` already, so nesting removes the collision
+    /// entirely. Registered as `AudioEngine.AnchorLine`.
+    private struct AnchorLine {
+        let startBeats: Double
+        let tempoMap: TempoMap
+        let anchorHostTime: UInt64
+    }
+
+    /// WHICH INSTANT a start anchors on — THE ONE HOME of the schedule-origin
+    /// ↔ anchor-instant identity (m23-bs-2, design §1b/§13.5).
+    ///
+    /// `startBeats` is the beat that occurs at `anchorHostTime` — for the clip
+    /// schedule, the automation origin (`PlaybackGraph.stagedAutomationStart`),
+    /// the metronome, the reference track and the playhead SIMULTANEOUSLY. The
+    /// pair is not separable, and a start that derives its beat at one instant
+    /// and anchors at another republishes a line the music is not on, with an
+    /// error that is PERMANENT for the rest of the roll.
+    ///
+    /// There are exactly two kinds of start, and the difference is which half
+    /// of that identity the caller already fixed:
+    ///
+    ///   - RELOCATION — the user (or an agent) chose the beat. Any instant will
+    ///     do; take the earliest practical one.
+    ///   - CONTINUATION — wall time kept running through an engine bounce, so
+    ///     the beat is a FUNCTION of the instant. The caller must therefore
+    ///     choose the instant FIRST, derive the beat for it off the outgoing
+    ///     anchor's line, and hand both here.
+    ///
+    /// ⚠️ NO DEFAULT ON `startPlayers(anchorPolicy:)`, for the m23-bp/m23-bq
+    /// reason: silence is how `recoverEngine` inherited the wrong answer twice
+    /// already (the reschedule cause, then render-clock trust). A required
+    /// parameter makes the COMPILER ask every future start path which kind it
+    /// is. `StartAnchorPolicySiteTests` pins the resulting answers.
+    private enum StartAnchorPolicy {
+        /// Anchor at the earliest instant the start work can guarantee —
+        /// today's behaviour, byte-identical.
+        case asSoonAsPractical
+        /// Anchor at exactly this host time: `fromBeat` was derived FOR this
+        /// instant. Clamped FORWARD (never backward) if the start work
+        /// overruns — a PAST anchor gives m19-f shifted-origin behaviour, i.e.
+        /// audio late and playhead on time, which is a sync SPLIT and strictly
+        /// worse than the shared lag a forward clamp degrades to.
+        ///
+        /// Requires `countInBars == 0`: the anchor is built as
+        /// `clickAnchorHost + countInHostTicks`, so a count-in would push it
+        /// past the requested instant. Every continuation site passes 0.
+        case atHostTime(UInt64)
     }
 
     private var currentAnchor: PlaybackAnchor?
@@ -219,6 +307,21 @@ public final class AudioEngine: AudioEngineControlling {
     /// Survives across takes — every startRecording applies the current
     /// selection to its fresh InputCapture.
     private var selectedInputUID: String?
+
+    /// UID of the OUTPUT device pinned for playback (m20-j); nil = follow the
+    /// system default. Survives engine rebuilds — `rebuildEngine` re-applies
+    /// it to the fresh engine's AUHAL, which would otherwise be born following
+    /// the system default again.
+    private var selectedOutputUID: String?
+
+    /// Whether the pin has actually been written to the CURRENT engine's
+    /// output AUHAL (and read back). Distinct from `selectedOutputUID != nil`:
+    /// the selection is the user's standing intent, this is the state of the
+    /// hardware unit right now. It drives exactly one decision — whether
+    /// resetting to the system default has to discard the engine (a never-
+    /// pinned engine is already following the default, so a rebuild would be a
+    /// pointless audio glitch).
+    private var outputDevicePinned = false
 
     // MARK: Loop state (cached from transport intents; read by the playhead task)
 
@@ -391,17 +494,22 @@ public final class AudioEngine: AudioEngineControlling {
     /// Lead time between "now" and the shared player start anchor: long enough
     /// to cover a render quantum + scheduling jitter, short enough to feel
     /// immediate. This is the FLOOR — `startPlayers` scales the lead with the
-    /// startable-player count (m19-f R2′ leg 2) because the serial
-    /// `play(at:)` loop costs ~6 ms per player and a call completing AFTER
-    /// the anchor starts that player SHIFTED-ORIGIN (probe-pinned
-    /// 2026-07-16): its whole schedule runs late by the lateness, silently
-    /// off the grid for the rest of the roll. The metronome enable-mid-play
-    /// re-anchor keeps this constant — it starts ONE player.
-    private static let startLeadSeconds = 0.06
+    /// startable-player count (m19-f R2′ leg 2). The metronome enable-mid-play
+    /// and reference re-anchors keep this constant — they start ONE player.
+    ///
+    /// m23-bs-2: a FORWARDING ALIAS, not a copy. The formula and the reason it
+    /// has the shape it has now live in `StartAnchorBudget`, because
+    /// `recoverEngine` has to evaluate the SAME function to predict where its
+    /// anchor will land — and two copies of a prediction and the thing it
+    /// predicts is exactly the divergence the one-home rule forbids.
+    private static let startLeadSeconds = StartAnchorBudget.leadFloorSeconds
 
     /// Anchor-lead ceiling (m19-f R2′ leg 2): a 60+-active-player session
     /// gets a visible stderr line instead of a silent ~1 s pre-roll gap.
-    private static let maxStartLeadSeconds = 0.5
+    /// m23-bs-2: forwarding alias — see `startLeadSeconds` above. Kept as an
+    /// alias rather than inlined into the stderr warning so the warning text
+    /// stays byte-identical.
+    private static let maxStartLeadSeconds = StartAnchorBudget.leadCapSeconds
 
     /// Simultaneously armed per-insert spectrum taps (m23-r2a, design §Q4).
     /// The 9th arm is REFUSED, never evicted: eviction would silently stop a
@@ -424,12 +532,41 @@ public final class AudioEngine: AudioEngineControlling {
 
     public private(set) var isRunning = false
     public private(set) var isTonePlaying = false
-    /// Position + tempo map captured when the routing-rewire hook wound down
-    /// ACTIVE playback (quiescence before the engine discard, see
-    /// `wireGraphHooks`); consumed by `rebuildEngine`, which resumes through
-    /// the cold-start primitive (`startPlayers` + playhead task) against the
-    /// freshly built engine.
-    private var resumeAfterRoutingRewire: (beats: Double, tempoMap: TempoMap)?
+    /// The outgoing anchor's LINE plus the startable-player count, captured when
+    /// the routing-rewire hook wound down ACTIVE playback (quiescence before the
+    /// engine discard, see `wireGraphHooks`); consumed by `rebuildEngine` (and,
+    /// defensively, by `tracksDidChangeBody`), which resume through the
+    /// cold-start primitive (`startPlayers` + playhead task) against the freshly
+    /// built engine.
+    ///
+    /// ⚠️ THERE IS NO BEAT HERE, AND THAT IS THE m23-bs-3a FIX (design §14.2).
+    /// Until bs-3a this was `(beats:, tempoMap:)` — a beat frozen at quiesce and
+    /// handed to a start an arbitrary amount of work later, which stepped the
+    /// transport BACKWARD by the whole rewire/rebuild cost, permanently, on every
+    /// occurrence. A LINE has no "when": it can only be EVALUATED at an instant,
+    /// so the resume site is forced to name the instant it is about to anchor on
+    /// and derive the beat FOR it (`resumeBeat(at:line:)`). Re-adding a beat
+    /// field, or deriving forward from a carried quiesce instant, reintroduces
+    /// the defect — `ContinuationResumeStateSiteTests` (A-L8) pins this
+    /// structurally, because a linear fixture cannot see the modular-origin half
+    /// of that mistake behaviourally.
+    ///
+    /// ⚠️ THE COUNT IS CAPTURED HERE, NOT AT THE RESUME, AND IT IS NOT AN
+    /// OPTIMISATION. At both resume sites the natural read returns 0 BY
+    /// CONSTRUCTION (§14.3): the hook has already run `graph.stopAllPlayers()`,
+    /// and `rebuildEngine`'s `graph` is a different object that has never been
+    /// scheduled. Reading there would collapse every horizon to the floor
+    /// regardless of project size — silently, and in proportion to project size.
+    ///
+    /// ⚠️ THE PAIRING ASSUMPTION. `resumeBeat`'s modular branch reads the
+    /// ENGINE's `loopContext`, not this line's. That is correct ONLY because the
+    /// carried line and the surviving `loopContext` come from the same outgoing
+    /// `startPlayers`. It holds because `loopContext` is written in exactly three
+    /// functions (pinned by A-L9) and none of them runs between quiesce and
+    /// resume, and because every quiesce→resume path is one synchronous
+    /// main-actor stretch. Each resume site carries a debug assertion that no
+    /// start arrived in between.
+    private var resumeAfterRoutingRewire: (line: AnchorLine, startablePlayerCount: Int)?
     public var meteringHandler: ((MeterFrame) -> Void)?
     public var trackMeteringHandler: ((UUID, MeterFrame) -> Void)?
     public var playheadHandler: ((Double) -> Void)?
@@ -439,23 +576,31 @@ public final class AudioEngine: AudioEngineControlling {
     /// surface). The store installs this and owns the coalescing ring.
     public var engineNoticeHandler: ((EngineNoticeEvent) -> Void)?
 
+    /// THE session processing rate of every LIVE graph (m20-d, m19-k design
+    /// §7 Phase 2). A constant, deliberately: the graph no longer follows the
+    /// output device, so chain DSP, PDC, automation frame math, AU prepare
+    /// keys and the metronome's click buffers are device-INVARIANT — a
+    /// 44.1 kHz interface or a 24 kHz Bluetooth headset changes nothing above
+    /// the output edge, where `AVAudioOutputNode` converts on its input scope
+    /// (documented, AVAudioIONode.h; measured cost +0.004 ms in m20-b).
+    ///
+    /// 48 kHz is the v1 value and `OfflineRenderer`'s production default, so
+    /// live and offline DSP are at parity by construction. This is the seam a
+    /// future per-project rate lands on: design §7 Phase 3+ bullet 2 makes
+    /// `project.sampleRate` an additive `ProjectDocument` field (plus wire/MCP
+    /// surface) once a real 96 k need appears — at which point live graph
+    /// construction reads THAT instead of this constant, and nothing else in
+    /// the engine has to move. Until then this is the one home of the number.
+    ///
+    /// NOT the capture rate: `InputCapture`/`RecordingWriter` stay
+    /// device-coupled (design class B — the input node cannot convert), and
+    /// the transport anchor math stays in the device sample-clock domain.
+    public static let projectSampleRate: Double = 48_000
+
     public init() {
-        graph = PlaybackGraph(engine: engine, graphRate: Self.currentDeviceRate(of: engine))
+        graph = PlaybackGraph(engine: engine, graphRate: Self.projectSampleRate)
         wireGraphHooks()
         observeConfigurationChanges()
-    }
-
-    /// The default output device's nominal rate at CALL time, 48 kHz when
-    /// the output is not yet configured — the exact query-plus-guard that
-    /// lived in `PlaybackGraph.graphFormat()` before m20-c, now read ONCE
-    /// per live graph construction (init, `rebuildEngine`) and injected.
-    /// Build-time semantics are identical to the old live query; what
-    /// changed is mid-life: a device-rate flip no longer half-updates chain
-    /// rates through `applyParameters` — the graph keeps its build rate
-    /// until the next full rebuild.
-    private static func currentDeviceRate(of engine: AVAudioEngine) -> Double {
-        let outputRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-        return outputRate > 0 ? outputRate : 48_000
     }
 
     /// Wires every AudioEngine-owned hook into the CURRENT `graph` — called
@@ -552,8 +697,26 @@ public final class AudioEngine: AudioEngineControlling {
         graph.willMutateRoutingTopology = { [weak self] in
             guard let self, self.engine.isRunning else { return }
             if let anchor = self.currentAnchor {
-                self.resumeAfterRoutingRewire =
-                    (beats: self.derivedBeats(), tempoMap: anchor.tempoMap)
+                // ⚠️ m23-bs-3a §13.3/§14.3, SECOND INSTANCE OF THE LANDMINE. The
+                // count MUST be read HERE, above `stopAllPlayers()` two lines
+                // down: that call runs `noteStopped()` on every node and the
+                // enqueue ledger goes to ZERO, so the resume site — which is
+                // where the obvious code would read it — sees 0 whatever the
+                // project holds. The horizon would then collapse to the floor
+                // and a large project would under-predict its anchor by up to
+                // 0.44 s, SILENTLY and in proportion to project size.
+                let startable = self.graph.startablePlayerCount
+                // §6's mirror, and the reason the frozen beat is not simply
+                // deleted: the STOP-INSTANT beat still has a job. It is what a
+                // FAILED rebuild must report — the last beat that actually
+                // sounded — and it is what `rebuildEngine`'s two
+                // `applyParameters(playheadBeat:)` passes key off. Never the
+                // resume beat, which is a FUTURE beat that has not sounded yet.
+                self.lastKnownBeats = self.derivedBeats()
+                // The LINE, never a beat: the resume site derives its own beat
+                // for the instant it is about to anchor on (§14.2).
+                self.resumeAfterRoutingRewire = (line: anchor.line,
+                                                 startablePlayerCount: startable)
                 self.playheadTask?.cancel()
                 self.playheadTask = nil
                 self.graph.stopAllPlayers()
@@ -655,6 +818,14 @@ public final class AudioEngine: AudioEngineControlling {
             // standing LocalizedError mapping surfaces a teaching error
             // wherever this throw lands.
             try withObjCExceptionBarrier("engine start") {
+                // m20-j: the output device pin lands BEFORE anything reads an
+                // output format and before start() — the hardware must come up
+                // on the SELECTED device, not come up on the default and then
+                // be yanked across (which would cost a configuration change
+                // and a recovery bounce on every cold start). Best-effort: a
+                // pinned device that vanished degrades to the system default
+                // with a notice rather than failing the whole transport start.
+                reapplyOutputDevicePinIfNeeded()
                 // Touching mainMixerNode implicitly wires mixer -> output.
                 let mixer = engine.mainMixerNode
                 // Master chain insert before start (m13-d R1): normally already
@@ -755,7 +926,20 @@ public final class AudioEngine: AudioEngineControlling {
         // `withGuardedEngineIntent` for why a caught raise cannot rethrow
         // through this non-throwing protocol method.
         withGuardedEngineIntent("transport start") {
-            startPlayers(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap)
+            // relocation: the user chose this beat and pressed play — a note
+            // you started inside does not sound (the v0 policy, unchanged).
+            // renderClockTrusted: no bounce precedes this start. A transport
+            // stop leaves the ENGINE running (`stopPlayback` stops players
+            // only), so the common path finds a live, current render clock;
+            // a never-started engine reports `lastRenderTime == nil` and the
+            // trusted branch falls through to the host anchor by itself.
+            // The one residual window is shutdown() → startPlayback() in the
+            // same process, which no production caller performs (m23-bq
+            // audit: `AudioEngine.shutdown()` has zero callers in Sources).
+            // anchorPolicy: the user chose the beat — any instant will do.
+            startPlayers(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap,
+                         renderClockTrusted: true, cause: .relocation,
+                         anchorPolicy: .asSoonAsPractical)
             startPlayheadTask()
         }
     }
@@ -790,7 +974,9 @@ public final class AudioEngine: AudioEngineControlling {
         cacheTransportFlags(from: transport)
         guard currentAnchor != nil else { return }  // stopped: position arrives with next start
         withGuardedEngineIntent("transport seek") {
-            restart(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap)
+            // relocation: the transport JUMPED to a chosen beat.
+            restart(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap,
+                    cause: .relocation)
         }
     }
 
@@ -803,7 +989,8 @@ public final class AudioEngine: AudioEngineControlling {
         // map edit — the transport's (trivial) map rides in whole.
         withGuardedEngineIntent("tempo change") {
             let beats = derivedBeats()
-            restart(fromBeat: beats, tempoMap: transport.tempoMap)
+            // continuation: the tempo changed, the position did not.
+            restart(fromBeat: beats, tempoMap: transport.tempoMap, cause: .continuation)
             lastKnownBeats = beats
             playheadHandler?(beats)
         }
@@ -877,7 +1064,10 @@ public final class AudioEngine: AudioEngineControlling {
         if changed, isRunning, let anchor = currentAnchor {
             // Structural change WITHOUT an engine bounce (clip edits etc.):
             // the pre-M4 player-only restart, unchanged.
-            restart(fromBeat: derivedBeats(), tempoMap: anchor.tempoMap)
+            // continuation: an EDIT happened, the playhead kept rolling — this
+            // is the m23-bp trigger the live gate reproduces (any piano-roll
+            // note edit or clip move flips `changed`).
+            restart(fromBeat: derivedBeats(), tempoMap: anchor.tempoMap, cause: .continuation)
         }
         if let resume = resumeAfterRoutingRewire {
             // Defensive (m13-a): an announce always aborts into the rebuild
@@ -891,8 +1081,45 @@ public final class AudioEngine: AudioEngineControlling {
             // pinned live 2026-07-06).
             resumeAfterRoutingRewire = nil
             if isRunning {
-                startPlayers(fromBeat: resume.beats, tempoMap: resume.tempoMap,
-                             renderClockTrusted: false)
+                // §14.2's PAIRING ASSUMPTION, guarded in debug only. The carried
+                // line describes the OUTGOING roll, and `resumeBeat`'s modular
+                // branch reads the ENGINE's surviving `loopContext` — a pairing
+                // that is valid only while no start arrived in between. It holds
+                // here for a reason that is NOT obvious from reading the two
+                // blocks in sequence: the `restart` branch above requires
+                // `currentAnchor != nil`, and the hook that set this resume state
+                // nils the anchor, so the two are mutually exclusive. If that ever
+                // stops being true the carried line is stale and applying it
+                // silently is the failure this pairing can produce.
+                assert(currentAnchor == nil,
+                       "m23-bs-3a: a start arrived between the routing-rewire quiesce and "
+                       + "this resume, so the carried AnchorLine describes a roll that is "
+                       + "no longer the one playing, while resumeBeat's modular branch "
+                       + "reads the CURRENT loopContext. See resumeAfterRoutingRewire.")
+                // m23-bs-3a: predict the instant, then derive the beat FOR it, so
+                // `startBeats` and `anchorHostTime` are two views of ONE chosen
+                // number. The count comes from QUIESCE (§14.3): the hook already
+                // ran `stopAllPlayers()`, so reading it here would return 0.
+                //
+                // ⚠️ §5.1 — the derivation lives HERE, at the call site, and never
+                // inside `startPlayers`, which clears `loopContext` on the way in
+                // and would silently take the LINEAR branch.
+                let target = continuationAnchorInstant(
+                    startablePlayerCount: resume.startablePlayerCount)
+                let beats = resumeBeat(at: target, line: resume.line)
+                // continuation: wall time kept running through the rewire, so the
+                // beat is a FUNCTION of the instant this anchor lands on.
+                // ⚠️ NO LIVE LEG COVERS THIS SITE and the close-out says so: it is
+                // unreachable in this tree (an announce always aborts into the
+                // rebuild branch at the top of this method, which consumes the
+                // resume state). It is flipped anyway for the no-default
+                // discipline — a site left on a recorded answer that is
+                // known-wrong is how `recoverEngine` inherited the wrong answer
+                // twice. Source-pinned by StartAnchorPolicySiteTests and
+                // ContinuationResumeStateSiteTests.
+                startPlayers(fromBeat: beats, tempoMap: resume.line.tempoMap,
+                             renderClockTrusted: false, cause: .continuation,
+                             anchorPolicy: .atHostTime(target))
                 startPlayheadTask()
             }
         }
@@ -938,7 +1165,21 @@ public final class AudioEngine: AudioEngineControlling {
         //    arrive without the announce hook having wound down), capture
         //    resume state exactly like the hook.
         if let anchor = currentAnchor {
-            resumeAfterRoutingRewire = (beats: derivedBeats(), tempoMap: anchor.tempoMap)
+            // ⚠️ m23-bs-3a §13.3/§14.3 — THIRD READ SITE, same landmine, and here
+            // it is doubly load-bearing: the resume at step 6 runs against a
+            // BRAND-NEW `PlaybackGraph` (built below at step 3) which has never
+            // been scheduled, so `startablePlayerCount` there is 0 by
+            // construction, not merely stale. This read, above
+            // `stopAllPlayers()`, is the only place the outgoing project's size
+            // is still knowable.
+            let startable = graph.startablePlayerCount
+            // §6's mirror — the STOP-INSTANT beat, never the resume beat. It is
+            // what a rebuild whose `engine.start()` THROWS must report (today
+            // that path reports whatever the last 30 Hz playhead push happened
+            // to be), and it is what the two `applyParameters(playheadBeat:)`
+            // passes below key off — this makes them FRESHER, not staler.
+            lastKnownBeats = derivedBeats()
+            resumeAfterRoutingRewire = (line: anchor.line, startablePlayerCount: startable)
             playheadTask?.cancel()
             playheadTask = nil
             graph.stopAllPlayers()
@@ -977,7 +1218,33 @@ public final class AudioEngine: AudioEngineControlling {
         // reused by the fresh tap when the format holds.
         resetLiveLoudness()
         engine = AVAudioEngine()  // old engine's last reference dies here
-        graph = PlaybackGraph(engine: engine, graphRate: Self.currentDeviceRate(of: engine))
+        // m20-j: the fresh engine is born following the SYSTEM default output,
+        // so a live pin has to be re-written here. The surviving ordering
+        // constraint is pin-before-`start()` (step 4 below): the AUHAL must
+        // already point at the selected device when the hardware comes up, or
+        // the rebuild would play to whichever device happened to be the system
+        // default. (When nothing is pinned this is a no-op and the
+        // born-following-the-default behaviour is exactly what
+        // `releaseOutputDevicePin` relies on.)
+        //
+        // m20-d: the position relative to the `PlaybackGraph(...)` line below
+        // is NO LONGER constrained — the graph rate is `projectSampleRate`, a
+        // constant, so graph construction reads nothing from the device.
+        //
+        // The pin does take effect on this never-started engine — MEASURED,
+        // not argued (m20-j probe C, 2026-08-02): with the loopback staged at
+        // 44100 while the system default sat at 48000, a fresh engine's
+        // `outputNode.outputFormat` read 48000.0 before the pin and 44100.0
+        // after it, with no `start()` in between. That is now evidence about
+        // the PIN's reach only; it no longer bears on the graph rate.
+        // ⚠️ The earlier probe could NOT have shown this — every output device
+        // on this machine was at 48 kHz, so that field was a constant and
+        // could not tell "tracks the pin" from "stale until start()" (m20-b
+        // carry-forward caveat (b)). Staging a differing rate is what made the
+        // measurement discriminating; re-stage it before trusting a re-run.
+        outputDevicePinned = false
+        reapplyOutputDevicePinIfNeeded()
+        graph = PlaybackGraph(engine: engine, graphRate: Self.projectSampleRate)
         wireGraphHooks()
         observeConfigurationChanges()
         // 4. Cold build from the model — the offline renderer's proven
@@ -1042,8 +1309,32 @@ public final class AudioEngine: AudioEngineControlling {
         if let resume = resumeAfterRoutingRewire {
             resumeAfterRoutingRewire = nil
             if isRunning {
-                startPlayers(fromBeat: resume.beats, tempoMap: resume.tempoMap,
-                             renderClockTrusted: false)
+                // §14.2's pairing assumption — see the twin at the rewire resume.
+                // Nothing between the quiesce at step 1 and here starts players.
+                assert(currentAnchor == nil,
+                       "m23-bs-3a: a start arrived between rebuildEngine's quiesce and its "
+                       + "resume, so the carried AnchorLine describes a roll that is no "
+                       + "longer the one playing. See resumeAfterRoutingRewire.")
+                // m23-bs-3a — THE DEVICE-FLIP PATH (m20-e), and design §10 ranked
+                // it the largest instance of the backward step because a full cold
+                // rebuild ran between quiesce and here. §14.7 reframes that: the
+                // INSTANT is chosen HERE, so every bit of that rebuild is MEASURED
+                // rather than predicted and drops out exactly. Only the player
+                // COUNT is stale, it comes from quiesce (§14.3 — this graph is a
+                // fresh object and reads 0), and an under-prediction clamps
+                // FORWARD, which is precisely today's behaviour and no worse.
+                //
+                // ⚠️ §5.1 — the derivation stays at the call site, never inside
+                // `startPlayers`.
+                let target = continuationAnchorInstant(
+                    startablePlayerCount: resume.startablePlayerCount)
+                let beats = resumeBeat(at: target, line: resume.line)
+                // continuation: the engine bounced under a rolling transport, so
+                // held notes must re-sound (m23-bp) and the beat is a FUNCTION of
+                // the instant the new anchor lands on.
+                startPlayers(fromBeat: beats, tempoMap: resume.line.tempoMap,
+                             renderClockTrusted: false, cause: .continuation,
+                             anchorPolicy: .atHostTime(target))
                 startPlayheadTask()
             }
         }
@@ -1767,6 +2058,35 @@ public final class AudioEngine: AudioEngineControlling {
         auRegistry.effectStatus[id]
     }
 
+    /// m23-br-1 — the LIVE registry's prepare bookkeeping (`engine.auPrepareStats`).
+    ///
+    /// `auRegistry` is a `let` (see its declaration): `rebuildEngine` and
+    /// `recoverEngine` replace the `AVAudioEngine` and the `PlaybackGraph`,
+    /// but NOT this registry — the hosted AU instances deliberately survive an
+    /// engine rebuild, and so therefore do these counters, for the whole
+    /// lifetime of this `AudioEngine`. That is the property a gate reading the
+    /// counter before and after a device flip or a stall recovery rests on,
+    /// and `AUPrepareStatsTests` pins it rather than leaving it to the reader
+    /// of a `let`. Offline renders build their OWN registry, so a bounce never
+    /// moves these numbers.
+    public func auPrepareStats() -> EngineAUPrepareStats {
+        auRegistry.prepareStats()
+    }
+
+    /// m23-av — the AU-prepare in-flight ledger, readable WITHOUT the main
+    /// actor. `auPrepareStats()` above already carries the same array; this
+    /// exists for the one caller that cannot await the main actor at all: the
+    /// ControlServer's queue tier during a wedge.
+    ///
+    /// `nonisolated` on a `@MainActor` class reaching a plain `let` of
+    /// `@MainActor` type and calling a `nonisolated` method on it is legal —
+    /// the registry reference itself is not isolated state, only its
+    /// main-actor-isolated members are. `auRegistry`'s declaration is
+    /// deliberately unchanged.
+    nonisolated public func auPrepareInFlight() -> [EngineAUPrepareStats.InFlightEntry] {
+        auRegistry.inFlightSnapshot()
+    }
+
     public func instrumentState(forTrack id: UUID) -> Data? {
         auRegistry.instrumentState(forTrack: id)
     }
@@ -1992,7 +2312,9 @@ public final class AudioEngine: AudioEngineControlling {
             // m16-a Leg 1: the restart seam reaches the same playAtTime: loop
             // as a transport start — same barrier, same wind-down on a raise.
             withGuardedEngineIntent("loop change") {
-                restart(fromBeat: derivedBeats(), tempoMap: anchor.tempoMap)
+                // continuation: the loop BOUNDS moved, the playhead did not.
+                restart(fromBeat: derivedBeats(), tempoMap: anchor.tempoMap,
+                        cause: .continuation)
             }
         }
     }
@@ -2028,7 +2350,7 @@ public final class AudioEngine: AudioEngineControlling {
         guard metronomeEnabled else { return }
         let elapsed = elapsedSeconds(anchor: anchor)
         let anchorBeat = beat(forElapsedSeconds: elapsed + Self.startLeadSeconds,
-                              anchor: anchor)
+                              line: anchor.line)
         if let loop = loopContext {
             metronome.scheduleLoopClicks(
                 fromBeat: anchorBeat,
@@ -2202,7 +2524,7 @@ public final class AudioEngine: AudioEngineControlling {
               let file = file ?? (try? openReferenceFile(slot: slot)) else { return }
         let elapsed = elapsedSeconds(anchor: anchor)
         let anchorBeat = beat(forElapsedSeconds: elapsed + Self.startLeadSeconds,
-                              anchor: anchor)
+                              line: anchor.line)
         scheduleAndStartReference(
             atBeat: anchorBeat, tempoMap: anchor.tempoMap, slot: slot, file: file,
             anchorHostTime: mach_absolute_time()
@@ -2274,6 +2596,370 @@ public final class AudioEngine: AudioEngineControlling {
             throw ProjectError.inputDeviceNotFound(uid)
         }
         selectedInputUID = uid
+    }
+
+    // MARK: - Output device selection (m20-j)
+
+    /// All hardware devices currently offering output streams, with the app's
+    /// own pin stamped into `isSelected` (CoreAudio property reads only —
+    /// nothing starts, nothing blocks).
+    public func availableOutputDevices() -> [AudioOutputDevice] {
+        OutputDevices.enumerate(selectedUID: selectedOutputUID)
+    }
+
+    /// Pin PLAYBACK to `uid` (validated against the live device list), or nil
+    /// to follow the system default again.
+    ///
+    /// APP-LOCAL BY CONSTRUCTION: the only thing written is
+    /// `kAudioOutputUnitProperty_CurrentDevice` on THIS engine's own output
+    /// AUHAL. `kAudioHardwarePropertyDefaultOutputDevice` is never written
+    /// anywhere in this project — picking an output here does not move the
+    /// user's Mac-wide default.
+    ///
+    /// Unlike `setInputDevice` (which only records the choice for the next
+    /// take) this takes effect NOW, because playback is continuous: a live
+    /// engine is re-pointed in place, which raises an AVAudioEngine
+    /// configuration change and lands on `recoverEngine` — the same path a
+    /// device unplug has always used, and one that gates on `currentAnchor`
+    /// rather than on `player.isPlaying` (m20-b measured the two disagreeing
+    /// after exactly this kind of change: `engine.isRunning == false` while
+    /// `player.isPlaying == true`).
+    public func setOutputDevice(uid: String?) throws {
+        if let uid, OutputDevices.deviceID(forUID: uid) == nil {
+            throw ProjectError.outputDeviceNotFound(uid)
+        }
+        let previous = selectedOutputUID
+        selectedOutputUID = uid
+        do {
+            if uid == nil {
+                releaseOutputDevicePin()
+            } else {
+                try applyOutputDevicePin()
+            }
+        } catch {
+            selectedOutputUID = previous  // a refused pin never becomes state
+            throw error
+        }
+    }
+
+    /// Points this engine's output AUHAL at `selectedOutputUID`. No-op when
+    /// nothing is pinned (a fresh AVAudioEngine already follows the system
+    /// default — that is the whole "follow" mechanism, see
+    /// `releaseOutputDevicePin`).
+    ///
+    /// ⚠️ THE READ-BACK IS THE VERIFICATION, NOT THE STATUS CODE.
+    /// `AudioUnitSetProperty` returns `noErr` on writes the unit discards
+    /// (m20-b paid for this the hard way), so the set is not done until the
+    /// property has been read back and compared. Measured on this machine
+    /// 2026-08-02: the OUTPUT AUHAL reports the RAW hardware `AudioDeviceID`
+    /// (77 = built-in speakers before the pin, 89 = BlackHole after), so the
+    /// comparison is meaningful here. That is specifically NOT true of the
+    /// INPUT AUHAL, which reports the engine's private aggregate device — see
+    /// `InputDevices.defaultInputDeviceID`. Do not generalize either fact to
+    /// the other side.
+    ///
+    /// The write is unconditional rather than skipped when the AUHAL already
+    /// happens to sit on the target: "on the device" and "pinned to the
+    /// device" are different states, and only the explicit write makes the
+    /// engine stop tracking the system default.
+    private func applyOutputDevicePin() throws {
+        guard let uid = selectedOutputUID else { return }
+        guard var deviceID = OutputDevices.deviceID(forUID: uid) else {
+            throw ProjectError.outputDeviceNotFound(uid)
+        }
+        // Measured (m20-j probe A): `outputNode.audioUnit` is already non-nil
+        // on a never-prepared engine, so no `engine.prepare()` is needed to
+        // materialize it — but keep the guard honest rather than forcing one.
+        guard let audioUnit = engine.outputNode.audioUnit else {
+            throw ProjectError.outputDeviceNotApplied(uid)
+        }
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        guard status == noErr else {
+            FileHandle.standardError.write(Data(
+                "AudioEngine: pinning output '\(uid)' failed — OSStatus \(status)\n".utf8))
+            throw ProjectError.outputDeviceNotApplied(uid)
+        }
+        guard currentOutputDeviceID() == deviceID else {
+            FileHandle.standardError.write(Data(
+                ("AudioEngine: output pin '\(uid)' returned noErr but the AUHAL "
+                 + "did not take it (read-back \(currentOutputDeviceID().map(String.init) ?? "unreadable"), "
+                 + "wanted \(deviceID))\n").utf8))
+            throw ProjectError.outputDeviceNotApplied(uid)
+        }
+        outputDevicePinned = true
+    }
+
+    /// Returns to FOLLOWING the system default output.
+    ///
+    /// There is no "unpin" property: an AUHAL always has a CurrentDevice, and
+    /// whether one that has been explicitly pinned resumes tracking the system
+    /// default after being pointed back at it is not something this code can
+    /// verify without moving the user's default — which is forbidden. So the
+    /// reset is done the one way that is correct BY CONSTRUCTION: discard the
+    /// engine. A fresh `AVAudioEngine` follows the system default by
+    /// definition (measured: a new engine's output AUHAL reads the default
+    /// device's id), and `rebuildEngine` is this project's proven engine-
+    /// replacement primitive — it quiesces a rolling transport, rebuilds the
+    /// graph cold, and resumes playback from the captured position.
+    ///
+    /// No pin ever applied ⇒ nothing to undo, and a rebuild would be a
+    /// gratuitous audio glitch.
+    private func releaseOutputDevicePin() {
+        guard outputDevicePinned else { return }
+        outputDevicePinned = false
+        rebuildEngine(reason: "output device reset to system default")
+    }
+
+    /// The live output AUHAL, exposed so tests can read
+    /// `kAudioOutputUnitProperty_CurrentDevice` back INDEPENDENTLY of this
+    /// engine's own accessor — a read-back verified by the same code that
+    /// wrote it proves less than one verified from outside
+    /// (`graphSampleRateForTesting` naming precedent). Not part of any
+    /// protocol; DAWCore and the UI never see an `AudioUnit`.
+    var outputNodeAudioUnitForTesting: AudioUnit? { engine.outputNode.audioUnit }
+
+    /// The output node's current render-session sample time, or nil when the
+    /// clock has never been valid. `engine` is private, so a test cannot reach
+    /// `outputNode` even with `@testable`.
+    ///
+    /// m23-bt uses this as the HARDWARE-BOUNCE WITNESS: a genuine stop→start
+    /// opens a NEW render session whose sample clock restarts near zero, so
+    /// `after < before` is positive evidence that the hardware actually went
+    /// down and came back. That the clock restarts is not an assumption — it is
+    /// what m23-bq measured from the other side: recovery anchoring against the
+    /// PREVIOUS session's `lastRenderTime` froze the playhead for 1045 / 2060 /
+    /// 3063 ms against rolls of 1000 / 2000 / 3000 ms, a 1:1 line that can only
+    /// arise if the new session's clock restarts at ~0 while the stale anchor
+    /// holds the large old value.
+    ///
+    /// ⚠️ READ IT AFTER THE NEW SESSION'S FIRST CALLBACK. Immediately after a
+    /// restart this still reports the PREVIOUS session (with its valid flags
+    /// set) — that staleness IS the m23-bq defect, so a reader who does not
+    /// wait measures the bug rather than the bounce.
+    var outputNodeRenderSampleTimeForTesting: AVAudioFramePosition? {
+        guard let time = engine.outputNode.lastRenderTime,
+              time.isSampleTimeValid else { return nil }
+        return time.sampleTime
+    }
+
+    /// How many times `recoverEngine()` has taken its `if !engine.isRunning`
+    /// RESTART branch. Test instrumentation only — nothing reads it in
+    /// production and nothing branches on it.
+    ///
+    /// m23-bt exists because a green output-pin read-back is INDISTINGUISHABLE
+    /// from "recovery early-returned and never restarted anything" — which is
+    /// the exact hole this item found in `pinSurvivesRateFlip`. This counter is
+    /// the discriminator: 0→1 across a bounce means the restart branch really
+    /// ran, so the read-back is evidence about surviving a restart.
+    private(set) var recoveryRestartCountForTesting = 0
+
+    /// How many times `reapplyOutputDevicePinIfNeeded()` has been CALLED (every
+    /// call, including the ones that return early with nothing pinned). Test
+    /// instrumentation only.
+    ///
+    /// The second half of m23-bt's discriminator, and the one that closes the
+    /// subtler confound: `watchdogRestart()` falls through to `prepare()` when
+    /// recovery fails to leave the engine running, and `prepare()` DOES
+    /// re-apply the pin (:688). So a surviving pin could mean "the AUHAL kept
+    /// it across the restart" OR "recovery failed and prepare healed it". If
+    /// this counter is unchanged across the bounce, nothing re-applied
+    /// anything and the pin survived on its own.
+    private(set) var outputPinReapplyCountForTesting = 0
+
+    // MARK: - m23-bs-1: where recovery's BACKWARD transport step goes
+    //
+    // GATE INSTRUMENTATION, MEASUREMENT ONLY. Production never reads these and
+    // never branches on them — the `recoveryRestartCountForTesting` convention
+    // above, and the reason each write below carries a
+    // `// m23-bs-1 instrumentation only` marker.
+    //
+    // `recoverEngine` derives its resume beat from the host clock at ENTRY and
+    // only anchors playback once all of its work is done, so the transport
+    // resumes BEHIND the music by exactly:
+    //
+    //     backward step  =  segment A  +  segment B  +  lead
+    //
+    //   A    = recovery entry -> the reschedule call below it: stopAllPlayers,
+    //          the conditional prepare()/start(), the mix-parameter restore,
+    //          the reference-monitor state.
+    //   B    = reschedule entry -> the anchor instant, EXCLUDING the lead:
+    //          scheduleAll, the loop top-up, prepareAllPlayers, countInPlan.
+    //   lead = the POST-CAP `startLead` actually used.
+    //
+    // ⚠️ THE PER-PLAYER SERIAL-START COST IS IN `lead`, NOT IN B. The
+    // `startAllPlayers` pass runs AFTER both anchor sites, which is precisely
+    // what the scaled lead (`0.02 + n * 0.008`) exists to cover; B carries the
+    // per-CLIP schedule/prepare term instead. Both grow with project size and
+    // both add to the backward step, but they are different terms and a reader
+    // who folds them together will mis-size m23-bs-2's budget.
+    //
+    // At 120 BPM, 1 beat = 500 ms, so the lag in beats is `2 * (A + B + lead)`
+    // — the identity that lets `RecoveryPlayheadTests`' measured lag validate
+    // these three seams against each other (`RecoveryCostSplitTests`).
+
+    /// Seconds from `recoverEngine()` entry to the reschedule call at the end
+    /// of its success path. Test instrumentation only (see the block above).
+    ///
+    /// Stays at its previous value when recovery early-returns (no anchor) or
+    /// throws, so a reader must know from its own fixture whether recovery ran
+    /// — `0` here means "never measured", not "measured as free".
+    private(set) var recoverySegmentACostSecondsForTesting: Double = 0
+
+    /// Seconds from `startPlayers(...)` entry to the instant that call computes
+    /// its anchor from, EXCLUDING the lead. Test instrumentation only.
+    ///
+    /// Written in BOTH anchor branches deliberately: the trusted branch builds
+    /// its anchor from `lastRenderTime` (a timestamp from the past, useless as
+    /// an elapsed marker), so without an explicit wall-clock read there a
+    /// future reader would conclude the render-clock path costs nothing. It
+    /// costs the same schedule pass; only the clock the anchor rides differs.
+    private(set) var startPlayersScheduleCostSecondsForTesting: Double = 0
+
+    /// The anchor lead the last start ACTUALLY used — after the
+    /// `maxStartLeadSeconds` cap, not the pre-cap computation. Test
+    /// instrumentation only.
+    ///
+    /// Also the only published witness of the startable-player count: while it
+    /// is above the `startLeadSeconds` floor, `n == (lead - 0.02) / 0.008`.
+    private(set) var lastStartLeadSecondsForTesting: Double = 0
+
+    /// Wall-clock seconds between two `mach_absolute_time()` reads, with the
+    /// same underflow-guard shape `recoverEngine` uses for its own elapsed
+    /// derivation. `AVAudioTime.seconds(forHostTime:)` rather than
+    /// `Self.hostTicksToSeconds` because every OTHER host-delta in this file
+    /// (`elapsedSeconds`, `recoverEngine`) uses it; the stored factor has a
+    /// single caller, the MIDI capture session, whose per-event math wants a
+    /// multiply rather than a call. m23-bs-1 support — production never
+    /// consumes the result.
+    private static func instrumentationSeconds(from start: UInt64, to end: UInt64) -> Double {
+        end >= start ? AVAudioTime.seconds(forHostTime: end - start) : 0
+    }
+
+    // MARK: - m23-bs-2: the continuation anchor seams
+    //
+    // RAW SCALARS ONLY. Production never reads these and never branches on
+    // them — the `recoveryRestartCountForTesting` convention above.
+    //
+    // ⚠️ ONE SEAM IS FORBIDDEN HERE AND A READER WILL WANT IT: a precomputed
+    // in-engine ANCHOR DIFFERENCE (`newStartBeats − oldStartBeats − β·Δt`, or
+    // any packaging of it). Under this fix that expression recomputes what the
+    // fix itself computed and subtracts it from itself: it is IDENTICALLY ZERO
+    // BY ALGEBRA, so it would read green against a broken `TempoMap`, a wrong
+    // loop branch or a sign error. It *does* redden on the entry-derivation
+    // mutant, and that is precisely the trap — a seam that kills the obvious
+    // mutant is one a future author keeps and asserts on, while it cannot see
+    // the class of bug where the DERIVATION is wrong. The arithmetic belongs
+    // test-side, against `anchorLineForTesting`'s raw pair, using the test's own
+    // closed form (design §9.1/§13.5).
+
+    /// The raw anchor line: the beat, and the host instant that beat occurs at.
+    /// nil when the transport is idle.
+    ///
+    /// This pair IS the invariant `StartAnchorPolicy` exists to protect —
+    /// `startBeats` is the beat at `anchorHostTime` for the clip schedule, the
+    /// automation origin, the metronome, the reference track and the playhead
+    /// at once. Two readings across a recovery are what let a test assert
+    /// continuity WITHOUT the engine ever computing the difference (see the
+    /// block above).
+    var anchorLineForTesting: (startBeats: Double, anchorHostTime: UInt64)? {
+        guard let anchor = currentAnchor else { return nil }
+        return (anchor.startBeats, anchor.anchorHostTime)
+    }
+
+    /// How many `.atHostTime` starts found their predicted instant already in
+    /// the past and had to clamp the anchor FORWARD. Each one is a residual
+    /// backward step equal to the prediction miss — today's defect, of that
+    /// magnitude, in-band and counted.
+    private(set) var continuationOverrunCountForTesting = 0
+
+    /// The magnitude of the LAST `.atHostTime` resolution's overrun, in
+    /// seconds; reset to 0 by every `.atHostTime` resolution that did not
+    /// overrun, so it always describes the most recent continuation rather
+    /// than an arbitrarily old one.
+    private(set) var lastContinuationOverrunSecondsForTesting: Double = 0
+
+    /// How many `.atHostTime` starts requested an instant so far ahead it had
+    /// to be clamped DOWN. Nonzero means a CALLER BUG (a horizon computed
+    /// somewhere other than `StartAnchorBudget`), not load — and it
+    /// `assertionFailure`s in debug for exactly that reason.
+    private(set) var continuationClampDownCountForTesting = 0
+
+    /// The horizon `recoverEngine` last forecast, in seconds — the value it
+    /// added to `mach_absolute_time()` to pick its anchor instant.
+    private(set) var lastContinuationHorizonSecondsForTesting: Double = 0
+
+    /// The startable-player count `recoverEngine` last forecast FROM, read at
+    /// recovery ENTRY (before `graph.stopAllPlayers()`).
+    ///
+    /// ⚠️ THE READ SITE IS THE POINT. `stopAllPlayers` calls `noteStopped()` on
+    /// every node, which zeroes the enqueue ledger, so the same read one line
+    /// lower returns 0 — the horizon then collapses to the floor and a large
+    /// project under-predicts by up to 0.44 s, silently and in proportion to
+    /// project size. Exporting the COUNT rather than the horizon is what lets a
+    /// one-clip fixture catch that: at n ≥ 1 the engine would report 0 where the
+    /// test's own snapshot says n, with no floor clamp masking it.
+    private(set) var lastContinuationPlayerCountForTesting = 0
+
+    /// How many CONTINUATION starts have chosen an anchor instant — exactly one
+    /// increment per `continuationAnchorInstant` call (m23-bs-3a).
+    ///
+    /// ⚠️ NOT DECORATION — IT CLOSES A FALSE-GREEN. The two seams above are
+    /// written by EVERY continuation site, so a leg that reads them after a
+    /// REBUILD — in a `.serialized` suite where a RECOVERY leg already ran, or
+    /// simply on an engine that recovered earlier in its own life — can read
+    /// the OTHER event's values, and on a similar fixture those can
+    /// coincidentally equal the snapshot the leg is comparing against. A
+    /// monotone counter, asserted to advance by exactly 1 ACROSS the event
+    /// under test, is the m23-bt `recoveryRestartCountForTesting` discriminator
+    /// applied to the same hazard. Every bs-3 live leg asserts it.
+    private(set) var continuationStartCountForTesting = 0
+
+    /// This engine's output AUHAL's current device, or nil when it cannot be
+    /// read. The read half of the m20-b "noErr on a discarded write" defence.
+    private func currentOutputDeviceID() -> AudioDeviceID? {
+        guard let audioUnit = engine.outputNode.audioUnit else { return nil }
+        var deviceID = AudioDeviceID(0)
+        var dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            &dataSize
+        )
+        return status == noErr ? deviceID : nil
+    }
+
+    /// Re-applies the pin BEST-EFFORT after the engine object has been
+    /// replaced or before the hardware comes up. Never throws: a pinned device
+    /// that has been unplugged must degrade to the system default with a note,
+    /// not brick `prepare()` and take the whole transport down with it. The
+    /// selection is deliberately KEPT on failure — it is the user's standing
+    /// intent, and re-plugging the interface re-pins on the next cold start.
+    private func reapplyOutputDevicePinIfNeeded() {
+        outputPinReapplyCountForTesting += 1   // m23-bt instrumentation only
+        guard let uid = selectedOutputUID else { return }
+        do {
+            try applyOutputDevicePin()
+        } catch {
+            outputDevicePinned = false
+            FileHandle.standardError.write(Data(
+                ("AudioEngine: output device '\(uid)' is unavailable — falling back to the "
+                 + "system default (the selection is kept and will re-apply if it returns)\n").utf8))
+            engineNoticeHandler?(EngineNoticeEvent(
+                code: "output-device-unavailable",
+                message: "The output device you picked isn't available right now — "
+                    + "sound is going to your system's default output instead. "
+                    + "Reconnect it and it will be used again."))
+        }
     }
 
     /// Legacy audio-only surface: a thin wrapper over `startTake`.
@@ -2367,8 +3053,17 @@ public final class AudioEngine: AudioEngineControlling {
         //    first, so the window guard below always passes) — playback wraps
         //    gaplessly while the capture stays ONE linear take against the
         //    never-moving anchor; the store slices it per cycle at stop.
+        // relocation: recording starts at a chosen beat, like a transport start.
+        // renderClockTrusted: record-arm never bounces the engine (the capture
+        // side runs on InputCapture's own engine) — same standing as a
+        // transport start.
+        // anchorPolicy: record starts at a chosen beat, like a transport start —
+        // and it is the ONE site that passes a non-zero countInBars, which
+        // `.atHostTime` explicitly does not support (§7).
         startPlayers(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap,
-                     countInBars: transport.countInBars)
+                     countInBars: transport.countInBars,
+                     renderClockTrusted: true, cause: .relocation,
+                     anchorPolicy: .asSoonAsPractical)
         startPlayheadTask()
         // 4. Align the writer to the shared player-start anchor: capture
         //    before this host time is trimmed, so file frame 0 ≈ the moment
@@ -2593,10 +3288,40 @@ public final class AudioEngine: AudioEngineControlling {
     /// The single reschedule primitive: stop-all → reschedule-from-beat →
     /// re-anchor → resume. Individual scheduled segments cannot be cancelled;
     /// costs one ~60 ms lead-in gap.
-    private func restart(fromBeat beats: Double, tempoMap: TempoMap) {
+    ///
+    /// m23-bp: `cause` has NO DEFAULT on purpose — `stopAllPlayers` cuts every
+    /// sounding voice, so whether the new build chases held notes is the
+    /// difference between a seam and permanent silence. Making the parameter
+    /// required means the compiler, not a comment, enumerates every reschedule
+    /// site: a future path cannot be added without stating its cause.
+    ///
+    /// m23-bq: this primitive stops PLAYERS, never the engine — the render
+    /// session and its sample clock roll straight through — so every site that
+    /// reaches playback through here is render-clock-trusted by construction.
+    /// `renderClockTrusted` is therefore a literal here rather than a forwarded
+    /// parameter: an engine bounce cannot arrive down this path, and a future
+    /// path that DOES bounce must call `startPlayers` directly and say so
+    /// (`rebuildEngine`, `recoverEngine` and the rewire resume all do).
+    private func restart(fromBeat beats: Double, tempoMap: TempoMap,
+                         cause: RescheduleCause) {
         graph.stopAllPlayers()
         currentAnchor = nil
-        startPlayers(fromBeat: beats, tempoMap: tempoMap)
+        // `cause: cause` stays on the SAME LINE as `startPlayers(` — m23-bp's
+        // forward pin (NoteChaseSiteTests) matches per line, and wrapping it
+        // reds that test.
+        //
+        // m23-bs-2 added `anchorPolicy:` and that forced this call to wrap at
+        // all, so the policy is what goes on the continuation line. ⚠️ The
+        // design's §8 Step 5 prescribed moving `renderClockTrusted` down
+        // instead; that is NOT expressible — Swift requires call arguments in
+        // DECLARATION order and `renderClockTrusted` precedes `cause` there.
+        //
+        // anchorPolicy: THE reschedule primitive stops players, never the
+        // engine, so every path that reaches playback through here relocated to
+        // a beat somebody chose (seek, setTempo, edits, loop changes, the
+        // loop-wrap fallback). m23-bs-3 makes this a forwarded parameter.
+        startPlayers(fromBeat: beats, tempoMap: tempoMap, renderClockTrusted: true, cause: cause,
+                     anchorPolicy: .asSoonAsPractical)
     }
 
     /// Schedules every clip from `beats`, then starts all players in lockstep
@@ -2631,8 +3356,23 @@ public final class AudioEngine: AudioEngineControlling {
     /// playback. The capture side never notices: the writer's accept window
     /// and the MIDI session are anchored ONCE to the never-moving M14 anchor,
     /// and loop unrolling only queues more segments on rolling players.
+    ///
+    /// m23-bp: `cause` (NO DEFAULT — see `restart`) is forwarded straight to
+    /// `graph.scheduleAll`, which owns the single continuation → note-chase
+    /// mapping. Nothing on this path inspects it.
+    ///
+    /// m23-bq: `renderClockTrusted` LOST ITS `= true` DEFAULT for the same
+    /// reason `cause` never had one. The defaulted form is how this bug
+    /// shipped: `recoverEngine` — the ONE routine whose premise is that the
+    /// sample timeline just broke — silently inherited "trust the render
+    /// clock" by saying nothing. A required parameter makes the compiler, not
+    /// a comment, ask every future start path whether its engine just
+    /// bounced. `RenderClockTrustSiteTests` pins the resulting answers.
     private func startPlayers(fromBeat beats: Double, tempoMap: TempoMap, countInBars: Int = 0,
-                              renderClockTrusted: Bool = true) {
+                              renderClockTrusted: Bool,
+                              cause: RescheduleCause,
+                              anchorPolicy: StartAnchorPolicy) {
+        let segmentBEntryHost = mach_absolute_time()   // m23-bs-1 instrumentation only
         metronome.stop()  // clears the click queue; player time resets to 0
         // m14-a L-1: an eligible live loop schedules WITH the window — the
         // wrap is then pre-queued cycles on rolling players, never a restart.
@@ -2650,7 +3390,7 @@ public final class AudioEngine: AudioEngineControlling {
                                           headSeconds: headSeconds, cycleSeconds: cycleSeconds)
             }
         }
-        graph.scheduleAll(fromBeat: beats, tempoMap: tempoMap, loop: loopWindow)
+        graph.scheduleAll(fromBeat: beats, tempoMap: tempoMap, loop: loopWindow, cause: cause)
         if loopContext != nil {
             // Initial coverage: eager +2 cycles and the C6 horizon — all
             // pre-queued anchored segments, the L-0 spike's proven shape.
@@ -2682,27 +3422,73 @@ public final class AudioEngine: AudioEngineControlling {
         // currentAnchor, the metronome's clickAnchorHost, additive count-in
         // ticks, and derivedBeats' negative-elapsed clamp already handles
         // arbitrary leads.
+        // m23-bs-2: the expression itself now lives in `StartAnchorBudget` —
+        // `recoverEngine` must evaluate the IDENTICAL function to predict the
+        // instant this anchor will land on, and a second copy here would let
+        // the prediction and the thing predicted drift apart silently.
+        // `wasCapped` carries the cap decision out so the warning below does
+        // not re-evaluate the pre-cap expression.
         let startableCount = graph.startablePlayerCount
-        var startLead = max(Self.startLeadSeconds,
-                            0.02 + Double(startableCount) * 0.008)
-        if startLead > Self.maxStartLeadSeconds {
+        let leadBudget = StartAnchorBudget.lead(forStartablePlayerCount: startableCount)
+        let startLead = leadBudget.seconds
+        if leadBudget.wasCapped {
             FileHandle.standardError.write(Data(
                 ("AudioEngine: anchor lead capped at \(Self.maxStartLeadSeconds) s "
                  + "for \(startableCount) startable players — the serial start "
                  + "loop may overrun the anchor\n").utf8))
-            startLead = Self.maxStartLeadSeconds
         }
+        lastStartLeadSecondsForTesting = startLead   // m23-bs-1 instrumentation only
         let leadHostTicks = AVAudioTime.hostTime(forSeconds: startLead)
         let countInHostTicks = AVAudioTime.hostTime(forSeconds: countIn.delaySeconds)
 
         if renderClockTrusted,
            let renderTime = output.lastRenderTime,
            renderTime.isSampleTimeValid, renderTime.isHostTimeValid, hardwareRate > 0 {
-            let clickAnchorHost = renderTime.hostTime + leadHostTicks
-            let anchorHost = clickAnchorHost + countInHostTicks
-            let anchorSample = renderTime.sampleTime + AVAudioFramePosition(
-                ((startLead + countIn.delaySeconds) * hardwareRate).rounded()
-            )
+            let anchorSampledHost = mach_absolute_time()
+            startPlayersScheduleCostSecondsForTesting =   // m23-bs-1 instrumentation only
+                Self.instrumentationSeconds(from: segmentBEntryHost, to: anchorSampledHost)
+            // The earliest instant THIS branch can guarantee — today's
+            // expression, unchanged. ⚠️ It is NOT the same expression as the
+            // host-clock branch's (render clock vs `mach_absolute_time`), which
+            // is why the policy is applied inside each branch rather than
+            // hoisted above the `if`: hoisting would silently give this branch
+            // the host-clock basis and forfeit the "`.asSoonAsPractical` is
+            // today verbatim" claim that makes the null case reviewable.
+            let earliest = renderTime.hostTime + leadHostTicks + countInHostTicks
+            let anchorHost = resolveAnchorHost(policy: anchorPolicy, earliest: earliest)
+            // m23-bs-2 §13.6: the metronome anchors on the CLICK anchor, not on
+            // the transport anchor, so the click must be derived from the
+            // CHOSEN instant. Leaving it as `renderTime.hostTime + leadHostTicks`
+            // would desync the click from the transport by exactly the
+            // continuation's over-prediction — and every anchor-pair assertion
+            // would stay green, because they read the transport pair. Written
+            // as the subtraction rather than `= anchorHost` so both branches
+            // keep identical algebra and the line survives if the count-in
+            // precondition is ever relaxed.
+            let clickAnchorHost = anchorHost - countInHostTicks
+            let anchorSample: AVAudioFramePosition
+            switch anchorPolicy {
+            case .asSoonAsPractical:
+                anchorSample = renderTime.sampleTime + AVAudioFramePosition(
+                    ((startLead + countIn.delaySeconds) * hardwareRate).rounded()
+                )
+            case .atHostTime:
+                // The sample offset must come from the ACTUAL host delta, not
+                // from `startLead`: under `.atHostTime` the chosen instant is
+                // not `renderTime.hostTime + startLead`, and `elapsedSeconds`
+                // prefers the sample path when `hasSampleAnchor` — so a
+                // lead-derived sample anchor would have the playhead reading a
+                // DIFFERENT clock from the host instant the schedule origin was
+                // committed against. ⚠️ Do not rewrite the case above into this
+                // form "for symmetry": they are algebraically equal but this one
+                // round-trips through `hostTime(forSeconds:)`, so it is not
+                // byte-identical. Two expressions, one per policy, on purpose.
+                let deltaSeconds = anchorHost >= renderTime.hostTime
+                    ? AVAudioTime.seconds(forHostTime: anchorHost - renderTime.hostTime)
+                    : -AVAudioTime.seconds(forHostTime: renderTime.hostTime - anchorHost)
+                anchorSample = renderTime.sampleTime
+                    + AVAudioFramePosition((deltaSeconds * hardwareRate).rounded())
+            }
             currentAnchor = PlaybackAnchor(
                 startBeats: beats,
                 tempoMap: tempoMap,
@@ -2722,8 +3508,15 @@ public final class AudioEngine: AudioEngineControlling {
         } else {
             // No render clock yet (first callback pending): host-clock anchor
             // and host-clock playhead.
-            let clickAnchorHost = mach_absolute_time() + leadHostTicks
-            let anchorHost = clickAnchorHost + countInHostTicks
+            let anchorSampledHost = mach_absolute_time()
+            startPlayersScheduleCostSecondsForTesting =   // m23-bs-1 instrumentation only
+                Self.instrumentationSeconds(from: segmentBEntryHost, to: anchorSampledHost)
+            // Earliest instant this branch can guarantee — today's expression.
+            // See the trusted branch above for why this is not hoisted.
+            let earliest = anchorSampledHost + leadHostTicks + countInHostTicks
+            let anchorHost = resolveAnchorHost(policy: anchorPolicy, earliest: earliest)
+            // m23-bs-2 §13.6 — identical algebra to the trusted branch.
+            let clickAnchorHost = anchorHost - countInHostTicks
             currentAnchor = PlaybackAnchor(
                 startBeats: beats,
                 tempoMap: tempoMap,
@@ -2739,6 +3532,70 @@ public final class AudioEngine: AudioEngineControlling {
             // m22-g P2: same hook as the render-clock branch.
             startReferenceWithRoll(fromBeat: beats, tempoMap: tempoMap,
                                    anchorHost: anchorHost)
+        }
+    }
+
+    /// THE ONE PLACE a start's anchor instant is chosen (m23-bs-2, §13.5).
+    ///
+    /// `earliest` is whatever the calling branch can guarantee — the render
+    /// clock plus the lead, or `mach_absolute_time()` plus the lead — and the
+    /// policy says whether that is the answer or merely a lower bound.
+    ///
+    /// TWO CLAMPS, AND THEY ARE NOT SYMMETRIC. Do not "simplify" them into one
+    /// `clamp(...)`; the distinction is the whole safety argument.
+    ///
+    ///  - CLAMP FORWARD (`target < earliest`, an OVERRUN) is the designed
+    ///    degradation. Handing `startAllPlayers` a PAST anchor gives m19-f
+    ///    shifted-origin behaviour — probe-pinned 2026-07-16: the player's
+    ///    timeline zero becomes the actual late start, so its whole roll runs
+    ///    late by (lateness + IO-quantum roundup) while the playhead runs on
+    ///    time. That is a sync SPLIT. Clamping forward instead reproduces
+    ///    exactly today's defect with a magnitude equal only to the PREDICTION
+    ///    MISS: audio and playhead still agree with each other, both that far
+    ///    behind wall time. Strictly better, and counted rather than silent.
+    ///  - CLAMP DOWN (`target` absurdly far ahead) REINTRODUCES a backward
+    ///    step, so it is not a designed degradation at all: the real guard is
+    ///    the debug `assertionFailure`, which fails a caller bug loudly in
+    ///    tests, and the release clamp exists only to bound user-visible damage
+    ///    to a ~0.53 s dropout instead of an unbounded one.
+    private func resolveAnchorHost(policy: StartAnchorPolicy, earliest: UInt64) -> UInt64 {
+        switch policy {
+        case .asSoonAsPractical:
+            return earliest
+        case .atHostTime(let target):
+            lastContinuationOverrunSecondsForTesting = 0
+            if target < earliest {
+                let missed = AVAudioTime.seconds(forHostTime: earliest - target)
+                continuationOverrunCountForTesting += 1
+                lastContinuationOverrunSecondsForTesting = missed
+                FileHandle.standardError.write(Data(
+                    ("AudioEngine: continuation anchor overran its predicted instant by "
+                     + String(format: "%.1f", missed * 1000)
+                     + " ms — the transport resumes that far behind wall time "
+                     + "(m23-bs-2; raise StartAnchorBudget.scheduleAllowanceSeconds if this "
+                     + "is common, never the accuracy it protects)\n").utf8))
+                return earliest
+            }
+            let ceilingSeconds = StartAnchorBudget.leadCapSeconds
+                + StartAnchorBudget.scheduleAllowanceSeconds
+            let ceilingTicks = AVAudioTime.hostTime(forSeconds: ceilingSeconds)
+            if target - earliest > ceilingTicks {
+                let excess = AVAudioTime.seconds(forHostTime: target - earliest)
+                continuationClampDownCountForTesting += 1
+                assertionFailure(
+                    "AudioEngine: continuation anchor requested \(excess) s ahead of the "
+                    + "earliest practical instant, past the \(ceilingSeconds) s bound. That is "
+                    + "a CALLER bug — the horizon must come from "
+                    + "StartAnchorBudget.continuationHorizonSeconds."
+                )
+                FileHandle.standardError.write(Data(
+                    ("AudioEngine: continuation anchor clamped DOWN from "
+                     + String(format: "%.3f", excess) + " s to " + "\(ceilingSeconds) s ahead "
+                     + "— this reintroduces a backward step and means a caller computed its "
+                     + "horizon somewhere other than StartAnchorBudget (m23-bs-2)\n").utf8))
+                return earliest + ceilingTicks
+            }
+            return target
         }
     }
 
@@ -2827,15 +3684,23 @@ public final class AudioEngine: AudioEngineControlling {
     /// map inverse is only ever evaluated inside [loop.startBeat,
     /// loop.endBeat) — segments past the loop end never leak into cycle
     /// timing.
-    private func beat(forElapsedSeconds seconds: Double, anchor: PlaybackAnchor) -> Double {
+    ///
+    /// m23-bs-3a: takes the `AnchorLine`, not the whole `PlaybackAnchor`. This
+    /// routine only ever read `startBeats` and `tempoMap` (plus the engine's
+    /// own `loopContext`), and `resumeBeat` — its continuation caller — now
+    /// holds a LINE rather than an anchor. The alternative was for `resumeBeat`
+    /// to build a throwaway `PlaybackAnchor` with a zeroed sample epoch just to
+    /// call this, which would hand-construct exactly the stale-sample-anchor
+    /// state `AnchorLine` exists to make unrepresentable.
+    private func beat(forElapsedSeconds seconds: Double, line: AnchorLine) -> Double {
         if let loop = loopContext, seconds >= loop.headSeconds {
             let within = (seconds - loop.headSeconds)
                 .truncatingRemainder(dividingBy: loop.cycleSeconds)
             return min(loop.endBeat,
-                       anchor.tempoMap.beat(from: loop.startBeat, elapsedSeconds: within))
+                       line.tempoMap.beat(from: loop.startBeat, elapsedSeconds: within))
         }
-        return max(anchor.startBeats,
-                   anchor.tempoMap.beat(from: anchor.startBeats, elapsedSeconds: seconds))
+        return max(line.startBeats,
+                   line.tempoMap.beat(from: line.startBeats, elapsedSeconds: seconds))
     }
 
     /// Current transport position derived from the output node's render clock
@@ -2847,7 +3712,7 @@ public final class AudioEngine: AudioEngineControlling {
     /// under an active loop (m14-a; see `beat(forElapsedSeconds:anchor:)`).
     private func derivedBeats() -> Double {
         guard let anchor = currentAnchor else { return lastKnownBeats }
-        return beat(forElapsedSeconds: elapsedSeconds(anchor: anchor), anchor: anchor)
+        return beat(forElapsedSeconds: elapsedSeconds(anchor: anchor), line: anchor.line)
     }
 
     /// LINEAR transport beat since the anchor — `derivedBeats` WITHOUT the
@@ -2895,7 +3760,14 @@ public final class AudioEngine: AudioEngineControlling {
                         // `loopContext != nil`), and `transport.setLoop` is
                         // refused mid-record, so a rolling take can never
                         // find itself linear-with-a-loop here.
-                        self.restart(fromBeat: self.loopStartBeat, tempoMap: anchor.tempoMap)
+                        // relocation: the transport JUMPS from ≥ loopEndBeat
+                        // back to a chosen beat. m23-bp: this must NOT chase —
+                        // the post-fallback state has to be identical to "seek
+                        // to loop start and play", because every later (gapless)
+                        // cycle reproduces exactly that state; chasing here
+                        // would re-attack a straddling pad once and never again.
+                        self.restart(fromBeat: self.loopStartBeat, tempoMap: anchor.tempoMap,
+                                     cause: .relocation)
                         beats = self.loopStartBeat
                     }
                     // Keep the linear click queue ahead of the playhead
@@ -2930,6 +3802,75 @@ public final class AudioEngine: AudioEngineControlling {
             horizonSeconds: Self.loopHorizonSeconds)
     }
 
+    /// THE ONE PLACE A CONTINUATION START PICKS THE INSTANT IT WILL ANCHOR ON
+    /// (m23-bs-3a, design §14.4). Every `.atHostTime` caller comes here; the
+    /// derivation of the BEAT for that instant stays at the CALL SITE (§5.1 —
+    /// `startPlayers` clears `loopContext` on the way in, so a derivation moved
+    /// inward silently takes the LINEAR branch and loses the modular loop wrap).
+    ///
+    /// Four sites would otherwise each repeat "compute the horizon, write two
+    /// seams, read the clock, add" — and a second copy of that ritual is how the
+    /// prediction and the thing predicted drift apart silently.
+    ///
+    /// ⚠️ `n` IS A PARAMETER, DELIBERATELY, AND THAT IS THE WHOLE SUBTLETY OF
+    /// THIS ITEM. The READ SITE is the load-bearing thing (§13.3) and it differs
+    /// per caller: recovery ENTRY for `recoverEngine`, but QUIESCE for the two
+    /// resume sites, because by the time they run the count is 0 and NOT EVEN BY
+    /// MISTAKE — the rewire hook already ran `graph.stopAllPlayers()` (whose
+    /// `noteStopped()` zeroes the enqueue ledger), and `rebuildEngine`'s `graph`
+    /// is a DIFFERENT OBJECT that has never been scheduled. A helper that read
+    /// the count itself would move all four reads to one wrong place and collapse
+    /// every horizon to the floor regardless of project size.
+    private func continuationAnchorInstant(startablePlayerCount n: Int) -> UInt64 {
+        let horizon = StartAnchorBudget.continuationHorizonSeconds(forStartablePlayerCount: n)
+        lastContinuationHorizonSecondsForTesting = horizon
+        lastContinuationPlayerCountForTesting = n
+        continuationStartCountForTesting += 1
+        return mach_absolute_time() &+ AVAudioTime.hostTime(forSeconds: horizon)
+    }
+
+    /// The beat that an anchor's line puts at host instant `host` — THE
+    /// derivation every continuation start must come to (m23-bs-2 §8 Step 4;
+    /// the m23-bs-3 sites join it here).
+    ///
+    /// Generalised from `recoverEngine`'s original entry-time expression by
+    /// replacing `now` with an arbitrary instant, which is the entire mechanism:
+    /// a continuation can therefore derive its beat for an instant in the
+    /// FUTURE — the one its anchor is about to land on — instead of for the
+    /// instant it happened to start working.
+    ///
+    /// m12-b (design row 48): the same inverse integral + clamp as
+    /// `derivedBeats`, and the same modular wrap under a loop (m14-a), so
+    /// recovery resumes inside the window and re-schedules with it. A later
+    /// derivation crossing a loop seam is CORRECT, not a hazard: wall time kept
+    /// moving, the loop kept cycling, and the listener's position is inside the
+    /// next cycle.
+    ///
+    /// ⚠️ THE `>= loopEndBeat` SNAP IS LOAD-BEARING (§5.2, §13.9 #8), and the
+    /// new derivation instant makes it MORE reachable rather than less.
+    /// `beat(forElapsedSeconds:)` clamps the modular branch with
+    /// `min(loop.endBeat, …)`. If float error returns exactly `loopEndBeat`,
+    /// `startPlayers`' `beats < loopEndBeat` guard fails, `loopWindow` stays
+    /// nil, and recovery silently resumes as a LINEAR roll past the loop end —
+    /// i.e. the loop turns itself off.
+    ///
+    /// m23-bs-3a: takes an `AnchorLine`, not a `PlaybackAnchor` — FOUR callers
+    /// now (`recoverEngine`, the rewire resume, the rebuild resume, and bs-3b's
+    /// `restart`), and two of them no longer hold an anchor at all: the engine
+    /// object they anchored against has been discarded. Narrowing the parameter
+    /// is what lets those sites reach THIS derivation instead of growing one of
+    /// their own (§14.2).
+    private func resumeBeat(at host: UInt64, line: AnchorLine) -> Double {
+        let seconds = host >= line.anchorHostTime
+            ? AVAudioTime.seconds(forHostTime: host - line.anchorHostTime)
+            : 0
+        let beats = beat(forElapsedSeconds: seconds, line: line)
+        if let loop = loopContext, loop.endBeat > loop.startBeat, beats >= loop.endBeat {
+            return loop.startBeat
+        }
+        return beats
+    }
+
     /// Best-effort recovery when the device or its format changes under us —
     /// now a plain alias for the shared `recoverEngine()` (M9 crash-c
     /// extraction; behavior byte-identical). Deliberately unchanged for
@@ -2950,23 +3891,45 @@ public final class AudioEngine: AudioEngineControlling {
     /// layers the stopped-transport bounce on top (`watchdogRestart`).
     /// Internal (not private) so tests can drive it directly.
     func recoverEngine() {
+        // m23-bs-1 instrumentation only. Sampled at the true entry, a couple of
+        // statements ahead of the `now` the resume beat is derived from below,
+        // so segment A is the beat-derivation -> anchor gap to within one
+        // `engine.isRunning` read.
+        let recoveryEntryHost = mach_absolute_time()
         isRunning = engine.isRunning
         guard let anchor = currentAnchor else { return }
 
-        let now = mach_absolute_time()
-        let seconds = now >= anchor.anchorHostTime
-            ? AVAudioTime.seconds(forHostTime: now - anchor.anchorHostTime)
-            : 0
-        // m12-b (design row 48): same inverse integral + clamp as derivedBeats
-        // — and the same modular wrap under a loop (m14-a), so recovery
-        // resumes inside the window and re-schedules with it.
-        let beats = beat(forElapsedSeconds: seconds, anchor: anchor)
+        // ⚠️ m23-bs-2 §13.3 — THE LANDMINE OF THIS ITEM. The startable-player
+        // count MUST be read HERE, above `graph.stopAllPlayers()`. That call
+        // runs `noteStopped()` on every node and the enqueue ledger goes to
+        // ZERO, so the identical read a few lines lower returns 0 whatever the
+        // project holds: the forecast horizon silently collapses to the floor
+        // and a large project under-predicts its anchor by up to 0.44 s. The
+        // failure is SILENT, PROJECT-SIZE-DEPENDENT, and invisible to a
+        // one-clip fixture. Leg L3 in `RecoveryAnchorContinuityGateTests`
+        // exists solely to catch it, and it does so by asserting the reported
+        // COUNT against the test's own snapshot rather than the horizon.
+        //
+        // The count is an UPPER BOUND on the resume count, not an estimate:
+        // `scheduleAll` drops clips whose source is exhausted at the resume
+        // beat, that set shrinks monotonically in `startBeats`, and recovery
+        // always resumes at a beat ≥ the outgoing schedule's. Over-predicting
+        // costs a slightly longer gap and ZERO timing error; under-predicting
+        // clamps forward and costs only the miss.
+        let startableAtEntry = graph.startablePlayerCount
+
+        // The STOP-instant beat: the last beat that actually sounded. It stays
+        // `lastKnownBeats` (§6) — the resume beat derived below is a FUTURE
+        // beat, and storing that here would make a FAILED recovery report a
+        // beat that never sounded.
+        let beats = resumeBeat(at: mach_absolute_time(), line: anchor.line)
         lastKnownBeats = beats
 
         graph.stopAllPlayers()
         currentAnchor = nil
         do {
             if !engine.isRunning {
+                recoveryRestartCountForTesting += 1   // m23-bt instrumentation only
                 engine.prepare()
                 try engine.start()
             }
@@ -2977,8 +3940,61 @@ public final class AudioEngine: AudioEngineControlling {
             // m22-g P2: gate/gain re-land with the mix parameters; the
             // startPlayers below re-schedules the reference when monitoring.
             applyReferenceMonitorNodeState()
-            startPlayers(fromBeat: beats, tempoMap: anchor.tempoMap)
+            recoverySegmentACostSecondsForTesting =   // m23-bs-1 instrumentation only
+                Self.instrumentationSeconds(from: recoveryEntryHost, to: mach_absolute_time())
+            // continuation: `beats` is beat(forElapsedSeconds:) off the LIVE
+            // anchor — recovery resumes where playback had actually got to.
+            //
+            // m23-bq: `renderClockTrusted: false` — UNCONDITIONALLY, even
+            // though the restart above is conditional. This routine's whole
+            // premise is that the sample timeline just broke (see the doc
+            // comment: `beats` is derived from the HOST clock for exactly that
+            // reason), so trusting `outputNode.lastRenderTime` two lines later
+            // was self-contradictory. When the engine did bounce, that clock
+            // still reports the PREVIOUS session with its valid flags set, and
+            // the resulting sample anchor freezes the playhead for the whole
+            // length of that session — MEASURED 2026-08-02 at 1045 / 2060 /
+            // 3063 ms against rolls of 1000 / 2000 / 3000 ms, a 1:1 line, with
+            // a no-restart control flat at 0 ms. Making this conditional on
+            // `engine.isRunning` would add a branch no test can reach; the
+            // host-clock branch is correct in both cases and is already what
+            // the two rebuildEngine resumes take.
+            //
+            // ⚠️ m23-bs-2 §5.1 — THE DERIVATION LIVES HERE, AT THE CALL SITE,
+            // AND NEVER INSIDE `startPlayers`. `startPlayers` sets
+            // `loopContext = nil` on the way in and rebuilds it, so a
+            // derivation moved inward would silently take the LINEAR branch of
+            // `beat(forElapsedSeconds:)` and lose the modular loop wrap — a
+            // recovery that spans a loop seam would resume past the loop end
+            // instead of just after `loopStartBeat`. Leg L4 is the ONLY
+            // automated check that catches that mistake.
+            //
+            // Predict the instant, then derive the beat FOR it, so the beat
+            // committed to `scheduleAll` and the instant the anchor lands are
+            // two views of ONE chosen number. `mach_absolute_time()` is read
+            // HERE, after segment A, which eliminates segment A (the engine
+            // restart — the least predictable term at 0.9–48 ms) EXACTLY rather
+            // than estimating it; the horizon then covers only segment B plus
+            // the lead `startPlayers` is about to compute from the same
+            // formula.
+            //
+            // m23-bs-3a: the horizon forecast, the two seams and the clock read
+            // moved into `continuationAnchorInstant` — the ONE home the two
+            // resume sites (and bs-3b's `restart`) also come to. The COUNT stays
+            // a parameter read at THIS site, above `stopAllPlayers()`.
+            let anchorHost = continuationAnchorInstant(
+                startablePlayerCount: startableAtEntry)
+            let resume = resumeBeat(at: anchorHost, line: anchor.line)
+            startPlayers(fromBeat: resume, tempoMap: anchor.tempoMap,
+                         renderClockTrusted: false, cause: .continuation,
+                         anchorPolicy: .atHostTime(anchorHost))
         } catch {
+            // Reports `beats`, the STOP-instant value, DELIBERATELY (§6): the
+            // resume derivation lives inside the `do` above and `engine.start()`
+            // throws from before it, so this can never see the resume value —
+            // and it should not. A failed recovery must report the last beat
+            // that was real, not a future beat that never sounded. Do not
+            // "helpfully" switch this to the resume beat.
             playheadTask?.cancel()
             playheadTask = nil
             playheadHandler?(beats)

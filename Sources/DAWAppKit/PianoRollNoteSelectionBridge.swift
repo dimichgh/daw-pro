@@ -96,4 +96,92 @@ public final class PianoRollNoteSelectionBridge {
     /// permanently, with nothing on screen to explain why — strictly worse than
     /// the bug this whole bridge exists to fix.
     public func clear() { hasSelection = false }
+
+    /// THE ARRANGE SELECTION GREW PAST THE ROLL'S CLIP — drop the note claim
+    /// (m23-ak). Driven by `AppModel.arrangeSelection`'s `didSet`, which asks
+    /// `shouldDropNotes(from:to:)` below and calls this when the answer is yes.
+    ///
+    /// A DISTINCT VERB FROM `stage(selectAll: false)`, deliberately, even though
+    /// the two bodies are the same two lines today. The callers MEAN different
+    /// things: the seam means "a gate asked for the empty state", this means
+    /// "your clip is no longer the whole selection, so give the keys back". One
+    /// name for both would let a future change to staged-clear semantics — a
+    /// gate-only affordance — silently rewrite what the user sees when they
+    /// shift-click a second clip. Same nonce and same effect on purpose; the
+    /// roll needs no new machinery to obey it (`PianoRollView`'s existing
+    /// `.onChange(of: stageNonce)` already routes `stagedSelectAll == false` to
+    /// `model.clearSelection()`).
+    ///
+    /// INERT WITH NO ROLL MOUNTED, and that is the intended behaviour: the
+    /// view's `.onChange(of: stageNonce)` carries no `initial: true`, so a bump
+    /// made while the editor is closed is NOT retroactively applied by the next
+    /// roll that appears. It cannot be: a roll that appears later is a fresh
+    /// `@State private PianoRollModel` with an empty selection anyway.
+    ///
+    /// IDEMPOTENT BY REPETITION, which the marquee needs. A rubber-band drag
+    /// re-decides the whole selection on every pointer update, so this fires
+    /// many times across one gesture; each extra call clears an already-empty
+    /// set. Precisely (do not round this up to "no churn"): the REPORT path is
+    /// quiet — `model.selection.isEmpty` does not change, so the roll's report
+    /// `.onChange` never runs again — but the NONCE path is not silent. Every
+    /// pointer update is its own 1 -> N crossing, so `.onChange(of: stageNonce)`
+    /// does fire once per update and calls `clearSelection()` on an already
+    /// empty set. That is idempotent, not free; it is cheap enough to accept and
+    /// is the only reason the marquee needs no special case. VERIFIED ONLY BY
+    /// READING the two `.onChange` bodies — the end-to-end marquee is an
+    /// explicit SKIP in `scripts/gates/m23ak-note-selection-drop.mjs`.
+    public func dropForWidenedArrangeSelection() {
+        stagedSelectAll = false
+        stageNonce += 1
+    }
+
+    /// THE ONE HOME FOR THE QUESTION "did the arrange selection just grow past
+    /// the clip the roll is open on?" (m23-ak). Pure, `nonisolated`, and takes
+    /// both endpoints, so it is decided in DAWAppKit where it can be tested
+    /// headlessly rather than inside a `didSet` nothing can reach.
+    ///
+    /// WHAT IT FIXES. Select a MIDI clip, select notes in the roll, then
+    /// shift-click two more clips in the arrange and press →: MEASURED, nothing
+    /// happens (`refusedBy: piano-roll-note-edit`, starts unchanged), and DELETE
+    /// removes the NOTES rather than the three clips. Both are correct under the
+    /// m23-x predicate and wrong by intent — the user's evident target is the
+    /// three-clip arrange selection. The trigger lives app-side and the roll
+    /// EXECUTES, because the roll cannot see the arrange selection at all
+    /// (`PianoRollModel` is `@State private`; this bridge is the only channel in
+    /// either direction) and giving it that visibility would invert the layering
+    /// the bridge exists to preserve.
+    ///
+    /// WHY CARDINALITY IS THE WHOLE TEST, with no term naming the focus. Under
+    /// `ArrangeSelection`'s INV1 the focus is always a member of `ids`, so with
+    /// the roll open (`focusID != nil`) `count > 1` is exactly `ids ⊋ {focusID}`
+    /// — "there is now a selected clip that is not the one you are editing".
+    /// Naming the focus would restate INV1 and could only disagree with it.
+    ///
+    /// WHY IT READS THE RESULTING STATE rather than the gesture: that covers all
+    /// three growth paths — `toggle` (shift/⌘-click), `replace` (a marquee, and
+    /// the track-header click that runs through `ArrangeTrackSelection`) and
+    /// `formUnion` (an additive marquee) — with no gesture-specific term and
+    /// nothing to add when a fourth path lands. `replace` is the one that would
+    /// be missed by a "did ids gain a member" reading: a band can swap the whole
+    /// set at once.
+    ///
+    /// WHY A TRANSITION AND NOT A STANDING CONDITION. The roadmap's word is
+    /// "grows". `old.count <= 1` is what makes this fire on the crossing and not
+    /// forever after, and the consequence is deliberate: if the user
+    /// DELIBERATELY selects notes again while three clips are selected, their
+    /// notes are KEPT and the nudge refuses again. At that point their intent is
+    /// plainly the notes — they just asked for them, with the wide selection
+    /// already on screen — and re-clearing would be the app arguing with them.
+    /// `<=` rather than `==` so a 0 → 2 marquee (nothing selected, band sweeps
+    /// two clips) is also a growth; the roll is not open at 0, so that case
+    /// costs an inert nonce bump and keeps the rule stated in one place.
+    ///
+    /// NOT GUARDED ON "is a roll even open". The bridge call is inert without
+    /// one (see `dropForWidenedArrangeSelection`), and this function deciding it
+    /// would need `openEditorClip`, which is an `AppModel` + store lookup — i.e.
+    /// exactly the dependency that would stop this being headless and pure.
+    nonisolated public static func shouldDropNotes(from old: ArrangeSelection,
+                                                   to new: ArrangeSelection) -> Bool {
+        old.count <= 1 && new.count > 1
+    }
 }

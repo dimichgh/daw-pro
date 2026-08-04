@@ -49,6 +49,17 @@ struct SoundBankHostingTests {
         return audio.channelData[0]
     }
 
+    // MARK: - Duration → seconds (m23-aw)
+
+    /// `Duration` → `Double` seconds. Local copy of the
+    /// `AUPrepareRenegotiationStressTests.secondsOf` shape — that file's own
+    /// comment says test-timing scaffolding stays local to whichever file
+    /// needs it rather than migrating into `DAWCore`.
+    private static func secondsOf(_ duration: Duration) -> Double {
+        Double(duration.components.seconds)
+            + Double(duration.components.attoseconds) * 1e-18
+    }
+
     // MARK: - Spectral helpers (T2)
 
     /// Goertzel single-bin magnitude over `range` (the FXPack1 estimator,
@@ -100,7 +111,27 @@ struct SoundBankHostingTests {
             await renderer.prepareAudioUnits(tracks: [track])
         }
         // §5.7: the GM selection-to-ready target is < ~300 ms — RECORD it.
-        print("[measured] GM bank prepare-to-ready wall time: \(prepareTime)")
+        //
+        // m23-aw: ADDITIVE ONLY — the prefix and the first value
+        // (`prepareTime`) keep their exact spelling and position; m23-ab-3,
+        // m23-at, m23-aw and scripts/gates/m23aw-prepare-headroom.mjs all
+        // read past measurements off this prefix, and a reformat blinds the
+        // gate silently. `horizon` mirrors what m23-as-2 appended to the
+        // m19-e line: the record states the timeout that ACTUALLY applied
+        // (`AUHostRegistry.defaultPrepareTimeout` — 60 s in a detected test
+        // process, 10 s in production), so the void-clause staleness class
+        // that hid this item's own finding becomes self-correcting. `margin`
+        // is `horizon / prepareTime` to three decimals, printed and NEVER
+        // asserted — the number a human should be able to grep out of any
+        // log without doing arithmetic. The 36 s worst-of-campaign threshold
+        // that DOES get asserted lives only in
+        // `scripts/gates/m23aw-prepare-headroom.mjs` (§5.5 of the design —
+        // one home, not one in Swift and a duplicate in JS).
+        let horizon = AUHostRegistry.defaultPrepareTimeout
+        let marginString = String(
+            format: "%.3f", Self.secondsOf(horizon) / Self.secondsOf(prepareTime))
+        print("[measured] GM bank prepare-to-ready wall time: \(prepareTime), "
+              + "horizon \(horizon), margin \(marginString)")
         // m23-ab-3: a timed-out/failed prepare renders honest silence, so the
         // three onset assertions below would ALL fail as if three things
         // broke when really there is one root cause. `#require` stops here

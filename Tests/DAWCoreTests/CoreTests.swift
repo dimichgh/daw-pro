@@ -504,6 +504,31 @@ final class FakeEngine: AudioEngineControlling {
         setInputDeviceCalls.append(uid)
     }
 
+    /// m20-j output twin. `outputDevices` is the raw hardware list;
+    /// `availableOutputDevices()` stamps `isSelected` from the accepted
+    /// selection the way `OutputDevices.enumerate(selectedUID:)` does, and
+    /// `setOutputDeviceCalls` records every ACCEPTED selection (rejections are
+    /// never recorded — the store must not advance its own state either).
+    var outputDevices: [AudioOutputDevice] = []
+    private(set) var setOutputDeviceCalls: [String?] = []
+    private var selectedOutputUID: String?
+
+    func availableOutputDevices() -> [AudioOutputDevice] {
+        outputDevices.map {
+            var device = $0
+            device.isSelected = selectedOutputUID != nil && $0.uid == selectedOutputUID
+            return device
+        }
+    }
+
+    func setOutputDevice(uid: String?) throws {
+        if let uid, !outputDevices.contains(where: { $0.uid == uid }) {
+            throw ProjectError.outputDeviceNotFound(uid)
+        }
+        setOutputDeviceCalls.append(uid)
+        selectedOutputUID = uid
+    }
+
     func startRecording(_ transport: TransportState, to url: URL,
                         completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {
         calls.append(.startRecording(beats: transport.positionBeats))
@@ -814,6 +839,232 @@ struct InputDeviceSelectionTests {
         let decoded = try JSONDecoder().decode(ProjectSnapshot.self, from: data)
         #expect(decoded == snapshot)
         #expect(decoded.selectedInputDeviceUID == "mic-1")
+    }
+}
+
+/// A conformer that implements NOTHING of the m20-j output surface, so it
+/// picks up the `AudioEngineControlling` extension defaults. Deliberately
+/// separate from `FakeEngine` (which DOES override them): this exists to pin
+/// what an engine with no output capability at all does, and it would stop
+/// doing that the moment it gained an override.
+@MainActor
+final class MinimalOutputCapabilityEngine: AudioEngineControlling {
+    var isRunning = false
+    var meteringHandler: ((MeterFrame) -> Void)?
+    var trackMeteringHandler: ((UUID, MeterFrame) -> Void)?
+    var playheadHandler: ((Double) -> Void)?
+    var recordPermission: RecordPermission = .granted
+
+    func prepare() throws { isRunning = true }
+    func shutdown() { isRunning = false }
+    func tracksDidChange(_ tracks: [Track]) {}
+    func startPlayback(_ transport: TransportState) {}
+    func stopPlayback() {}
+    func seek(_ transport: TransportState) {}
+    func setTempo(_ transport: TransportState) {}
+    func loopChanged(_ transport: TransportState) {}
+    func masterVolumeChanged(_ volume: Double) {}
+    func requestRecordPermission(_ completion: @escaping @MainActor (Bool) -> Void) {}
+    func availableInputDevices() -> [AudioInputDevice] { [] }
+    func setInputDevice(uid: String?) throws {}
+    func startRecording(_ transport: TransportState, to url: URL,
+                        completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {}
+    func stopRecording() {}
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       fromBeat: Double, durationSeconds: Double,
+                       to url: URL) async throws -> AudioFileInfo {
+        AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
+    }
+}
+
+@MainActor
+@Suite("Output device selection (m20-j)")
+struct OutputDeviceSelectionTests {
+    private let speakers = AudioOutputDevice(
+        uid: "builtin-speakers", name: "MacBook Pro Speakers", sampleRate: 48_000,
+        channelCount: 2, isDefault: true
+    )
+    private let loopback = AudioOutputDevice(
+        uid: "BlackHole2ch_UID", name: "BlackHole 2ch", sampleRate: 44_100,
+        channelCount: 2, isDefault: false
+    )
+
+    private func fixture() -> (ProjectStore, FakeEngine) {
+        let engine = FakeEngine()
+        engine.outputDevices = [speakers, loopback]
+        let store = ProjectStore()
+        store.engine = engine
+        return (store, engine)
+    }
+
+    @Test("listOutputDevices is empty headless and mirrors the engine's list")
+    func listDevices() {
+        let store = ProjectStore()
+        #expect(store.listOutputDevices().isEmpty)  // no engine → no devices
+
+        // `store.engine` is WEAK — the engine binding must stay alive to the
+        // end of the test or the store silently goes headless and every
+        // assertion below reads [] (which is exactly what happened first try).
+        let (withEngine, engine) = fixture()
+        #expect(withEngine.listOutputDevices().map(\.uid)
+                == ["builtin-speakers", "BlackHole2ch_UID"])
+        withExtendedLifetime(engine) {}
+    }
+
+    @Test("selectOutputDevice stores the uid, forwards to the engine, nil resets")
+    func selectHappyPath() throws {
+        let (store, engine) = fixture()
+
+        #expect(store.selectedOutputDeviceUID == nil)  // default: system default
+        try store.selectOutputDevice(uid: "BlackHole2ch_UID")
+        #expect(store.selectedOutputDeviceUID == "BlackHole2ch_UID")
+        try store.selectOutputDevice(uid: nil)
+        #expect(store.selectedOutputDeviceUID == nil)
+        #expect(engine.setOutputDeviceCalls == ["BlackHole2ch_UID", nil])
+    }
+
+    /// The distinction the input side does not have to make: `isDefault` is the
+    /// SYSTEM's output, `isSelected` is this app's pin, and "following the
+    /// default" is NOT the same state as "pinned to the device that is
+    /// currently the default". A picker that cannot tell those apart shows the
+    /// wrong thing the moment the user changes their system default.
+    @Test("isSelected tracks the app's pin and is independent of isDefault")
+    func selectedIsDistinctFromDefault() throws {
+        // `store.engine` is weak — keep `engine` bound (see `listDevices`).
+        let (store, engine) = fixture()
+        defer { withExtendedLifetime(engine) {} }
+
+        // Following the system default: NO device is selected, even though one
+        // of them IS the default.
+        let following = store.listOutputDevices()
+        #expect(following.filter(\.isSelected).isEmpty)
+        #expect(following.filter(\.isDefault).map(\.uid) == ["builtin-speakers"])
+
+        // Pinned to a NON-default device: the two flags land on different rows.
+        try store.selectOutputDevice(uid: "BlackHole2ch_UID")
+        let pinned = store.listOutputDevices()
+        #expect(pinned.filter(\.isSelected).map(\.uid) == ["BlackHole2ch_UID"])
+        #expect(pinned.filter(\.isDefault).map(\.uid) == ["builtin-speakers"])
+
+        // Explicitly pinned to the device that IS the default: both flags on
+        // the same row — and crucially NOT the same as `following` above.
+        try store.selectOutputDevice(uid: "builtin-speakers")
+        let pinnedToDefault = store.listOutputDevices()
+        #expect(pinnedToDefault.filter(\.isSelected).map(\.uid) == ["builtin-speakers"])
+        #expect(pinnedToDefault.filter(\.isDefault).map(\.uid) == ["builtin-speakers"])
+        #expect(pinnedToDefault != following,
+                "pinned-to-the-default must be distinguishable from following-the-default")
+    }
+
+    @Test("unknown-uid errors pass through and leave the selection untouched")
+    func selectUnknownUID() throws {
+        let (store, engine) = fixture()
+        try store.selectOutputDevice(uid: "BlackHole2ch_UID")
+
+        do {
+            try store.selectOutputDevice(uid: "ghost")
+            Issue.record("expected outputDeviceNotFound")
+        } catch let error as ProjectError {
+            guard case .outputDeviceNotFound(let uid) = error else {
+                Issue.record("expected outputDeviceNotFound, got \(error)")
+                return
+            }
+            #expect(uid == "ghost")
+            #expect(error.errorDescription
+                    == "no output device with uid 'ghost' — use output.listDevices")
+        }
+        // Only updated on success — the pin survives the rejection.
+        #expect(store.selectedOutputDeviceUID == "BlackHole2ch_UID")
+        #expect(engine.setOutputDeviceCalls == ["BlackHole2ch_UID"])
+    }
+
+    @Test("selectOutputDevice while recording throws transportBusy with the exact message")
+    func selectWhileRecording() throws {
+        let (store, engine) = fixture()
+        let track = store.addTrack(kind: .audio)
+        try store.setTrackArm(id: track.id, armed: true)
+        try store.record()
+
+        do {
+            try store.selectOutputDevice(uid: "BlackHole2ch_UID")
+            Issue.record("expected transportBusy")
+        } catch let error as ProjectError {
+            guard case .transportBusy(let message) = error else {
+                Issue.record("expected transportBusy, got \(error)")
+                return
+            }
+            #expect(message == "cannot switch output device while recording — stop first")
+        }
+        #expect(store.selectedOutputDeviceUID == nil)   // untouched
+        #expect(engine.setOutputDeviceCalls.isEmpty)    // never reached the engine
+
+        store.stop()
+        try store.selectOutputDevice(uid: "BlackHole2ch_UID")  // allowed again
+        #expect(store.selectedOutputDeviceUID == "BlackHole2ch_UID")
+    }
+
+    @Test("snapshot round-trips selectedOutputDeviceUID; missing key decodes nil")
+    func snapshotRoundTrip() throws {
+        // `store.engine` is weak — keep `engine` bound (see `listDevices`).
+        // This test passed even without it, because the store records the uid
+        // whether or not an engine is attached; binding it keeps the test
+        // honest about which path it is exercising.
+        let (store, engine) = fixture()
+        defer { withExtendedLifetime(engine) {} }
+
+        // Default (nil) round-trips, and its encoded form OMITS the key — a
+        // pre-m20-j snapshot stays byte-identical, and an old snapshot still
+        // decodes.
+        let defaultSnapshot = store.snapshot()
+        #expect(defaultSnapshot.selectedOutputDeviceUID == nil)
+        let defaultData = try JSONEncoder().encode(defaultSnapshot)
+        let defaultObject = try JSONSerialization.jsonObject(with: defaultData) as? [String: Any]
+        #expect(defaultObject?["selectedOutputDeviceUID"] == nil)
+        #expect(try JSONDecoder().decode(ProjectSnapshot.self, from: defaultData)
+                    .selectedOutputDeviceUID == nil)
+
+        try store.selectOutputDevice(uid: "BlackHole2ch_UID")
+        let snapshot = store.snapshot()
+        #expect(snapshot.selectedOutputDeviceUID == "BlackHole2ch_UID")
+        let data = try JSONEncoder().encode(snapshot)
+        let decoded = try JSONDecoder().decode(ProjectSnapshot.self, from: data)
+        #expect(decoded == snapshot)
+        #expect(decoded.selectedOutputDeviceUID == "BlackHole2ch_UID")
+    }
+
+    /// `outputDeviceNotApplied` is thrown by the AUHAL read-back guard — the
+    /// m20-b "AudioUnitSetProperty returns noErr on a write the unit
+    /// DISCARDED" defence. Staging a device that accepts the write and
+    /// discards it is not something a test can arrange, so what IS pinned here
+    /// is the wording (it reaches the wire and the MCP surface verbatim) and
+    /// the fact that the case carries the offending uid.
+    @Test("outputDeviceNotApplied names the device and points at the list verb")
+    func notAppliedMessage() {
+        let error = ProjectError.outputDeviceNotApplied("BlackHole2ch_UID")
+        #expect(error.errorDescription
+                == "output device 'BlackHole2ch_UID' would not accept the selection — "
+                + "it may have been unplugged; use output.listDevices")
+    }
+
+    /// The protocol default (`AudioEngineControlling` extension) must REFUSE a
+    /// uid rather than silently succeed: an engine with no output AUHAL cannot
+    /// pin anything, and a silent success would let a caller believe a
+    /// selection took effect.
+    @Test("the optional-capability default refuses a uid and accepts nil")
+    func optionalCapabilityDefault() throws {
+        // A conformer that implements NOTHING of the output surface — it picks
+        // up the extension defaults.
+        let engine = MinimalOutputCapabilityEngine()
+        #expect(engine.availableOutputDevices().isEmpty)
+        try engine.setOutputDevice(uid: nil)  // trivially satisfied
+        #expect {
+            try engine.setOutputDevice(uid: "anything")
+        } throws: { error in
+            (error as? LocalizedError)?.errorDescription
+                == "no output device with uid 'anything' — use output.listDevices"
+        }
     }
 }
 

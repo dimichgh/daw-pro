@@ -66,6 +66,14 @@ struct TimelineLanesView: View {
     var selectedLaneByTrack: [UUID: UUID] = [:]
     /// Submits an edited breakpoint array (wired to `setAutomationPoints`).
     var onCommitPoints: (_ trackID: UUID, _ laneID: UUID, _ points: [AutomationPoint]) -> Void = { _, _, _ in }
+    /// m23-ai: where every automation lane editor below reports "I hold a
+    /// breakpoint selection" so the arrange's ← / → nudge refuses instead of
+    /// sliding the clip out from under the point being edited. Optional in type
+    /// but WITHOUT a default, on purpose: a `nil` slipped in by omission would
+    /// silently unguard the arrow keys, and this view has exactly one mount that
+    /// must therefore state its answer (`waveformStore` above sets the same
+    /// precedent for a dependency that must not be defaulted away).
+    var automationPointSelection: AutomationPointSelectionBridge?
 
     // MARK: Clip editing (M5 i-d)
 
@@ -1230,7 +1238,13 @@ struct TimelineLanesView: View {
                     laneHeight: Self.automationLaneHeight,
                     range: param.range),
                 contentWidth: contentWidth,
-                onCommit: { points in onCommitPoints(track.id, lane.id, points) }
+                onCommit: { points in onCommitPoints(track.id, lane.id, points) },
+                // m23-ai: these editors ARE descendants of the arrange's
+                // arrow-key mount, so each one must be able to say "I hold a
+                // breakpoint selection, don't nudge the clip out from under me".
+                // Keyed by lane id inside the bridge, which is why N of them can
+                // report at once without clobbering each other.
+                pointSelection: automationPointSelection
             )
             // Re-init the editor's draft when the selected lane (target) changes.
             .id(lane.id)

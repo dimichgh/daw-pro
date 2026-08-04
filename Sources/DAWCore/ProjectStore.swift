@@ -113,6 +113,11 @@ public final class ProjectStore {
     /// UID of the input device pinned for recording; nil = system default.
     /// Only updated when the engine accepts the selection.
     public private(set) var selectedInputDeviceUID: String?
+    /// UID of the OUTPUT device pinned for playback (m20-j); nil = follow the
+    /// system default. Only updated when the engine accepts the selection.
+    /// Session state, not project state — deliberately NOT persisted (which
+    /// rig you are on is a property of the room, not of the song).
+    public private(set) var selectedOutputDeviceUID: String?
     /// Absolute path of the `.dawproj` bundle backing this session; nil until
     /// the first successful save-as (untitled). Adopted on save-as and open.
     public private(set) var projectPath: String?
@@ -209,7 +214,21 @@ public final class ProjectStore {
     /// its snapshot is offered back only after a crash. Injected in tests
     /// (`store.crashRecovery.directory` / `.clock`) — the OnboardingStateBacking /
     /// PanelDensity injection idiom.
-    @ObservationIgnored public var crashRecovery = AutosaveManager()
+    ///
+    /// (m23-aq) The `directory:` argument is `ProjectStore.autosaveRecoveryDefault()`
+    /// — the SAME redirected default `autosaveRecoveryDirectory` (right above) uses
+    /// — rather than `AutosaveManager()`'s own bare default. In production both are
+    /// exactly `defaultAutosaveDirectory()`, so the rolling snapshot and the legacy
+    /// per-slug bundles genuinely cohabit one directory (`AutosaveManager.swift`'s
+    /// own layout doc); reusing the one existing test root instead of minting a
+    /// second is what keeps that true under test too, and a bundle either one
+    /// writes stays discoverable from a fresh store built in the same process.
+    /// Deliberately NOT done by touching `AutosaveManager.init`'s own default
+    /// argument: `AppDirectoriesTests.autosaveManagerDefaultArgumentMatches`
+    /// pins a bare, directly-constructed `AutosaveManager()` to the REAL directory
+    /// even inside this test process, so the redirection has to happen at THIS
+    /// call site, one level above `AutosaveManager`'s own always-real computation.
+    @ObservationIgnored public var crashRecovery = AutosaveManager(directory: ProjectStore.autosaveRecoveryDefault())
 
     /// Diagnostics-bundle writer (M9 beta) — the headless engine behind
     /// `writeFeedbackBundle`/`app.feedbackBundle`. Injected in tests
@@ -1328,12 +1347,32 @@ public final class ProjectStore {
         engine?.watchdogStatus() ?? .idle
     }
 
+    // MARK: - Hosted-AU prepare bookkeeping (m23-br-1)
+
+    /// Hosted-AU prepare/release counters + per-slot key digests as the
+    /// engine's live registry reports them — the `watchdogStatus()`
+    /// passthrough shape, `.idle` when running headless (no engine
+    /// injected). Deliberately NO reset parameter: the counters are monotone
+    /// for the engine's lifetime so a caller can subtract two reads across
+    /// an event (a device flip, an engine recovery) and get an exact
+    /// integer. See `EngineAUPrepareStats`.
+    public func auPrepareStats() -> EngineAUPrepareStats {
+        engine?.auPrepareStats() ?? .idle
+    }
+
     // MARK: - Input devices
 
     /// Hardware input devices as the engine sees them; empty when running
     /// headless (no engine injected).
     public func listInputDevices() -> [AudioInputDevice] {
         engine?.availableInputDevices() ?? []
+    }
+
+    /// Hardware OUTPUT devices as the engine sees them (m20-j), each carrying
+    /// both `isDefault` (the system's choice) and `isSelected` (this app's
+    /// pin); empty when running headless (no engine injected).
+    public func listOutputDevices() -> [AudioOutputDevice] {
+        engine?.availableOutputDevices() ?? []
     }
 
     /// MIDI input sources as the engine sees them; empty when running
@@ -1471,6 +1510,27 @@ public final class ProjectStore {
         }
         try engine?.setInputDevice(uid: uid)
         selectedInputDeviceUID = uid
+    }
+
+    /// Pins PLAYBACK to the device with `uid`; nil returns to following the
+    /// system default (m20-j). Takes effect immediately — unlike the input
+    /// selection, which waits for the next take, playback is continuous and
+    /// the engine re-points live.
+    ///
+    /// Refused mid-record for the same reason `setLoop` is: re-pointing the
+    /// output bounces the playback engine, and a rolling take is anchored to
+    /// that engine's start — the writer's accept window and the MIDI session
+    /// are frozen at record start, so a mid-take device switch would strand
+    /// them. `selectedOutputDeviceUID` updates only when the engine accepts
+    /// the selection (unknown-uid and would-not-apply errors pass through
+    /// untouched).
+    public func selectOutputDevice(uid: String?) throws {
+        guard !transport.isRecording else {
+            throw ProjectError.transportBusy(
+                "cannot switch output device while recording — stop first")
+        }
+        try engine?.setOutputDevice(uid: uid)
+        selectedOutputDeviceUID = uid
     }
 
     /// Enables/disables the loop region and optionally moves its bounds. Passing
@@ -3400,6 +3460,28 @@ public final class ProjectStore {
         count == 1 ? "Delete 1 Clip" : "Delete \(count) Clips"
     }
 
+    /// THE order a multi-clip edit tests its ids in when deciding WHICH refusal
+    /// to report (m23-am): track index, then clip index. One home for that
+    /// choice, so the answer can never depend on how a caller happened to build
+    /// its array.
+    ///
+    /// WHY IT MATTERS AT ALL. A batch that refuses names exactly one offender,
+    /// and the app anchors its amber bubble on that clip. The app's caller hands
+    /// over `Array(Set<UUID>)`, whose order is arbitrary and — because Swift
+    /// seeds hashing per process — not even stable between runs. So without this
+    /// the same project, same selection, same key press could blame a different
+    /// clip each launch.
+    ///
+    /// WHY CLIP INDEX AND NOT START BEAT. `Track.clips` is insertion-ordered,
+    /// not beat-ordered (`addMIDIClip` appends; `resolvingOverlaps` rebuilds in
+    /// place), so the two genuinely differ. Index is the model's own order and
+    /// costs no lookup; beat order would be a second, prettier ordering that
+    /// nothing else in the store uses. Both are deterministic — determinism is
+    /// the property being bought here, and index is the cheaper way to buy it.
+    static func refusalOrder(_ locations: [(track: Int, clip: Int)]) -> [(track: Int, clip: Int)] {
+        locations.sorted { ($0.track, $0.clip) < ($1.track, $1.clip) }
+    }
+
     /// Removes SEVERAL clips as ONE undoable edit (m23-g1) — the group-delete
     /// verb behind the arrange's multi-selection.
     ///
@@ -3426,6 +3508,18 @@ public final class ProjectStore {
     /// (`ArrangeSelection.resolved(in:)`), so a stale selected id can never reach
     /// here; an agent calling with a bad id still gets told.
     ///
+    /// WHICH refusal you get is contract as of m23-am, where it used to be an
+    /// accident of the caller's array order:
+    /// - `clipNotFound` beats `clipInTakeGroup` unconditionally (all ids are
+    ///   located before any is validated), and names the first unknown id in the
+    ///   CALLER's order.
+    /// - Among several comp members, the one named is the first in
+    ///   `refusalOrder` — track index, then clip index — never the caller's
+    ///   order, which for the UI path is `Array(Set<UUID>)` and is arbitrary.
+    ///   The error carries that clip's id (`ProjectError.clipInTakeGroup`), which
+    ///   is what lets the arrange anchor its refusal bubble on a clip that
+    ///   actually refused instead of on an innocent neighbour.
+    ///
     /// WIRED (m23-w): reachable as `clip.removeMany {ids:[uuid]}` in
     /// `Sources/DAWControl/Commands.swift` and the MCP tool `clip_remove_many`
     /// in `mcp-server/src/server.ts` — the wire half deliberately deferred at
@@ -3439,13 +3533,28 @@ public final class ProjectStore {
         let unique = ids.filter { seen.insert($0).inserted }
         guard !unique.isEmpty else { return [] }
 
-        // Phase 1 — locate + validate EVERYTHING. No mutation yet.
+        // Phase 1a — LOCATE everything. An unknown id refuses here, reported in
+        // the caller's own array order (which the caller controls and can
+        // reproduce), and it beats a comp-member refusal unconditionally: a set
+        // that is partly nonsense is a caller bug, and telling the caller about
+        // the comp member first would send them to fix the wrong thing.
         var located: [(track: Int, clip: Int)] = []
         located.reserveCapacity(unique.count)
         for id in unique {
             guard let loc = locateClip(id) else { throw ProjectError.clipNotFound(id) }
-            try requireNotCompMember(trackIndex: loc.track, clipIndex: loc.clip)
             located.append(loc)
+        }
+
+        // Phase 1b — VALIDATE, in the refusal order (m23-am). Split from 1a on
+        // purpose: validating inline meant the offender NAMED by the throw was
+        // whichever comp member the caller's array happened to reach first, and
+        // the app's caller passes `Array(Set<UUID>)` — so the reported offender
+        // was arbitrary AND unstable across processes (Swift's per-process hash
+        // seed). The amber bubble anchors on this clip, so an arbitrary choice
+        // put it on an innocent clip while naming a take group. Still no
+        // mutation: ALL-OR-NOTHING is unchanged.
+        for loc in Self.refusalOrder(located) {
+            try requireNotCompMember(trackIndex: loc.track, clipIndex: loc.clip)
         }
         let removed = located.map { tracks[$0.track].clips[$0.clip] }
 
@@ -3500,11 +3609,17 @@ public final class ProjectStore {
     /// stretch/note/remove would be silently overwritten. The escape hatch is
     /// `flattenTakeGroup` (→ ordinary clips). Named guard shared by every
     /// clip-edit op.
+    ///
+    /// m23-am: the throw carries the OFFENDING CLIP'S ID alongside the group
+    /// name. This guard is the only thing in the program that knows which clip
+    /// failed the test, so it is the only thing that can say — and because it
+    /// says, no caller needs a second copy of the "is this a comp member?"
+    /// question to find out (`ProjectError.refusalAnchorClipID` reads it back).
     func requireNotCompMember(trackIndex t: Int, clipIndex c: Int) throws {
         guard let gid = tracks[t].clips[c].takeGroupID else { return }
         let name = tracks[t].takeGroups.first(where: { $0.id == gid })?.name
             ?? tracks[t].clips[c].name
-        throw ProjectError.clipInTakeGroup(name)
+        throw ProjectError.clipInTakeGroup(name, clipID: tracks[t].clips[c].id)
     }
 
     /// Clamps a fade pair to a clip length. Each fade is first pinned to
@@ -3868,6 +3983,64 @@ public final class ProjectStore {
             : "clip.moveMany:" + ids.map(\.uuidString).sorted().joined(separator: ",")
     }
 
+    /// The ONE home for the WHOLE-GROUP beat-0 clamp (hoisted out of `moveClips`
+    /// at m23-aj, when the cross-track move verb below became a second caller).
+    ///
+    /// `minStart` is the LEFTMOST mover's start. NEVER per clip: a per-clip
+    /// `max(0, ...)` — which is what `moveClip` does, correctly, for ONE clip —
+    /// silently breaks the group's offsets the moment the leftmost member hits
+    /// the wall while the others still have room. The full argument is in
+    /// `moveClips`' own doc block; this is where the arithmetic lives so that a
+    /// second verb carrying `byBeats` cannot restate it slightly differently.
+    static func clampedGroupBeatDelta(requested: Double, minStart: Double)
+        -> (effective: Double, clamped: Bool) {
+        let effective = max(requested, -minStart)
+        return (effective, effective != requested)
+    }
+
+    /// The ONE home for the GROUP overlap RECIPE (hoisted out of `moveClips` at
+    /// m23-aj): `resolvingOverlaps` run ONCE PER MOVER over ONE track's array,
+    /// feeding the rebuilt array forward, in a caller-order-independent sort.
+    ///
+    /// **THIS IS NOT A SECOND OVERLAP POLICY.** It decides nothing about what a
+    /// trim does — that stays entirely inside `resolveOverlap` /
+    /// `resolvingOverlaps`, the m13-b choke point. It decides only HOW MANY
+    /// windows are applied and IN WHAT ORDER, which is the part m23-g2 reasoned
+    /// about (see `moveClips`' PASS ORDER paragraph) and the part a cross-track
+    /// verb must not re-reason about.
+    ///
+    /// `activeIDs` is an EXPLICIT parameter precisely because the two callers
+    /// mean different sets, and the difference is invisible from inside here:
+    /// `moveClips` passes the movers that are ON this track (equivalently, that
+    /// are landing on it — it never moves a clip off its track), while the
+    /// cross-track core passes the movers LANDING on this destination. Passing
+    /// "the movers that STARTED here" from a cross-track caller would omit the
+    /// arriving movers and let them trim each other.
+    static func resolvingGroupOverlaps(
+        in clips: [Clip],
+        movers: [(id: UUID, start: Double, end: Double)],
+        activeIDs: Set<UUID>,
+        tempoMap: TempoMap
+    ) -> (clips: [Clip], trimmedIDs: [UUID], removedIDs: [UUID]) {
+        var out = clips
+        var trimmed: [UUID] = []
+        var removed: [UUID] = []
+        // Sorted (by landing start, then id) so the result cannot depend on the
+        // caller's id order — see `moveClips`' PASS ORDER paragraph.
+        let ordered = movers.sorted {
+            $0.start == $1.start ? $0.id.uuidString < $1.id.uuidString : $0.start < $1.start
+        }
+        for mover in ordered {
+            let resolved = resolvingOverlaps(in: out, activeIDs: activeIDs,
+                                             start: mover.start, end: mover.end,
+                                             tempoMap: tempoMap)
+            out = resolved.clips
+            trimmed.append(contentsOf: resolved.trimmedIDs)
+            removed.append(contentsOf: resolved.removedIDs)
+        }
+        return (out, trimmed, removed)
+    }
+
     /// Translates SEVERAL clips RIGIDLY along the timeline as ONE undoable edit
     /// (m23-g2) — the group-move verb behind the arrange's multi-selection drag.
     ///
@@ -3901,7 +4074,14 @@ public final class ProjectStore {
     ///
     /// OVERLAP: resolved through the ONE no-silent-overlap choke point
     /// (`resolvingOverlaps`, m13-b) — but called ONCE PER MOVING CLIP, with
-    /// `activeIDs` = the FULL moving set, feeding the rebuilt array forward.
+    /// `activeIDs` = THIS TRACK'S moving set, feeding the rebuilt array forward.
+    /// (The per-track set, not the whole selection: `resolvingOverlaps` only ever
+    /// sees one track's array, so an id from another track would match nothing.
+    /// The two readings are equivalent HERE because this verb never moves a clip
+    /// off its track — they are NOT equivalent for the cross-track verb below,
+    /// where `activeIDs` must mean the movers LANDING on the track. That is why
+    /// `resolvingGroupOverlaps` takes it as an explicit argument. This comment
+    /// said "the FULL moving set" until m23-aj measured the code.)
     /// This is the whole reason the verb is not a loop over `moveClip`:
     /// `resolvingOverlaps` takes a SINGLE CONTIGUOUS window (`start`/`end`), so
     /// a union window over a non-contiguous group (clips at bar 1 and bar 9)
@@ -3940,13 +4120,16 @@ public final class ProjectStore {
     /// UI path filters the selection against live clips first
     /// (`ArrangeSelection.resolved(in:)`).
     ///
-    /// HORIZONTAL ONLY. There is no cross-track group drag, because there is no
-    /// cross-track drag at all — `moveClip` is same-track by construction
-    /// (`locateClip(trackID:clipID:)`, no `toTrackId` unlike `duplicateClip`)
-    /// and the arrange gesture has never offered one. A MIXED-TRACK selection is
-    /// fully supported and preserves cross-track offsets, because one delta
-    /// applies to all of them; what does not exist is moving a clip to a
-    /// DIFFERENT track.
+    /// HORIZONTAL ONLY — this verb never changes a clip's TRACK, and that is now
+    /// a statement about ITS scope rather than about the store's. A MIXED-TRACK
+    /// selection is fully supported and preserves cross-track offsets, because
+    /// one delta applies to all of them; what this signature cannot express is
+    /// LANDING a clip on a different track. That verb exists as of m23-aj —
+    /// `moveClips(ids:byTracks:byBeats:)` / `moveClips(ids:toTrackId:byBeats:)`
+    /// immediately below, which carry `byBeats` themselves and share this verb's
+    /// beat-0 clamp and overlap recipe through `clampedGroupBeatDelta` /
+    /// `resolvingGroupOverlaps`. `moveClip` is still same-track by construction
+    /// (`locateClip(trackID:clipID:)`, no `toTrackId` unlike `duplicateClip`).
     ///
     /// WIRED (m23-w): reachable as `clip.moveMany {ids:[uuid],
     /// byBeats:Double}` in `Sources/DAWControl/Commands.swift` and the MCP
@@ -3971,10 +4154,9 @@ public final class ProjectStore {
             located.append(loc)
         }
 
-        // Phase 2 — the WHOLE-GROUP clamp (never per clip).
+        // Phase 2 — the WHOLE-GROUP clamp (never per clip), through its ONE home.
         let minStart = located.map { tracks[$0.track].clips[$0.clip].startBeat }.min() ?? 0
-        let effective = max(delta, -minStart)
-        let clamped = effective != delta
+        let (effective, clamped) = Self.clampedGroupBeatDelta(requested: delta, minStart: minStart)
         guard effective != 0 else {
             let unchanged = located.map { tracks[$0.track].clips[$0.clip] }
             return ClipsMoveResult(clips: unchanged, requestedDeltaBeats: delta,
@@ -3993,28 +4175,24 @@ public final class ProjectStore {
                     key: Self.moveClipsKey(ids: unique)) {
             for t in byTrack.keys.sorted() {
                 let locs = byTrack[t] ?? []
+                // This TRACK's movers (see the OVERLAP paragraph above).
                 let movingIDs = Set(locs.map { tracks[t].clips[$0.clip].id })
                 // Each mover's TRUE post-move window, captured before anything is
-                // rebuilt. Sorted so the pass order is caller-order-independent.
-                var movers: [(id: UUID, start: Double, end: Double)] = locs.map { loc in
+                // rebuilt. `resolvingGroupOverlaps` owns the sort and the pass loop.
+                let movers: [(id: UUID, start: Double, end: Double)] = locs.map { loc in
                     let clip = tracks[t].clips[loc.clip]
                     let start = clip.startBeat + effective
                     return (clip.id, start, start + clip.lengthBeats)
                 }
-                movers.sort {
-                    $0.start == $1.start ? $0.id.uuidString < $1.id.uuidString : $0.start < $1.start
-                }
                 for loc in locs {
                     tracks[t].clips[loc.clip].startBeat += effective
                 }
-                for mover in movers {
-                    let resolved = Self.resolvingOverlaps(
-                        in: tracks[t].clips, activeIDs: movingIDs,
-                        start: mover.start, end: mover.end, tempoMap: tempoMap)
-                    tracks[t].clips = resolved.clips
-                    trimmed.append(contentsOf: resolved.trimmedIDs)
-                    removed.append(contentsOf: resolved.removedIDs)
-                }
+                let resolved = Self.resolvingGroupOverlaps(
+                    in: tracks[t].clips, movers: movers,
+                    activeIDs: movingIDs, tempoMap: tempoMap)
+                tracks[t].clips = resolved.clips
+                trimmed.append(contentsOf: resolved.trimmedIDs)
+                removed.append(contentsOf: resolved.removedIDs)
             }
             engine?.tracksDidChange(tracks)
         }
@@ -4036,6 +4214,448 @@ public final class ProjectStore {
                                requestedDeltaBeats: delta, effectiveDeltaBeats: effective,
                                clamped: clamped, trimmedClipIDs: trimmedOut,
                                removedClipIDs: removedOut)
+    }
+
+    // MARK: - Cross-track group move (m23-aj)
+
+    /// The ONE home for the vertical WHOLE-GROUP clamp (m23-aj) — the discrete
+    /// twin of `clampedGroupBeatDelta`.
+    ///
+    /// NEVER per clip: a per-clip `min(max(...))` would silently break vertical
+    /// offsets the moment the topmost mover hits track 0 while the others still
+    /// have room, which is the exact defect the beat-0 clamp exists to prevent,
+    /// one axis over.
+    ///
+    /// `lower <= 0 <= upper` holds for any in-range source indices, so the clamp
+    /// can never invert the sign of the request and `effective == 0` is always
+    /// reachable. **It is a pure RANGE clamp and never SEARCHES** — that is what
+    /// keeps the no-skip rule true: `byTracks: 5` on a 3-track project clamps to
+    /// the last track and the caller then kind-checks THAT landing. It does not
+    /// hunt for a landing that works.
+    static func clampedTrackDelta(requested: Int, minTrackIndex: Int, maxTrackIndex: Int,
+                                  trackCount: Int) -> (effective: Int, clamped: Bool) {
+        guard trackCount > 0 else { return (0, requested != 0) }
+        let lower = -minTrackIndex                    // topmost mover lands on track 0
+        let upper = (trackCount - 1) - maxTrackIndex  // bottommost lands on the last track
+        let effective = min(max(requested, lower), upper)
+        return (effective, effective != requested)
+    }
+
+    /// What a cross-track move's undo label says about WHERE the movers went — a
+    /// fact about the RESULT, not about which API shape the caller reached for
+    /// (m23-aj).
+    ///
+    /// A three-state sum rather than a `String?`: `nil` cannot tell "no mover
+    /// changed track" (which must read exactly like the horizontal verb) apart
+    /// from "several destinations", and a parallel `crossed: Bool` would leave two
+    /// illegal states representable.
+    enum ClipsMoveLabelDestination: Sendable, Equatable {
+        /// No mover changed track — a cross-track call that did not cross.
+        case unchanged
+        /// Every mover landed on the SAME track, and at least one crossed onto it.
+        case single(String)
+        /// Movers crossed onto MORE THAN ONE destination track.
+        case several
+    }
+
+    /// The undo label a cross-track move journals (m23-aj).
+    ///
+    /// The `.unchanged` row reproduces `moveClipsLabel` BYTE-FOR-BYTE, one level
+    /// up from that function's own byte-exactness argument: a cross-track verb
+    /// that did not actually cross must read in the Edit menu exactly like the
+    /// horizontal one, or the menu text would depend on which API the caller
+    /// reached for. The other rows are countable and DISTINCT, so a gate — and the
+    /// user — can tell one atomic cross-track move from a loop of single moves by
+    /// the label alone.
+    static func moveClipsAcrossLabel(count: Int, singleName: String,
+                                     destination: ClipsMoveLabelDestination) -> String {
+        switch destination {
+        case .unchanged:
+            return moveClipsLabel(count: count, singleName: singleName)
+        case .single(let trackName):
+            return count == 1
+                ? "Move Clip '\(singleName)' to '\(trackName)'"
+                : "Move \(count) Clips to '\(trackName)'"
+        case .several:
+            return "Move \(count) Clips Across Tracks"
+        }
+    }
+
+    /// Moves SEVERAL clips to DIFFERENT TRACKS — and optionally along the
+    /// timeline at the same time — as ONE undoable edit (m23-aj). The shared
+    /// private core behind both public shapes; `landing` is the ONLY thing they
+    /// disagree about.
+    ///
+    /// THE VERTICAL AXIS IS THE RAW `tracks` INDEX, and there is NO SKIP in
+    /// either sense — not "search past a bus", not "move the clips that can and
+    /// leave the rest". A bus occupies a position on the axis like any other
+    /// track because the arrange draws a row for every track including buses, and
+    /// the future cross-track DRAG resolves an ABSOLUTE destination (the row under
+    /// the pointer) which cannot skip. Two vertical axes disagreeing about the
+    /// same visible row is the divergence this rule exists to prevent. The cost is
+    /// stated rather than hidden: in `[audio, BUS, audio]` a ±1 delta cannot reach
+    /// the far audio track, and the answer is `track.reorder`, not a second axis.
+    ///
+    /// RUNNING OFF THE TOP OR BOTTOM CLAMPS THE WHOLE GROUP (`clampedTrackDelta`),
+    /// never per clip and never a throw — the beat-0 precedent. A LANDING THAT
+    /// CANNOT HOLD THE CLIP REFUSES THE WHOLE MOVE, throwing the exact errors
+    /// `duplicateClip` already throws. Clamping to a silent no-op instead was
+    /// rejected: a dead key is indistinguishable from a broken one, and a refusal
+    /// that says why is strictly more informative.
+    ///
+    /// PHASE ORDER IS LOAD-BEARING. **Clamp FIRST, kind-check the CLAMPED landing
+    /// SECOND** — the reverse would make the kind check a function of an
+    /// out-of-range index. A mover whose destination equals its source is never
+    /// kind-checked: staying put is always legal, and the verb must not refuse
+    /// because of a pre-existing state it did not create.
+    ///
+    /// THE MECHANIC: build the whole new `[Track]` value, then commit it ONCE.
+    /// Every crossing mover is VACATED from every source array BEFORE any mover
+    /// lands, so a track that is simultaneously vacated by one mover and landed on
+    /// by another is already empty of the departing clip when the arriving one
+    /// resolves overlap. A per-track "remove mine then add mine" loop would leave
+    /// the vacating mover present during the landing mover's pass, and that pass
+    /// would either TRIM it (data loss) or need it in `activeIDs` (a mover
+    /// exempting itself on a track it is leaving). Removal is `removeAll(where:)`,
+    /// never `remove(at:)`, so no index arithmetic survives a mutation. The single
+    /// `tracks = next` assignment makes a torn intermediate — a clip on two tracks
+    /// or on none — structurally unrepresentable rather than merely absent.
+    ///
+    /// The whole `Clip` VALUE travels, so `controllerLanes`, fades, the gain
+    /// envelope and the clip's IDENTITY all come along; only `startBeat` changes.
+    /// `reidentified` is deliberately NOT on this path — it mints a fresh id and
+    /// drops `takeGroupID`, which is right for a DUPLICATE and wrong for a MOVE.
+    /// Same-track movers keep their ARRAY SLOT (crossing movers append), because
+    /// `moveClips(ids:byBeats:)` does not reorder `tracks[t].clips` today and a
+    /// `.toTrack` mover already on the destination must not be shuffled to the end
+    /// just because its siblings arrived. `Track.clips` has no sortedness
+    /// invariant, so appending is safe.
+    ///
+    /// OVERLAP is the SAME recipe the horizontal verb uses
+    /// (`resolvingGroupOverlaps` over the m13-b choke point), with `activeIDs` =
+    /// the movers LANDING on that destination — never the movers that STARTED
+    /// there, which would omit the arrivals and let them trim each other. Take/comp
+    /// members on the destination are exempt inside `resolvingOverlaps`, so a
+    /// mover landing on a track that has take groups STACKS over the comp clips
+    /// rather than trimming them — `duplicateClip`'s documented behaviour,
+    /// inherited verbatim.
+    ///
+    /// VALIDATE-FIRST: every id is located and cleared past `requireNotCompMember`
+    /// before anything moves (a comp member crossing tracks would orphan its
+    /// track-scoped `takeGroups`), and every kind check runs before the single
+    /// `performEdit`, so any refusal leaves the project byte-identical. Duplicate
+    /// ids collapse; an unknown id throws `clipNotFound`. A move that would change
+    /// NOTHING returns before `performEdit` and journals no entry — the same rule,
+    /// and the same reason, as the horizontal verb's zero-delta return: a held
+    /// arrow at the bottom of the track list emits exactly that gesture, and
+    /// running the overlap pass at a clip's CURRENT position would trim a
+    /// legitimately-overlapping neighbour for a gesture that moved nothing.
+    ///
+    /// COALESCING reuses `moveClipsKey(ids:)` UNCHANGED, so a diagonal keyboard
+    /// walk on one selection is ONE undo step. The measured, accepted consequence:
+    /// because the key does not encode the axis, a horizontal press and a vertical
+    /// press inside the coalescing window fold into the same entry and
+    /// `UndoJournal.recordEdit` keeps the FIRST label. An axis-suffixed key would
+    /// keep the label honest at the cost of making that walk cost TWO undo steps,
+    /// which is the defect the coalescing exists to prevent.
+    ///
+    /// ENGINE: ONE `tracksDidChange(tracks)` after the final assignment. There is
+    /// NO transport guard — the render thread never reads `[Track]`, and
+    /// `insertBars`' recording refusal does not transfer because that verb
+    /// re-anchors the TEMPO MAP underneath a rolling capture while this one moves
+    /// clips only.
+    ///
+    /// NOT WIRED YET — m23-aj-1 is DAWCore-only, which is precedented rather than
+    /// a constitution violation: `moveClips(ids:byBeats:)` above landed exactly
+    /// this way at m23-g2 and was wired at m23-w.
+    ///
+    /// TODO(m23-aj-2): expose this verb on both surfaces, APPENDED AT THE END of
+    /// `CommandRouter.allCommands`, never renaming a live command:
+    ///   - control `clip.moveManyByTracks {ids, byTracks, byBeats?}`
+    ///     → MCP tool `clip_move_many_by_tracks`
+    ///   - control `clip.moveManyToTrack  {ids, toTrackId, byBeats?}`
+    ///     → MCP tool `clip_move_many_to_track`
+    /// plus the two matching `CopilotCatalog` entries. TODO(m23-aj-3): the ↑/↓
+    /// arrange keyboard layer over the m23-x handler.
+    /// Design record: `docs/research/design-m23aj-cross-track-move.md` (§9 has the
+    /// exact request/response shapes; §9.3 says do NOT "fix" the key casing).
+    private func moveClips(ids: [UUID], landing: ClipTrackLanding,
+                           byBeats delta: Double) throws -> ClipsTrackMoveResult {
+        // Phase 0 — resolve the named DESTINATION first, BEFORE the empty-ids
+        // check: an agent that typo'd a track id must learn immediately rather
+        // than get a silent success. `.byTracks` needs no such check — an `Int`
+        // cannot be invalid.
+        var namedDestination: Int?
+        var requestedTrackDelta: Int?
+        switch landing {
+        case .toTrack(let trackID):
+            guard let index = tracks.firstIndex(where: { $0.id == trackID }) else {
+                throw ProjectError.trackNotFound(trackID)
+            }
+            namedDestination = index
+        case .byTracks(let requested):
+            requestedTrackDelta = requested
+        }
+
+        // Phase 0b — duplicate ids collapse (the removeClips / moveClips contract).
+        var seen = Set<UUID>()
+        let unique = ids.filter { seen.insert($0).inserted }
+        guard !unique.isEmpty else {
+            return ClipsTrackMoveResult(
+                clips: [], landings: [],
+                requestedTrackDelta: requestedTrackDelta,
+                effectiveTrackDelta: requestedTrackDelta.map { _ in 0 },
+                clampedTracks: false,
+                requestedDeltaBeats: delta, effectiveDeltaBeats: 0, clamped: false)
+        }
+
+        // Phase 1 — locate + validate EVERYTHING. No mutation yet. The clip VALUES
+        // are captured here and drive every later phase; the phase-1 INDICES are
+        // used only for pre-mutation ordering (below) and are dead the moment
+        // phase 3a runs.
+        var located: [(track: Int, clip: Int)] = []
+        var moving: [Clip] = []
+        located.reserveCapacity(unique.count)
+        moving.reserveCapacity(unique.count)
+        for id in unique {
+            guard let loc = locateClip(id) else { throw ProjectError.clipNotFound(id) }
+            try requireNotCompMember(trackIndex: loc.track, clipIndex: loc.clip)
+            located.append(loc)
+            moving.append(tracks[loc.track].clips[loc.clip])
+        }
+        let sources = located.map(\.track)
+
+        // Phase 2a — the vertical resolve. CLAMP happens here; kind-checking the
+        // clamped landing is phase 2b, and that order is the decision.
+        let destinations: [Int]
+        let effectiveTrackDelta: Int?
+        let clampedTracks: Bool
+        if let namedDestination {
+            destinations = Array(repeating: namedDestination, count: unique.count)
+            effectiveTrackDelta = nil   // a destination-shaped move has no delta
+            clampedTracks = false
+        } else {
+            let (effective, didClamp) = Self.clampedTrackDelta(
+                requested: requestedTrackDelta ?? 0,
+                minTrackIndex: sources.min() ?? 0, maxTrackIndex: sources.max() ?? 0,
+                trackCount: tracks.count)
+            destinations = sources.map { $0 + effective }
+            effectiveTrackDelta = effective
+            clampedTracks = didClamp
+        }
+        // ONE crossing predicate, consumed by BOTH the kind check and the vacate
+        // set, so those two can never disagree about who is moving.
+        let crossing = zip(sources, destinations).map { $0 != $1 }
+
+        // Phase 2b — kind-check the CLAMPED destination of every CROSSING mover,
+        // in (source track, source clip) order so the FIRST failure is
+        // deterministic rather than a function of the caller's id order.
+        let checkOrder = (0..<unique.count).sorted {
+            located[$0].track == located[$1].track
+                ? located[$0].clip < located[$1].clip
+                : located[$0].track < located[$1].track
+        }
+        for i in checkOrder where crossing[i] {
+            let dt = destinations[i]
+            guard tracks[dt].canHold(moving[i]) else {
+                if moving[i].isMIDI {
+                    throw ProjectError.midiClipsRequireInstrumentTrack(tracks[dt].kind)
+                }
+                throw ProjectError.trackKindUnsupported(tracks[dt].kind)
+            }
+        }
+
+        // Phase 2b' — refuse a collision this verb would MANUFACTURE (§18).
+        //
+        // THE PRINCIPLE IS "refuse what the verb manufactured", not "compare
+        // source track indices"; the index comparison below is only the
+        // mechanical test that happens to decide it for every landing shape this
+        // verb has today. A collision is PRE-EXISTING iff the two movers came
+        // from the SAME source track: every landing shape here translates every
+        // mover by one uniform `byBeats`, so a same-source pair's relative
+        // geometry is unchanged by the move — if it overlaps after, it overlapped
+        // before. Those are exactly the sanctioned audio crossfade pairs the
+        // horizontal verb documents at :4028-4032, and they are GRANDFATHERED.
+        // A future landing shape (e.g. a per-clip destination mapping) must
+        // inherit the principle, not the shortcut.
+        //
+        // It runs over ALL movers assigned to a destination, NOT just the
+        // CROSSING ones: copying phase 2b's `where crossing[i]` filter is the
+        // natural mistake and is wrong. Under `.toTrack` a mover ALREADY on the
+        // destination is non-crossing — it keeps its array slot rather than being
+        // vacated and re-appended — but it is still in that destination's
+        // `activeIDs`, and `resolvingOverlaps` exempts `activeIDs` members from
+        // trimming each other, so it collides just the same.
+        //
+        // IT IS UNCONDITIONAL, AND IT PROVABLY NEVER REFUSES UNDER `.byTracks` —
+        // both structural reasons are recorded because each kills a different
+        // failure mode, and a later reader who finds a guard that never fires
+        // there and cannot reconstruct them will delete it as dead code:
+        //   1. INJECTIVITY. `destination = source + effectiveTrackDelta` with a
+        //      single whole-group `Int` (the vertical clamp is whole-group too) is
+        //      injective on source track index, so two movers share a destination
+        //      IFF they shared a source — and same-source pairs are grandfathered.
+        //      No pair can be both co-landing and manufactured.
+        //   2. NO CROSSING/NON-CROSSING ASYMMETRY. Under a rigid common track
+        //      delta a mover is non-crossing only when the delta is 0, and the
+        //      delta is common — so either EVERY mover crosses or NONE does. The
+        //      "one mover sits still on the destination while another lands on it"
+        //      case is structurally unrepresentable under `.byTracks`. It is
+        //      representable under `.toTrack`.
+        // One unconditional phase enforcing the invariant beats a conditional one
+        // plus a proof obligation on every future reader.
+        //
+        // It needs no beat delta: for movers i and j translated by a common `d`,
+        // `[s_i+d, s_i+d+L_i) ∩ [s_j+d, s_j+d+L_j) ≠ ∅  ⟺  s_i < s_j+L_j ∧
+        // s_j < s_i+L_i` — `d` cancels, the whole-group beat-0 clamp is likewise
+        // common, and lengths never change. So it sits BEFORE the 2c clamp, where
+        // it fails earlier and needs less state. Take/comp members cannot reach
+        // here (`requireNotCompMember`, phase 1) and are not re-exempted: a second
+        // take exemption would be a second policy home.
+        //
+        // WHICH pair is named is DETERMINISTIC: the scan runs in phase 2b's
+        // `checkOrder` — (source track, source clip) — and reports the FIRST
+        // colliding pair, `first` being whichever comes earlier in that order.
+        // NOT `resolvingGroupOverlaps`' landing sort (start, then `uuidString`),
+        // which this design declines to call principled.
+        for (pos, i) in checkOrder.enumerated() {
+            for j in checkOrder[(pos + 1)...] {
+                guard destinations[i] == destinations[j] else { continue }
+                guard sources[i] != sources[j] else { continue }  // grandfathered crossfade pair
+                // STRICT `<`, never `<=`: `[0,4)` and `[4,8)` ABUT and must
+                // succeed. This is `resolveOverlap`'s own half-open disjointness
+                // rule — grep its "touching at a shared edge counts as adjacent,
+                // not overlap" — so the two agree by construction.
+                let iStart = moving[i].startBeat, iEnd = iStart + moving[i].lengthBeats
+                let jStart = moving[j].startBeat, jEnd = jStart + moving[j].lengthBeats
+                guard iStart < jEnd, jStart < iEnd else { continue }
+                throw ProjectError.clipsWouldOverlapOnDestination(
+                    firstID: unique[i], firstName: moving[i].name,
+                    secondID: unique[j], secondName: moving[j].name)
+            }
+        }
+
+        // Phase 2c — the horizontal WHOLE-GROUP clamp, through its ONE home. The
+        // leftmost mover's start is taken across ALL tracks: one group, one wall.
+        let minStart = moving.map(\.startBeat).min() ?? 0
+        let (effectiveBeats, clampedBeats) =
+            Self.clampedGroupBeatDelta(requested: delta, minStart: minStart)
+
+        // Track ids are stable across the whole edit, so the landings read the
+        // same before and after phase 3.
+        let landings = (0..<unique.count).map { i in
+            ClipLanding(clipID: unique[i], fromTrackID: tracks[sources[i]].id,
+                        toTrackID: tracks[destinations[i]].id)
+        }
+
+        // Phase 2d — nothing would change: return BEFORE `performEdit`, so a
+        // no-op consumes no undo slot.
+        guard crossing.contains(true) || effectiveBeats != 0 else {
+            return ClipsTrackMoveResult(
+                clips: moving, landings: landings,
+                requestedTrackDelta: requestedTrackDelta,
+                effectiveTrackDelta: effectiveTrackDelta, clampedTracks: clampedTracks,
+                requestedDeltaBeats: delta, effectiveDeltaBeats: 0, clamped: clampedBeats)
+        }
+
+        // Phase 3 — ONE edit, built on a local `[Track]` value and committed once.
+        let crossingIDs = Set((0..<unique.count).filter { crossing[$0] }.map { unique[$0] })
+        let vacatedTracks = Set((0..<unique.count).filter { crossing[$0] }.map { sources[$0] })
+        var byDestination: [Int: [Int]] = [:]
+        for i in 0..<unique.count { byDestination[destinations[i], default: []].append(i) }
+        let labelDestination: ClipsMoveLabelDestination = {
+            guard crossing.contains(true) else { return .unchanged }
+            let first = destinations[0]
+            return destinations.allSatisfy { $0 == first } ? .single(tracks[first].name) : .several
+        }()
+        let tempoMap = transport.tempoMap
+        var trimmed: [UUID] = []
+        var removed: [UUID] = []
+        performEdit(Self.moveClipsAcrossLabel(count: unique.count, singleName: moving[0].name,
+                                              destination: labelDestination),
+                    key: Self.moveClipsKey(ids: unique)) {
+            var next = tracks
+            // 3a — VACATE every crossing mover from every source array, globally,
+            // before anything lands. Index-free by construction.
+            for t in vacatedTracks.sorted() {
+                next[t].clips.removeAll { crossingIDs.contains($0.id) }
+            }
+            // 3b — LAND, per destination in ascending index order.
+            for dt in byDestination.keys.sorted() {
+                let movers = byDestination[dt] ?? []
+                var windows: [(id: UUID, start: Double, end: Double)] = []
+                windows.reserveCapacity(movers.count)
+                for i in movers {
+                    let start = moving[i].startBeat + effectiveBeats
+                    windows.append((unique[i], start, start + moving[i].lengthBeats))
+                    if crossing[i] {
+                        var landed = moving[i]      // the whole VALUE travels
+                        landed.startBeat = start
+                        next[dt].clips.append(landed)
+                    } else if let slot = next[dt].clips.firstIndex(where: { $0.id == unique[i] }) {
+                        next[dt].clips[slot].startBeat = start   // keeps its slot
+                    }
+                }
+                let resolved = Self.resolvingGroupOverlaps(
+                    in: next[dt].clips, movers: windows,
+                    activeIDs: Set(movers.map { unique[$0] }), tempoMap: tempoMap)
+                next[dt].clips = resolved.clips
+                trimmed.append(contentsOf: resolved.trimmedIDs)
+                removed.append(contentsOf: resolved.removedIDs)
+            }
+            tracks = next   // ONE assignment: no observer ever sees a torn state.
+            engine?.tracksDidChange(tracks)
+        }
+
+        // Phase 4 — de-duplicate the aggregate: a resident can be reported by more
+        // than one mover's pass, and a REMOVAL supersedes any earlier trim of it.
+        var seenRemoved = Set<UUID>()
+        let removedOut = removed.filter { seenRemoved.insert($0).inserted }
+        var seenTrimmed = Set<UUID>()
+        let trimmedOut = trimmed.filter {
+            !seenRemoved.contains($0) && seenTrimmed.insert($0).inserted
+        }
+        var byID: [UUID: Clip] = [:]
+        for track in tracks {
+            for clip in track.clips { byID[clip.id] = clip }
+        }
+        return ClipsTrackMoveResult(
+            clips: unique.compactMap { byID[$0] }, landings: landings,
+            requestedTrackDelta: requestedTrackDelta,
+            effectiveTrackDelta: effectiveTrackDelta, clampedTracks: clampedTracks,
+            requestedDeltaBeats: delta, effectiveDeltaBeats: effectiveBeats,
+            clamped: clampedBeats,
+            trimmedClipIDs: trimmedOut, removedClipIDs: removedOut)
+    }
+
+    /// Moves several clips by a signed number of TRACKS (negative = up the track
+    /// list), rigidly: every mover moves the SAME number of tracks, so a selection
+    /// spanning several tracks keeps its vertical shape. `byBeats` rides along in
+    /// the SAME undo step, so one gesture can move down AND along.
+    ///
+    /// One `Int` is one amount, which is what makes rigidity a type-level fact
+    /// rather than a caller promise. Running off the top or bottom CLAMPS the
+    /// whole group (`clampedTracks` / `effectiveTrackDelta` report it, no throw);
+    /// a landing that cannot hold a mover REFUSES the whole call. See the private
+    /// core above for the full contract.
+    @discardableResult
+    public func moveClips(ids: [UUID], byTracks: Int,
+                          byBeats: Double = 0) throws -> ClipsTrackMoveResult {
+        try moveClips(ids: ids, landing: .byTracks(byTracks), byBeats: byBeats)
+    }
+
+    /// Moves several clips ONTO ONE NAMED TRACK, which COLLAPSES a multi-track
+    /// selection by construction: relative BEAT offsets survive, relative TRACK
+    /// offsets do not. `byBeats` rides along in the SAME undo step.
+    ///
+    /// This is the shape a pointer DROP resolves to (a destination, not a delta),
+    /// and the shape an agent's "move these to the Drums track" means. An unknown
+    /// `toTrackId` throws `trackNotFound` EVEN WHEN `ids` IS EMPTY. Use
+    /// `moveClips(ids:byTracks:byBeats:)` for a shape-preserving move.
+    @discardableResult
+    public func moveClips(ids: [UUID], toTrackId: UUID,
+                          byBeats: Double = 0) throws -> ClipsTrackMoveResult {
+        try moveClips(ids: ids, landing: .toTrack(toTrackId), byBeats: byBeats)
     }
 
     /// Rebuilds `clip` under a FRESH identity/position, VALUE-COPYING every
@@ -4112,7 +4732,10 @@ public final class ProjectStore {
                 throw ProjectError.midiClipsRequireInstrumentTrack(tracks[dt].kind)
             }
         } else {
-            guard tracks[dt].kind == .audio else {
+            // `Track.canHoldAudioClips` (m23-aj), not a local `kind == .audio`:
+            // this line WAS the second home for the audio half of the rule, and
+            // the cross-track MOVE verb below asks the same question.
+            guard tracks[dt].canHoldAudioClips else {
                 throw ProjectError.trackKindUnsupported(tracks[dt].kind)
             }
         }
@@ -6366,6 +6989,7 @@ public final class ProjectStore {
             ),
             lastRecordingError: lastRecordingError,
             selectedInputDeviceUID: selectedInputDeviceUID,
+            selectedOutputDeviceUID: selectedOutputDeviceUID,
             projectPath: projectPath,
             isDirty: isDirty,
             undoLabel: journal.undoLabel,

@@ -350,7 +350,24 @@ public final class OfflineRenderer {
         graph.applyParameters(tracks: tracks, playheadBeat: fromBeat)
         try engine.start()
         graph.applyParameters(tracks: tracks, playheadBeat: fromBeat)
-        graph.scheduleAll(fromBeat: fromBeat, tempoMap: tempoMap)
+        // m23-bv: the cause is STATED, not defaulted. A render begins at a
+        // beat the CALLER chose, which is a relocation by m23-bp's own rule
+        // (the anchor is not a position playback would have reached anyway),
+        // so `.relocation` is the same value `scheduleAll`'s default carries
+        // and this line is byte-identical to the pre-m23-bv tree. Writing it
+        // out is the point: a comment is not a compiler, and until m23-bv the
+        // only record that anyone had CHOSEN it lived in a test's header.
+        //
+        // ⚠️ WHAT IT COSTS IS MEASURED, NOT INFERRED — a MIDI note held across
+        // `fromBeat` is ABSENT from the bounce (RMS exactly 0.0 at bar 5 for a
+        // pad held bars 1-9), while the same instant played through from the
+        // top sounds (RMS 0.064), and a straddling AUDIO clip in the identical
+        // position DOES sound (RMS 0.354, entered mid-file). See
+        // `OfflineChaseDivergenceTests`. Whether a region bounce should chase
+        // — and whether that audio/MIDI asymmetry is wanted — is an OPEN
+        // PRODUCT question on the m23-bv roadmap entry. Do not flip this line
+        // without settling it: it is the offline byte-identity anchor.
+        graph.scheduleAll(fromBeat: fromBeat, tempoMap: tempoMap, cause: .relocation)
         if let metronome {
             // One click per integer beat across the render range (the window
             // end is the inverse integral of the render duration — m12-b,

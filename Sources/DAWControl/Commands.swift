@@ -226,6 +226,7 @@ public final class CommandRouter {
         "mixer.masterAnalysis",
         "engine.performanceStats",
         "engine.watchdogStatus",
+        "engine.auPrepareStats",
         "macro.songSkeleton",
         "automation.addLane",
         "automation.removeLane",
@@ -288,6 +289,13 @@ public final class CommandRouter {
         "project.overview",
         "input.listDevices",
         "input.setDevice",
+        // m20-j: registered HERE, next to the input pair and BEFORE
+        // transport.record, on purpose — the all-commands routing loop in
+        // ControlTests walks this array IN ORDER and is mid-take by the time
+        // it reaches the verbs below, and output.setDevice is refused while
+        // recording (bouncing the output engine would strand a rolling take).
+        "output.listDevices",
+        "output.setDevice",
         "midi.listInputs",
         "transport.record",
         "track.setArm",
@@ -382,6 +390,15 @@ public final class CommandRouter {
         // control, NOT a claim that this touches the transport (it must not —
         // see the verb's case below).
         "transport.panic",
+        // m23-aj-2: the WIRE half of m23-aj-1's cross-track group move
+        // (ProjectStore.moveClips(ids:byTracks:byBeats:) /
+        // moveClips(ids:toTrackId:byBeats:)) — the vertical twins of
+        // clip.moveMany above. Two commands, not one either/or param (design
+        // §1.2: neither wire schema surface can express "exactly one of
+        // byTracks/toTrackId"). STRICTLY ADDITIVE. Appended at the end per
+        // the additive-at-end law.
+        "clip.moveManyByTracks",
+        "clip.moveManyToTrack",
     ]
 
     public init(
@@ -1787,6 +1804,88 @@ public final class CommandRouter {
                 watchdogPayload = .object(watchdogFields)
             }
             return .success(request.id, watchdogPayload)
+
+        case "engine.auPrepareStats":
+            // No params. Hosted-Audio-Unit PREPARE BOOKKEEPING for the live
+            // graph (m23-br-1) — the registry's own ledger, read-only.
+            // Response = EngineAUPrepareStats verbatim: {instrumentPrepares,
+            // instrumentReleases, effectPrepares, effectReleases, tracks:
+            // [{trackId, keyDigest?, status?}], effects: [{effectId,
+            // keyDigest?, status?}]}.
+            //
+            // WHAT THE COUNTERS COUNT, because a caller SUBTRACTS them:
+            // `*Prepares` counts prepare bodies that were NOT short-circuited
+            // by the registry's idempotency guard — NOT successful
+            // instantiations, so a re-prepare that ends `.missing`/`.failed`
+            // still counts (it is still real re-prepare work, and a
+            // storm of failing prepares is the worst storm there is).
+            // `*Releases` counts only releases that removed a REAL live
+            // instance, never a bookkeeping-only no-op. A config-change
+            // re-prepare therefore bumps BOTH; a first prepare bumps only
+            // the prepare counter. Two independent numbers is what lets a
+            // caller tell "nothing happened" apart from "the counters broke".
+            //
+            // MONOTONE, and there is NO reset param — deliberately unlike
+            // engine.performanceStats(reset:). Read before, read after,
+            // subtract. The engine's AU registry is a `let`, so the counters
+            // survive an engine rebuild/recovery (device change, watchdog
+            // self-heal) for the lifetime of the engine object; only the LIVE
+            // graph is counted, since offline renders build their own
+            // registry per bounce.
+            //
+            // `keyDigest` is a stable 16-hex-char SHA256 digest of the LAST
+            // ATTEMPTED prepare key (component + sample rate + saved plugin
+            // state + sound-bank address) — i.e. the exact value the
+            // idempotency guard compares against, so it is what CHANGES when
+            // a re-prepare genuinely fires. Opaque: compare it across two
+            // reads, never parse it. The raw key can NOT go on the wire (the
+            // saved state is an arbitrary, possibly large, possibly private
+            // plugin blob), and the digest is SHA256 rather than a Swift hash
+            // precisely so it stays comparable across processes and runs.
+            // Omitted when nothing has been attempted for that slot; `status`
+            // ("pending"/"ready"/"missing"/"failed: <reason>") is omitted when
+            // the registry holds no status for it.
+            //
+            // `inFlight` (m23-av) is the prepare bodies that have ARMED a
+            // deadline race and not yet published an outcome: [{slot
+            // ("instrument"/"effect"), id, component?, startedSecondsAgo,
+            // deadlineSeconds, overdue}], sorted by (slot, id). It answers the
+            // question `status` structurally cannot, because `status` is
+            // written by the main actor and a wedged plugin is holding it.
+            // `overdue` is DERIVED at read time (startedSecondsAgo >
+            // deadlineSeconds), so it is never a second publisher of the
+            // timeout verdict.
+            //
+            // ⚠️ `overdue` does NOT mean "the AU failed" (the work runs to
+            // completion after a timeout), does NOT mean "the main actor is
+            // wedged" (read `mainActor` for that — a prepare can be overdue on
+            // a responsive machine under load), and says NOTHING about audio:
+            // the render thread runs straight through a main-actor wedge, so
+            // sound already playing keeps playing. An ABSENT slot means "no
+            // prepare is between arming and publication", not "that slot is
+            // fine". See `EngineAUPrepareStats.InFlightEntry`.
+            //
+            // ADDITIVE (m23-av, the m18-b watchdog precedent): `mainActor:
+            // {responsive: true}` rides every response produced HERE —
+            // self-evidently true, since this handler runs ON the main actor.
+            // During a wedge this handler cannot run at all; the ControlServer's
+            // queue tier answers instead with `mainActor: {responsive: false,
+            // wedgedForSeconds}` plus `inFlight`, and the counters/tracks/effects
+            // OMITTED (they are main-actor-produced — see
+            // ControlServer.wedgeIntercept). The always-present `mainActor`
+            // field is how a client tells the two forms apart. Same verb, one
+            // discoverable surface, zero new commands.
+            //
+            // Read-only, never throws, headless-safe: no engine reads all
+            // zeros with empty arrays. Arrays are sorted by id so two reads
+            // diff positionally.
+            try params.rejectUnknownKeys([], verb: "engine.auPrepareStats")
+            var preparePayload = try JSONValue(encoding: store.auPrepareStats())
+            if case .object(var prepareFields) = preparePayload {
+                prepareFields["mainActor"] = .object(["responsive": .bool(true)])
+                preparePayload = .object(prepareFields)
+            }
+            return .success(request.id, preparePayload)
 
         case "macro.songSkeleton":
             // params: genre (required — a SongSkeletonCatalog kebab name),
@@ -3589,6 +3688,37 @@ public final class CommandRouter {
             try store.selectInputDevice(uid: uid)
             return .success(request.id, try inputDeviceList())
 
+        case "output.listDevices":
+            try params.rejectUnknownKeys([], verb: "output.listDevices")
+            return .success(request.id, try outputDeviceList())
+
+        case "output.setDevice":
+            // uid: string | null | omitted — null/omitted = follow the system
+            // default output.
+            //
+            // F5 HARDENING (m15-d shape, copied deliberately — see
+            // input.setDevice): this is the same "omit = destructive default"
+            // class, and MORE so, because resetting the output is immediately
+            // audible (sound jumps back to the laptop speakers mid-session).
+            // A typo'd key must never be the thing that does that, so unknown
+            // keys are rejected with a teaching error first.
+            try params.rejectUnknownKeys(
+                ["uid"], verb: "output.setDevice",
+                hint: "omit 'uid' (or pass it null) to select the system-default output")
+            let outputUID: String?
+            switch params["uid"] {
+            case .none, .some(.null):
+                outputUID = nil
+            case .some(.string(let value)):
+                outputUID = value
+            case .some:
+                throw ControlError("'uid' must be a string or null")
+            }
+            // Selection applies first; the returned list reflects it (the
+            // caller reads the new pin straight off `isSelected`).
+            try store.selectOutputDevice(uid: outputUID)
+            return .success(request.id, try outputDeviceList())
+
         case "midi.listInputs":
             // No params. MIDI input sources as CoreMIDI enumerates them
             // (hot-plug refreshes the list; the first call may lazily create
@@ -4903,6 +5033,94 @@ public final class CommandRouter {
                 "clips": try JSONValue(encoding: moveManyResult.clips),
             ]))
 
+        case "clip.moveManyByTracks":
+            // params: ids (required array of clip id strings; may be empty),
+            // byTracks (required, a signed WHOLE number of tracks — negative
+            // = up the track list, positive = down), byBeats (optional,
+            // default 0 — signed beat delta applied at the same time, so one
+            // call can move down AND along in ONE undo step). The wire half
+            // of ProjectStore.moveClips(ids:byTracks:byBeats:) (m23-aj) — the
+            // VERTICAL twin of clip.moveMany: every listed clip moves the
+            // SAME number of tracks, so a selection spanning several tracks
+            // keeps its shape.
+            //
+            // ⚠️ byTracks is REFUSED, never truncated, when it carries a
+            // fractional part. The design doc's §9.1 floated parsing it
+            // "through the existing integer-parameter path (arrange.
+            // insertBars's atBar/count, track.reorder's index)" — MEASURED
+            // FALSE: both of those do `Int(double)`, which silently
+            // truncates 1.9 to 1. Silently discarding the caller's fraction
+            // is exactly the defect class parseOutputFormat's bitDepth guard
+            // exists to avoid, so byTracks gets its own integrality check
+            // (`isInteger(_:)`, the pitch/velocity/controller precedent)
+            // BEFORE the `Int(...)` conversion, not after.
+            //
+            // WHOLE-GROUP CLAMP: running off the top or bottom of the track
+            // list reduces the effective delta (never per clip, never a
+            // throw) — read clampedTracks/effectiveTrackDelta rather than
+            // assuming byTracks fully applied. A landing that cannot hold a
+            // mover's clip kind (including a bus) REFUSES THE WHOLE MOVE
+            // with the same midiClipsRequireInstrumentTrack/
+            // trackKindUnsupported errors clip.duplicate already throws.
+            //
+            // Response is the shared ClipsTrackMoveResult shape (see
+            // clipsTrackMoveResultJSON below): "requestedTrackDelta" and
+            // "effectiveTrackDelta" are ALWAYS present here (non-nil for the
+            // byTracks shape) — contrast clip.moveManyToTrack, which omits
+            // both.
+            try params.rejectUnknownKeys(["ids", "byTracks", "byBeats"], verb: "clip.moveManyByTracks")
+            let byTracksIDs = try parseClipIDs(params["ids"], field: "ids", requirement: "")
+            let byTracksRaw = try params.require("byTracks", \.doubleValue)
+            guard Self.isInteger(byTracksRaw) else {
+                throw ControlError(
+                    "'byTracks' must be a whole number of tracks (e.g. -1, 0, 2) — "
+                    + "\(byTracksRaw) has a fractional part and would be silently "
+                    + "truncated rather than honored")
+            }
+            let byTracksDelta = Int(byTracksRaw)
+            let byTracksBeats = try Self.optionalNumber(params["byBeats"], "'byBeats'") ?? 0
+            let byTracksResult = try store.moveClips(
+                ids: byTracksIDs, byTracks: byTracksDelta, byBeats: byTracksBeats)
+            return .success(request.id, try Self.clipsTrackMoveResultJSON(byTracksResult))
+
+        case "clip.moveManyToTrack":
+            // params: ids (required array of clip id strings; may be empty),
+            // toTrackId (required uuid string — unknown id throws
+            // trackNotFound EVEN WHEN ids IS EMPTY, an agent that typo'd a
+            // track id must learn immediately rather than get a silent
+            // success), byBeats (optional, default 0). The wire half of
+            // ProjectStore.moveClips(ids:toTrackId:byBeats:) (m23-aj) — the
+            // DESTINATION-shaped twin of clip.moveManyByTracks: every listed
+            // clip lands on the SAME named track, which COLLAPSES a
+            // multi-track selection by construction (relative BEAT offsets
+            // survive, relative TRACK offsets do not).
+            //
+            // A landing that cannot hold a mover's clip kind (including a
+            // bus) REFUSES THE WHOLE MOVE, same errors as
+            // clip.moveManyByTracks. Because this shape can COLLAPSE several
+            // source tracks onto one, two movers from DIFFERENT source
+            // tracks can be asked to occupy the same destination beats — a
+            // collision this verb itself MANUFACTURED, not a pre-existing
+            // one. That is refused with
+            // ProjectError.clipsWouldOverlapOnDestination, surfaced VERBATIM
+            // by the blanket LocalizedError arm above (no wire-side mapping
+            // — the exact wording is contract, pinned byte-exact by
+            // ClipCrossTrackMoveCommandTests).
+            //
+            // Response is the shared ClipsTrackMoveResult shape
+            // (clipsTrackMoveResultJSON below) with "requestedTrackDelta"/
+            // "effectiveTrackDelta" OMITTED (not null) — a destination-
+            // shaped move has no delta, and a synthesized 0 would be
+            // indistinguishable from "the clamp reduced the request to
+            // nothing" (design §6/§9.2).
+            try params.rejectUnknownKeys(["ids", "toTrackId", "byBeats"], verb: "clip.moveManyToTrack")
+            let toTrackIDs = try parseClipIDs(params["ids"], field: "ids", requirement: "")
+            let toTrackDestination = try params.requireUUID("toTrackId")
+            let toTrackBeats = try Self.optionalNumber(params["byBeats"], "'byBeats'") ?? 0
+            let toTrackResult = try store.moveClips(
+                ids: toTrackIDs, toTrackId: toTrackDestination, byBeats: toTrackBeats)
+            return .success(request.id, try Self.clipsTrackMoveResultJSON(toTrackResult))
+
         default:
             // App-installed surface (see `appCommandHandler`): a non-nil return
             // wraps as success; nil (or no handler) falls through to the
@@ -4957,6 +5175,20 @@ public final class CommandRouter {
     /// {"devices": [{uid, name, sampleRate, channelCount, isDefault}, ...]}.
     private func inputDeviceList() throws -> JSONValue {
         .object(["devices": try JSONValue(encoding: store.listInputDevices())])
+    }
+
+    /// Wire shape shared by output.listDevices and output.setDevice (m20-j):
+    /// {"devices": [{uid, name, sampleRate, channelCount, isDefault,
+    /// isSelected}, ...]}.
+    ///
+    /// The input twin's five fields plus `isSelected`, which the input side
+    /// does not have and the output side needs: a picker has to be able to
+    /// read back WHICH device this app is pinned to, and that is not
+    /// `isDefault` (the system's choice). Following the system default is the
+    /// state where NO device reports `isSelected` — distinct from having
+    /// explicitly pinned the device that is currently the default.
+    private func outputDeviceList() throws -> JSONValue {
+        .object(["devices": try JSONValue(encoding: store.listOutputDevices())])
     }
 
     /// Shared result shape for all four routing commands so an agent re-orients
@@ -5876,6 +6108,51 @@ public final class CommandRouter {
             ids.append(id)
         }
         return ids
+    }
+
+    /// Shared JSON encoder for `ClipsTrackMoveResult` (m23-aj-2) — ONE
+    /// function so `clip.moveManyByTracks` and `clip.moveManyToTrack` cannot
+    /// diverge on key casing.
+    ///
+    /// `requestedTrackDelta`/`effectiveTrackDelta` are OMITTED entirely
+    /// (never encoded as `null`) whenever the store's own result carries
+    /// them as `nil` — which is always and only the `.toTrack` shape
+    /// (`ProjectStore.moveClips(ids:toTrackId:byBeats:)` never sets them,
+    /// design §6/§9.2): a synthesized `0` would be indistinguishable from
+    /// "the clamp reduced the request to nothing", the one vertical fact a
+    /// caller most needs to tell apart.
+    ///
+    /// `trimmedClipIDs`/`removedClipIDs` keep the capital "IDs" the live
+    /// `clip.moveMany` response already emits (`Commands.swift` above) — a
+    /// live key is never renamed. `landings` uses lower-case "Id"
+    /// (`clipId`/`fromTrackId`/`toTrackId`) because that is the PARAMETER
+    /// convention (`trackId`, `clipId`, `toTrackId`). The inconsistency is
+    /// inherited and deliberate — design §9.3 says explicitly not to
+    /// "fix" it.
+    private static func clipsTrackMoveResultJSON(_ result: ClipsTrackMoveResult) throws -> JSONValue {
+        var obj: [String: JSONValue] = [
+            "clampedTracks": .bool(result.clampedTracks),
+            "requestedDeltaBeats": .number(result.requestedDeltaBeats),
+            "effectiveDeltaBeats": .number(result.effectiveDeltaBeats),
+            "clamped": .bool(result.clamped),
+            "landings": .array(result.landings.map { landing in
+                .object([
+                    "clipId": .string(landing.clipID.uuidString),
+                    "fromTrackId": .string(landing.fromTrackID.uuidString),
+                    "toTrackId": .string(landing.toTrackID.uuidString),
+                ])
+            }),
+            "trimmedClipIDs": .array(result.trimmedClipIDs.map { .string($0.uuidString) }),
+            "removedClipIDs": .array(result.removedClipIDs.map { .string($0.uuidString) }),
+            "clips": try JSONValue(encoding: result.clips),
+        ]
+        if let requestedTrackDelta = result.requestedTrackDelta {
+            obj["requestedTrackDelta"] = .number(Double(requestedTrackDelta))
+        }
+        if let effectiveTrackDelta = result.effectiveTrackDelta {
+            obj["effectiveTrackDelta"] = .number(Double(effectiveTrackDelta))
+        }
+        return .object(obj)
     }
 
     /// Parses the optional `sections` param for `macro.songSkeleton` into
@@ -6829,13 +7106,17 @@ public final class CommandRouter {
     /// and `.soundBank` instrument objects (both ride the same registry slot,
     /// §6.1): "pending" until the engine reports (the headless default),
     /// "ready", "missing", or "failed: <reason>".
+    ///
+    /// m23-br-1: the four-case rendering itself moved to
+    /// `AudioUnitTrackStatus.wireLabel` (DAWCore) so `engine.auPrepareStats`'
+    /// per-slot `status` cannot spell "failed" differently from this one. The
+    /// nil handling stays HERE and is NOT shared — a snapshot's instrument
+    /// object always carries a status, defaulting to "pending" when the engine
+    /// has not reported yet, whereas the prepare-stats payload omits the field
+    /// entirely for a slot the registry holds no status for. Different
+    /// questions, deliberately different answers.
     private func instrumentStatusString(_ trackID: UUID) -> String {
-        switch store.audioUnitStatus(forTrack: trackID) ?? .pending {
-        case .pending: return "pending"
-        case .ready: return "ready"
-        case .missing: return "missing"
-        case .failed(let reason): return "failed: \(reason)"
-        }
+        (store.audioUnitStatus(forTrack: trackID) ?? .pending).wireLabel
     }
 
     /// Wire JSON for a resolved instrument descriptor: `polySynth` verbatim plus

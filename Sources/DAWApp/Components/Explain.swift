@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import DAWAppKit
 
@@ -19,6 +20,162 @@ import DAWAppKit
 /// so the overlay can anchor a card to any control in the window.
 enum ExplainCoordinateSpace {
     static let name = "explainRoot"
+}
+
+// MARK: - Capture-space anchor (m23-ag)
+
+/// Where the explain coordinate space SITS inside the surface `debug.captureUI`
+/// rasterizes — MEASURED from the live view tree, never derived from layout
+/// constants.
+///
+/// **Why this exists — the false-negative class it retires.** `debug.captureUI`
+/// rasterizes the window's `contentView.bounds`, while `.explainable` reports frames
+/// in the `explainRoot` space declared further in (`ContentView.swift`), so a pixel
+/// gate that places a crop box straight off a reported explain frame's Y measures
+/// rows belonging to a completely different surface and reports a confident FALSE
+/// NEGATIVE — "the feature is not drawn" while it is drawn perfectly, ~32 pt lower.
+/// (m23-v hit exactly that: four crop boxes landed on the pinned ruler's bar-number
+/// strip, whose pixels are identical whether the thing under test is shown or
+/// suppressed.) Carrying the origin in the payload makes the conversion EXPLICIT —
+/// `contentPoint = frame.origin + captureOrigin` — instead of assumed.
+///
+/// The initialiser is `fileprivate`, so the ONLY way to obtain one of these is
+/// `ExplainSpaceAnchor.captureGeometry(in:)`: a second, divergent computation of this
+/// origin cannot be written outside this file (the `ArrangeDropSnap` model).
+struct ExplainCaptureGeometry {
+    /// The explain space's origin in `contentView.bounds` POINTS, top-left based —
+    /// the same orientation as the captured image's rows.
+    let origin: CGPoint
+    /// `contentView.bounds.size` in POINTS: the surface `debug.captureUI` rasterizes.
+    /// A consumer derives the backing scale as `png.height / height` rather than
+    /// guessing it.
+    let size: CGSize
+
+    fileprivate init(origin: CGPoint, size: CGSize) {
+        self.origin = origin
+        self.size = size
+    }
+}
+
+/// The registry the `ExplainSpaceProbe` reports into, and the ONE definition of the
+/// explain space's origin in capture space.
+///
+/// Probes are held WEAKLY and selected BY WINDOW: `debug.captureUI` rasterizes
+/// `mainCaptureWindow.contentView`, and the app can mount the content tree more than
+/// once (the `ImageRenderer` fallback builds a fresh, windowless `ContentView`;
+/// plugin windows host their own trees). Matching `probe.window === window` is what
+/// keeps this from confidently answering about a DIFFERENT tree — which would be the
+/// same defect wearing a different hat.
+@MainActor
+enum ExplainSpaceAnchor {
+    private final class WeakProbe {
+        weak var view: NSView?
+        init(_ view: NSView) { self.view = view }
+    }
+
+    private static var probes: [WeakProbe] = []
+
+    /// Idempotent and allocation-free once registered — `updateNSView` calls this on
+    /// every layout pass, so re-boxing the same view there would be a per-pass
+    /// allocation on the main actor for no gain.
+    fileprivate static func register(_ view: NSView) {
+        probes.removeAll { $0.view == nil }
+        guard !probes.contains(where: { $0.view === view }) else { return }
+        probes.append(WeakProbe(view))
+    }
+
+    fileprivate static func unregister(_ view: NSView) {
+        probes.removeAll { $0.view == nil || $0.view === view }
+    }
+
+    /// The explain space's origin in `window`'s content-view points (top-left based)
+    /// plus that content view's size, or nil when no probe is mounted in `window`
+    /// (explain root not in this window's tree, or the tree is still being built).
+    ///
+    /// Measured, every call: `probe.bounds` ARE the coordinate space's bounds — the
+    /// probe is a `.background` on the very view that carries
+    /// `.coordinateSpace(.named(ExplainCoordinateSpace.name))` — so converting them
+    /// into the content view and taking the TOP edge asks AppKit where the space is
+    /// rather than recomputing it from insets that can silently change.
+    ///
+    /// It read `(0, 32)` when this landed, at BOTH 1400×1000 and 1320×880 content
+    /// (a pure, size-invariant translation), cross-checked against ink: the arrange
+    /// playhead's lanes stroke begins at capture point y = 195.00 and the reported
+    /// `arrangePlayhead` frame's y is 163 — 163 + 32, exactly. That number is
+    /// recorded as an OBSERVATION and asserted NOWHERE; it is measured on every
+    /// call, because a constant here is precisely how this defect returns.
+    static func captureGeometry(in window: NSWindow) -> ExplainCaptureGeometry? {
+        guard let contentView = window.contentView else { return nil }
+        probes.removeAll { $0.view == nil }
+        // A detached view converts to garbage silently — require a live window match.
+        guard let probe = probes.lazy.compactMap({ $0.view })
+            .first(where: { $0.window === window }) else { return nil }
+        let rect = probe.convert(probe.bounds, to: contentView)
+        let origin = CaptureSpaceGeometry.topLeftOrigin(
+            of: rect,
+            contentHeight: contentView.bounds.height,
+            isFlipped: contentView.isFlipped
+        )
+        return ExplainCaptureGeometry(origin: origin, size: contentView.bounds.size)
+    }
+}
+
+/// A zero-cost AppKit probe mounted as a `.background` on the view that declares the
+/// explain coordinate space, so its `bounds` ARE that space's bounds. Draws nothing,
+/// declares no intrinsic size (so `.background` cannot perturb layout) and is
+/// hit-test-transparent (the `CursorTrackingOverlay` precedent) — its only job is to
+/// exist somewhere AppKit can be asked to convert from.
+struct ExplainSpaceProbe: NSViewRepresentable {
+    func makeNSView(context: Context) -> ExplainSpaceProbeView {
+        let view = ExplainSpaceProbeView()
+        ExplainSpaceAnchor.register(view)
+        return view
+    }
+
+    func updateNSView(_ view: ExplainSpaceProbeView, context: Context) {
+        // Idempotent re-assert: cheap, and it survives a tree rebuild that reuses the
+        // representable without re-running `makeNSView`.
+        ExplainSpaceAnchor.register(view)
+    }
+
+    static func dismantleNSView(_ view: ExplainSpaceProbeView, coordinator: ()) {
+        ExplainSpaceAnchor.unregister(view)
+    }
+}
+
+/// The probe's NSView. Inert by construction: no drawing, no tracking areas, no
+/// intrinsic size, and `hitTest` returns nil so clicks reach the real UI behind it.
+final class ExplainSpaceProbeView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var isOpaque: Bool { false }
+    override func draw(_ dirtyRect: NSRect) {}
+}
+
+extension View {
+    /// Declares the `explainRoot` coordinate space on this view AND mounts the
+    /// capture-space probe as its background — deliberately ONE modifier rather than
+    /// two adjacent ones, so a later edit cannot separate the space from the probe
+    /// that measures it, nor slip a layout modifier between them (which would make
+    /// the probe's bounds quietly stop being the space's bounds).
+    func explainCoordinateSpaceRoot() -> some View {
+        modifier(ExplainSpaceRootModifier())
+    }
+}
+
+private struct ExplainSpaceRootModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .coordinateSpace(.named(ExplainCoordinateSpace.name))
+            // A `.background` takes the primary view's frame exactly and never
+            // perturbs its layout — which is what makes the probe's bounds the
+            // space's bounds. (Note the probe CANNOT resolve `.named(explainRoot)`
+            // itself: background content is a sibling of the view carrying the
+            // space, not a descendant, so a SwiftUI-side self-check placed here
+            // silently falls back to window coordinates. The AppKit convert in
+            // `ExplainSpaceAnchor` is the honest measurement; it was cross-checked
+            // against playhead ink at bring-up — see the item record.)
+            .background { ExplainSpaceProbe() }
+    }
 }
 
 /// Collects every explainable control's frame up to the root, where the

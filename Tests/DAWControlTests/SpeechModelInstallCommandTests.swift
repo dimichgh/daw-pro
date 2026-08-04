@@ -117,7 +117,7 @@ struct SpeechModelInstallCommandTests {
     @Test("both verbs are registered, additive, adjacent and in order; wire count 159 -> 161 -> 162 at m23-r4 (fx.spectrum landed after)")
     func commandsRegistered() {
         let all = CommandRouter.allCommands
-        #expect(all.count == 166)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af
+        #expect(all.count == 171)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2
         // m23-r4's fx.spectrum is additive-at-the-END (its own law), which
         // moved these two off the absolute tail — pin their ADJACENCY and
         // ORDER instead of an absolute suffix, so a later additive command

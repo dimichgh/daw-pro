@@ -84,6 +84,24 @@ struct PianoRollView: View {
     /// must happen app-side). Defaulted so previews stay one-liner-simple.
     var onFocusChange: (Bool) -> Void
 
+    /// Reports that the user just ACTED INSIDE THIS EDITOR (m23-al) — a gesture,
+    /// not a focus state. The app turns it into "the roll is the surface the user
+    /// is working in", which is what ⌘+/⌘−/⌘0 route on
+    /// (`EditorSurfaceRouter.resolve`). Defaulted to a no-op so previews and any
+    /// future call site stay one-liner-simple.
+    ///
+    /// ⚠️ CALLED FROM EIGHT ENUMERATED FUNNELS (R1–R8, all marked `m23-al Rn`),
+    /// NOT from a single root `.simultaneousGesture` on `body`. That draft was
+    /// rejected on purpose: nothing in this tree can PROVE such a gesture fires on
+    /// a click inside the grid's descendant `ScrollView` (m23-bw), and its failure
+    /// mode is silent and TOTAL — the roll could never be engaged, ⌘+ would never
+    /// reach it, and every gate leg except one would still pass. An enumerated
+    /// funnel someone forgets costs one gesture; that would cost the feature.
+    /// `EditorSurfaceOwnershipSiteTests` pins that all eight still exist and that
+    /// the gesture-attachment count under `Sources/DAWApp/PianoRoll/` has not
+    /// grown behind their backs.
+    var onEngage: () -> Void
+
     /// The NOTE-SELECTION bridge (m23-x, second pass) — reports out whether this
     /// editor currently has notes selected, which is the app's own test for
     /// "would the roll have consumed this key?" (see its `.onKeyPress(.delete)`
@@ -171,6 +189,7 @@ struct PianoRollView: View {
          onClose: @escaping () -> Void,
          onAudition: @escaping (_ pitches: [Int], _ velocity: Int) -> Void = { _, _ in },
          onFocusChange: @escaping (Bool) -> Void = { _ in },
+         onEngage: @escaping () -> Void = {},
          noteSelection: PianoRollNoteSelectionBridge = PianoRollNoteSelectionBridge(),
          onBarOpsStyle: @escaping (_ role: String, _ text: String?, _ ink: Color?) -> Void
              = { _, _, _ in }) {
@@ -190,6 +209,7 @@ struct PianoRollView: View {
         self.onClose = onClose
         self.onAudition = onAudition
         self.onFocusChange = onFocusChange
+        self.onEngage = onEngage
         self.noteSelection = noteSelection
         self.onBarOpsStyle = onBarOpsStyle
         _model = State(initialValue: PianoRollModel(
@@ -289,10 +309,24 @@ struct PianoRollView: View {
         .onChange(of: model.selection.isEmpty, initial: true) { _, empty in
             noteSelection.report(hasSelection: !empty)
         }
-        // m23-x: the debug seam's staged selection (the
-        // `follow.externalScrollNonce` pattern — watch the NONCE, so a gate
-        // asking for the same state twice still applies). This is the only way
-        // anything outside can reach `model`, which is `@State private`.
+        // m23-x: the STAGED NOTE SELECTION (the `follow.externalScrollNonce`
+        // pattern — watch the NONCE, so the same state asked for twice still
+        // applies). This is the only way anything outside can reach `model`,
+        // which is `@State private`.
+        //
+        // TWO PRODUCERS SINCE m23-ak, and this comment used to name only the
+        // first. (1) The debug seam, `debug.arrangeSelection
+        // {act:"pianoRollNotes"}`, which can ask for either state. (2) THE APP
+        // ITSELF: `AppModel.arrangeSelection`'s `didSet` calls
+        // `dropForWidenedArrangeSelection()` when the arrange selection grows
+        // past this clip, so a user who selects notes here and THEN shift-clicks
+        // two more clips gets → and DELETE aimed at the three clips rather than
+        // at the notes. That path always lands in the `else` below. No logic
+        // here changed for it — the production verb reuses this nonce
+        // deliberately, so the roll needs no second channel — but reading this
+        // as "gate-only" would be wrong, and a stale doc comment on the seam
+        // that gates a keyboard path is the kind of defect this file has paid
+        // for before.
         .onChange(of: noteSelection.stageNonce) { _, _ in
             if noteSelection.stagedSelectAll {
                 model.selection = Set(model.draft.map(\.id))
@@ -427,7 +461,18 @@ struct PianoRollView: View {
         }
     }
 
-    private func commit() { onCommit(model.buildSubmission()) }
+    /// m23-al R6 — the NOTE-EDIT commit funnel.
+    ///
+    /// VERIFIED COVERAGE, NOT ASSUMED: its only callers are the roll's own
+    /// `.onKeyPress(.delete)`, the double-tap add, `endGesture` when the note
+    /// actually moved, and the VELOCITY LANE (`VelocityLane(…, onCommit: commit)`,
+    /// which has no other route out). All four are user gestures and there is no
+    /// non-gesture caller, so this cannot FALSE-engage — which is the property
+    /// that makes it safe to put the call here rather than at four sites.
+    private func commit() {
+        onEngage()
+        onCommit(model.buildSubmission())
+    }
 
     // MARK: - Header
 
@@ -764,15 +809,20 @@ struct PianoRollView: View {
     /// the View-menu ⌘+/⌘−/⌘0 while the editor is focused via the app router).
     private var zoomCluster: some View {
         HStack(spacing: 0) {
-            zoomStepButton("minus.magnifyingglass", help: "Zoom the notes out (⌘− while the editor is focused)") {
+            // m23-al R5 — the roll's OWN zoom cluster. Pressing it is a gesture
+            // inside the roll, so it claims the surface for the ⌘ keys as well;
+            // that is what keeps the roll reachable under "last-engaged wins".
+            zoomStepButton("minus.magnifyingglass", help: "Zoom the notes out (⌘− after you click in the editor)") {
+                onEngage()
                 layout.setPianoRollPPB(PianoRollZoom.zoomedOut(layout.pianoRollPPB))
             }
             Text(PianoRollZoom.percentLabel(pixelsPerBeat: layout.pianoRollPPB))
                 .font(.system(size: 9, weight: .medium, design: .monospaced))
                 .foregroundStyle(DAWTheme.textDim)
                 .frame(width: 34)
-                .help("Editor zoom — ⌘0 resets to 100% while the editor is focused")
-            zoomStepButton("plus.magnifyingglass", help: "Zoom the notes in (⌘+ while the editor is focused)") {
+                .help("Editor zoom — ⌘0 resets to 100% after you click in the editor")
+            zoomStepButton("plus.magnifyingglass", help: "Zoom the notes in (⌘+ after you click in the editor)") {
+                onEngage()   // m23-al R5
                 layout.setPianoRollPPB(PianoRollZoom.zoomedIn(layout.pianoRollPPB))
             }
         }
@@ -811,6 +861,7 @@ struct PianoRollView: View {
     private var gridPinch: some Gesture {
         MagnifyGesture()
             .onChanged { value in
+                onEngage()   // m23-al R3 — pinch-zoom the roll
                 if pinchStartPPB == nil { pinchStartPPB = layout.pianoRollPPB }
                 guard let start = pinchStartPPB else { return }
                 layout.setPianoRollPPB(PianoRollZoom.clamp(start * value.magnification))
@@ -922,8 +973,18 @@ struct PianoRollView: View {
     private var editor: some View {
         ScrollView(.vertical, showsIndicators: true) {
             HStack(alignment: .top, spacing: 0) {
+                // m23-al R8 — the gutter keyboard. Its gesture lives in another
+                // file (`KeyboardSidebar.swift:45`, attached `:127`), so the
+                // engagement is added by WRAPPING the closure AT THIS CALL SITE
+                // rather than by editing that view.
+                // ⚠️ ONLY THIS ARGUMENT. `onAudition` is also called from
+                // `applyGesture` (already covered by R1) and from teardown with an
+                // empty pitch set — engaging on teardown would be a false engage.
                 KeyboardSidebar(model: model, width: Self.keyboardWidth,
-                                onAudition: onAudition)
+                                onAudition: { pitches, velocity in
+                                    onEngage()
+                                    onAudition(pitches, velocity)
+                                })
                 // The follow reader (m23-c2) wraps ONLY this horizontal scroller,
                 // NOT the vertical one above it. A `ScrollViewReader` resolves
                 // `scrollTo` against every scroll view inside ITS content, and
@@ -965,6 +1026,7 @@ struct PianoRollView: View {
                         .simultaneousGesture(gridPinch)
                         .simultaneousGesture(
                             SpatialTapGesture(count: 2).onEnded { value in
+                                onEngage()   // m23-al R4 — double-tap add note
                                 let note = model.addNote(
                                     atBeat: model.beat(forX: value.location.x),
                                     pitch: model.pitch(forY: value.location.y),
@@ -1132,6 +1194,7 @@ struct PianoRollView: View {
     private var scrubDrag: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
+                onEngage()   // m23-al R2 — ruler scrub
                 DragCursor.set(.resizeLeftRight)
                 // Strip-local x=0 is the grid's left edge (unscrolled); add the
                 // live scroll offset to recover the content beat.
@@ -1178,6 +1241,12 @@ struct PianoRollView: View {
     }
 
     private func beginGesture(at start: CGPoint) {
+        // m23-al R1 — THE grid press funnel: note click, move, resize and
+        // empty-grid click all arrive here through `gridDrag`. Kept even though R6
+        // (`commit`) covers every MUTATING gesture, because this fires on a
+        // SELECTION-ONLY click (`activeDrag = .click` below), which mutates
+        // nothing and must still claim the surface.
+        onEngage()
         let shift = NSEvent.modifierFlags.contains(.shift)
         let hit = model.hitTest(start)
         if let hit, !shift, hit.zone == .resizeHandle, mode == .pro {
@@ -1334,6 +1403,17 @@ struct PianoRollView: View {
     /// Commits the visible controller lane and reseeds the strip model from the
     /// updated clip (canonicalized stored lanes; keeps chips + selection live).
     private func commitControllerLane() {
+        // m23-al R7 — and it is a SEPARATE funnel on purpose. The controller strip
+        // does NOT go through `commit()`: `ControllerLaneStrip` carries its own
+        // `onCommit` (`ControllerLaneStrip.swift:36`, fired at `:354`), threaded
+        // here. Dropping this as "already covered by R6" would mean editing a CC
+        // lane never engages the roll.
+        //
+        // NARROWED CLAIM, stated rather than rounded up: a controller-lane drag
+        // that ends with `didEdit == false` does not commit and therefore does not
+        // engage. Accepted — it changed nothing, and the alternative is editing a
+        // child view to report a gesture that had no effect.
+        onEngage()
         guard let type = controllerModel.selectedType else { return }
         let points = controllerModel.buildSubmission()
         if let updated = onCommitControllerLane(type, points) {

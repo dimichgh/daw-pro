@@ -1,0 +1,6 @@
+◇ Test run started.
+✘ Test "Some Unrelated Regression" recorded an issue at SomeFile.swift:42:5: Expectation failed
+[measured] GM bank prepare-to-ready wall time: 30.900 seconds, horizon 60.0 seconds, margin 1.942
+[measured] m19-e contended prepares: n=32, min 0.056466 s, median 2.447989 s, p90 12.043 s, max 22.101 s, under1s 9, horizon 60.0 seconds
+✘ Test "Some Unrelated Regression" failed after 0.010 seconds with 1 issue.
+✘ Test run with 4716 tests in 487 suites failed after 98.000 seconds.

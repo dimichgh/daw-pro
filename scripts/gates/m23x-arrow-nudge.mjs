@@ -516,13 +516,22 @@ try {
 
   // ══ N8  THE SEAM REFUSES WHAT THE FEATURE DOES NOT DO ════════════════════
   const noDir = await expectError("debug.arrangeSelection", { act: "nudge" });
-  const vertical = await expectError("debug.arrangeSelection",
-                                     { act: "nudge", direction: "up" });
+  // m23-aj-3 REWROTE N8b, and the rewrite is the record of why. This leg used
+  // to send `direction:"up"` and assert it was REFUSED, because a vertical
+  // nudge did not exist. It does now (`ArrangeVerticalNudgeDirection`, over
+  // `ProjectStore.moveClips(ids:byTracks:)`), so the old assertion was a
+  // shipped gate pinning a fact the roadmap deliberately changed — exactly the
+  // kind of red that must be found by the item that causes it. The leg keeps
+  // its PURPOSE (the seam refuses what the feature does not do) by moving to a
+  // direction the app really has no rule for. The ↑/↓ axis itself is owned by
+  // `scripts/gates/m23aj-cross-track-move.mjs`.
+  const bogusDir = await expectError("debug.arrangeSelection",
+                                     { act: "nudge", direction: "sideways" });
   check("N8a a nudge with no direction is an ERROR, not a silent no-op",
         noDir.errored === true, `${noDir.message ?? "accepted!"}`);
-  check("N8b ↑ / ↓ are REFUSED EXPLICITLY — vertical nudge does not exist, and the "
-        + "seam says so rather than pretending it worked",
-        vertical.errored === true, `${vertical.message ?? "accepted!"}`);
+  check("N8b an UNRECOGNISED direction is REFUSED EXPLICITLY — the seam says so rather "
+        + "than pretending it worked (was: ↑/↓; they became real at m23-aj-3)",
+        bogusDir.errored === true, `${bogusDir.message ?? "accepted!"}`);
 
   // ══ Recorded as SKIP, never as a pass ════════════════════════════════════
   // ══ N9  GUARD 5 — THE PIANO ROLL WOULD HAVE CONSUMED THE KEY ════════════

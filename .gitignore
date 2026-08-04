@@ -28,3 +28,8 @@ assets/generated/
 # Build output, never source: regenerated on every run of the tool that
 # imports them.
 __pycache__/
+
+# Compiled gate helper (m20-d). Build output of the committed
+# `scripts/gates/m20d-bhrate.swift`; the gate rebuilds it on demand and aborts
+# with the swiftc line if it is missing.
+/scripts/gates/m20d-bhrate

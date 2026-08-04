@@ -1058,6 +1058,18 @@ struct InsertSpectrumCoverageTests {
         // microbenchmark. Loosening it to accommodate a slow machine is fine;
         // loosening it past ~10 µs makes it stop seeing the thing it exists
         // for.
+        //
+        // m23-as-2d: this ceiling has now actually been SEEN to fire, not
+        // just asserted in the abstract ("a budget nobody has seen fire is a
+        // budget nobody has calibrated" — m23-as-1). Mutation protocol (run
+        // and reverted byte-exact, not re-derived here): add ~4096
+        // iterations of float work inside `InsertSpectrumTap.write`,
+        // simulating the named regression (an FFT back on the render
+        // thread). Result: delta 257874.7 ns against this 3000 ns ceiling —
+        // an 86× overshoot, test red. Measured healthy delta range without
+        // the mutation: 60.0–74.6 ns (isolated 60.0/63.96/65.31/68.86 ns;
+        // historical full-suite 65.1–74.6 ns; inflation ~1.0–1.24×). Re-fire
+        // this exact way to re-verify the ceiling still means something.
         #expect(delta <= 3_000,
                 "an armed insert costs \(delta) ns/quantum on the render path — the tap is doing more than copying")
         // Anti-vacuity: a tap that cost nothing BECAUSE IT NEVER RAN must not

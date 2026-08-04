@@ -117,6 +117,39 @@ public enum ArrangeTrackSelection {
     /// note editor (INV2). That is the roadmap's "a track with zero clips selects
     /// cleanly" — clicking empty space in the header column deselects, exactly as
     /// clicking empty space in the lanes does.
+    ///
+    /// ═══ WHY THE OUTCOME ALSO CARRIES `changedSelection` (m23-an) ═══
+    ///
+    /// Selection in the arrange is rendered ENTIRELY as clip blocks going
+    /// selected, so "the selection did not move" is exactly "the click drew
+    /// nothing". That is a different question from WHICH BRANCH ran — the two
+    /// disagree in both directions, which is why it is measured here rather than
+    /// inferred downstream from `effect`:
+    ///
+    ///   • `.replace` over an ALREADY-EMPTY selection on a zero-clip track is a
+    ///     no-op the effect string calls `replace`. Silent, and not `.noClips`.
+    ///   • A plain click that CLEARS a real selection is also `.replace`, and is
+    ///     the loudest thing on this surface (it closes the note editor).
+    ///
+    /// Measured on a live staging binary before this field existed
+    /// (`scripts/gates/_m23an-feedback-probe.mjs`, legs D1/D2/D3/D6).
+    ///
+    /// IT IS `true` IN THREE OF THE FOUR BRANCHES UNCONDITIONALLY, and a future
+    /// reader will want to know whether that makes it dead weight. It does not,
+    /// and the reason is structural rather than incidental: `.add` is reached
+    /// only when `ids` is NOT a subset of the selection, so `formUnion` must
+    /// insert at least one id; `.remove` is reached only when `ids` is non-empty
+    /// AND a subset, so `subtract` must remove at least one. **Neither branch can
+    /// produce `changedSelection == false`.** `false` is therefore reachable from
+    /// exactly two places — `.noClips`, which mutates nothing at all, and
+    /// `.replace` with an empty `ids` over an already-empty selection. Both are
+    /// pinned in `ArrangeTrackClickFeedbackTests`, including the impossibility,
+    /// so an edit to `formUnion`/`subtract` that made a mutator silently no-op
+    /// fails a test instead of quietly widening the acknowledgement.
+    ///
+    /// Computed by VALUE COMPARISON (`ArrangeSelection` is `Equatable`), never by
+    /// a per-branch literal: a hand-written `true` beside each mutator would be a
+    /// second opinion about what the mutator did, free to agree with a broken one.
     @discardableResult
     public static func apply(
         click track: Track,
@@ -125,6 +158,7 @@ public enum ArrangeTrackSelection {
     ) -> ArrangeTrackClickOutcome {
         let ids = clipIDs(on: track)
         let intent = ArrangeClickIntent.intent(for: modifiers)
+        let before = selection
         let effect: ArrangeTrackClickEffect
         switch intent {
         case .replace:
@@ -141,7 +175,8 @@ public enum ArrangeTrackSelection {
                 effect = .add
             }
         }
-        return ArrangeTrackClickOutcome(intent: intent, effect: effect, clipIDs: ids)
+        return ArrangeTrackClickOutcome(intent: intent, effect: effect, clipIDs: ids,
+                                        changedSelection: selection != before)
     }
 }
 
@@ -162,13 +197,17 @@ public enum ArrangeTrackClickEffect: String, Equatable, Sendable {
     case noClips = "no-clips"
 }
 
-/// One header click's answer: which chord rule fired, which branch it took, and
-/// the exact id set it acted on.
+/// One header click's answer: which chord rule fired, which branch it took, the
+/// exact id set it acted on, and whether the selection actually moved.
 ///
 /// `fileprivate init` (the `ArrangeDropSnap` / `ArrangeNudgeStep` model):
 /// `ArrangeTrackSelection.apply` is the only producer in this file, so an
-/// intent/effect/ids triple the rule would not have produced is UNREPRESENTABLE —
-/// no caller, and no test, can assemble one.
+/// intent/effect/ids/changed QUADRUPLE the rule would not have produced is
+/// UNREPRESENTABLE — no caller, and no test, can assemble one. That mattered
+/// more once `changedSelection` joined (m23-an): a caller free to hand-build an
+/// outcome could assert `changed: false` on a `.add`, which is a state the rule
+/// cannot reach, and `ArrangeTrackClickFeedback` would then be documented
+/// against a fiction.
 public struct ArrangeTrackClickOutcome: Equatable, Sendable {
     /// From `ArrangeClickIntent.intent(for:)` — the shared chord table.
     public let intent: ArrangeClickIntent
@@ -178,12 +217,26 @@ public struct ArrangeTrackClickOutcome: Equatable, Sendable {
     /// recomputed there, so the seam and the gesture can never disagree about
     /// what "this track's clips" means.
     public let clipIDs: Set<UUID>
+    /// Whether `apply` left the selection in a DIFFERENT state than it found it
+    /// (m23-an). Measured by comparing the whole `ArrangeSelection` value before
+    /// and after — so it covers the focus as well as the id set, which matters
+    /// because a plain click can drop a focus (closing the piano roll) without
+    /// changing `ids`… except it cannot: INV1 makes the focus a member of `ids`,
+    /// so a focus change without an id change is unreachable. Comparing the whole
+    /// value costs nothing and does not rely on that invariant holding forever.
+    ///
+    /// The full argument for why this is not the same question as `effect`, and
+    /// why it is `true` unconditionally in three of four branches, is on
+    /// `ArrangeTrackSelection.apply`.
+    public let changedSelection: Bool
 
     fileprivate init(intent: ArrangeClickIntent,
                      effect: ArrangeTrackClickEffect,
-                     clipIDs: Set<UUID>) {
+                     clipIDs: Set<UUID>,
+                     changedSelection: Bool) {
         self.intent = intent
         self.effect = effect
         self.clipIDs = clipIDs
+        self.changedSelection = changedSelection
     }
 }

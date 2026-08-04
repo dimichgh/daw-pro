@@ -301,6 +301,13 @@ struct EngineWatchdogEngineTests {
             // extraction pins above (labeled gap, the liveSmoke idiom).
             return
         }
+        // m23-bu-2: this function now has early returns on the starvation
+        // and render-dead paths below; without this, either would leak a
+        // running engine onto a contended output device across tests.
+        defer {
+            engine.stopPlayback()
+            engine.shutdown()
+        }
 
         engine.tracksDidChange([
             Track(name: "Keys", kind: .instrument,
@@ -310,12 +317,22 @@ struct EngineWatchdogEngineTests {
                   instrument: InstrumentDescriptor(kind: .testTone)),
         ])
 
-        var pushes: [Double] = []
-        engine.playheadHandler = { pushes.append($0) }
+        var pushes: [(ms: Double, beat: Double)] = []
         var transport = TransportState()
         transport.isPlaying = true
         engine.startPlayback(transport)
-        try await Task.sleep(for: .milliseconds(250))
+        // t0 AFTER startPlayback returns: playback begins at beat 0 one start
+        // lead later, so wall-time-implied beat = elapsed(ms) / 500 at the
+        // 120 BPM default, and the lead is the systematic ~0.12 beats the
+        // tolerance below absorbs.
+        let t0 = Date()
+        engine.playheadHandler = { pushes.append((Date().timeIntervalSince(t0) * 1000, $0)) }
+        // m23-bq: 1200 ms, not the original 250. The stale-render-clock freeze
+        // lasts as long as the PREVIOUS session did, so a short pre-restart
+        // roll cannot separate a frozen playhead from a healthy one — the roll
+        // is load-bearing for the value assertion below (2000 ms of roll = 4
+        // beats of lag under the defect, against a 1.2-beat tolerance).
+        try await Task.sleep(for: .milliseconds(2000))
 
         // While playing, the heartbeat advances: one tick reads ok.
         engine.watchdogTick()
@@ -331,15 +348,76 @@ struct EngineWatchdogEngineTests {
         #expect(!engine.graph.needsEngineRebuild)
 
         // Playback resumed through startPlayers: the playhead keeps moving.
+        //
+        // TWO assertions, and they catch DIFFERENT failures — m23-bq shipped
+        // because only the first existed. The COUNT catches a dead playhead
+        // task (`recoverEngine` nils `currentAnchor` mid-routine and the task
+        // breaks on a nil anchor; it survives only because that whole span is
+        // synchronous on the main actor, so a future `await` inserted there
+        // would kill it). The VALUE catches a task that keeps firing while the
+        // beat stands still — which is exactly what a stale render clock does,
+        // and what the count assertion cannot see.
+        //
+        // The value metric is LAG AGAINST WALL TIME, not advance-per-window:
+        // under full-suite load this suite's main actor is starved hard enough
+        // that a nominal 1200 ms window can deliver 3 pushes, and rare-but-
+        // CORRECT pushes must not read as a failure while frequent-but-WRONG
+        // ones must. See RecoveryPlayheadTests' header for the measurements.
         let pushesAtRestart = pushes.count
-        try await Task.sleep(for: .milliseconds(300))
-        #expect(pushes.count > pushesAtRestart)
+        let callbackCountAtRestart = engine.performanceStats(reset: false).callbackCount
+        try await Task.sleep(for: .milliseconds(1200))
+        // Read the render-side witness BEFORE any teardown — see
+        // StarvationWitness's header for why the window must not cross a
+        // reset.
+        let callbackCountAfterObserve = engine.performanceStats(reset: false).callbackCount
+        let after = pushes.dropFirst(pushesAtRestart)
+
+        // m23-bu-2: `pushes.count > pushesAtRestart` (CALLBACK LIVENESS) is
+        // DELETED outright here, not wrapped in a starvation skip —
+        // docs/ARCHITECTURE.md's m23-bu-1 entry names this exact assertion
+        // as the worked counter-example of getting the rule wrong: the
+        // m23-bq defect PRESERVES it (the playhead task keeps firing at
+        // 30 Hz, pushing the same frozen value), so a green pass here is
+        // worse than no test at all. `maxLag` below already carries the real
+        // claim. What remains genuinely ambiguous is an EMPTY `after`: is
+        // that starvation (the main-actor sampling task never got scheduled)
+        // or a dead playhead task (the actual defect the deleted assertion
+        // was trying, and failing, to catch)? The render thread's own
+        // callback counter is the independent channel that tells them apart.
+        switch StarvationWitness.classify(
+            mainActorSampleCount: after.count,
+            callbackCountBefore: callbackCountAtRestart,
+            callbackCountAfter: callbackCountAfterObserve
+        ) {
+        case .starved(let delta, let minimum):
+            StarvationWitness.printSkip(
+                leg: "liveWatchdogRestart", mainActorSampleCount: after.count,
+                minimumSamples: minimum, callbackDelta: delta)
+            return
+        case .renderDead:
+            let dead: String = "liveWatchdogRestart: zero playhead pushes in the 1200 ms window "
+                + "after watchdogRestart, AND the render callbackCount did not advance across the "
+                + "same window (callbacks=\(callbackCountAtRestart)→\(callbackCountAfterObserve)) "
+                + "— the render thread itself is not running. This is a genuine defect (a dead "
+                + "playhead task or a dead engine), never starvation."
+            Issue.record("\(dead)")
+            return
+        case .usable:
+            break
+        }
+
+        let maxLag: Double = after.map { $0.ms / 500.0 - $0.beat }.max() ?? 0
+        let rendered: String = String(format: "%.2f", maxLag)
+        let why: String = "after watchdogRestart the pushed playhead fell \(rendered) beats "
+            + "behind what wall time says it should be (<= 1.2 tolerated; 1 beat = 500 ms at "
+            + "120 BPM, and the 2000 ms pre-restart roll makes the m23-bq freeze worth ~4). "
+            + "Callbacks kept flowing, the VALUE froze — the m23-bq signature. Check "
+            + "recoverEngine's `renderClockTrusted: false`; RecoveryPlayheadTests measures it "
+            + "directly, with a positive control."
+        #expect(maxLag <= 1.2, "\(why)")
 
         // The healed engine keeps reading ok on later ticks.
         engine.watchdogTick()
         #expect(engine.watchdogStatus().state != .failed)
-
-        engine.stopPlayback()
-        engine.shutdown()
     }
 }

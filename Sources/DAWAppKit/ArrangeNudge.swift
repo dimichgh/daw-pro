@@ -44,15 +44,26 @@ import DAWCore
 // no anchor clip, so `moveClips` is the ONLY reducer on this path and
 // `ClipsMoveResult.clamped` is the whole honest answer.
 //
-// ═══ LEFT / RIGHT ONLY ═══
+// ═══ THIS ENUM IS HORIZONTAL-ONLY, AND THAT IS A TYPE DECISION ═══
 //
-// ↑/↓ are deliberately OUT OF SCOPE, not forgotten. Moving a clip to a
-// DIFFERENT TRACK does not exist anywhere in this app: `ProjectStore.moveClip`
-// takes `trackId` as the LOCATOR (which track the clip is already on), not a
-// destination — unlike `duplicateClip` there is no `toTrackId` — and
-// `moveClips(ids:byBeats:)` is time-only by construction (one `Double`). A
-// vertical nudge therefore needs a new DOMAIN verb with its own overlap and
-// take-comp rules, which is a roadmap item, not a keyboard layer.
+// ↑/↓ DO exist (m23-aj-3) — see `ArrangeVerticalNudgeDirection` below and the
+// cross-track domain verb `ProjectStore.moveClips(ids:byTracks:byBeats:)` /
+// `moveClips(ids:toTrackId:byBeats:)` that m23-aj-1 landed. They are a SEPARATE
+// enum rather than two more cases here, for two measured reasons
+// (`docs/research/design-m23aj-cross-track-move.md` §10.1):
+//
+//   1. This enum is `CaseIterable`, and `allCases` is iterated by a live test
+//      (`Tests/DAWAppKitTests/ArrangeNudgeTests.swift`, the ⌘/⌃ pass-through
+//      leg). Adding cases silently changes what that leg covers — it would keep
+//      passing while testing something else.
+//   2. It carries `sign: Double`, and the leg titled "Direction is the ONLY
+//      source of sign" pins exactly that. A vertical case has no `Double` sign,
+//      and `ArrangeNudgeStep`'s other two fields (`magnitudeBeats`, `source`)
+//      are horizontal-GRID concepts a lane move cannot answer either. A
+//      four-case enum would force three fields to return a lie for two cases.
+//
+// So the axes share a HANDLER (`AppModel.handleArrangeNudgeKey` takes an
+// `ArrangeNudgeAxisKey` sum type, one guard stack) and share nothing else.
 public enum ArrangeNudgeDirection: String, Equatable, Sendable, CaseIterable {
     case left
     case right
@@ -98,6 +109,45 @@ public struct ArrangeNudgeStep: Equatable, Sendable {
                      direction: ArrangeNudgeDirection) {
         self.magnitudeBeats = magnitudeBeats
         self.source = source
+        self.direction = direction
+    }
+}
+
+/// ↑/↓ (m23-aj-3). SEPARATE from `ArrangeNudgeDirection` on purpose — the two
+/// reasons are in the banner at the top of this file, and the design record is
+/// `docs/research/design-m23aj-cross-track-move.md` §10.1.
+public enum ArrangeVerticalNudgeDirection: String, Equatable, Sendable, CaseIterable {
+    case up
+    case down
+
+    /// The ONE place a vertical arrow's sign is decided: −1 up (toward the top
+    /// of the track list), +1 down. An `Int`, not the horizontal enum's
+    /// `Double`: tracks are indices, and a fractional lane is unrepresentable.
+    public var trackSign: Int { self == .up ? -1 : 1 }
+}
+
+/// One vertical arrow press's answer: which way, and how far in TRACKS.
+///
+/// `fileprivate init` (the `ArrangeNudgeStep` / `ArrangeDropSnap` model):
+/// `ArrangeNudge.verticalStep` lives in this file and is the only producer, so a
+/// step whose `trackDelta` disagrees with its `direction` is UNREPRESENTABLE —
+/// no caller, and no test, can assemble one.
+///
+/// THERE IS NO `ArrangeNudgeStepSource` ANALOGUE, and its absence is a decision.
+/// The horizontal step has four rules competing for one magnitude (⌥ fine, ⇧
+/// bar, the grid, the grid-off fallback) and a gate that read back only the
+/// distance could not tell "the grid gave 4" from "⇧ gave 4". Here there is ONE
+/// rule and `trackDelta` is always ±1 — a lane is a lane, there is no coarse or
+/// fine variant to disambiguate — so a `source` field would have exactly one
+/// possible value and would invite a future implementation to invent a second.
+public struct ArrangeVerticalNudgeStep: Equatable, Sendable {
+    /// Always exactly ±1, and always `direction.trackSign`.
+    public let trackDelta: Int
+    /// Which arrow was pressed.
+    public let direction: ArrangeVerticalNudgeDirection
+
+    fileprivate init(trackDelta: Int, direction: ArrangeVerticalNudgeDirection) {
+        self.trackDelta = trackDelta
         self.direction = direction
     }
 }
@@ -184,5 +234,50 @@ public enum ArrangeNudge {
                                     source: .gridOffFallback, direction: direction)
         }
         return ArrangeNudgeStep(magnitudeBeats: grid, source: .grid, direction: direction)
+    }
+
+    /// How far one VERTICAL arrow press moves the arrange selection (m23-aj-3),
+    /// or nil when the key is not ours and must PASS THROUGH untouched.
+    ///
+    /// BARE PRESS ONLY — every chord returns nil, and each half of that is a
+    /// decision rather than a simplification:
+    ///
+    ///   • ⌘ / ⌃ pass through for the SAME reason `step` refuses them: ⌘↑ / ⌘↓
+    ///     are the system's document-start / document-end bindings and ⌃↑ / ⌃↓
+    ///     are Mission Control. Consuming either breaks a binding the user's Mac
+    ///     owns.
+    ///   • ⇧ AND ⌥ ALSO PASS THROUGH, and this is where the vertical policy
+    ///     parts company with the horizontal one, where both carry meaning. They
+    ///     are RESERVED: ⇧↓ is the standard "extend the selection downward" and
+    ///     ⌥↓ the standard "duplicate down" in this class of app, both plausible
+    ///     next features on this exact surface (m23-y already shipped track
+    ///     selection). Adding meaning to a modifier later is additive; taking it
+    ///     back is a break. The rejected alternative — ignore ⇧/⌥ and nudge one
+    ///     lane anyway — is cheaper today and spends two bindings we have
+    ///     concrete plans for on a behaviour nobody asked for.
+    ///
+    /// This is NOT the "dead key" hazard `gridOffFallbackBeats` guards against.
+    /// A passed-through ⇧↓ reaches the arrange's shared `ScrollView(.vertical)`
+    /// and scrolls the lane list, which is a sensible answer to ⇧↓ and is
+    /// visibly not-nothing.
+    ///
+    /// THERE IS NO GRID AND NO CLAMP HERE, mirroring `step`: the whole-group
+    /// top/bottom clamp lives in `ProjectStore.moveClips(ids:byTracks:)`, the
+    /// only place that can see every selected clip's track index. This hands
+    /// down the REQUESTED ±1 and lets the store reduce it
+    /// (`ClipsTrackMoveResult.effectiveTrackDelta` / `clampedTracks` are the
+    /// honest answer). A second clamp here would be a second computation of the
+    /// same quantity, free to agree by luck — the m23-f finding.
+    ///
+    /// KEY REPEAT IS WELCOME, as on the horizontal axis: no `isRepeat` parameter
+    /// exists, the view mounts `phases: [.down, .repeat]`, and the undo cost of a
+    /// held arrow is paid by `ProjectStore.moveClipsKey(ids:)`'s
+    /// selection-stable coalescing key.
+    public static func verticalStep(
+        direction: ArrangeVerticalNudgeDirection,
+        modifiers: TransportKeyModifiers
+    ) -> ArrangeVerticalNudgeStep? {
+        guard modifiers.isEmpty else { return nil }
+        return ArrangeVerticalNudgeStep(trackDelta: direction.trackSign, direction: direction)
     }
 }

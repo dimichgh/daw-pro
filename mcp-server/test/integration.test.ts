@@ -292,8 +292,20 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // cited instrument frequency reference table) took it 165 -> 166. m23-w's
   // clip_remove_many/clip_move_many (the wire half of m23-g1/m23-g2's group
   // delete/move) took it 166 -> 168. m23-af's `transport_panic` (PANIC /
-  // all-notes-off) took it 168 -> 169.
-  assert.equal(result.tools.length, 169);
+  // all-notes-off) took it 168 -> 169. m20-j's output_list_devices/
+  // output_set_device (pick where playback comes OUT, mirroring the
+  // input.listDevices/input.setDevice pair) took it 169 -> 171. NOTE: filed
+  // MCP-side only, ahead of the backing `output.listDevices`/
+  // `output.setDevice` control commands landing in Commands.swift (parallel
+  // work) — until they land, audit-tools.test.ts's bijection check is
+  // EXPECTED to report these two as strays; that is a known, self-healing
+  // gap, not a regression of this count. m23-br-1's engine_au_prepare_stats
+  // (the read-only AU-registry prepare/release ledger, so a gate can assert
+  // an exact integer instead of inferring "nothing re-prepared" from ~18 000
+  // note.audition samples) took it 171 -> 172. m23-aj-2's
+  // clip_move_many_by_tracks/clip_move_many_to_track (the wire half of
+  // m23-aj-1's cross-track group move) took it 172 -> 174.
+  assert.equal(result.tools.length, 174);
 });
 
 // ---------------------------------------------------------------------------

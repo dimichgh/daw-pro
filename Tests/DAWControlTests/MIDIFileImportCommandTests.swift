@@ -62,12 +62,14 @@ struct MIDIFileImportCommandTests {
         // 161 since m23-k4a appended `project.exportMIDI` / `track.exportMIDI`,
         // m23-n2b appended `clip.transcribe`, m23-n3b appended
         // `ai.installSpeechModel`/`ai.speechModelInstallStatus`, m23-r4
-        // appended `fx.spectrum`, m23-o1 appended `frequency.reference`, and
-        // m23-w appended `clip.removeMany`/`clip.moveMany` AFTER this pair —
+        // appended `fx.spectrum`, m23-o1 appended `frequency.reference`,
+        // m23-w appended `clip.removeMany`/`clip.moveMany`, m23-af appended
+        // `transport.panic`, and m23-aj-2 appended
+        // `clip.moveManyByTracks`/`clip.moveManyToTrack` AFTER this pair —
         // the additive-at-end law working, not a regression: the k3 verbs did
         // not move, they are simply no longer last.
-        #expect(CommandRouter.allCommands.count == 166)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af
-        #expect(Array(CommandRouter.allCommands.suffix(12).prefix(2))
+        #expect(CommandRouter.allCommands.count == 171)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2
+        #expect(Array(CommandRouter.allCommands.suffix(14).prefix(2))
                 == ["project.importMIDI", "clip.importMIDI"])
     }
 

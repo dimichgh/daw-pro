@@ -14,28 +14,48 @@
 // stageLabel verbatim at every window, never RECONNECTING, never QUEUED
 // during the load window.
 //
-// Staging port law: DAW_CONTROL_PORT env, default 17695 — NEVER 17600 (the
-// user's live app port).
-// Usage: DAW_CONTROL_PORT=17695 node scripts/gates/m18g-sketchpad-honesty.mjs [outdir]
+// >>> CONVERTED TO THE _staging.mjs HARNESS (m23-ac-3e-2) <<<
+// This gate now BUILDS AND LAUNCHES its own binary on the harness's
+// STAGING_PORT (17695), instead of driving whatever instance happened to be
+// listening on a port — the m23-ac defect class (unknown provenance: a gate
+// in that shape can pass against code minutes or days old and cannot tell you
+// that it did). There is no env-var port override left: the old
+// `DAW_CONTROL_PORT` line did nothing useful, and an operator setting it to
+// 17600 would have pointed a real-model-boot probe at the user's live app
+// (the m23-bi defect class, present in 6 gates before this conversion).
+// `startStaging`/`connect` refuse 17600 structurally (`assertStagingPort`).
+//
+// ⚠️ HARD PRECONDITION, UNCHANGED BY THIS CONVERSION AND NOT STRUCTURAL LIKE
+// PORT/PROVENANCE NOW ARE: the ACE sidecar must be STOPPED before this gate
+// runs. Leg W1 — the gate's core — only exists on a COLD boot: a warm sidecar
+// skips straight past `startingSidecar`/`awaitsBoot` and the window this gate
+// exists to assert never opens. The window is also SINGLE-USE per sidecar
+// lifetime on this machine right now (m23-bb: a stopped sidecar cannot
+// currently be re-stopped once started) — do not run this gate speculatively.
+//
+// Staging port law: this gate targets ONLY the harness's STAGING_PORT
+// (17695) — never 17600 (the user's live app port).
+// Usage: node scripts/gates/m18g-sketchpad-honesty.mjs [outdir]
 //   outdir defaults to /tmp/daw-gate-out/m18g-sketchpad-honesty
 import fs from "fs";
-const PORT = process.env.DAW_CONTROL_PORT || "17695";
+import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+const GATE = "m18g-sketchpad-honesty";
 const OUT = process.argv[2] || "/tmp/daw-gate-out/m18g-sketchpad-honesty";
 fs.mkdirSync(OUT, { recursive: true });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function connect() {
-  for (let i = 0; i < 30; i++) {
-    try {
-      return await new Promise((res, rej) => {
-        const w = new WebSocket(`ws://127.0.0.1:${PORT}`);
-        w.addEventListener("open", () => res(w));
-        w.addEventListener("error", () => rej(new Error("refused")));
-      });
-    } catch { await sleep(1000); }
-  }
-  throw new Error(`no connect to ${PORT}`);
-}
+buildOrAbort({ label: "building staging binary (m18g)…" });
+startStaging({ gate: GATE });
 const ws = await connect();
+// Failure-path teardown (m23-bd): the `check()` calls below never throw, but an
+// uncaught `cmd()` TIMEOUT (several calls below have no `.catch()`, matching the
+// original file's behaviour) or any other unexpected error must still stop
+// staging rather than leak it for the next gate to silently drive. `stopStaging`
+// is idempotent, so this and the explicit call at the bottom (success path)
+// cannot double-fire badly. Mirrors current house style (m23am-refusal-anchor.mjs).
+const teardown = () => { try { stopStaging(GATE); } catch {} };
+for (const ev of ["uncaughtException", "unhandledRejection"]) {
+  process.on(ev, (e) => { console.error(`${ev}:`, e && e.message); teardown(); process.exit(2); });
+}
 let n = 0, pass = 0, fail = 0;
 function cmd(command, params = {}, timeoutMs = 30000) {
   return new Promise((res, rej) => {
@@ -54,6 +74,14 @@ function check(name, ok, detail = "") {
   if (ok) { pass++; console.log(`PASS ${name}`); }
   else { fail++; console.log(`FAIL ${name} :: ${detail}`); }
 }
+// NOTE for the next audit (m23-ac-3e-2): this is a FUNCTION DEFINITION, not an
+// executed statement — the `check()` inside it runs only when a caller invokes
+// `captureTwice`, which happens later, after the fixture is seeded below (W1/W2
+// call it from inside the poll loop). A prior pass mis-filed this as "asserts
+// before it seeds" by reading this definition's line number as if it were
+// execution order; it is not. The first EXECUTED assertion in this file is the
+// `project.new` check immediately after the seed call. Leave this ordering as
+// it is.
 async function captureTwice(tag) {
   await cmd("debug.captureUI", { path: `${OUT}/cap-${tag}-a.png` });
   await sleep(400);
@@ -159,5 +187,6 @@ check("normalize project.new", r.ok, JSON.stringify(r.error ?? ""));
 r = await cmd("debug.generationCard");
 check("card empty at end", r.ok && r.result.jobs.length === 0, JSON.stringify(r.result ?? {}));
 console.log(`M18G_GATE pass=${pass} fail=${fail}`);
+stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
 process.exit(fail === 0 ? 0 : 1);

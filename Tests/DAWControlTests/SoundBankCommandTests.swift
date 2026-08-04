@@ -430,7 +430,7 @@ struct SoundBankCommandTests {
         // design-au-parameter-surface) took it 139 -> 141. m21-d's
         // clip.fitToContent took it 141 -> 142. m21-e's clip.analyzeAudio
         // took it 142 -> 143. m22-c's mixer.liveLoudness took it 143 -> 144.
-        #expect(CommandRouter.allCommands.count == 166)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af
+        #expect(CommandRouter.allCommands.count == 171)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBanks"))
         #expect(CommandRouter.allCommands.contains("instrument.listSoundBankPrograms"))
         #expect(CommandRouter.allCommands.contains("instrument.importSoundBank"))

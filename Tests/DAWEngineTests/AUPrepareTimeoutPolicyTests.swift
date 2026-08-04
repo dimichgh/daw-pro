@@ -52,20 +52,41 @@ struct AUPrepareTimeoutPolicyTests {
         #expect(AUHostRegistry.defaultPrepareTimeout != AUHostRegistry.productionPrepareTimeout)
     }
 
-    /// The test-time value carries no claim about AU behaviour, but it does
-    /// carry one about headroom: it must clear the slowest prepare actually
-    /// measured under a full parallel run with margin, or it is just a slower
-    /// version of the same flake.
+    /// m23-aw — THE ANTI-CIRCUMVENTION PIN, replacing a TAUTOLOGY.
     ///
-    /// 26.9 s is the SLOWEST of eight full runs at m23-at (`[measured] GM bank
-    /// prepare-to-ready wall time`, printed by `SoundBankHostingTests` on every
-    /// run — so if this figure ever goes stale, the run that invalidates it
-    /// also prints its replacement). Note it is above the 17–22 s seen before
-    /// this policy existed, because prepares that used to be abandoned at 10 s
-    /// now run to completion and lengthen the main-actor queue they wait in.
-    @Test("the test-time timeout clears the measured full-suite prepare with margin")
-    func testTimeoutHasHeadroomOverMeasuredWorstCase() {
-        let measuredWorstCase = Duration.seconds(27)   // m23-at, slowest of 8 full runs
-        #expect(AUHostRegistry.testPrepareTimeout >= measuredWorstCase * 2)
+    /// The assertion this replaced (`testTimeoutHasHeadroomOverMeasuredWorstCase`)
+    /// compared `Duration.seconds(27) * 2 <= Duration.seconds(60)` — two
+    /// compile-time constants, an assertion that could not observe the
+    /// program and could not fail for any behaviour of it. Deleting it is NOT
+    /// the m23-as-2 precedent (that deleted a CALIBRATED bound whose
+    /// derivation rule had stopped having a solution); this deletes a
+    /// statement that never measured anything in the first place.
+    ///
+    /// What replaces it pins the ONE edit both m23-at and m23-aw forbid:
+    /// raising this constant to make an AU suite's headroom problem go away
+    /// quietly. `scripts/gates/m23aw-prepare-headroom.mjs` independently fails
+    /// its own `horizon` leg on the same edit, so the forbidden move cannot be
+    /// made quietly in either place.
+    ///
+    /// THE MEASUREMENT THIS CONSTANT NOW CARRIES, replacing the stale "27":
+    ///   - m23-at derived 60 s as ~2.2x a measured 26.9 s worst case (n=8,
+    ///     mixed regimes; the post-policy sub-population was 24.3-26.9 s, n=6).
+    ///   - m23-aw RE-MEASURED it 2026-08-03: worst 30.994 s over 5 green
+    ///     full-suite runs -> actual margin 1.936x, i.e. BELOW the 2x the
+    ///     number was derived under. Under ordinary machine load the same
+    ///     channel reached 49.311 s = 82% of the horizon. So the literal this
+    ///     replaced — `60 >= 2 * 27 = 54`, true — was already FALSE against
+    ///     the real number: `60 >= 2 * 30.994 = 61.99` does not hold.
+    ///   - The live headroom check is `scripts/gates/m23aw-prepare-headroom.mjs`
+    ///     (worst-of-campaign T1 <= 36 s, campaign-validity-checked); the
+    ///     structural early warning is `MainActorOccupancySiteTests`
+    ///     (deliberate main-actor occupancy, currently 2 sites / 3000 ms).
+    ///   - Raising this constant is forbidden. The permitted response to
+    ///     either check firing is m23-aw-1 (reduce the harness's main-actor
+    ///     load) or a roadmap-approved, argued change of horizon — never a
+    ///     quiet edit here.
+    @Test("the test-time horizon is 60 s — raising it is the m23-at move, one regime over")
+    func testTimeoutIsSixtySeconds() {
+        #expect(AUHostRegistry.testPrepareTimeout == .seconds(60))
     }
 }

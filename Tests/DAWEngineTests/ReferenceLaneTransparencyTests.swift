@@ -379,10 +379,13 @@ struct ReferenceLaneTransparencyTests {
 
         // A limiter strip gives the session real PDC latency (the fixed 5 ms
         // lookahead — the masterChainEditIsNeverTopology figure), so the D7
-        // anchor delay is a NON-ZERO measured quantity here. 240 is only
-        // `LimiterParams.lookaheadSamples(sampleRate: 48_000)` — the ONE HOME
-        // (m23-ab-1) — since this machine's graph rate follows the current
-        // audio device, never hardcode the sample count.
+        // anchor delay is a NON-ZERO measured quantity here. Derive it through
+        // the ONE HOME (`LimiterParams.lookaheadSamples`, m23-ab-1), never a
+        // literal: since m20-d the live graph rate is the constant
+        // `AudioEngine.projectSampleRate` so the value IS 240, but the
+        // derivation is what keeps this test honest if the session rate ever
+        // becomes per-project (design §7 Phase 3+). Before m20-d the same
+        // derivation absorbed whatever rate the current audio device ran at.
         let fixtures = try TestSignals.fixtures()
         let track = Track(name: "L", kind: .audio,
                           clips: [Clip(name: "c", startBeat: 0, lengthBeats: 8,

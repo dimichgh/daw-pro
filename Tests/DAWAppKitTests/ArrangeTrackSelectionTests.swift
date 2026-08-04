@@ -422,4 +422,55 @@ struct ArrangeTrackSelectionTakeCompTests {
         try store.undo()
         #expect(liveIDs(store).count == 3, "one undo restores the whole union")
     }
+
+    // 22. m23-am — WHAT THE USER IS SHOWN when #20 refuses. #20 pinned the
+    //     survivor set; this pins the bubble's anchor, end to end through the two
+    //     pieces the app wires together: the store names the offender, and
+    //     `ArrangeRefusalAnchor` turns that into the clip the bubble hangs on.
+    //
+    //     A header click adopts NO FOCUS (`focusID` is nil below, asserted), so
+    //     before m23-am this fell through to `Set.first` over the whole union and
+    //     could name any of the five clips. TWO comp members on purpose: with one,
+    //     every implementation names it and the leg proves nothing about order.
+    @Test("a refused header-union delete anchors on the FIRST comp member, not an innocent clip")
+    func refusalAnchorsOnTheOffender() throws {
+        let store = ProjectStore()
+        let takeTrack = store.addTrack(name: "Takes", kind: .instrument)
+        let ordinary = store.addTrack(name: "Ordinary", kind: .instrument)
+        let free1 = try store.addMIDIClip(toTrack: takeTrack.id, atBeat: 0, lengthBeats: 2)
+        let member1 = try store.addMIDIClip(toTrack: takeTrack.id, atBeat: 4, lengthBeats: 2)
+        let free2 = try store.addMIDIClip(toTrack: takeTrack.id, atBeat: 8, lengthBeats: 2)
+        let member2 = try store.addMIDIClip(toTrack: takeTrack.id, atBeat: 12, lengthBeats: 2)
+        _ = try store.addMIDIClip(toTrack: ordinary.id, atBeat: 0, lengthBeats: 2)
+
+        let group = UUID()
+        store.tracks[0].takeGroups.append(
+            TakeGroup(id: group, name: "PROBE TAKES", lanes: [], comp: []))
+        for id in [member1.id, member2.id] {
+            let index = store.tracks[0].clips.firstIndex { $0.id == id }!
+            store.tracks[0].clips[index].takeGroupID = group
+        }
+
+        var selection = ArrangeSelection()
+        ArrangeTrackSelection.apply(click: store.tracks[0], modifiers: .none, to: &selection)
+        ArrangeTrackSelection.apply(click: store.tracks[1], modifiers: .shift, to: &selection)
+        #expect(selection.focusID == nil, "a header click adopts no focus — the item's premise")
+
+        // Exactly what `AppModel.deleteArrangeSelection` hands the store and the
+        // anchor: the store's own iteration order, filtered to the selection.
+        let liveOrdered = store.tracks.flatMap { $0.clips.map(\.id) }
+        let orderedTargets = liveOrdered.filter(selection.ids.contains)
+        var thrown: (any Error)?
+        do { _ = try store.removeClips(ids: Array(selection.ids)) } catch { thrown = error }
+        let error = try #require(thrown)
+
+        let anchor = ArrangeRefusalAnchor.resolve(error: error, focusID: selection.focusID,
+                                                  orderedTargets: orderedTargets)
+        #expect(anchor == member1.id, "the first comp member in track-then-clip order")
+        #expect(anchor != free1.id)
+        #expect(anchor != free2.id)
+        #expect(anchor != member2.id, "deterministic, not merely 'some offender'")
+        #expect((error as? ProjectError)?.errorDescription
+                == "clip belongs to take group 'PROBE TAKES' — edit the comp (take.setComp) or take.flatten first")
+    }
 }

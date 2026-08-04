@@ -288,14 +288,16 @@ final class PlaybackGraph {
     }
 
     private let engine: AVAudioEngine
-    /// m20-c (m19-k Phase 1): the graph's processing rate, injected at
-    /// construction. Production owners ALWAYS pass one — `AudioEngine`
-    /// injects the device rate read at build time, `OfflineRenderer` its own
-    /// render rate — so the rate is a build-time fact of the graph, never a
-    /// live query: a mid-life device-rate flip can no longer half-update
-    /// chain rates through `applyParameters` (the graph stays coherent until
-    /// the next full rebuild). nil (headless test graphs only) keeps the
-    /// legacy call-time output-node query in `graphFormat()`.
+    /// m20-c/m20-d (m19-k Phases 1-2): the graph's processing rate, injected
+    /// at construction. Production owners ALWAYS pass one — `AudioEngine`
+    /// injects `AudioEngine.projectSampleRate`, `OfflineRenderer` its own
+    /// render rate — so the rate is a fact of the graph, never a live query.
+    /// Since m20-d it is not even a device-derived fact: the live graph runs
+    /// at the constant project rate and the output node converts on its input
+    /// scope, so a device-rate flip changes nothing in here (before m20-c the
+    /// same flip half-updated chain rates through `applyParameters`).
+    /// nil (headless test graphs only) keeps the legacy call-time output-node
+    /// query in `graphFormat()`.
     private let graphRate: Double?
     private var trackNodes: [UUID: TrackNode] = [:]
     private var instrumentNodes: [UUID: InstrumentNode] = [:]
@@ -1441,12 +1443,19 @@ final class PlaybackGraph {
         masterAutomationRenderer
     }
 
-    /// The LIVE graph rate exactly as `graphFormat()` resolves it (the
-    /// hardware default output device's rate, 48 kHz fallback when the query
-    /// answers 0). m19-j: device-rate-derived test expectations read this so
-    /// latency pins hold at ANY default-device rate — a 24 kHz Bluetooth
-    /// headset in mic mode is a rate every AirPods user's default device
-    /// actually runs at.
+    /// The graph rate exactly as `graphFormat()` resolves it — for a LIVE
+    /// graph that is `AudioEngine.projectSampleRate`, pinned at construction
+    /// and independent of the output device (m20-d; before it, this reported
+    /// the hardware default output device's rate).
+    ///
+    /// This is the INVARIANCE seam. m19-j-era expectations derived latency and
+    /// frame-math pins from it because they had to hold at any device rate —
+    /// a 24 kHz Bluetooth headset in mic mode is a rate real default devices
+    /// run at. Those derivations stay correct and are now constant-valued by
+    /// construction (5 ms limiter lookahead == 240 samples, always); reading
+    /// anything but the project rate off a live graph is the regression this
+    /// accessor exists to catch. Un-injected test graphs still report their
+    /// engine's rate — that is the `graphFormat()` fallback, not live policy.
     var graphSampleRateForTesting: Double { graphFormat().sampleRate }
 
     // MARK: - Parameters
@@ -2158,9 +2167,11 @@ final class PlaybackGraph {
     /// The explicit graph-rate stereo format for every mixer-level
     /// connection. `format: nil` would keep a fresh mixer's default 44.1 kHz
     /// output and force a second SRC in the main mixer, breaking sample
-    /// accuracy (measured: 32-frame onset error at 48 kHz). m20-c: the rate
-    /// is the INJECTED construction rate — every production owner passes one
-    /// (the device rate at build time live, the render rate offline). Only
+    /// accuracy (measured: 32-frame onset error at 48 kHz). m20-c/m20-d: the
+    /// rate is the INJECTED construction rate — every production owner passes
+    /// one (`AudioEngine.projectSampleRate` live, the render rate offline), so
+    /// live graph edges are device-invariant and the ONE conversion happens
+    /// where `ensureMasterSandwich` connects into `outputNode`. Only
     /// un-injected graphs (headless test rigs) keep the legacy call-time
     /// query: the output node reports the manual-rendering format offline
     /// and the hardware format live; the 48 kHz fallback covers a
@@ -2370,8 +2381,29 @@ final class PlaybackGraph {
     /// anchors) and builds the per-clip full-cycle plans that
     /// `topUpLoopCycles` unrolls. With `loop == nil` (offline render, linear
     /// live playback, recording) the schedule is byte-identical to pre-m14-a.
+    ///
+    /// m23-bp: `cause` is THE note-chase discriminator. `.continuation` (the
+    /// resume beat is the position playback would have reached anyway) admits
+    /// notes already sounding at `startBeats` into the head build with their
+    /// onsets clamped to the anchor; `.relocation` — the DEFAULT — keeps the
+    /// v0 no-chase rule, so those builds are byte-identical.
+    ///
+    /// ⚠️ m23-bv — THE DEFAULT IS FOR FIXTURES, NOT FOR PRODUCTION. Every
+    /// production caller STATES its cause explicitly, and there are exactly
+    /// two: `AudioEngine.startPlayers` (forwards the cause its own no-default
+    /// parameter made the compiler demand at all ten m23-bp sites) and
+    /// `OfflineRenderer.beginSession` (`.relocation`, with the reasoning and
+    /// the measured cost written at the call). `NoteChaseSiteTests` pins that
+    /// set — a THIRD production caller must add itself there and say why,
+    /// rather than inheriting a no-chase policy silently.
+    ///
+    /// The default survives only because ~30 test call sites across 16 files
+    /// have no opinion about chase (m23-bv measured them); removing it would
+    /// make the compiler enumerate 30 fixtures to surface 2 decisions, which
+    /// inverts the m23-bp value proposition instead of extending it.
     func scheduleAll(fromBeat startBeats: Double, tempoMap: TempoMap,
-                     loop: LoopWindow? = nil) {
+                     loop: LoopWindow? = nil,
+                     cause: RescheduleCause = .relocation) {
         loopUnroll = nil
         // Stage the timeline mapping the next startAllPlayers rolls
         // automation with (the pendingEvents convention).
@@ -2547,10 +2579,13 @@ final class PlaybackGraph {
         // pre-m14 (`onsetEndBeat: nil`).
         let onsetWindowEnd = loopUnroll != nil ? loop?.endBeat : nil
         for (trackID, node) in instrumentNodes {
+            // m23-bp: THE ONLY read of `chasesHeldNotes` in the tree — the one
+            // home of the relocation/continuation → chase mapping.
             let build = MIDIEventSchedule.buildEvents(
                 clips: node.clips, fromBeat: startBeats, tempoMap: tempoMap,
                 sampleRate: node.renderer.sampleRate,
-                onsetEndBeat: onsetWindowEnd
+                onsetEndBeat: onsetWindowEnd,
+                chaseHeldNotes: cause.chasesHeldNotes
             )
             node.pendingEvents = build.events
             if onsetWindowEnd != nil {
@@ -2878,6 +2913,13 @@ final class PlaybackGraph {
                 // `previous + cycleFrames`.
                 let cycleStartSec = state.headSeconds
                     + Double(cycle - 1) * state.cycleSeconds
+                // m23-bp: cycle blocks NEVER chase — `chaseHeldNotes` keeps its
+                // `false` default here and must not be "made consistent" with
+                // the head build. Each block has to reproduce exactly what a
+                // fresh seek-to-loop-start produces (the §8.6 prune
+                // self-containment law), and a seek IS a relocation; chasing
+                // here would re-attack every note straddling the loop start on
+                // EVERY cycle, on top of the head build's still-ringing voice.
                 let block = MIDIEventSchedule.buildEvents(
                     clips: node.clips, fromBeat: state.loop.startBeat,
                     tempoMap: state.tempoMap,

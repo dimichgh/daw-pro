@@ -1192,7 +1192,20 @@ struct MasterAutomationSection: View {
                 contentWidth: geo.size.width,
                 onCommit: { points in
                     _ = try? store.setMasterAutomationPoints(laneID: lane.id, points: points)
-                }
+                },
+                // m23-ai: DELIBERATELY nil. This master lane lives in the MIX
+                // workspace, and `ContentView`'s root is a `switch
+                // model.workspaceMode` with `.arrange` and `.mix` as mutually
+                // exclusive ViewBuilder branches — so this editor is never a
+                // descendant of `ArrangeDeleteKey`, the one place in the app
+                // that consumes ← / →, and can never receive the key this guard
+                // is about. Reporting from here would claim the arrange's arrow
+                // keys on behalf of a lane the arrange cannot even see; the
+                // workspace switch is a real teardown, so `.onDisappear` would
+                // usually clear it, but "usually" is exactly the latch hazard
+                // the bridge's doc comment warns about. Nothing to guard, so
+                // nothing is reported.
+                pointSelection: nil
             )
             // Re-seed the editor's draft if the lane identity changes (create/remove).
             .id(lane.id)

@@ -28,6 +28,24 @@ public enum AudioUnitTrackStatus: Sendable, Equatable {
     case ready
     case missing
     case failed(String)
+
+    /// THE wire spelling of this status — "pending" / "ready" / "missing" /
+    /// "failed: <reason>". ONE home (m23-br-1): the `project.snapshot`
+    /// instrument objects and `engine.auPrepareStats`' per-slot `status`
+    /// must never be able to disagree about what "failed" looks like on the
+    /// wire, so DAWControl's `instrumentStatusString` and the engine's
+    /// prepare-stats builder both read this and nothing else. Deliberately
+    /// NOT `Codable` conformance: the enum is a payload-carrying case and a
+    /// synthesized encoding would emit an object, changing the existing
+    /// snapshot bytes.
+    public var wireLabel: String {
+        switch self {
+        case .pending: return "pending"
+        case .ready: return "ready"
+        case .missing: return "missing"
+        case .failed(let reason): return "failed: \(reason)"
+        }
+    }
 }
 
 /// Identity of one hosted-AU parameter-surface target (au.describeParams /
@@ -734,6 +752,27 @@ public protocol AudioEngineControlling: AnyObject {
     /// never re-routed. Throws when no input device carries the UID.
     func setInputDevice(uid: String?) throws
 
+    /// All hardware devices currently offering output streams (m20-j), with
+    /// the system default output flagged (`isDefault`) and the app's own pin
+    /// flagged (`isSelected`). Safe to call any time; never touches the render
+    /// path. Optional capability — see the default in the extension below.
+    func availableOutputDevices() -> [AudioOutputDevice]
+
+    /// Pin PLAYBACK to the device with this UID; nil returns to following the
+    /// system default. APP-LOCAL: this sets the engine's own output AUHAL and
+    /// never writes the system default output, so a user picking an output
+    /// inside DAW Pro does not move where their Mac sends notification sounds.
+    ///
+    /// Takes effect immediately — switching the device under a running engine
+    /// bounces the hardware (an AVAudioEngine configuration change), and
+    /// playback resumes from the current position through the standard
+    /// recovery path. Throws when no output device carries the UID, or when
+    /// the AUHAL accepts the write and then does not honour it (the read-back
+    /// is what proves the set landed; `AudioUnitSetProperty` returns `noErr`
+    /// on writes the unit discards). Optional capability — see the default in
+    /// the extension below.
+    func setOutputDevice(uid: String?) throws
+
     /// Start capturing the selected input (see `setInputDevice`; the system
     /// default when unset) to `url` AND start playback from
     /// transport.positionBeats — one take, one file; the engine knows nothing
@@ -871,6 +910,15 @@ public protocol AudioEngineControlling: AnyObject {
     /// without watchdog support.
     func watchdogStatus() -> EngineWatchdogStatus
 
+    /// Hosted-AU prepare bookkeeping for the LIVE graph (m23-br-1): monotone
+    /// lifetime prepare/release counters plus a per-slot digest of the last
+    /// attempted prepare key. Read-only, poll-based and headless-safe like
+    /// `watchdogStatus()` — never throws, `.idle` for engines without AU
+    /// hosting. The counters are NOT resettable by design (a reader
+    /// subtracts two reads); see `EngineAUPrepareStats` for what each one
+    /// counts and why it counts there.
+    func auPrepareStats() -> EngineAUPrepareStats
+
     /// Output metering, delivered on the main actor at ~30-60 Hz while running.
     var meteringHandler: ((MeterFrame) -> Void)? { get set }
 
@@ -914,6 +962,27 @@ extension AudioEngineControlling {
     /// The audition all-stop is optional capability (m23-d): an engine with no
     /// audition support holds no voices, so the default is a no-op.
     public func stopAllAudition() {}
+
+    /// Output-device enumeration is optional capability (m20-j, the
+    /// `availableMIDIInputs` shape): fakes and headless engines drive no
+    /// hardware, so they report no devices.
+    ///
+    /// ⚠️ A silent default is a vacuity risk — an `AudioEngine` that forgot to
+    /// override this would report "no output devices" and every test would
+    /// still pass. `Tests/DAWEngineTests/OutputDeviceTests.swift` closes that
+    /// hole by asserting the real engine's list EQUALS `OutputDevices`'
+    /// enumeration and is non-empty (the `InputDeviceTests` precedent).
+    public func availableOutputDevices() -> [AudioOutputDevice] { [] }
+
+    /// Output-device pinning is optional capability (m20-j). An engine with no
+    /// hardware cannot pin anything, so a uid is rejected the same way an
+    /// unknown uid is — deliberately NOT a silent success, which would let a
+    /// caller believe a selection took effect on an engine that has no output
+    /// AUHAL at all. nil (follow the system default) is trivially satisfied by
+    /// an engine that never pinned anything, so it succeeds.
+    public func setOutputDevice(uid: String?) throws {
+        if let uid { throw ProjectError.outputDeviceNotFound(uid) }
+    }
 
     /// Panic is optional capability (m23-af, same precedent): an engine with no
     /// instrument renderers has nothing to flush, so the default reports 0 asked
@@ -1086,6 +1155,12 @@ extension AudioEngineControlling {
     /// The engine watchdog is optional capability: engines without one
     /// (fakes, headless) report the zero/idle status.
     public func watchdogStatus() -> EngineWatchdogStatus { .idle }
+
+    /// AU prepare bookkeeping is optional capability (m23-br-1): engines
+    /// that host no Audio Units (fakes, headless) have prepared and released
+    /// nothing, so the all-zero snapshot is the HONEST answer here — unlike
+    /// `liveLoudness`, where a fabricated zero would read like a real meter.
+    public func auPrepareStats() -> EngineAUPrepareStats { .idle }
 
     /// Buffer-out offline rendering is optional capability (M5 iv-b):
     /// engines without it (fakes, headless) refuse readably instead of

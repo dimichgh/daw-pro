@@ -347,8 +347,12 @@ struct ClipGroupEditCommandTests {
     func registeredAtEndOfAllCommands() {
         // m23-af appended `transport.panic` after this pair, so both slide
         // one rung up — they did not move, they are simply no longer last.
-        #expect(CommandRouter.allCommands.dropLast(2).last == "clip.removeMany")
-        #expect(CommandRouter.allCommands.dropLast().last == "clip.moveMany")
-        #expect(CommandRouter.allCommands.last == "transport.panic")
+        // m23-aj-2 then appended `clip.moveManyByTracks`/`clip.moveManyToTrack`
+        // after THAT, so all three slide one rung further up in turn.
+        #expect(CommandRouter.allCommands.dropLast(4).last == "clip.removeMany")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.moveMany")
+        #expect(CommandRouter.allCommands.dropLast(2).last == "transport.panic")
+        #expect(CommandRouter.allCommands.dropLast().last == "clip.moveManyByTracks")
+        #expect(CommandRouter.allCommands.last == "clip.moveManyToTrack")
     }
 }

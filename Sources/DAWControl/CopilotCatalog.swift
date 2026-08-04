@@ -175,9 +175,10 @@ public enum CopilotToolCatalog {
 
     /// The versioned catalog of commands exposed to the Copilot. `v1` is the
     /// curated allow-list (design §3), now 55 commands: transport (6),
-    /// tempo (2, m12-d), marker (5, m11-c), track (7), clip (14, m15-d added
-    /// duplicate), arrange (2, m15-d), take (2), mixer (1), fx (5, m13-d master
-    /// chain), render (2), ai (6), discovery (2), edit (1).
+    /// tempo (2, m12-d), marker (5, m11-c), track (7), clip (16, m23-aj added
+    /// moveManyByTracks/moveManyToTrack), arrange (2, m15-d), take (2), mixer
+    /// (1), fx (5, m13-d master chain), render (2), ai (6), discovery (2),
+    /// edit (1).
     public static let v1: [CopilotTool] = [
         // MARK: transport (6)
 
@@ -396,7 +397,7 @@ public enum CopilotToolCatalog {
             ], required: ["trackId"])
         ),
 
-        // MARK: clip (14, m23-w added removeMany/moveMany)
+        // MARK: clip (16, m23-aj added moveManyByTracks/moveManyToTrack)
 
         CopilotTool(
             command: "clip.addAudio",
@@ -622,6 +623,29 @@ public enum CopilotToolCatalog {
                     items: stringSchema("Id of a clip to move."))),
                 ("byBeats", numberSchema("Signed beat delta applied to every listed clip. Positive moves later, negative earlier.")),
             ], required: ["ids", "byBeats"])
+        ),
+        CopilotTool(
+            command: "clip.moveManyByTracks",
+            description: "Move SEVERAL clips DOWN or UP the track list by the SAME whole number of tracks, rigidly — a selection spanning several tracks keeps its shape (vertical offsets preserved). A move onto a track that cannot hold the clip (a MIDI clip onto a non-instrument track, an audio clip onto a non-audio track, or ANYTHING onto a bus — bus tracks hold no clips at all) refuses the WHOLE call; nothing is skipped or partially applied. Running off the top or bottom of the track list is CLAMPED, not refused — check effectiveTrackDelta/clampedTracks rather than assuming byTracks fully applied. byBeats optionally rides along in the SAME undo step, so one call can move down AND along (same whole-group beat-0 clamp as clip.moveMany). Prefer clip.moveManyToTrack when you know the destination track by id rather than by a relative offset. Returns {requestedTrackDelta, effectiveTrackDelta, clampedTracks, requestedDeltaBeats, effectiveDeltaBeats, clamped, landings: [{clipId, fromTrackId, toTrackId}], trimmedClipIDs, removedClipIDs, clips}.",
+            schema: schemaObject([
+                ("ids", arraySchema(
+                    "Ids of the clips to move together, from project.snapshot. May be empty (a no-op).",
+                    items: stringSchema("Id of a clip to move."))),
+                ("byTracks", integerSchema(
+                    "Signed WHOLE number of tracks to move every listed clip by. Negative = up the track list, positive = down. A non-integral value (e.g. 1.5) is REFUSED, never rounded or truncated. Reduced (never per-clip) if it would carry the group past the first or last track — check clampedTracks/effectiveTrackDelta.")),
+                ("byBeats", numberSchema("Optional signed beat delta applied at the same time, so one call can move down AND along in ONE undo step. Same whole-group beat-0 clamp as clip.moveMany. Defaults to 0.")),
+            ], required: ["ids", "byTracks"])
+        ),
+        CopilotTool(
+            command: "clip.moveManyToTrack",
+            description: "Move SEVERAL clips onto ONE NAMED destination track, in ONE undo step. This COLLAPSES a multi-track selection by construction: relative BEAT offsets survive, relative TRACK offsets do not (they cannot — everything lands on one track). Use this when you know the destination track by id (\"move these to the Drums track\"); use clip.moveManyByTracks instead when the goal is a shape-preserving relative move. A move onto a track that cannot hold a clip (a MIDI clip onto a non-instrument track, an audio clip onto a non-audio track, or ANYTHING onto a bus) refuses the WHOLE call. An unknown toTrackId is refused EVEN WHEN ids is empty. Because several source tracks can collapse onto one, two of the listed clips landing on the same beats on the destination is also refused (move them one at a time, or use clip.moveManyByTracks to keep them on separate tracks) — clips that already overlapped each other on the SAME source track (a sanctioned crossfade) are unaffected. byBeats optionally rides along in the SAME undo step. Returns the SAME shape as clip.moveManyByTracks MINUS requestedTrackDelta/effectiveTrackDelta (a destination-shaped move has no delta to report): {clampedTracks, requestedDeltaBeats, effectiveDeltaBeats, clamped, landings: [{clipId, fromTrackId, toTrackId}], trimmedClipIDs, removedClipIDs, clips}.",
+            schema: schemaObject([
+                ("ids", arraySchema(
+                    "Ids of the clips to move together, from project.snapshot. May be empty (still validates toTrackId).",
+                    items: stringSchema("Id of a clip to move."))),
+                ("toTrackId", stringSchema("Id of the track every listed clip lands on, from project.snapshot. Unknown id is refused even when ids is empty.")),
+                ("byBeats", numberSchema("Optional signed beat delta applied at the same time, so one call can move down AND along in ONE undo step. Defaults to 0.")),
+            ], required: ["ids", "toTrackId"])
         ),
 
         // MARK: arrange (2, m15-d)

@@ -217,7 +217,11 @@ struct ContentView: View {
         // is active (the tour card anchors on them), and the tour overlay reads it.
         .environment(model.onboarding)
         .environment(explainCoordinator)
-        .coordinateSpace(.named(ExplainCoordinateSpace.name))
+        // Declares the `explainRoot` named space AND mounts m23-ag's capture-space
+        // probe on the SAME view, so the probe's AppKit bounds ARE the space's
+        // bounds. One modifier, not two, so the pair cannot be separated by a later
+        // edit — and so a layout modifier can never be slipped between them.
+        .explainCoordinateSpaceRoot()
         .onPreferenceChange(ExplainFramePreferenceKey.self) { frames in
             explainCoordinator.setFrames(frames)
         }
@@ -637,9 +641,16 @@ struct ContentView: View {
                     _ = try? store.auditionPitches(trackID: trackID, pitches: pitches,
                                                    velocity: velocity)
                 },
-                // m21-c: while the editor holds key focus, the View-menu
-                // ⌘+/⌘−/⌘0 zoom THIS editor instead of the arrange timeline.
+                // m21-c/m23-al: the roll's SwiftUI key-focus report. Still fed,
+                // still echoed — but NOTHING ROUTES ON IT any more. It is an
+                // instrument for the divergence between "who holds focus" and
+                // "which surface is active" (see `AppModel.pianoRollEditorFocused`
+                // for the measurement that demoted it).
                 onFocusChange: { model.pianoRollEditorFocused = $0 },
+                // m23-al: the roll reports that the user just ACTED inside it —
+                // the one closure behind its eight gesture funnels. THIS is what
+                // ⌘+/⌘−/⌘0 route on, via `EditorSurfaceRouter`.
+                onEngage: { model.editorEngagement.engage(.pianoRoll) },
                 // m23-x: the roll publishes whether it holds a NOTE selection,
                 // which is what the arrange's arrow-key nudge refuses on (with
                 // focus). Same object carries the debug seam's staged selection
@@ -680,6 +691,11 @@ struct ContentView: View {
             onCommitPoints: { trackID, laneID, points in
                 _ = try? store.setAutomationPoints(trackID: trackID, laneID: laneID, points: points)
             },
+            // m23-ai: the arrow-key nudge's SIXTH guard reads this. Every
+            // automation lane editor these lanes mount reports its own breakpoint
+            // selection into it, so ← / → with a point selected edits the point
+            // rather than sliding the whole clip underneath the open lane.
+            automationPointSelection: model.automationPointSelection,
             snap: model.clipSnap,
             // m12-d: route the waveform seconds-per-beat through the tempo-map API.
             // Base-tempo scalar (segment 0); clips crossing a non-trivial boundary
@@ -1122,7 +1138,14 @@ struct ContentView: View {
     private var zoomCluster: some View {
         HStack(spacing: 6) {
             HStack(spacing: 0) {
+                // m23-al: pressing the ARRANGE's own zoom button is an arrange
+                // gesture, so it claims the surface for the ⌘ keys too. Engaged
+                // HERE at the BUTTON, never inside `setArrangeZoom` — that is a
+                // router target, and a zoom entry point that engaged the surface
+                // it routed to would be self-confirming and would latch forever
+                // (pinned by `EditorSurfaceOwnershipSiteTests`).
                 zoomStepButton("minus.magnifyingglass", help: "Zoom out (⌘−)") {
+                    model.editorEngagement.engage(.arrange)
                     model.zoomArrangeOut()
                 }
                 Text(ArrangeZoom.percentLabel(pixelsPerBeat: model.panelLayout.arrangePPB))
@@ -1131,6 +1154,7 @@ struct ContentView: View {
                     .frame(width: 40)
                     .help("Timeline zoom — ⌘0 resets to 100%")
                 zoomStepButton("plus.magnifyingglass", help: "Zoom in (⌘+)") {
+                    model.editorEngagement.engage(.arrange)
                     model.zoomArrangeIn()
                 }
             }
@@ -1627,9 +1651,11 @@ private struct ArrangeDeleteKey: ViewModifier {
             //     transport. Walking a clip into place by holding an arrow is
             //     the whole gesture; the undo cost is paid by
             //     `ProjectStore.moveClipsKey`'s selection-stable coalescing key.
-            //   • NO ↑/↓. Not forgotten — there is no cross-track move verb in
-            //     this app at all (see the note atop `ArrangeNudge`). Unhandled
-            //     keys keep passing through to whatever wants them.
+            //   • ↑/↓ are a SEPARATE mount below, not two more keys in this
+            //     list. They resolve to a different direction enum on a
+            //     different axis (see the banner atop `ArrangeNudge`), so
+            //     folding them in here would need a character switch that
+            //     returns two unrelated types.
             //   • The whole modifier POLICY lives in `ArrangeNudge.step`, not
             //     here: ⌥ fine, ⇧ bar, ⌘/⌃ pass through. This closure only
             //     translates SwiftUI's vocabulary into the headless one, so the
@@ -1648,7 +1674,36 @@ private struct ArrangeDeleteKey: ViewModifier {
                     return .ignored
                 }
                 let outcome = model.handleArrangeNudgeKey(
-                    direction: direction,
+                    .horizontal(direction),
+                    modifiers: AppModel.keyPressModifiers(press.modifiers))
+                return outcome.handled ? .handled : .ignored
+            }
+            // ↑/↓ move the arrange selection ACROSS TRACKS (m23-aj-3), through
+            // the SAME `handleArrangeNudgeKey` and therefore the same six guards.
+            //
+            //   • `phases: [.down, .repeat]`, identically to ←/→ — walking a clip
+            //     down four lanes by holding ↓ is the gesture, and the undo cost
+            //     is paid by the same selection-stable coalescing key.
+            //   • The modifier policy is `ArrangeNudge.verticalStep`'s and is
+            //     STRICTER than the horizontal one: BARE PRESS ONLY. ⇧ and ⌥ are
+            //     reserved (extend-selection / duplicate-down) and pass through
+            //     to the lanes' vertical `ScrollView`, which is a descendant of
+            //     this mount.
+            //   • A REFUSED vertical nudge is still CONSUMED when it got past the
+            //     guards — see `AppModel.ArrangeNudgeOutcome`. That is the one
+            //     place the two axes deliberately differ.
+            .onKeyPress(keys: [.upArrow, .downArrow], phases: [.down, .repeat]) { press in
+                let character = press.key.character
+                let direction: ArrangeVerticalNudgeDirection
+                if character == KeyEquivalent.upArrow.character {
+                    direction = .up
+                } else if character == KeyEquivalent.downArrow.character {
+                    direction = .down
+                } else {
+                    return .ignored
+                }
+                let outcome = model.handleArrangeNudgeKey(
+                    .vertical(direction),
                     modifiers: AppModel.keyPressModifiers(press.modifiers))
                 return outcome.handled ? .handled : .ignored
             }

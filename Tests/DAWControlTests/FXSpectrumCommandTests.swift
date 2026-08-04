@@ -238,7 +238,7 @@ struct FXSpectrumCommandTests {
         #expect(refusal.error?.contains("release") == true,
                 "the refusal must teach how to free a slot")
         #expect(engine.taps.count == 8, "the refused arm must not have recorded a 9th tap")
-        #expect(CommandRouter.allCommands.count == 166, "a cap-full refusal must not have touched allCommands")
+        #expect(CommandRouter.allCommands.count == 171, "a cap-full refusal must not have touched allCommands")
     }
 
     // MARK: - L4a/L4b: lease expiry — reporting vs cap-slot, deliberately split
@@ -426,19 +426,23 @@ struct FXSpectrumCommandTests {
 
     // MARK: - L11: wire registration (additive-at-end law)
 
-    @Test("L11: fx.spectrum is registered at the END of allCommands (additive-at-end law); count 161 -> 162 -> 163 -> 165 (m23-o1 appended frequency.reference, then m23-w appended clip.removeMany/clip.moveMany, after it)")
+    @Test("L11: fx.spectrum is registered at the END of allCommands (additive-at-end law); count 161 -> 162 -> 163 -> 165 -> 166 -> 171 (m23-o1 appended frequency.reference, then m23-w appended clip.removeMany/clip.moveMany, m23-af appended transport.panic, then m23-aj-2 appended clip.moveManyByTracks/clip.moveManyToTrack, all after it)")
     func registeredAtEndOfAllCommands() {
-        // fx.spectrum was the tail at m23-r4; m23-o1's frequency.reference and
-        // m23-w's clip.removeMany/clip.moveMany are each additive-at-end AFTER
-        // it, so fx.spectrum is now fourth-from-last — still contiguous,
-        // still unmoved, per the same law it was gated by.
-        #expect(CommandRouter.allCommands.dropLast(4).last == "fx.spectrum")
-        #expect(CommandRouter.allCommands.dropLast(3).last == "frequency.reference")
-        #expect(CommandRouter.allCommands.dropLast(2).last == "clip.removeMany")
-        #expect(CommandRouter.allCommands.dropLast().last == "clip.moveMany")
+        // fx.spectrum was the tail at m23-r4; m23-o1's frequency.reference,
+        // m23-w's clip.removeMany/clip.moveMany, m23-af's transport.panic and
+        // m23-aj-2's clip.moveManyByTracks/clip.moveManyToTrack are each
+        // additive-at-end AFTER it, so fx.spectrum is now sixth-from-last —
+        // still contiguous, still unmoved, per the same law it was gated by.
+        #expect(CommandRouter.allCommands.dropLast(6).last == "fx.spectrum")
+        #expect(CommandRouter.allCommands.dropLast(5).last == "frequency.reference")
+        #expect(CommandRouter.allCommands.dropLast(4).last == "clip.removeMany")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.moveMany")
         // m23-af appended `transport.panic` after the m23-w pair.
-        #expect(CommandRouter.allCommands.last == "transport.panic")
-        #expect(CommandRouter.allCommands.count == 166)   // 166 at m23-af
+        #expect(CommandRouter.allCommands.dropLast(2).last == "transport.panic")
+        // m23-aj-2 appended clip.moveManyByTracks/clip.moveManyToTrack after that.
+        #expect(CommandRouter.allCommands.dropLast().last == "clip.moveManyByTracks")
+        #expect(CommandRouter.allCommands.last == "clip.moveManyToTrack")
+        #expect(CommandRouter.allCommands.count == 171)   // 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2
     }
 
     // MARK: - L12: headless / no-capability both refuse honestly, never with a cap number

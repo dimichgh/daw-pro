@@ -43,6 +43,40 @@ public struct AudioInputDevice: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// One hardware OUTPUT device as the engine enumerates it (m20-j) — the
+/// playback twin of `AudioInputDevice`. Same identity/description fields, plus
+/// one the input side does not have.
+///
+/// `isDefault` and `isSelected` answer different questions and both are needed:
+///
+/// - `isDefault` — the SYSTEM's current default output. DAW Pro only ever
+///   READS this; picking an output inside the app never moves the Mac's
+///   default (notification sounds stay where the user put them).
+/// - `isSelected` — the device DAW Pro itself has pinned. No device reports
+///   `isSelected` while the app is following the system default, so
+///   "following the default" is distinguishable from "explicitly pinned to
+///   the device that is currently the default" — the former tracks the
+///   default as it changes, the latter does not.
+public struct AudioOutputDevice: Codable, Sendable, Equatable, Identifiable {
+    public var id: String { uid }
+    public var uid: String
+    public var name: String
+    public var sampleRate: Double
+    public var channelCount: Int
+    public var isDefault: Bool
+    public var isSelected: Bool
+
+    public init(uid: String, name: String, sampleRate: Double,
+                channelCount: Int, isDefault: Bool, isSelected: Bool = false) {
+        self.uid = uid
+        self.name = name
+        self.sampleRate = sampleRate
+        self.channelCount = channelCount
+        self.isDefault = isDefault
+        self.isSelected = isSelected
+    }
+}
+
 /// One MIDI input source as the engine enumerates it — CoreMIDI facts
 /// mirrored into the domain so DAWCore stays engine-free. `uniqueID` is the
 /// endpoint's persistent `kMIDIPropertyUniqueID` (the stable key; names are
@@ -942,6 +976,104 @@ public struct ClipsMoveResult: Sendable, Equatable {
     }
 }
 
+/// WHERE the movers land, VERTICALLY (m23-aj) — the ONLY thing the two public
+/// cross-track move shapes disagree about, made explicit so the shared private
+/// core has exactly one axis decision in it.
+///
+/// `byTracks` carries ONE `Int` for the whole group on purpose, the same argument
+/// `moveClips(ids:byBeats:)` makes for its single `Double`: one amount means
+/// vertical rigidity is not something the implementation achieves but something
+/// the signature makes UNREPRESENTABLE to violate. A per-clip `[UUID: UUID]` —
+/// the shape a "generalised" API reaches for first — would silently permit a
+/// non-rigid group move.
+public enum ClipTrackLanding: Sendable, Equatable {
+    /// Every mover moves the SAME signed number of tracks (negative = up the
+    /// track list). RIGID: vertical offsets survive. Running off the top or
+    /// bottom CLAMPS the whole group; it never throws and never moves per clip.
+    case byTracks(Int)
+    /// Every mover lands on ONE named track, which COLLAPSES a multi-track group
+    /// by construction (relative BEAT offsets survive; relative TRACK offsets do
+    /// not, because there is nowhere for them to go).
+    case toTrack(UUID)
+}
+
+/// One mover's VERTICAL outcome (m23-aj): which track it left, which it landed
+/// on.
+///
+/// Reported PER CLIP because a `byTracks` group spanning several tracks lands on
+/// several tracks — a single `toTrackID` on the result would be a lie for exactly
+/// the case the verb exists for. It is also what lets a caller assert relative
+/// offsets in BOTH axes from the result alone, without re-deriving positions from
+/// a snapshot.
+public struct ClipLanding: Sendable, Equatable {
+    public var clipID: UUID
+    public var fromTrackID: UUID
+    public var toTrackID: UUID
+
+    public init(clipID: UUID, fromTrackID: UUID, toTrackID: UUID) {
+        self.clipID = clipID
+        self.fromTrackID = fromTrackID
+        self.toTrackID = toTrackID
+    }
+}
+
+/// Outcome of the CROSS-TRACK group move (m23-aj) — the vertical twin of
+/// `ClipsMoveResult`.
+///
+/// A NEW type rather than fields on `ClipsMoveResult`: that struct is the shipped
+/// `clip.moveMany` response shape, and widening it would change a live wire
+/// surface's payload for a command that did not change. Additive-only means
+/// additive here too.
+///
+/// **There is deliberately no `skipped` field.** Nothing is ever skipped — a
+/// landing that cannot hold the clip REFUSES the whole move, and the top/bottom
+/// of the track list CLAMPS the whole group. The absence of the field is a
+/// positive statement of that policy; a `skipped: []` that is always empty would
+/// invite a future implementation to fill it.
+public struct ClipsTrackMoveResult: Sendable, Equatable {
+    /// The moved clips in FINAL geometry, in the caller's unique id order.
+    public var clips: [Clip]
+    /// Every mover's from/to track, INCLUDING movers whose track did not change
+    /// (`from == to`). Reporting the no-ops too is the honest shape: a consumer
+    /// filters, it never has to infer.
+    public var landings: [ClipLanding]
+    /// Non-nil ONLY for the `byTracks` shape. A destination-shaped move has no
+    /// delta, and a synthesised `0` would be indistinguishable from "the clamp
+    /// reduced the request to nothing" — the one vertical fact a caller most
+    /// needs to tell apart.
+    public var requestedTrackDelta: Int?
+    public var effectiveTrackDelta: Int?
+    /// The vertical WHOLE-GROUP clamp (top/bottom of the track list) engaged.
+    /// Always false for the `toTrack` shape, which has no delta to reduce.
+    public var clampedTracks: Bool
+    /// The horizontal triple, identical in meaning to `ClipsMoveResult`'s.
+    public var requestedDeltaBeats: Double
+    public var effectiveDeltaBeats: Double
+    public var clamped: Bool
+    /// Residents the overlap policy edited ON THE DESTINATION TRACKS, aggregated
+    /// across every mover's pass and de-duplicated; a REMOVAL supersedes an
+    /// earlier trim of the same clip (the `ClipsMoveResult` rule).
+    public var trimmedClipIDs: [UUID]
+    public var removedClipIDs: [UUID]
+
+    public init(clips: [Clip], landings: [ClipLanding],
+                requestedTrackDelta: Int?, effectiveTrackDelta: Int?,
+                clampedTracks: Bool,
+                requestedDeltaBeats: Double, effectiveDeltaBeats: Double, clamped: Bool,
+                trimmedClipIDs: [UUID] = [], removedClipIDs: [UUID] = []) {
+        self.clips = clips
+        self.landings = landings
+        self.requestedTrackDelta = requestedTrackDelta
+        self.effectiveTrackDelta = effectiveTrackDelta
+        self.clampedTracks = clampedTracks
+        self.requestedDeltaBeats = requestedDeltaBeats
+        self.effectiveDeltaBeats = effectiveDeltaBeats
+        self.clamped = clamped
+        self.trimmedClipIDs = trimmedClipIDs
+        self.removedClipIDs = removedClipIDs
+    }
+}
+
 /// Outcome of `ProjectStore.insertBars` (m15-d): where the empty bars landed
 /// (absolute beat) and how many beats were inserted (meter-aware: `count` bars
 /// of the meter governing the insertion point).
@@ -1079,6 +1211,42 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
     /// composed value the arrange lanes actually draw DOES get that treatment —
     /// see `ArrangeEmptyLaneHint`.
     public var canHoldMIDIClips: Bool { kind == .instrument }
+
+    /// Whether an AUDIO clip is allowed to live on this track (m23-aj) — the
+    /// `canHoldMIDIClips` twin.
+    ///
+    /// **The ONE home for audio-clip eligibility.** It was hoisted out of
+    /// `duplicateClip`, which wrote the rule inline as `tracks[dt].kind == .audio`
+    /// — a second home for it, in the one verb that already places clips
+    /// cross-track. The cross-track MOVE verb (`moveClips(ids:byTracks:byBeats:)`)
+    /// and the future arrange cross-track DRAG's drop affordance both ask this
+    /// same question, and an affordance that advertised a landing the store then
+    /// refuses is exactly the divergence `canHoldMIDIClips` exists to prevent.
+    ///
+    /// Kept SEPARATE from `canHoldMIDIClips` rather than folded into one
+    /// `canHold(_:)` body for the `canExportMIDI` reason above: the two rules
+    /// answer different questions and must stay free to diverge. It is a one-line
+    /// comparison on purpose — there is no computation here to give a resolver
+    /// type.
+    public var canHoldAudioClips: Bool { kind == .audio }
+
+    /// Whether THIS clip may live on THIS track (m23-aj) — the composed predicate
+    /// every cross-track PLACEMENT asks.
+    ///
+    /// **CONTENT decides, not the caller's intent**: `Clip.isMIDI` is
+    /// `notes != nil`, and `Clip.init` enforces "notes wins" (a MIDI clip never
+    /// also carries audio media), so an audio clip and a MIDI clip can never be
+    /// confused here. A `bus` track answers `false` to both halves, which is what
+    /// makes "a bus holds no clips at all" one fact rather than two.
+    ///
+    /// This is one home for the QUESTION, composed from the two homes for the
+    /// RULES — it deliberately does NOT merge them (see `canHoldAudioClips`).
+    /// It is narrower than `DAWAppKit.ArrangeEmptyLaneHints`, which asks the
+    /// different question "should this EMPTY lane advertise a double-click add"
+    /// and keeps consuming the underlying predicate rather than this composer.
+    public func canHold(_ clip: Clip) -> Bool {
+        clip.isMIDI ? canHoldMIDIClips : canHoldAudioClips
+    }
 
     /// Whether this track is one of the signals the MAIN MIX sums — a bus, or a
     /// track routed direct to master (m23-m3c).
@@ -1860,6 +2028,12 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
     /// UID of the input device pinned for recording; nil = system default.
     /// Additive and optional so older snapshots still decode.
     public var selectedInputDeviceUID: String?
+    /// UID of the OUTPUT device pinned for playback (m20-j); nil (key omitted)
+    /// = following the system default, so a snapshot taken with no pin stays
+    /// byte-identical to a pre-m20-j one. This is the app's pin, NOT the
+    /// system default — `output.listDevices` reports both per device
+    /// (`isSelected` vs `isDefault`).
+    public var selectedOutputDeviceUID: String?
     /// Absolute path of the `.dawproj` bundle this session lives in; nil until
     /// the session is first saved (untitled).
     public var projectPath: String?
@@ -1910,6 +2084,7 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         meters: SessionMeters = SessionMeters(),
         lastRecordingError: String? = nil,
         selectedInputDeviceUID: String? = nil,
+        selectedOutputDeviceUID: String? = nil,
         projectPath: String? = nil,
         isDirty: Bool = false,
         undoLabel: String? = nil,
@@ -1941,6 +2116,7 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         self.meters = meters
         self.lastRecordingError = lastRecordingError
         self.selectedInputDeviceUID = selectedInputDeviceUID
+        self.selectedOutputDeviceUID = selectedOutputDeviceUID
         self.projectPath = projectPath
         self.isDirty = isDirty
         self.undoLabel = undoLabel
@@ -2257,6 +2433,186 @@ public struct EngineWatchdogStatus: Codable, Sendable, Equatable {
     public static let idle = EngineWatchdogStatus(
         state: .idle, restartCount: 0, consecutiveFailures: 0,
         lastHeartbeat: 0, engineRunning: false)
+}
+
+/// Hosted-AU prepare bookkeeping (m23-br-1), surfaced over
+/// `engine.auPrepareStats`: the LIVE graph's AU host registry, read-only.
+///
+/// WHY THIS EXISTS. m20-e proves "the sample-rate flip re-prepared nothing"
+/// by hammering `note.audition` ~18 000 times and watching its `reason`
+/// field — an INFERENCE, because that field only reaches the registry after
+/// mute/solo, `!isRunning` and `noRenderer` have been checked, so a
+/// concurrent not-ready can be masked. These counters let a gate read a
+/// number before, read it after, and subtract: an exact integer instead of
+/// a statistical absence.
+///
+/// COUNTER SEMANTICS — the arithmetic a gate does against them:
+/// - The prepare counters count prepare BODIES THAT WERE NOT SHORT-CIRCUITED
+///   by the registry's idempotency guard, NOT successful instantiations. A
+///   re-prepare that ends `.missing` or `.failed` is still real re-prepare
+///   work and still counts; that is the "storm" this exists to detect.
+/// - The release counters count only REAL removals (a live instance left the
+///   registry's table — exactly where the plugin-window invalidation fires),
+///   never bookkeeping-only no-op releases. Two independent monotone numbers
+///   are what let a gate tell "nothing happened" apart from "the counters are
+///   broken".
+/// - A CONFIG-CHANGE re-prepare bumps BOTH: past the idempotency guard the
+///   prepare counter rises, and the wholesale replacement of the old instance
+///   raises the release counter. A FIRST prepare bumps the prepare counter
+///   only (nothing to release).
+/// - MONOTONE and NOT resettable, deliberately unlike
+///   `EnginePerformanceStats` (whose `reset:` opens a fresh profiling
+///   window). The registry is a `let` on `AudioEngine`, so these survive
+///   `rebuildEngine`/`recoverEngine` for the lifetime of the engine object —
+///   which is precisely what makes a before/after subtraction across a
+///   device flip or an engine recovery meaningful.
+/// - The LIVE graph only. Offline renders build their own registry per
+///   render, so a bounce never moves these numbers.
+public struct EngineAUPrepareStats: Codable, Sendable, Equatable {
+    /// One track's hosted-instrument slot in the registry.
+    public struct TrackEntry: Codable, Sendable, Equatable {
+        /// `Track.id.uuidString`.
+        public var trackId: String
+        /// Stable digest of the LAST ATTEMPTED prepare key for this track —
+        /// the exact value the idempotency guard compares against, so it is
+        /// what CHANGES when a re-prepare is genuinely triggered. Omitted
+        /// when nothing has been attempted. Opaque by contract: compare it,
+        /// never parse it (see `EngineAUPrepareStats` on why a raw key can
+        /// not go on the wire).
+        public var keyDigest: String?
+        /// Hosting lifecycle state — "pending" / "ready" / "missing" /
+        /// "failed: <reason>", the same spelling the rest of the wire uses
+        /// (`AudioUnitTrackStatus.wireLabel`). Omitted when the registry
+        /// holds no status for this track.
+        public var status: String?
+
+        public init(trackId: String, keyDigest: String?, status: String?) {
+            self.trackId = trackId
+            self.keyDigest = keyDigest
+            self.status = status
+        }
+    }
+
+    /// One insert effect's hosted-AU slot — the `TrackEntry` mirror, keyed by
+    /// effect id (the registry keys effects by effectID alone).
+    public struct EffectEntry: Codable, Sendable, Equatable {
+        /// `EffectDescriptor.id.uuidString`.
+        public var effectId: String
+        /// `TrackEntry.keyDigest`'s effect twin.
+        public var keyDigest: String?
+        /// `TrackEntry.status`'s effect twin.
+        public var status: String?
+
+        public init(effectId: String, keyDigest: String?, status: String?) {
+            self.effectId = effectId
+            self.keyDigest = keyDigest
+            self.status = status
+        }
+    }
+
+    /// One prepare body that has been ARMED and has not yet PUBLISHED an
+    /// outcome (m23-av) — the fact `status`/`keyDigest` structurally cannot
+    /// carry, because both are written by the main actor and a wedged plugin
+    /// is holding it.
+    ///
+    /// EVIDENCE vs VERDICT: `startedSecondsAgo` and `deadlineSeconds` are the
+    /// EVIDENCE (when the race was armed, what budget it was armed against);
+    /// `overdue` is the VERDICT, DERIVED at read time by comparing them. The
+    /// producer never stores a verdict, so there is no second publisher of the
+    /// timeout outcome to diverge from the main actor's eventual
+    /// `status[id] = "failed: … timed out …"`.
+    ///
+    /// ⚠️ WHAT A READER MAY NOT CONCLUDE — all four are real misreadings:
+    /// · NOT "the AU failed". The work runs to completion after a timeout;
+    ///   `overdue` means THE DEADLINE PASSED, not that the component is broken.
+    /// · NOT "the main actor is wedged". A prepare can be overdue on a
+    ///   perfectly responsive machine (under heavy load a GM prepare has been
+    ///   measured at 17–27 s). The wedge question has its own home — read
+    ///   `mainActor` in the same payload, which is why it is always present.
+    /// · NOT anything about `status`. This is not a mirror of it. A reader who
+    ///   wants the published status must wait for the main actor.
+    /// · NOT anything about AUDIO. The render thread runs straight through a
+    ///   main-actor wedge; audio already playing keeps playing. An overdue
+    ///   prepare means ONE track will render the silent placeholder.
+    ///
+    /// An ABSENT slot means "no prepare body for that slot is currently
+    /// between arming and publication" — NOT "that slot is fine".
+    public struct InFlightEntry: Codable, Sendable, Equatable {
+        /// `"instrument"` or `"effect"`. Instrument and effect prepares run on
+        /// separate chains and CAN be in flight simultaneously for the same
+        /// UUID, so this is half of the identity, never decoration.
+        public var slot: String
+        /// `Track.id.uuidString` (instrument) or `EffectDescriptor.id.uuidString`.
+        public var id: String
+        /// The component whose prepare is in flight — the wire's ONE spelling
+        /// of component identity (`{type, subType, manufacturer}`), never a
+        /// second string form. A point-in-time snapshot of the ARMING EVENT,
+        /// like a log line; it is never updated after arming.
+        public var component: AudioUnitComponentID?
+        /// Wall-clock seconds since the prepare body armed its deadline race,
+        /// measured on mach uptime (which PAUSES across system sleep, so a
+        /// lid-close cannot masquerade as an overdue prepare).
+        public var startedSecondsAgo: Double
+        /// The budget the race was armed against, in seconds.
+        public var deadlineSeconds: Double
+        /// `startedSecondsAgo > deadlineSeconds`, computed at read time. When
+        /// true the deadline has already resolved `.timedOut` off-main and the
+        /// registry has not yet been able to publish that.
+        public var overdue: Bool
+
+        public init(slot: String, id: String, component: AudioUnitComponentID?,
+                    startedSecondsAgo: Double, deadlineSeconds: Double, overdue: Bool) {
+            self.slot = slot
+            self.id = id
+            self.component = component
+            self.startedSecondsAgo = startedSecondsAgo
+            self.deadlineSeconds = deadlineSeconds
+            self.overdue = overdue
+        }
+    }
+
+    /// Lifetime count of instrument prepare bodies that were NOT
+    /// short-circuited by the idempotency guard.
+    public var instrumentPrepares: Int
+    /// Lifetime count of instrument releases that removed a REAL instance.
+    public var instrumentReleases: Int
+    /// The insert-effect mirror of `instrumentPrepares`.
+    public var effectPrepares: Int
+    /// The insert-effect mirror of `instrumentReleases`.
+    public var effectReleases: Int
+    /// Every track the registry holds any state for, sorted by
+    /// `trackId` (deterministic so two reads can be diffed directly).
+    public var tracks: [TrackEntry]
+    /// Every effect the registry holds any state for, sorted by `effectId`.
+    public var effects: [EffectEntry]
+    /// m23-av — prepare bodies armed but not yet published, sorted by
+    /// `(slot, id)` so two reads diff positionally (the `tracks`/`effects`
+    /// discipline). Empty is the overwhelmingly common case.
+    ///
+    /// ⚠️ This field makes `EngineAUPrepareStats` TIME-VARYING: `==` between
+    /// two reads taken while a prepare is in flight is now guaranteed false
+    /// rather than merely likely false, because `startedSecondsAgo` advances.
+    /// Anyone comparing two snapshots should compare COUNTERS, not the struct.
+    public var inFlight: [InFlightEntry]
+
+    public init(instrumentPrepares: Int, instrumentReleases: Int,
+                effectPrepares: Int, effectReleases: Int,
+                tracks: [TrackEntry], effects: [EffectEntry],
+                inFlight: [InFlightEntry] = []) {
+        self.instrumentPrepares = instrumentPrepares
+        self.instrumentReleases = instrumentReleases
+        self.effectPrepares = effectPrepares
+        self.effectReleases = effectReleases
+        self.tracks = tracks
+        self.effects = effects
+        self.inFlight = inFlight
+    }
+
+    /// The all-zero snapshot: engines without AU hosting (fakes, headless
+    /// stores) and a fresh engine before any prepare.
+    public static let idle = EngineAUPrepareStats(
+        instrumentPrepares: 0, instrumentReleases: 0,
+        effectPrepares: 0, effectReleases: 0, tracks: [], effects: [])
 }
 
 /// Wire-facing result of writing one local diagnostics bundle (M9 beta): the

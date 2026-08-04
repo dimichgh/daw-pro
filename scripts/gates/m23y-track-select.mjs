@@ -339,7 +339,25 @@ try {
   // ══ A2 — the roll-vs-arrange DELETE arbitration, pinned ═══════════════════
   // Track-select makes this newly reachable: a header click KEEPS a surviving
   // focus (Y6c), so the roll stays OPEN while the click's `arrangeKeyFocusNonce`
-  // bump moves key focus to the arrange. Two candidate consumers, one key.
+  // bump moves key focus to the arrange.
+  //
+  // ⚠️ m23-ak CHANGED THE STATE THIS LEG SETS UP, and the sentence that used to
+  // end the paragraph above ("Two candidate consumers, one key") is now false —
+  // rewritten here rather than left standing, because a shipped gate quietly
+  // describing a fact the roadmap deliberately changed is the m23-aj-3 failure
+  // shape. The header click below GROWS the arrange selection past the clip the
+  // roll is open on, and `AppModel.arrangeSelection`'s `didSet` now answers that
+  // by dropping the roll's note selection
+  // (`PianoRollNoteSelectionBridge.shouldDropNotes`). So after the click there is
+  // exactly ONE candidate consumer: the roll's `.onKeyPress(.delete)` reads
+  // `guard !model.selection.isEmpty` and returns `.ignored`. That is the whole
+  // point of m23-ak — the user who just selected a track means the track.
+  //
+  // NO ASSERTION HERE MOVED. The FIXTURE below is taken BEFORE the header click,
+  // so it still reads `true`; and what A2 pins — that when the arrange's DELETE
+  // handler runs it takes the WHOLE union in one step — was never about which
+  // consumer won. The roll-vs-arrange drop itself is owned by
+  // `scripts/gates/m23ak-note-selection-drop.mjs` (L5 drives this exact path).
   //
   // WHAT IS DECIDABLE HERE, and it is the honest half: the ARBITRATION is
   // SwiftUI's and is STRUCTURAL — `PianoRollView` owns `.onKeyPress(.delete)` as
@@ -359,8 +377,11 @@ try {
      `editor=${roll.editorClipId} notes=${roll.pianoRollNoteSelection}`);
 
   s = await clickTrack(T[0]);                       // the header of a4's own track
-  ck("A2 the header click LEAVES THE ROLL OPEN while selecting the whole track — "
-     + "this is the two-consumer state, reached the way a user reaches it",
+  ck("A2 the header click LEAVES THE ROLL OPEN while selecting the whole track, "
+     + "reached the way a user reaches it (this leg used to call that 'the "
+     + "two-consumer state'; m23-ak made that false — the click GROWS the "
+     + "selection past the roll's clip, so the roll drops its note claim and "
+     + "stops being a candidate for the key)",
      same(idsOf(s), A) && s.editorClipId === a4 && s.focusClipId === a4,
      `ids=${JSON.stringify(idsOf(s))} editor=${s.editorClipId}`);
 
@@ -380,8 +401,20 @@ try {
   ck("A2 one undo restores the three clips the arbitration consumed",
      same(await liveClips(), [...A, ...B, c0]), JSON.stringify(await liveClips()));
 
-  // The DELIVERY probe — the only thing that could show the REAL arbitration.
-  // Reported honestly, never manufactured into a pass.
+  // The DELIVERY probe — the only thing that could show SwiftUI's REAL focus
+  // arbitration. Reported honestly, never manufactured into a pass.
+  //
+  // ⚠️ SCOPE NARROWED BY m23-ak (2026-08-03), assertions unchanged. This fixture
+  // arms the notes and then clicks the TRACK HEADER, which grows the arrange
+  // selection past the roll's clip — so since m23-ak the roll has already
+  // dropped its note claim by the time `keyDelete` runs. A delivered probe here
+  // would therefore measure the arbitration in the DROPPED state (arrange is the
+  // only claimant), which is a weaker question than the one this block was
+  // written to ask. The CONTESTED state — roll open, notes still claimed — is no
+  // longer reachable by widening the selection at all; it needs a fixture that
+  // leaves the selection at ONE clip. Nothing here is wrong, it just proves less
+  // than its original wording implied. Not rebuilt in this item: the branch is
+  // unreachable on staging either way (delivered=false, m23-g1).
   await sel({ act: "clear" });
   await sel({ act: "click", clipId: a4 });
   await sel({ act: "pianoRollNotes", select: true });
@@ -441,9 +474,21 @@ try {
      !!takeProbe.error && JSON.stringify(takeProbe.error).includes("overlap"),
      JSON.stringify(takeProbe).slice(0, 240));
   skip("take-comp refusal over a track-header union, END TO END",
+       // ⚠️ CORRECTED 2026-08-03 (m23-am). The sentence below is TRUE ABOUT THE
+       // `take.group` VERB and was WRONG ABOUT THE WIRE, and this gate's own
+       // A3 legs only ever tested the verb. A take group IS reachable from the
+       // wire: `project.save` -> hand-author a `takeGroups` array plus a
+       // `takeGroupId` on a clip into the bundle's `project.json` ->
+       // `project.open` yields live comp members (MEASURED at m23-am, whose
+       // gate `m23am-refusal-anchor.mjs` builds exactly that fixture and keeps
+       // a CONTROL leg proving the verb still refuses on the same tree).
+       // This leg therefore stays a skip only because THIS gate does not build
+       // that fixture — a limit of this file, no longer a limit of the wire.
+       // Re-enabling it is filed as m23-am-2.
        "`take.group` needs >=2 OVERLAPPING clips and every wire clip verb "
        + "resolves overlaps on the way in (re-measured above: \"clips do not "
-       + "overlap\"). MEASURED INSTEAD in `ArrangeTrackSelectionTakeCompTests`, "
+       + "overlap\") — TRUE OF THE VERB, NOT OF THE WIRE; see the correction "
+       + "above. MEASURED INSTEAD in `ArrangeTrackSelectionTakeCompTests`, "
        + "against the store: a comp member ANYWHERE in a two-header union "
        + "refuses the WHOLE delete — every ordinary clip on the OTHER track "
        + "survives too, and no history step is pushed. That last part is a "

@@ -1,5 +1,873 @@
 # Changelog
 
+## 2026-08-04 — A second timing check that was quietly grading its own homework, and what we found replacing it
+
+Five days ago we raised how long a test process is allowed to wait for a plug-in to finish loading,
+from 10 seconds to 60, because 10 was too tight for a slow instrument under a busy test suite. At
+the time we added a note next to it: "60 seconds is roughly double the worst load we have ever
+measured, so there is real headroom." That note was itself a test — it asserted the 60-second limit
+was at least twice a fixed number written into the same file.
+
+It turned out both halves of that check were made up. The "worst we have ever measured" was a
+number typed in once and never updated; the "at least twice" comparison was two constants compared
+against each other, which can never fail no matter what the app actually does — it wasn't measuring
+anything. And when we went and actually measured, the real margin had already fallen under 2x:
+the worst clean load we could produce came in at just under 31 seconds, leaving about 1.94x, not
+2x. Nothing was broken by this — the 60-second limit itself is still nowhere close to being hit —
+but the thing that was supposed to warn us before it got close had never been capable of warning
+anyone about anything.
+
+So we deleted it, the same call we made with a similar check three weeks ago, and replaced it with
+something that actually watches the real number. Loading a General MIDI sound bank now prints how
+long it took, how much horizon it had, and the ratio between them, on every test run. A new check
+runs that measurement five times in a row and refuses to be quiet if the slowest run gets within
+60% of the 60-second limit. A separate, permanent check confirms nothing in the app is allowed to
+hold the interface hostage for a fixed stretch of time without being on a short, explicit list —
+today that list has exactly two entries, both deliberate test scaffolding, each measured down to
+the millisecond.
+
+Turning that new check on told us something uncomfortable: run for real, twice, on this machine
+today, it failed both times — the slowest load came in at 45–47 seconds instead of 31. Some of that
+is very likely an unusually busy shared machine rather than the app getting slower; load was
+running high enough during the second attempt that unrelated background activity is a real
+suspect. But we are not going to wave that away either, and we are not going to raise the limit to
+make the red go away — that is exactly the mistake that put us here in the first place. The honest
+state is: the new check works, it catches slow loads for real, and whether today's slow numbers are
+"the machine was busy" or "the margin has actually run out" needs a re-run on a quiet machine before
+anyone concludes either way. That follow-up is filed, not skipped.
+
+One more thing came out of building the check itself, which matters more than it sounds: the
+guardrail meant to keep an unusually busy test run from being graded at all — skip the whole
+result if the run as a whole took suspiciously long — let one of today's slow, failing runs through
+as legitimate. That is a real gap in how the two limits were tuned together, also filed, and it is
+better evidence that something needs re-deriving than either of the two failing runs was on its
+own.
+
+## 2026-08-03 — When a plug-in freezes the app, you can now find out which one, and for how long
+
+A badly-behaved plug-in can freeze the app's interface while it loads. We've had detection for
+that for a while: ask the app anything during a freeze and it answers, off to the side, "the
+interface is wedged, and has been for N seconds." True, and not much use — it doesn't tell you
+*what* it's stuck on.
+
+Now it does. During a freeze, asking for AU prepare status returns which plug-in is currently
+being loaded, how long it's been loading, and whether it has already blown its deadline. That
+answer comes from a small record kept outside the frozen part of the app, so it stays readable
+while everything else is stuck.
+
+The gap this closes is sharper than it sounds: the command that reports plug-in loading health
+was, until now, **unable to answer during exactly the freeze it would be most useful in** — it
+had to go through the frozen part of the app to fetch its reply. Measured before the fix, that
+request sat waiting out the entire freeze and answered a fraction of a millisecond after it
+ended. It now answers in microseconds, while the freeze is still going.
+
+**What this does not do.** It does not unfreeze anything, and we want to be blunt about that: you
+cannot interrupt a thread that is sitting inside someone else's code. The app still waits for the
+plug-in to let go. This is diagnosis, not rescue — the real fix is running plug-ins outside our
+process entirely, which is a much larger piece of work.
+
+It also doesn't announce itself yet. Right now you have to ask; nothing writes the fact to a log
+on its own. That part is written up and deliberately left for a follow-up rather than half-built
+here.
+
+## 2026-08-03 — The five-second limit on opening a plug-in window now actually works
+
+When you open a plug-in's window, we ask the plug-in to hand us its interface and give it five
+seconds to answer. If it doesn't, we show our own generic panel instead, with a note explaining
+why. That's the design: opening a plug-in should never hang the app.
+
+The countdown was scheduled on the same queue as everything else in the interface. So whenever the
+app was busy — which is precisely when a plug-in is slow to answer — the countdown couldn't run
+either. It wasn't a five-second limit; it was five seconds of sleep *plus* however long it took to
+get a turn. In practice it almost never fired. A slow plug-in didn't get cut off at five seconds,
+it just made you wait, and then its window opened late.
+
+The countdown now runs off to the side, on real wall-clock time, so it fires when it says it will.
+
+**You may notice this.** A plug-in that used to open late will now sometimes give you our generic
+panel and a "custom view request timed out after 5s" note instead of its own interface. That looks
+like something got worse, so it's worth being clear: this is the limit doing the job it was always
+supposed to do. We deliberately did not raise the five seconds to paper over it — a slower broken
+deadline is not a fixed one.
+
+One honest limit remains. We can now *decide* on time that a plug-in has taken too long, but
+actually putting the window on screen still needs the app to be responsive. A plug-in that freezes
+the app outright will still hold everything up until it lets go. That's a separate, harder problem
+and it's tracked.
+
+Internally this was the last corner of the app running its own private copy of this
+timeout logic; there's now a single shared implementation, with tests that make it hard to
+reintroduce a second one.
+
+## 2026-08-03 — A measurement that would have reported success while the thing it measures was broken
+
+Nothing you can see changed. This closes out a review of every timing check in our test suite, and
+the last one had the same shape as the others: it could not fail.
+
+The check measures how long it takes the app to hand a dense burst of MIDI — 512 controller
+messages in a single audio block — to a hosted plug-in. It compared that against a generous upper
+limit, and the number sat about two thousand times under it. So far, so harmless. But we tested what
+happens if the app stops forwarding MIDI to the plug-in altogether — the exact failure the check
+exists to notice — and it stayed green. With no messages being delivered, the measured cost drops to
+nearly nothing, and "nearly nothing" comfortably satisfies a check that only asks for "not too much."
+
+We nearly got the fix wrong in an instructive way. The obvious lower limit is "the cost must not be
+zero." But when we actually broke the code rather than imagining it, the broken version did not
+measure zero — it measured a small residual, because the app still walks the list of messages before
+discarding them. A limit chosen against the imagined failure would have let the real one through.
+The limit we shipped sits between the two measured values, with roughly equal room on either side.
+
+A companion check turned out to need nothing at all. We deliberately broke the code it guards and it
+failed loudly and immediately, which is all one can ask of it; we recorded how we broke it, next to
+the check, so the next person does not have to work it out again.
+
+Two things were filed rather than fixed in passing. One test crashes outright instead of failing
+when its subject regresses, which silently cancels every test queued behind it — worse than an
+ordinary failure, because the run looks short rather than truncated. And one measurement documents
+a performance target that nothing enforces.
+
+Across all six checks reviewed: one was deleted, three needed no change, and two gained the missing
+half of their reasoning. None were converted to the comparison-based form we originally planned for
+all of them — in every case, measurement said it would not have helped.
+
+## 2026-08-03 — A safety check that would have blamed your machine for its own failure
+
+Nothing you can see changed, but this one is worth reading, because the thing we found was hiding
+behind a reassuring message.
+
+Some background. When the app loads a plug-in, that work has to happen on the same single thread
+that draws the interface. A badly-behaved plug-in can seize that thread and not give it back, which
+is why we put a hard time limit on the operation. The subtlety is that the timer itself must not
+need that thread — otherwise the timer cannot ring in exactly the situation it exists for. We fixed
+that a few days ago, and wrote a test to make sure it never regresses.
+
+We checked whether that test actually works, by deliberately re-breaking the code and watching what
+it said. It failed — but it reported "the machine was too starved to run the experiment, which is
+not the same as the experiment failing." In other words, faced with the exact fault it was built to
+catch, the test blamed the computer it was running on. That is the kind of message that gets waved
+through as a bad day on the build machine, and the real fault would have sailed past.
+
+The reason is a little chain of consequences we had not followed all the way down. When the timer
+is broken, no measurement ever completes in time to be counted, so the test ends up with an empty
+set of results — and every check that examines those results is skipped entirely. All that remained
+was a final complaint about not having gathered enough data.
+
+Two smaller things came out of it. The test's own notes contained a claim and its refutation six
+lines apart, each stated confidently. And the actual broken behaviour is not what either of us
+predicted: we expected the timer to ring late, but it never rings at all, because the work it was
+racing gets to the finish line first the instant the thread is released.
+
+The test now recognises the real fault and says so, in its own words, before it says anything about
+the machine. We confirmed that by breaking the code again and watching the new message appear, then
+putting the code back exactly as it was. The old message is still there and still means what it
+says — it just no longer speaks for a failure that is not its own.
+
+## 2026-08-03 — A planned improvement, measured and then declined
+
+Nothing you can see changed, and this time nothing in the code changed either. It is recorded
+because the decision not to act was the work.
+
+We had a plan to make several of our internal timing checks more robust, by measuring each one
+against a reference task running at the same moment instead of against a fixed number of seconds.
+The idea is sound: if the machine is busy, both slow down together, so the comparison holds steady
+where a fixed number would drift.
+
+Applied to one particular check — how long it takes to analyse a five-minute piece of audio for
+tempo and key — it turned out to make things worse. The check was already steady: across fourteen
+runs, some on an idle machine and some with the entire test suite running, its measurement moved by
+about 8%. The reference task we would have compared it against is itself far less steady than that;
+its own recorded wobble is roughly 40%, and over 100% when the machine is deliberately overloaded.
+We would have been replacing a reliable ruler with a rubber one.
+
+So the check was left exactly as it was, and the reasoning was written down next to it. The
+general rule we took away: a comparison-based measurement is only worth it when the interference
+you are cancelling is larger than the wobble you are introducing, and both of those are things you
+can measure beforehand rather than assume.
+
+One genuine gap was found along the way and filed rather than patched in passing: the same test
+documents a target of "two seconds typical" that nothing actually enforces — only the five-second
+hard limit is checked. Enforcing it looks feasible but needs a deliberate stress test first, on
+exactly the principle above.
+
+## 2026-08-03 — A test that was one bad run from crying wolf, deleted rather than retuned
+
+Nothing you can see changed. This is about a timing check inside our own test suite, and it is
+recorded because the reasoning is the kind that goes stale quietly.
+
+One test measured how long it takes to load an instrument's sounds while deliberately hammering the
+app from several directions at once, then asserted the typical load stayed under 8 seconds. That
+8-second figure was not arbitrary — it was written as "four times the worst we have ever measured,
+and still comfortably under the 10-second cutoff where a load gets abandoned."
+
+Both halves of that sentence had quietly stopped being true. The cutoff is no longer 10 seconds
+inside tests — it became 60 seconds five days ago, and the comment never caught up. And the "worst we
+have ever measured" had crept from 2.0 seconds to 4.6. Re-applying the original rule to today's
+numbers demands a limit of 18.5 seconds — but loads actually start failing outright somewhere
+around 6 to 13 seconds. There is no number that satisfies both halves any more. The rule that
+produced 8 seconds had stopped having an answer.
+
+So the check was removed rather than given a fresh number. It was never the real safety net: a load
+that genuinely hangs already fails a different, sharper check with a much clearer message. What it
+was actually doing was sitting close enough to normal variation that one ordinary slow run would
+have made it fail for no reason — and a test that fails for no reason teaches everyone to ignore it.
+
+What replaced it is smaller and firmer. The remaining check watches the *fastest* load rather than
+the typical one, which barely moves no matter how busy the machine is. And it now has a companion
+test that deliberately breaks the code to prove the check actually catches it — because a limit
+nobody has ever seen trip is a limit nobody has really calibrated. The measurement itself is still
+printed on every run, so the history stays visible; only the brittle assertion is gone.
+
+## 2026-08-03 — Clicking an empty track's header now says something
+
+Clicking a track's header selects every clip on that track. On a track with no clips there was
+nothing to light up, so the click looked like it had been swallowed — you clicked, and the app did
+not move.
+
+It had not been swallowed. That click quietly moved the keyboard onto the arrangement and took the
+zoom keys (⌘+ / ⌘− / ⌘0) back from the piano roll, so the next key you pressed went somewhere new
+without anything on screen saying so.
+
+Now a brief line appears on the row you clicked, at its right-hand edge — "No clips to select" — and
+fades after a few seconds. It is deliberately plain grey rather than the amber the app uses for
+refused edits: nothing was rejected and nothing was lost, the click simply had nothing to select.
+
+It only appears when there is genuinely nothing to show. Clicking an empty track's header while
+clips are selected elsewhere clears that selection and closes the note editor — a large, visible
+change — so no message appears there. Nor does one appear when you click a track whose clips are
+already selected: those clips are on screen, selected, exactly as you asked.
+
+Nothing about selection itself changed. A track is still not a thing you can select; the line is a
+passing note, not a state, and it leaves nothing behind on the row.
+
+## 2026-08-03 — A delete that gets refused now points at the clip that refused it
+
+Select a whole track by its header, press Delete, and if any clip on that track belongs to a take
+group the app refuses the whole delete — one comp member spares everything, including clips on other
+tracks you selected at the same time. That part is deliberate: a delete that half-happened inside a
+single undo step would be worse than one that did not happen.
+
+What was wrong was where the app told you about it. The amber "this clip belongs to take group…"
+bubble appeared over an essentially random clip in the selection — usually not the take-group clip
+at all, and not even the same clip twice, since it changed from one launch to the next. You were
+being pointed at an innocent clip and told it was the problem.
+
+The bubble now appears on a clip that actually refused, and when several did, always on the same one
+— the first, reading the arrangement top to bottom and left to right. Nothing else about the refusal
+changed: the wording is identical, the delete is still all-or-nothing, and a single-clip refusal
+behaves exactly as before.
+
+One honest limit: if the clip that refused is scrolled off the side of the arrangement, the bubble is
+correct but out of sight. The app does not scroll to it yet.
+
+
+### Zoom keys now follow the editor you are actually working in
+
+⌘+ / ⌘− / ⌘0 used to be routed by whether the piano roll held keyboard focus, which was not
+something the app decided — it was the outcome of the arrangement and the roll competing for focus.
+In practice the result flipped from one clip click to the next, and clicking the same MIDI clip
+twice left the zoom keys aimed at the arrangement for the rest of the session.
+
+The zoom keys now follow the surface you last worked in: click a clip and ⌘+ zooms the arrangement;
+click into the piano roll and it zooms the roll. Closing the roll or switching to the mixer hands
+the keys back to the arrangement. The piano roll's zoom-button tooltips now say "after you click in
+the editor" instead of "while the editor is focused", which describes a rule the app no longer uses.
+
+Deleting and nudging clips are unchanged — those still go to the arrangement after a clip click.
+
+## 2026-08-03 — Selecting more clips while the note editor is open now hands the keyboard back to the arrangement
+
+Open a MIDI clip, select some notes in the piano roll, then shift-click two more
+clips in the arrangement and press the right arrow. Until now: nothing happened.
+Delete was worse — it deleted the notes rather than the three clips you had just
+selected. Both were the app doing exactly what it had been told, and neither was
+what anyone meant.
+
+The rule that caused it is a good one and it stays: while you have notes selected
+in the editor, the arrow keys and Delete belong to the notes, so a stray keypress
+cannot slide a whole clip out from under you. The problem was that selecting more
+clips never took that claim back. Now it does — the moment your selection grows
+past the clip the editor is open on, the editor drops its note selection and the
+keys go back to the arrangement, where you were plainly looking.
+
+The editor stays open, and nothing else about it changes. If you then select notes
+again on purpose, with all three clips still selected, you keep them and the arrow
+keys go back to the notes: at that point you have said what you want twice, and
+the app should not argue. Selecting a whole track by its header behaves the same
+way as shift-clicking, because it is the same thing — selecting more clips.
+
+## 2026-08-03 — The up and down arrow keys move clips between tracks
+
+Select some clips in the arrangement and press the up or down arrow: they move to
+the track above or below, keeping their spacing and their positions in time. This
+is the last piece of the cross-track move — the ability landed in the engine, then
+on the agent-facing commands, and now on the keyboard where you actually reach for
+it. Holding the key repeats, like the left and right arrows already did.
+
+Modifier combinations deliberately do nothing yet. Shift-down and Option-down are
+the standard shortcuts for "extend the selection downward" and "duplicate down" in
+apps of this kind, and both are plausible next features on this exact surface.
+Giving a modifier a meaning later is easy; taking one back is not.
+
+When a move is impossible — a MIDI clip with an audio track below it, or a bus —
+the arrow key is still consumed rather than passed on. Without that, the refused
+keypress would fall through and scroll the whole arrangement out from under you,
+which is a strange answer to a key that was trying to move a clip.
+
+## 2026-08-03 — Agents can move clips between tracks now, and a half-track move is refused rather than rounded
+
+The cross-track move landed in the engine room last time; this connects it to
+everything that talks to the app. Two new commands: move a selection some number
+of tracks up or down (keeping its shape), or gather it onto one named track. Both
+are available to AI agents as tools, so "move the backing vocals down to the bus
+below" is now a thing you can ask for.
+
+One decision worth naming. If you ask to move a selection by *one and a half*
+tracks, the app refuses instead of quietly moving it by one. There is no such
+thing as half a track, and the alternative — rounding silently — would have
+returned a cheerful success for something you did not ask for. When the app
+reduces a move because you hit the top or bottom of the track list, it says so in
+the response; there is no equivalent way to say "I threw away the fraction", so
+refusing is the only honest answer.
+
+The refusal that fires when a gathered move would stack two clips on the same
+bars now names both clips over the wire, word for word the same message the app
+itself would show.
+
+## 2026-08-02 — Clips can move between tracks, and a move that would stack them is refused
+
+Until now nothing in the app could move a clip from one track to another. You
+could drag it along the timeline, duplicate it onto another track, or reorder the
+tracks themselves — but the clip you already had was stuck on the lane it was
+born on. That is also why the up and down arrow keys did nothing.
+
+The underlying move now exists, in two shapes: move a selection *down two tracks*
+(keeping the shape of a selection that spans several tracks), or move it *onto
+one named track* (which gathers everything onto that lane). A move that would put
+a clip somewhere it cannot live — a MIDI clip onto an audio lane, anything onto a
+bus — is refused outright rather than half-applied, and running off the top or
+bottom of the track list simply stops at the end.
+
+The part worth explaining is what happens when a move would make two clips land
+on top of each other. Gathering several tracks onto one can do that: two clips
+that were perfectly fine on separate lanes want the same bars once they share a
+lane. The app refuses the whole move and names the two clips, rather than picking
+one and trimming it. Silently deciding which of your clips loses material is not
+something a move should do, and there is no honest way to choose.
+
+One deliberate exception: a pair of clips that already overlapped on the *same*
+track — a crossfade — keeps overlapping when it moves. That overlap is yours and
+predates the move, so the app carries it across intact instead of refusing a
+gesture that changes nothing about the relationship.
+
+This is the engine-room half. The arrow keys and the agent-facing commands that
+use it arrive next.
+
+## 2026-08-02 — Editing an automation curve no longer slides your clips out from under it
+
+Open a track's automation lane, click one of the breakpoints on the curve, and
+press the left or right arrow key. Until now that moved the selected *clips* —
+a bar of your arrangement sliding sideways underneath the point you were trying
+to nudge. The same surprise was fixed for the piano roll a few days ago; this is
+the other half of it.
+
+Now the arrow key is simply refused while a breakpoint is selected, and the
+refusal is quiet and complete: the key is consumed rather than passed along, so
+the timeline does not scroll sideways instead. Deselect the point and the arrows
+go back to moving clips, exactly as before.
+
+The rule the app applies is the automation editor's own. That editor already
+decides whether to claim the Delete key by asking "do I have a live breakpoint
+selected?", and the arrow keys now ask the very same question — the two now read
+one shared answer, so they cannot drift apart and start disagreeing about who
+owns a keystroke.
+
+One wrinkle worth recording, because it decided the design. A project can have
+several automation lanes open at once. A single yes/no flag would have been
+overwritten by whichever lane spoke last — so a second, untouched lane quietly
+reporting "nothing selected here" would have switched the protection off for the
+lane you were actually editing. The app tracks the lanes individually instead,
+and there is a test that opens two of them, silences one, and checks the other
+is still protected.
+
+## 2026-08-02 — The test that checked the hint was there, but never that it said anything
+
+Internal only — no behaviour change, nothing a user can see.
+
+An empty track lane shows the words "Double-click to add a clip". An automated
+check has guarded that for a while, and it guarded it well: the words are drawn,
+they are dim rather than glaring, they appear on exactly the lanes that should
+have them, and they disappear the moment a clip arrives.
+
+It never checked the words.
+
+That is not a theoretical hole. Change the label to "Double-click to **odd** a
+clip" — one letter — and the old check passed everything, perfectly green. It was
+reading the value the app *intended* to draw, not the pixels it actually drew, and
+its other measurements only bounded how tall and how bright the text was. A
+different sentence of the same size satisfies all of them.
+
+The gap is not closeable by measuring the label's width either, which is the
+obvious idea: in this typeface `a` and `o` are the same width to within half a
+point, so the exact mistake that motivated all this survives a width check.
+
+So the new check reads the letters. It renders the sentence it expects, then asks
+which of several near-miss sentences the real screen most resembles — including
+that one-letter impostor. The real thing wins by a comfortable margin, and when
+the impostor is compiled in, the two swap places. Both directions were run, so the
+check is known to be capable of failing rather than merely observed to pass.
+
+## 2026-08-02 — Two measuring tools that disagreed about where the window starts
+
+Internal only — no behaviour change, nothing a user can see.
+
+The app has a way for automated checks to ask "where on screen is this control?"
+and a separate way to ask "give me a picture of the window." Both answered
+honestly. They just answered in different units: the first measured from the top
+of the workspace, the second from the top of the window, and those are 32 points
+apart.
+
+Nothing said so. A check that asked where a control was, then looked at that spot
+in the picture, was looking 32 points too high — and 32 points up from a control
+is usually some other perfectly normal-looking piece of the interface. So the
+check did not crash or complain. It reported, confidently, that the thing it was
+looking for was not being drawn. It was being drawn perfectly, one row down.
+
+That already happened once, to the check that guards the "double-click to add a
+clip" hint, and cost an afternoon of chasing a bug that was never there.
+
+Now the first tool also reports where its own ruler starts, and the second
+reports exactly which rectangle it photographed. A check converts between them
+instead of assuming they match. The number is re-measured from the live window
+every time it is asked for, never written down as a constant — a written-down
+constant is precisely how this comes back the next time the layout shifts.
+
+Measuring where the workspace starts meant attaching a small invisible marker to
+the view that defines it. That marker sits behind the entire interface, so it was
+worth proving it changed nothing about the interface itself. Two things were
+checked by driving the real app rather than by reading the code: the little violet
+"what does this do?" card still appears exactly against the control it explains —
+verified by pointing it at two different controls and confirming the card moved by
+precisely the distance between them, to the point — and the track area still
+scrolls, and scrolls back. Both checks were then deliberately broken to confirm
+they would notice.
+
+## 2026-08-02 — A test that watched the playhead without ever checking it moved
+
+Internal only — no behaviour change, nothing a user can see.
+
+When you add a track while a song is playing, the audio engine has to be rebuilt
+underneath you and playback has to pick up where it left off. A test has guarded
+that for a long time. It turned out it could not see the one thing most worth
+seeing: if the playhead froze for several seconds after the rebuild, the test
+passed anyway. It asked "am I still getting position updates?" — and a frozen
+playhead keeps sending updates, it just keeps sending the same number. Its second
+check compared that number against itself, which is always true.
+
+That is not a hypothetical failure. It is a bug this project actually shipped
+once, and this test sat directly on the path where it happened.
+
+It now measures something a freeze cannot fake: how far the reported position
+drifts away from the wall clock over a fixed second of playing. A healthy resume
+drifts by about a twentieth of a beat. A frozen one drifts by two full beats.
+The threshold sits between them with room on both sides, and both sides were
+checked by deliberately breaking the test in each direction — first freezing the
+readings to confirm it goes red, then shifting them by a constant to confirm it
+does *not*, because a rebuild that starts slightly late is normal and must stay
+green.
+
+The old check that compared the position against itself was kept, not deleted.
+It is blind to a freeze, but it does catch the playhead jumping *backwards*,
+which is a different bug and a real one. Two separate questions, two separate
+checks.
+
+## 2026-08-02 — Telling "the machine was busy" apart from "the audio stopped"
+
+Internal only — no behaviour change, nothing a user can see.
+
+Some tests watch the playhead move while audio is really playing. When the test
+machine is busy running dozens of other tests at once, those tests can collect
+almost no readings — three where they expected thirty-six. A test that then
+says "I didn't see enough movement" is blaming the engine for the machine being
+busy, and one that shrugs it off is worse: it can't tell a busy machine from
+audio that genuinely died.
+
+There's now a shared check that tells those two apart, by asking the audio
+thread itself — which a busy machine cannot slow down. Busy machine: the test
+says so, out loud and greppably, and stops rather than pretending to have
+checked. Audio actually dead: it fails, every time. It is never allowed to
+excuse the second as the first.
+
+Two of the three tests didn't need the check at all, which was the more useful
+finding. One was asking "did I see the playhead loop around at least once?" —
+a question that needs many readings. It now asks whether the playhead is inside
+the loop after enough time has passed that it must have gone around, which one
+reading answers. The other was asking whether the playhead was still being
+updated, which stays true even when the number being reported is frozen — the
+exact bug this project shipped once already. That one was simply deleted.
+
+## 2026-08-02 — A test recipe that pointed at the wrong line, and nearly at three
+
+Internal only — no behaviour change, no new commands, nothing a user can see.
+The sample-rate flip test carries a "mutant recipe": a deliberate one-line
+break to the engine, so the test can prove it's able to fail. Its instructions
+had gone stale — the code moved under them and the line number now landed
+mid-comment. Re-resolved and, more importantly, re-run: the test still catches
+exactly the two things it's supposed to catch, and still lets the two unrelated
+ones through.
+
+The catch worth naming: the obvious fix — "find the code by what it says
+instead of by line number" — would have broken the test. The line the recipe
+breaks reads identically in three places, and changing all three would have
+made the run look like a *better* result while quietly destroying what the test
+proves. The recipe now anchors on a neighbouring line that appears exactly
+once, and refuses to run unless it matches exactly one place.
+
+Also corrected: a figure this same test recorded last week as "557, not 558"
+turns out to alternate between the two. Both readings were real. It now records
+the derived value and both observed ones, which is the only form that stops the
+number being "corrected" back and forth forever.
+
+## 2026-08-02 — The sample-rate test now counts, instead of estimating
+
+Yesterday's entry added a way for the app to report how many times it had
+reloaded a plug-in. Today the test that matters most started using it.
+
+That test is the one that protects you when your audio interface changes its
+sample rate mid-session — you switch a device, something renegotiates behind
+your back — and your loaded instruments are supposed to survive it untouched.
+Until now the test proved that the indirect way: fire thousands of note requests
+at every track and see whether any came back "instrument not ready".
+
+The trouble with a test like that is you can't tell a quiet moment from a quiet
+system. And we could measure the problem: when we deliberately broke the app to
+make it reload everything, the old test counted **25 reloads one run and 41 the
+next** — same bug, same machine. It was only ever able to report "a lot". So the
+real test could only ever assert "none", and nobody could say how firmly.
+
+Now it reads the counter directly, before and after, and subtracts. Broken, the
+answer is **exactly 8 reloads and exactly 8 teardowns — one per track, every
+time**. Working, it's exactly zero. The wobble was never in the app; it was in
+how we were looking.
+
+Two smaller things came out of it. We kept a deliberately-broken build around
+long enough to prove the test can actually fail, because a test that has never
+been seen failing isn't evidence of anything. And we found that the *check on the
+check* was weaker than it looked: it confirmed the counter noticed a plug-in
+being loaded, and noticed one being thrown away, but never the case that
+actually happens here — a plug-in being swapped out and back in the same
+instant. It does now.
+
+We also started watching effect plug-ins the same way we already watched
+instruments. That gap had been sitting there quietly, which is exactly the kind
+of thing this whole line of work exists to stop.
+
+## 2026-08-02 — The app can now tell you how often it reloaded a plug-in
+
+Loading a plug-in is one of the few genuinely expensive things a DAW does, and
+reloading one you were already using is pure waste — it can cost you a moment of
+sound. So we care a lot about *not* doing it: switching your audio interface,
+changing a sample rate, recovering from a glitch should all leave your loaded
+instruments exactly where they were.
+
+Proving that turned out to be harder than doing it. Until now the only way to
+check was indirect: ask a track to play a note about eighteen thousand times in a
+row and see whether any of those attempts came back saying "instrument not
+ready". That works, but it's inference dressed up as evidence — the answer can
+be hidden behind other reasons a note might not sound, and it depends on asking
+fast enough to catch a window a few milliseconds wide.
+
+There is now a direct reading. The engine keeps a running tally of how many times
+it has loaded and torn down hosted plug-ins, and you can ask for it: read the
+number, do the thing you're worried about, read it again, subtract. A difference
+of zero is a fact, not a statistical absence.
+
+Two details we thought worth getting right. The tally counts *attempts that did
+real work*, so a plug-in that failed to load still counts — a session where every
+load fails is the worst case, not a quiet one, and a counter that only tracked
+successes would report zero for it. And loads and teardowns are counted
+separately, because two numbers that must move together are much harder to break
+silently than one.
+
+Each track also reports a short fingerprint of the exact configuration it was
+last loaded with. Compare it between two readings and you can see *which* track
+changed rather than just that something did. It's deliberately opaque — you
+compare it, you don't read it — and it never carries the plug-in's own saved
+settings, which can be large and are none of the network's business.
+
+## 2026-08-02 — A test that was watching the wrong thing
+
+Also no behaviour change — this one is about how we know things work.
+
+An earlier entry described a playhead that could freeze after the engine
+restarted itself. That freeze is fixed. This is about the check that was
+supposed to catch it and didn't — it watched for the playhead to move *at all*,
+then declared success.
+
+The problem is that a broken playhead still twitches once before it stops. Our
+check needed the position to advance by a twentieth of a beat — about 25
+milliseconds of music — and the twitch on a broken build was bigger than that.
+So the check would announce "playback resumed after 44 ms" while the song sat
+frozen for the next three seconds. It was measuring the wrong quantity: how
+long until *something* happened, rather than how long *nothing* did.
+
+It now measures the freeze itself — the longest stretch where the playhead sits
+still — and fails if that exceeds a limit derived from what a healthy resume
+actually costs. On a deliberately broken build the two readings sit side by side
+in the same output: `advance=44ms` (the old check, passing) against
+`plateau=2818ms` (the new one, failing).
+
+One detail worth keeping: a detector that never reports a freeze would pass
+everything forever. So there is now a check that stops the transport on purpose
+and requires the detector to notice — proof that it can see the thing it is
+looking for, which no amount of passing on the real cases would establish.
+
+This also retired a number we had been repeating. Describing how bad the freeze
+got, a note in our own records said that with repeating notes it recovered in
+"about 100 ms" — a reassuring figure that made the whole thing look like an edge
+case for held notes only. Re-measured on that same broken behaviour, with that
+same repeating-note fixture, it freezes for nearly three seconds. The old figure
+came from the blind check: an instrument that stops watching early makes
+everything look fast, and it reports a confident small number rather than
+admitting it didn't look.
+
+## 2026-08-02 — Proving the held-note fix holds where you'd actually notice
+
+No behaviour changed here. This is the safety net for a fix that shipped
+earlier: changing something while the music is rolling used to permanently
+silence any note that was already sounding. That was fixed, but only *one* of
+the ways you can trigger it had ever been checked against real audio.
+
+Three more now are, each driving the actual action against a real audio device
+and listening to whether a held organ note is still there afterwards: **changing
+the tempo mid-playback**, **moving the loop region mid-playback**, and **the
+engine recovering itself after an audio device changes its sample rate**. That
+last one means a rate change on the device you are already using — switching to
+a *different* device is a separate path, and it is one of the two still
+uncovered below.
+
+The part worth stating is how they're trusted. A test that always passes is
+indistinguishable from a test that cannot fail, so each one was deliberately
+broken at its own source line to confirm it goes red — and red *only* for its
+own trigger, leaving the other two green. The device-recovery check goes
+further: it runs a second, repeating-note track through the identical device
+change, so if the note vanishes we know it was the scheduling and not the audio
+device being reconfigured underneath it.
+
+Two remaining triggers are deliberately left uncovered for now, because they sit
+on engine code that is still awaiting a decision.
+
+## 2026-08-02 — Bouncing part of a song: what we measured, and an open question
+
+Nothing changed in what you hear. This entry exists because we measured
+something we had only assumed, and the result is worth stating out loud.
+
+When you bounce a *region* — say from bar 5 rather than from the top — a note
+that was already sounding before bar 5 is **not** in the file. A pad held from
+bar 1 through bar 9 is simply absent from a bounce that starts at bar 5, even
+though playing the same song through bar 5 you hear it plainly. We had believed
+this from the name of an internal flag; it is now measured in samples, through
+the same code path your bounce actually takes, and confirmed in the written WAV.
+
+The same measurement turned up something we had not gone looking for: at
+*identical* geometry, an **audio** clip that straddles the bounce start plays
+(entered part-way through), while a **MIDI** note that straddles it is dropped
+whole. The same musical edit behaves differently depending on which kind of
+track it is on.
+
+We are deliberately not "fixing" this yet, because it is not obviously broken.
+Making a region bounce sound the held note means striking it at bar 5 — an
+attack the song does not have there. So the choice is between a missing pad and
+a phantom attack, and which one is right is a musical judgement, not a bug
+report. Until that is settled, the behaviour is unchanged and now pinned by a
+test that says in its own header that it records what we do rather than what we
+endorse.
+
+What did change is bookkeeping: the offline renderer now states its scheduling
+intent explicitly instead of inheriting it silently, and the checks that guard
+this decision read three source files where they previously read one — so the
+next place that inherits it will fail a test rather than slip through review.
+
+## 2026-08-02 — Recovering from a device change no longer rewinds the song
+
+The companion to the fix below. With the playhead no longer frozen, what was
+left was smaller but still wrong: when the engine restarted itself mid-song, the
+music resumed *slightly behind where it had got to*. Not a freeze — a step
+backward, between roughly a twelfth and a fifth of a second, and it stayed. Play
+through a device change and every bar after it sat a fraction late against
+everything you had already recorded.
+
+The cause was an ordering problem rather than a slow step. Resuming has to
+answer two questions — *which beat do we resume on* and *at what instant does
+that beat become audible* — and the engine committed to the beat first, then
+spent time restarting the device, rescheduling the clips and lining up the
+players before the sound actually landed. The beat was therefore correct for a
+moment that had already passed by the time it arrived.
+
+Now a resume picks the instant first and derives the beat for *that* instant, so
+the two agree by construction. If the work overruns the prediction the engine
+moves the anchor forward rather than honouring a moment in the past — being a
+touch late together is recoverable, whereas audio and playhead disagreeing is
+the failure this whole area exists to prevent. Measured on the same project, the
+step backward went from 0.27–0.38 beats to 0.14, which is the floor set by how
+the playhead reads the clock rather than anything left to reclaim.
+
+The trade is about thirty milliseconds of extra silence at the moment of
+recovery, once, in exchange for the song staying where you left it.
+
+## 2026-08-02 — The playhead no longer freezes after the engine recovers
+
+When the audio engine has to restart itself mid-song — because the device
+changed underneath it, or because the built-in watchdog caught a stalled engine
+and bounced it — you kept hearing music, but the playhead stopped moving. It sat
+still, then jumped and carried on as if nothing had happened. Everything that
+follows the playhead sat still with it.
+
+The freeze was not a fixed pause. It lasted exactly as long as the engine had
+been playing before the restart: a bounce after one second froze it for one
+second, after three seconds for three. Play for a minute and hit a device change
+and the readout would have lied to you for a minute.
+
+The cause: on restart, the engine asked the audio hardware "what time is it?"
+and got back the *old* session's answer, because the new one hadn't produced a
+sample yet. It anchored the playhead to that stale answer, which put the anchor
+in the future — so the position clamped and waited for real time to catch up.
+The engine already knew how to avoid this and does so in two other places; the
+recovery path was the one that didn't, even though its own notes say the sample
+timeline has just broken and it deliberately reads the wall clock instead.
+
+Measured before and after: a one-second freeze is now 35 ms, a three-second
+freeze 69 ms — the same as a healthy engine that never restarted at all. Both
+routes into recovery run through the single line that was wrong, so both are
+fixed; the measurements above were taken through the watchdog route, which is the
+one that can be driven on demand.
+
+One thing this fix does **not** cover, written down rather than left to be
+rediscovered: recovery still resumes roughly 120 ms behind where it should — a
+much smaller timing flaw in the same routine.
+
+A related worry, now **settled, and the news is good**: if you have picked a
+specific output device, that choice *does* survive a recovery. We had not
+checked, and a silent return to the system default would
+have been the kind of thing you only notice by wondering why the sound moved. It
+was measured on the harshest route — the watchdog stopping and restarting the
+audio hardware mid-playback — and the pinned device came back pinned, with the
+system default untouched. No change was needed; what was missing was the proof.
+
+## 2026-08-02 — Edit a note while the music is playing and the music keeps playing
+
+If you were holding a chord — a pad, an organ, anything sustained — and you drew
+a note in the piano roll, that chord stopped. Not faded: stopped, and never came
+back until you restarted playback. It happened to *every* sounding note in the
+project, including on tracks you hadn't touched — adding one new track was enough
+to cut off a chord held on a different one. Fixed.
+
+The same underlying rule reached several other mid-playback moments — dragging the
+tempo, changing the loop range, switching audio devices — and the fix covers all
+of them. To be exact about what we have actually watched happen, though: the
+clip-and-note-edit path is verified end to end against a running app with a real
+instrument sounding. The others are fixed and covered by tests, but have not yet
+been exercised live one at a time. That work is scheduled, not assumed done.
+
+The cause was a rule about how playback is scheduled. Whenever the engine has to
+rebuild its schedule mid-flight, it works out what to play from the current
+position onward — and it was only counting notes that *start* at or after that
+point. A note you were already holding started in the past, so it was skipped
+entirely, along with the instruction to release it. Audio clips never had this
+problem: the same code resumes them partway through, which is exactly what notes
+should have been doing all along.
+
+Now the engine distinguishes between two situations. If you asked to move — you
+pressed play, seeked, started recording — nothing changes; the existing behaviour
+was right. But if playback was simply continuing and the engine rebuilt its
+schedule for its own reasons, notes you were holding are picked back up and
+carried through to their proper end.
+
+One honest caveat: a note picked back up this way *re-attacks*. A slow-swelling
+pad restarts its swell rather than continuing seamlessly. That is audible, and it
+is not the same as never having been interrupted — but it is a great deal better
+than silence for the rest of the song, and continuing a voice untouched would
+mean preserving synthesiser state across a rebuild, which is a much larger change.
+
+This was found while proving out last week's audio-device work, filed as a
+device-switching bug, and turned out to be neither about devices nor rare.
+
+## 2026-08-02 — We proved the device-swap claim, and found what it doesn't cover
+
+Yesterday's note said swapping audio devices no longer disturbs your plug-ins.
+That was the design's intent; now it is a measured fact. We built a test that
+plays a real project through a real device, changes that device's sample rate
+underneath it while the music is running, and watches what happens to the eight
+loaded instruments. Nothing reloads. The engine holds its rate, the sound keeps
+flowing, and every plug-in keeps its state.
+
+To be sure the test could actually fail, we broke the engine on purpose — put
+the old device-following behaviour back — and re-ran it. The instruments all
+reloaded, exactly as they used to. That is the difference the change makes,
+and now it is written down rather than assumed.
+
+Two things we found along the way, both being fixed separately. **A note that
+is already sounding when you switch devices goes silent and does not come
+back** — a held pad drops out where a repeating part recovers in about a tenth
+of a second. And the playhead can appear to freeze for a few seconds after a
+switch even though audio is still playing. Neither is new; both were there
+before this work and simply had nobody looking.
+
+## 2026-08-02 — Your mix stops caring what you plugged in
+
+Until now the whole audio engine ran at whatever sample rate your output device
+happened to be using. Plug in a 44.1 kHz interface, or let a Bluetooth headset
+drop into its 24 kHz mic mode, and everything downstream quietly moved with it:
+the limiter's lookahead, the delay compensation between tracks, the timing math
+behind automation. The mix you were listening to was subtly not the mix you had
+set up, and switching devices mid-session could re-initialise every plug-in you
+had loaded.
+
+The engine now runs at a fixed 48 kHz regardless of your hardware, and converts
+once, at the very last step before the sound leaves for the device. Your project
+sounds the same on every output you own, and what you hear live now matches what
+you get when you bounce, by construction rather than by luck. Swapping devices no
+longer disturbs your plug-ins.
+
+*Later note (same day):* we went back and proved that last sentence against the
+running app, and it holds — but proving it turned up two things it does **not**
+cover. A note you are *holding* when you swap devices can go silent and never
+come back, and the transport clock can freeze for several seconds afterwards.
+Both are open; see the entry at the top of this file.
+
+The conversion is not free, so we measured it rather than assuming: **0.004 ms**,
+about a four-thousandth of the threshold where anyone could notice. Doing the
+same conversion in the wrong place would have cost 250× that, which is exactly
+why it happens where it does.
+
+Nothing to configure — this is how the engine behaves now. (48 kHz is the
+setting for this version; per-project rates are a later change and the code is
+already shaped for them.)
+
+## 2026-08-02 — Choose where the sound comes out
+
+You can now pick which audio device DAW Pro plays through, instead of it always
+following whatever your Mac's default output happens to be. Send the mix to your
+interface and leave notification sounds on the speakers — the two no longer have
+to be the same place.
+
+The important part is what it does *not* do: **choosing an output inside DAW Pro
+never changes your Mac's default output.** System Settings stays exactly as you
+left it, and every other app keeps playing wherever it already was. The app pins
+its own playback and nothing else. There is a check in the test suite whose only
+job is to prove this, run three times over, because getting it wrong would mean
+picking an interface in a music app silently muted the rest of your computer.
+
+Switching takes effect immediately, even mid-playback. It is refused while
+you're recording — re-pointing the output restarts the playback engine, and a
+take in progress is anchored to it.
+
+Which device you've chosen is remembered for the session but is deliberately
+**not** saved into the project file. Which speakers you're sitting in front of
+is a fact about the room, not about the song, so a project opened on another
+machine won't go looking for hardware that isn't there.
+
+Available to AI agents too, as `output_list_devices` and `output_set_device`.
+
 ## 2026-07-30 — Groundwork: playing at the right speed on any audio device
 
 Nothing you can see yet — this is a measurement that clears the way for
@@ -23,9 +891,12 @@ which is at the limit of what the measurement can even resolve, against a
 is playing* recovered correctly all ten times.
 
 One genuinely useful surprise: conversion at the output is essentially free,
-but doing the same conversion earlier in the chain — at the mixer, where it
-happens today — costs about **0.94 ms**. That is the argument for the change,
-and we would not have known it without measuring both.
+but doing the same conversion one step earlier in the chain — at the mixer —
+costs about **0.94 ms**. Both are ways of building the same change, and the
+difference between them is the whole finding. Nothing converts today: the app
+currently just runs everything at whatever speed the device asks for, which is
+why none of this has cost anyone anything yet, and also why the project has no
+speed of its own to keep.
 
 ## 2026-07-30 — A Panic button, for when a note will not stop
 

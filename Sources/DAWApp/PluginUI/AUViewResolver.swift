@@ -4,6 +4,7 @@ import AudioToolbox
 import AudioToolbox.AUCocoaUIView   // the `AUCocoaUIBase` factory protocol (macOS-only)
 import CoreAudioKit
 import DAWControl
+import DAWCore
 import DAWEngine
 
 /// Resolves the body view for one hosted `AUAudioUnit`'s plugin window via the
@@ -81,63 +82,64 @@ enum AUViewResolver {
         case timedOut
     }
 
-    /// Bridges `requestViewController`'s completion (which the SDK says may run on
-    /// ANY thread — CoreAudioKit/AUViewController.h) to an async main-actor result,
-    /// raced against a timeout. The gate resumes exactly once (a late completion is
-    /// a no-op).
+    /// Bridges `requestViewController` to an async main-actor result, raced against a
+    /// REAL wall-clock deadline (`DAWCore.DeadlineRace`, m23-at).
     ///
-    /// ⚠️ **KNOWN DEFECT — m23-au. Do NOT copy this shape.** The timeout below is
-    /// `Task { @MainActor in sleep }`, so the sleeper must RE-ACQUIRE the main actor
-    /// to fire: it is a sleep plus an unbounded queueing delay, not a deadline, and
-    /// it cannot fire while anything else is holding the actor. This is the same bug
-    /// m23-at removed from `AUHostRegistry` (whose `raceAgainstTimeout` this was
-    /// originally modelled on — that method no longer exists). The old comment here
-    /// claimed "a stalled extension can never wedge the main actor"; that is only an
-    /// argument about OUT-OF-PROCESS v3 extensions and it never covered the case
-    /// where our own main actor is busy for another reason. The fix is to route
-    /// through `DAWCore.DeadlineRace`, which puts the deadline on a `Task.detached`.
-    /// Note the deadline task here is also never cancelled, so it always sleeps the
-    /// full duration before its no-op resume.
+    /// The deadline runs on `Task.detached` inside `DeadlineRace`, so it fires on wall
+    /// time regardless of main-actor contention — the defect m23-au removed. `DeadlineRace`
+    /// also cancels its own deadline task when the work wins, so a successful open no
+    /// longer leaves a task sleeping out the full 5 s.
     ///
-    /// Never call this twice concurrently for one AU — `PluginWindowManager`'s
-    /// `pendingOpens` serializes opens per target.
+    /// `requestViewController()` is the SDK's ASYNC import of
+    /// `requestViewController(completionHandler:)`. Using it rather than the
+    /// completion-handler form is load-bearing, not cosmetic:
+    ///  · it removes the hand-rolled inner continuation, so there is no continuation this
+    ///    file could orphan when the deadline wins (m23-au §3);
+    ///  · the header contract (`CoreAudioKit/AUViewController.h`: the completion may run on
+    ///    ANY thread) is still honoured — the async thunk copies the VC POINTER out of the
+    ///    completion on whatever thread it ran on and resumes this task, and this task is
+    ///    `@MainActor`, so the first USE of the value is already on the main actor. That is
+    ///    the same guarantee the old hand-written `Task { @MainActor in … }` hop gave, now
+    ///    given by the language instead of by a comment;
+    ///  · a DIRECT completion-handler call in an `async` function emits "consider using
+    ///    asynchronous alternative function", which the 0-warning build would reject.
+    ///    ⚠️ MEASURED, m23-au: that check is NARROW and does NOT protect this shape.
+    ///    Wrapping the same call in a `withCheckedContinuation` body closure emits
+    ///    NOTHING — which is precisely why the pre-m23-au code here built warning-free
+    ///    with the defect present. The build cannot catch a regression to that shape;
+    ///    `AUViewResolverDeadlineSiteTests` leg S4 is what does.
+    ///
+    /// ⚠️ Do NOT reintroduce a local timeout, gate, or continuation here. `DeadlineRace`
+    /// is the ONE home for this decision (m23-at/m23-au); this file was the last
+    /// hand-rolled sleep-then-resume race in `Sources/`.
+    ///
+    /// ⚠️ Concurrency note, CORRECTED by m23-au: `PluginWindowManager.pendingOpens`
+    /// serializes `openUI` CALLS per target, which is NOT the same as serializing
+    /// outstanding view requests. Now that the deadline really fires, a timed-out request
+    /// is still in flight when `openUI` returns, and the user can immediately reopen — so
+    /// two `requestViewController` calls CAN be outstanding on one AU. Each resolves into
+    /// its own abandoned task and its result is discarded; nothing here is shared between
+    /// them. See m23-au §8.4.
     @MainActor
     static func requestViewControllerOnMain(_ au: AUAudioUnit,
                                             timeout: Duration) async -> RequestOutcome {
-        await withCheckedContinuation { continuation in
-            let gate = ResumeGate(continuation)
-            au.requestViewController { vc in
-                // Header contract: this closure may run on any thread. Hop the
-                // sole `vc` reference to the main actor before ANY use — AppKit
-                // objects are main-thread-only, and the nil-check happens after
-                // the hop (in `resolve`'s switch). This toolchain already imports
-                // the completion's VC as Sendable, so no explicit transfer
-                // annotation is needed; the `@MainActor` hop still honors the
-                // header's "may run off-main" contract. Nothing is marked Sendable.
-                let transfer = vc
-                Task { @MainActor in gate.resume(.viewController(transfer)) }
-            }
-            Task { @MainActor in
-                try? await Task.sleep(for: timeout)
-                gate.resume(.timedOut)
-            }
+        let outcome = await DeadlineRace.run(timeout: timeout) { @MainActor in
+            await au.requestViewController()
         }
-    }
-
-    /// Resumes a continuation exactly once, main-actor confined (a `@MainActor`
-    /// class is Sendable, so it may be captured by the completion closure and
-    /// only ever touched inside the `@MainActor` hop).
-    @MainActor
-    private final class ResumeGate {
-        private var continuation: CheckedContinuation<RequestOutcome, Never>?
-
-        init(_ continuation: CheckedContinuation<RequestOutcome, Never>) {
-            self.continuation = continuation
-        }
-
-        func resume(_ outcome: RequestOutcome) {
-            continuation?.resume(returning: outcome)
-            continuation = nil
+        switch outcome {
+        case .value(let vc):
+            return .viewController(vc)
+        case .timedOut:
+            return .timedOut
+        case .error(let error):
+            // Unreachable: `requestViewController()` is non-throwing, so `DeadlineRace`
+            // cannot produce `.error` here. Handled rather than force-unwrapped because
+            // the ladder is TOTAL (design §3.2) — fall through to steps 2/3 exactly as a
+            // unit with no custom v3 view does, and say so on stderr rather than
+            // mislabelling it a timeout in the user-facing warning.
+            FileHandle.standardError.write(Data(
+                "AUViewResolver: requestViewController surfaced an unexpected error (\(error)) — falling through to the ladder\n".utf8))
+            return .viewController(nil)
         }
     }
 

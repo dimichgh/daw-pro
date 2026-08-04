@@ -282,6 +282,186 @@ The honest summary: the weights being present is a coincidence of a neighbouring
 - **Bar**: on synthetic material, ≥99% of voiced frames within ±10 cents and **zero octave errors**; on real vocals, ≥95% of voiced frames within ±25 cents of the oracle, gross-error (>50 cents) rate under 2%, and voiced/unvoiced agreement ≥95%.
 - **Kill criterion**: bar missed after one round of tuning ⇒ vendor WORLD Harvest (BSD) behind the same protocol. Budgeted in §11.
 
+### 5.6 RECONCILIATION — the SwiftF0 decision (m23-ap, 2026-08-03, `daw-architect`)
+
+> **STATUS: RECOMMENDATION AWAITING THE USER'S SIGN-OFF. NOT SETTLED.**
+> A new vendored artefact of this weight is the user's call, not a cycle's — the same standing rule recorded for **m23-n3c** ("the pick is the user's, no cycle may resolve it"). **Nothing has been vendored, downloaded, converted, or added to the build by this amendment. It changes this one file and no code**: no `Package.swift` edit, no `Models/`, no `.gitignore` entry, no dependency. §5.1–§5.5 above are left exactly as written — they are the record of what was decided on 2026-07-29 and why — and the ⚠️ notice in §5.2 stays as the flag that produced this subsection.
+
+#### 5.6.1 The decision
+
+**Vendor SwiftF0 (`lars76/swift-f0`, MIT) as the primary detector. Demote in-house pYIN from "the PICK" to the named fallback, off the critical path.**
+
+**The one line:** pYIN loses to SwiftF0 on *every* metric that discriminates for this subsystem, and the one that breaks the tie is not the accuracy headline — it is **voicing recall 0.633 vs 0.871** (F1 0.731 vs 0.885). §5.1 criterion 4 exists to serve segmentation (subsystem B). A detector that misses **a third of voiced frames** is a segmentation defect, and the "it is an editor, the user drags it" argument of §5.1 does not cover it: the user cannot drag a note that was never proposed. §5.1's reasoning survives contact with SwiftF0 in general — accuracy *is* fourth — but it was applied to a candidate that also happens to win on criterion 4 itself, which is first-class.
+
+**What does NOT change:** §5.1's conjunction (all four criteria still binding, and SwiftF0 clears all four); §5.4's rejection of the RVC-sidecar route (below, 5.6.9); §5.5's existence as a gate written before the code; §7.6's absolute prohibition on pitch DSP reaching the render thread; §7.8's "one home" list.
+
+#### 5.6.2 The criteria, re-run against the candidate §5.2 never saw
+
+| §5.1 criterion | SwiftF0 | Verdict |
+|---|---|---|
+| 1. Commercial closed-source shippable | **MIT**, and — the part that matters — **`swift_f0/model.onnx` is a tracked blob inside that same MIT repo**, so the weights fall under the repo `LICENSE` rather than being a separate, unstated grant. **This is precisely why §5.2's CREPE objection ("weights' licence not separately stated … I will not assume the code licence covers the model") does not reach this candidate.** Verified by listing the repo tree via the GitHub API, 2026-08-03. | **PASS**, and on the exact axis that eliminated the other neural options |
+| 2. In-process, no Python sidecar | Achievable, but **not by the route §5.2's notice claims** — see 5.6.3. Three real routes, one with a shipping-app witness. | **PASS**, at a higher integration cost than the notice implied |
+| 3. No weights, or weights we can license and ship | **397,987 bytes** — the measured size of `swift_f0/model.onnx`, not an estimate. Criterion 3's stated objection is "hundreds of MB". This is 0.39 MB. | **PASS**, by three orders of magnitude |
+| 4. Confidence per frame | The ONNX graph returns **two** tensors, `pitch_hz` and `confidence`; **voicing is derived, not emitted** — `_compute_voicing` in `swift_f0/core.py` is `confidence > DEFAULT_CONFIDENCE_THRESHOLD (0.9)` plus an `fmin`/`fmax` range check. Criterion 4 still passes and the derivation is three lines of Swift, but §5.2's notice ("emits … voicing decisions") overstates it: that is the *Python package's* API, not the model's output head. | **PASS**, with the wording corrected |
+
+#### 5.6.3 Every figure in the §5.2 notice, checked against source — including one that does NOT hold
+
+Re-verified 2026-08-03 against the live upstream, not against the survey's summary of it.
+
+- ✅ **90.2% average vs pYIN's 78.7%** — HOLDS, verbatim, in the current `lars76/pitch-benchmark` README (fetched 2026-08-03), which has been re-run since the survey read it.
+- ✅ **95,842 parameters** — this is **the paper's claim** (arXiv:2508.18440 abstract), corroborated but not independently derived: I measured the artefact (397,987 bytes), not the graph. Stated as such.
+- ✅ **MIT** — HOLDS. GitHub API reports `MIT` for the repo, and the model file is inside it (5.6.2).
+- ✅ **f0 + confidence per frame** — HOLDS. **Voicing: derived, not emitted** (5.6.2).
+- ❌ **"ONNX → Core ML via `coremltools`" — DOES NOT HOLD ON TODAY'S TOOLING.** `coremltools`' ONNX converter was deprecated at coremltools 6 with users directed to the unified TensorFlow/PyTorch API, and the standalone `onnx-coreml` package is frozen and explicitly unmaintained. The current Core ML Tools "supported source frameworks" list is TensorFlow 1/2, PyTorch, LibSVM, scikit-learn and XGBoost — **ONNX is not on it.** SwiftF0 publishes **only** ONNX weights (no PyTorch checkpoint, and **no training code** — issue #4, unanswered), so there is no upstream artefact for the supported conversion path to consume. *(The deprecation is pinned to coremltools 6 and the absence from the current supported-source list is pinned; no exact removal version is asserted.)*
+- ⚠️ **"Best Overall at 90.2%" must not stand alone.** The benchmark's own TL;DR reads **"Best Human singing: RMVPE (87.2%, best on Vocadito and MIR-1K)"**, and SwiftF0's average lead is partly carried by NSynth (89.3 vs RMVPE's 68.2) and PTDBNoisy — instrument and noisy-speech material, not singing. **The honest framing for a vocal editor is the singing columns against the algorithm we would otherwise hand-write, and there SwiftF0 still wins decisively: MIR1K 95.0 vs pYIN 91.2, Vocadito 92.6 vs pYIN 79.5.** Vocadito is solo vocal recordings — the *cleanest* form of our actual input — and pYIN is 13.1 points down on it.
+
+**The detail table (`benchmark_report.md`, fetched 2026-08-03) is more damning for pYIN than the headline, and this is the material neither prior document had:**
+
+| Metric | SwiftF0 | pYIN | Note |
+|---|---|---|---|
+| Voicing F1 (precision / recall) | **0.885** (0.903 / **0.871**) | 0.731 (0.913 / **0.633**) | **The tie-breaker.** §5.1(4)'s whole purpose. |
+| Cents error ↓ | **35.4** | 62.9 | Best of 12 vs mid-field |
+| RMSE (Hz) ↓ | **25.1** | 41.2 | |
+| **Octave error** ↓ | **0.012** | 0.032 | SwiftF0 is **best of all 12 algorithms**; see 5.6.5 for why that is not the whole story |
+| Gross error ↓ | **0.017** | 0.041 | |
+| Contour smoothness rank ↓ | **4.5** (tied best) | **8.0** (2nd worst) | Directly relevant: the contour *is* the transpose curve fed to §6's resynthesis. A jittery contour is a jittery render. |
+| RPA ↑ | 0.905 | 0.878 | CREPE leads here (0.928) — reported for fairness |
+
+#### 5.6.4 Maturity as of 2026-08-03 — the one fact neither prior document could have had
+
+Both documents wrote their caveat on 2026-07-29 about "a very new (Aug 2025) single-author project." It is now ~11 months later than that project's last commit. Measured, not inferred:
+
+**Upstream is dormant.**
+- `lars76/swift-f0`: created 2025-07-08; **last commit 2025-09-02**; **8 commits total, every one by `lars76`** (the contributors API returns exactly one entry); **zero GitHub releases**; one tag (`v0.1.1`) though the code is at 0.1.2; 176 stars, 22 forks, 3 open issues. Last PyPI release **0.1.2, 2025-07-24**.
+- Open issues and their age: **#1** (2025-08-30, Hugging Face offering to host the checkpoint and the SpeechSynth dataset) — **never answered, 11 months**. **#3** (2025-10-16, opset-18 request) — answered in 2 days with a zip, still open. **#4** (2026-08-01, *"Request for training code or training details"*) — **unanswered**. **#2** (2025-09-02, ONNX graph simplification) — answered *and fixed the same day*.
+- The paper is **arXiv v1, 2025-08-25, never revised, no `journal_ref`, no venue** (arXiv API, 2026-08-03). At ~11.3 months it remains an **unreviewed preprint**.
+- Semantic Scholar returns **2 citing papers**, both 2026, both *tool use* rather than evaluation: a TTS-evaluation paper (arXiv:2606.31729) whose citation context reads *"f0 correlation computed with SwiftF0 [34]"*, and CHI 2026's *FlueBricks* (arXiv:2604.03636, DOI 10.1145/3772318.3790595). **No independent benchmark, and no reproduction of the accuracy claims by anyone unaffiliated.**
+
+**Argue dormancy correctly rather than fearing it.** Eleven idle months on an *evolving library you depend on* is a maintenance risk. Eleven idle months on a **frozen 389 KB MIT blob you vendor** is close to a feature — the same property that makes `signalsmith-stretch` v1.3.2 (`57b93f4`) safe to pin in §6. We would be vendoring a file, not depending on a maintainer. **The two genuine losses are specific and should be stated as such: (a) training code was never released, so we can neither retrain, fine-tune, nor audit how the model was produced; (b) no third party has re-run the benchmark end to end.**
+
+**The self-benchmarking objection is weaker than it was on 2026-07-29, and this is the single strongest new fact.** The benchmark has been **audited by a hostile-interest party, and the maintainer shipped the correction against his own model**: on 2025-09-01 `yxlllc` — who trained the RMVPE checkpoint the benchmark used — filed `lars76/pitch-benchmark` issue #3 with four specific implementation defects (wrong window length, wrong hop, wrong threshold, fp16 vs fp32 checkpoint); `lars76` engaged substantively the same day, `yxlllc` submitted PR #4, it was **merged within ~2 hours**, all benchmarks were re-run, and **RMVPE moved to 2nd overall and took "best on human singing" (MIR1K, Vocadito) away from SwiftF0.** The benchmark also carries third-party contributions (`korguchi`, +DIO/Harvest via pyworld, merged 2026-03-28) and is still being engaged with (issue #6, 2026-06-09). That is not independent *reproduction* — nobody has re-run the suite from scratch — but it is materially better than "unaudited", and the numbers the survey quoted are **post-correction**.
+
+**Third-party production adoption is real, and includes an Apple-platform, in-process, shipping case.** GitHub code search: **26** hits for `from swift_f0`; **187** issues/PRs mentioning it outside the author's own repos.
+- **`baijum/ukulele-companion`** — a shipping iOS + Android app: `iosApp/setup_onnxruntime.sh`, `docs/spec/22-neural-pitch-supervisor.md`, and PR #174 (2026-06-08) loading the model on iOS inside `Task.detached(priority: .userInitiated)` with `SwiftF0 Loading… / Active / Fallback` UI states. **This is the existence proof for criterion 2: SwiftF0 running in-process in a Swift app — via ONNX Runtime, not Core ML.**
+- **`rakuri255/UltraSinger`** — karaoke transcription on *sung vocals*, our exact material; a fork PR (2026-07-05) reads *"Revert default pitcher to swiftf0"*, i.e. it is the default.
+- **`musicmuni/voxatrace`** — commercial music-education pitch product, JNI bindings, docs and JVM demo apps.
+- **`kjranyone/RCWX`** PR #4 (2026-07-23): *"SwiftF0デフォルト化"* — made default. Also `SoulMelody/anyf0`, `tan90xx/distillw2n`, `gzivdo/pitch-core`, `Alok2221/Vocal2MIDI-Live`, `NewComer00/expressive`.
+- Ports exist (`jhartquist/candle-pitch` in Rust; `a5632645/swift_f0_cpp` in C++) but **none is a credible dependency** — the C++ one is a one-day experiment, 0 stars, **no licence**. Named so nobody mistakes them for a vendoring target. Its one useful datum: ~38% of a laptop CPU core for *real-time* operation, which is irrelevant to us and reinforces §7.6 — **this detector is offline machinery, exactly like everything else in this milestone.**
+
+#### 5.6.5 The strongest counter, in its sharpest form — and why it does not reverse the pick
+
+The sharp version is **not** "SwiftF0 makes octave errors": in aggregate it makes the *fewest* of the twelve algorithms measured (0.012, 5.6.3). It is this:
+
+> **`Alice-Sabrina-Ivy/Syrinx` #81 (2026-06-10) reports that on weak-fundamental low-F0 phonation (H2 louder than H1) in the 80–110 Hz register, SwiftF0 read 2×F0 on 25.6% of frames (49% correct, 19.1% null) — and the octave-up frames carried the *same confidence distribution as the correct ones* (median 0.82), so no threshold could separate them.** The project had replaced pYIN with SwiftF0 a month earlier (#75, 2026-05-07) and reverted to a Praat-style autocorrelation tracker. The stated mechanism is spectral H1−H2 dominance (correct frames +12 dB median, octave-up frames −3 dB).
+
+**Why this matters more than a benchmark row:** it makes criterion 4 **partially hollow on that register**. Segmentation is designed to gate on confidence (survey §B failure mode 3; §5.1(4)); a confidently-wrong octave is invisible to that gate. And this is *our* material — the survey's own open question 9 names low male voices and "grit" as the case Logic's Flex Pitch is reported to fail on, and tells us to test there specifically.
+
+**Why it does not reverse the pick, stated with its provenance:**
+1. **Provenance is one agent-authored PR body in a small repository.** The mechanism (H1/H2 dominance defeating a spectrogram-input CNN) is physically coherent and independently checkable; the numbers are not independently verifiable. It is **not** a hit piece — the same table reports SwiftF0 *winning* on vocadito (97.8 vs 95.0) and FDA (90.3 vs 84.2), and it corrects a measurement error that had previously *understated* SwiftF0 on PTDB (74.5 → 88.0%).
+2. **In an editor an octave error is visible and one drag fixes it** — this is exactly the case §5.1's "accuracy comes fourth" reasoning was written for, and here it genuinely applies. A *missing* note (voicing recall 0.633) is the error class that argument does not cover; a *wrong-octave* note is the class it does.
+3. **The alternative is not immune.** pYIN's whole design purpose is octave robustness and it still measures 0.032 — 2.7× SwiftF0's rate — while a from-scratch implementation would have no measured octave behaviour at all until we produced one.
+
+**So it becomes a gate requirement, not a rejection. §5.5 gains a named leg:**
+
+> **§5.5 new fixture leg (low-F0 weak-fundamental).** Male/low-register phonation in the **80–110 Hz** band with **H2 > H1**, synthetic first (where the H1/H2 balance is a dial and ground truth is exact), then real. **Ceiling: octave-error rate ≤ 2% of voiced frames, AND no octave-up frame may carry confidence above the median confidence of correct frames** — the second clause is the one that tests the actual claim. Failing this leg does **not** re-open the pick; it triggers the mitigation below.
+>
+> **Mitigation if that leg fails — contingent, deliberately NOT pre-decided:** an autocorrelation-based *octave sanity check* over the detector's own output (autocorrelation recovers the period regardless of which partial dominates, which is why the Praat-class trackers did not fail in the report above), used only to verify-and-halve, never to track. Cost ≈ **+0.5 week**, on `signalsmith-linear`'s existing Accelerate-backed primitives (§5.3's reasoning about vDSP transfers intact). **This is named as a costed contingency on a measurement nobody has made yet — it must not be built speculatively, and if it is built it lives in the one detector home, not as a second tracker.**
+
+Second, weaker real-world report, recorded for completeness: `walterfr/UltraStarKaraokeMaker` #7 (2026-07-17) finds SwiftF0's contour anti-correlated with ground truth on two densely-produced songs after stem separation (2% of notes within 2 semitones), and explicitly names two unseparated suspects — the extraction *or* the metric. **Undiagnosed; do not weigh it as a finding.** It is relevant only as a reminder that our input is a dry or RVC-produced vocal (§8.1), not a stem cut out of a dense mix.
+
+#### 5.6.6 What this changes in the plan
+
+**The integration route is an open sub-decision, and the notice's answer to it was wrong (5.6.3).** Three routes, ranked by *evidence status*, not by preference:
+
+| Route | Status | Cost / risk |
+|---|---|---|
+| **A. ONNX Runtime in-process** via Microsoft's official `onnxruntime-swift-package-manager` (**MIT**, release **1.24.2**, 2026-02-25; upstream `microsoft/onnxruntime` is MIT and actively maintained) | **The only route with a shipping-app witness on Apple platforms** (`baijum/ukulele-companion`, 5.6.4) | Works, licence-clean — but drags a **large binary runtime** into a bundle whose entire competing option is 389 KB, and adds a second inference stack the app otherwise does not have. This is a dependency the user may well decline on size grounds alone. |
+| **B. Dev-time ONNX → PyTorch → Core ML**, committing a small `.mlpackage`; **no inference dependency ships** | **Plausible and UNVERIFIED.** I have not checked that any converter handles this graph, nor that the result is numerically equivalent. | Architecturally the best fit (nothing new links; Core ML is a system framework). **Must not be nominated as preferred until a fidelity spike proves it.** Contingency: the in-repo model is **opset 20**; an opset-18 variant exists **only as an attachment on GitHub issue #3** — fragile provenance if a converter needs it, irrelevant if it does not. |
+| **C. Hand-port the graph** onto Accelerate/BNNS/MPSGraph, reading the ONNX weights | Feasible in principle at 95,842 parameters and a plain STFT + 2D CNN | Re-creates the "we are writing DSP" cost the pick was meant to remove, and creates a second home for the model. **Fallback of last resort.** |
+
+> **⚠️ REQUIRES FULL XCODE — flagged per the standing obligation, same convention as §8.2.** Neither route changes the pick; both change what the spike must confirm. **Route B**: compiling a committed `.mlpackage` to `.mlmodelc` is Xcode build-system tooling and is **not available under Command Line Tools** — so route B needs either a pre-compiled artefact produced once on a full-Xcode machine and committed, or `MLModel.compileModel(at:)` at first run (which moves the cost to the user's machine and needs a cache + failure path). **Route A**: embedding an xcframework lands in this repo's *existing* bundling/signing full-Xcode territory rather than adding new territory. **Check `xcodebuild -version` before either.**
+
+**Prerequisite: a conversion/fidelity spike that settles A vs B and proves numerical equivalence against the Python package on the §5.5 fixtures.** Ratification of this recommendation is ratification of *running that spike*, not of a particular runtime.
+
+**Where the spike belongs: phase 0, alongside E1 and E2 — not inside phase 1.** §11.2 says of phase 0 that *"this phase exists **to** absorb the risk"*, and this spike has a kill criterion and gates a structural choice, which is the same shape as E1/E2. Relocating it costs nothing: **phase 0 becomes 1–1.5 wk, phase-1 sub-item (1) drops to ~1 wk, and phase 0 + 1 stays at 4–4.5 wk either way** (5.6.7). The reason to prefer the relocation is §11.4's own argument — the ladder should run *before* anything is built on top of it.
+
+**The one home does not move.** §5.3 named `Sources/DAWEngine/Analysis/PitchTracker.swift`. **That file stays the single home for detection**; it now wraps a vendored artefact instead of containing a hand-written algorithm. Decimation, framing, timestamps, the confidence threshold and the voicing derivation all live behind it. **Do not create a second file for "the SwiftF0 wrapper" beside it** — that would re-create exactly the kind of second home §7.8 exists to forbid.
+
+**Concrete integration facts, read from `swift_f0/core.py` (2026-08-03), that the implementing milestone must plan around:**
+- `TARGET_SAMPLE_RATE = 16000` — our audio is 48 kHz, so **a 3:1 decimation with proper anti-aliasing is mandatory input conditioning**. This repo already has an SRC story worth reusing rather than re-deriving: `AudioEngine.projectSampleRate` and the m20-b/m20-d output-edge conversion work (m20-b measured that edge at +0.004 ms). Note this is *offline analysis* conditioning — it does not touch the live graph and must not acquire a second rate home.
+- `HOP_LENGTH = 256` at 16 kHz ⇒ **62.5 frames/s, 16 ms per frame.** **This is finer than §6's ~30 ms resynthesis hop, so detection is not the limiter §2.4's E1(c) worried about** — the analysis grid is denser than the grid we can act on, which is the right way round.
+- `MODEL_FMIN = 46.875 Hz`, `MODEL_FMAX = 2093.75 Hz` (G1–C7) — covers the full sung range including bass and soprano, and is *wider* than §5.3's proposed 80–1000 Hz pYIN search. Note that 5.6.5's failure register (80–110 Hz) sits well inside the supported range, so it is a model-behaviour question, not a range question.
+- `DEFAULT_CONFIDENCE_THRESHOLD = 0.9` produces **deliberate gaps** where the model declines to commit; the author states that post-processing to close them *reduced* benchmark accuracy. Segmentation must treat holes as signal (survey §B failure mode 3), not as something to fill. A third party lowered the threshold to 0.7 for a different application — **the threshold is ours to tune against the §5.5 fixtures, and it belongs in the one detector home.**
+- `swift_f0/music.py` ships `segment_notes()` / `export_to_midi()`. **Do NOT adopt it.** It splits on pitch deviation and unvoiced runs — precisely the naive scheme survey §B failure mode 1 says will chop vibrato into fragments. Subsystem B remains ours to design. Recorded here only so an implementer does not "discover" it and shortcut §B.
+
+**§5.5's gate survives and changes role, which is the most important consequence for the implementer.** It was written to validate *code we wrote*, with `librosa.pyin` as the reimplementation oracle. It now validates a *vendored artefact plus our wrapper*, so:
+- The bar and the fixtures stay (synthetic sweeps, vibrato at 4/5/6 Hz, octave leap, glide, silence/breath gap; then real dry vocal phrases), **plus the new low-F0 leg of 5.6.5**.
+- **The highest-value new test is Swift-vs-Python parity: identical WAV in, our in-process path vs the upstream `swift-f0` package, compared frame-for-frame.** That is what catches the errors this route actually makes — decimation, framing/timestamp alignment, opset or converter drift, threshold mismatch — and none of them are errors `librosa.pyin` can see.
+- `librosa.pyin` stays as a *second opinion* on the fixtures, dev-time only, never shipped (unchanged from §5.5). It is no longer the oracle for a reimplementation, because there is no longer a reimplementation.
+
+**pYIN's new status:** the fallback, not the plan. §5.3's reasoning for it remains correct and is why it is a *credible* fallback — no licence question, no artefact, well-specified algorithm, native confidence. It simply is not worth 2–3 weeks up front to arrive at a detector that measures worse on our material on every axis we care about. **The §5.2 table's `PICK` cell and §0's "Named detector" line should be read as superseded by this subsection** (left in place deliberately, per the no-rewrite rule).
+
+**Fallback ladder, replacing §5.5's single kill criterion:** SwiftF0 → (low-F0 leg fails) octave sanity check, +0.5 wk → (still fails, or the fidelity spike finds no acceptable in-process route and the user declines the ORT dependency) in-house pYIN exactly as §5.3 specifies, at §11's original cost. **Note that WORLD Harvest — the currently-named fallback in §5.5/§11 — has no number in the only benchmark either document found** (DIO/Harvest were added to the suite in March 2026 but do not appear in the published results table). Its accuracy on our material is unmeasured; that does not disqualify it, but it must not be cited as a *known-good* escape hatch.
+
+#### 5.6.7 Effect on §11 — a re-shape, not a subtraction
+
+§11.2's phase-1 sub-item (1) — *"`PitchTracker` — pYIN on `signalsmith-linear`, with the §5.5 fixture gate"*, called out there as **"the only one without precedent and … the bulk — 2–3 weeks"** — is replaced, not deleted. Do not read this as "removes 2–3 weeks." What replaces it:
+
+| Replacement work | Estimate |
+|---|---|
+| Conversion / fidelity spike: settle route A vs B (5.6.6), produce an in-process artefact, prove numerical equivalence vs the Python package on the §5.5 fixtures. **Real chance of falling back to the heavier route.** | 0.5–1 wk |
+| Swift wrapper: 48 k → 16 k anti-aliased decimation, framing and timestamp alignment, confidence threshold + fmin/fmax voicing derivation, the detector protocol seam (§7.6 keeps the model layer behind a protocol either way) | 0.5 wk |
+| §5.5 gate — unchanged in existence, changed in role, **plus** the low-F0 leg and the Swift-vs-Python parity comparison | 0.5 wk |
+| **Sub-item (1) total** | **1.5–2 wk** (was 2–3) |
+
+*The table books the spike against sub-item (1) so the line is directly comparable with §11.2's own "2–3 weeks" for the pYIN item. **5.6.6 recommends running it as a phase-0 leg instead; that moves 0.5–1 wk from phase 1 to phase 0 and leaves every total below unchanged.***
+
+**Phase 1: 4–5 wk → 3.5–4 wk. Phase 0 + 1 (first shippable value): 4.5–5.5 wk → 4–4.5 wk. Full subsystem: 14.5–19.5 wk → 14–18.5 wk.** Sub-item counts are unchanged (5 for phase 0+1, 15–16 total) — the spike replaces the pYIN item rather than adding one. The arithmetic is shown so a reader can disagree with the inputs rather than with the conclusion.
+
+**Contingencies (§11.3) change shape:** the "+1 week to escalate to WORLD Harvest" line is superseded by the ladder in 5.6.6 — **+0.5 wk** for the octave sanity check, and only if *both* the low-F0 leg fails *and* that check fails does the original **+2–3 wk** pYIN cost return. The Rubber Band contingency (+2 wk, £590–£1,490) is untouched.
+
+**But the tail gets WORSE, and saying otherwise would be false. The ladder is cumulative: the SwiftF0 route front-loads sunk cost that the pYIN fallback does not recover.**
+
+| | Detector work, worst case | Full subsystem, worst case (detector ladder only) |
+|---|---|---|
+| §11.3 as written | 2–3 (pYIN) + 1 (Harvest) = **3–4 wk** | **15.5–20.5 wk** |
+| This recommendation | 1.5–2 (spike + wrapper + gate, already spent) + 0.5 (octave check) + 2–3 (pYIN returns) = **4–5.5 wk** | **16.5–22 wk** |
+
+**So: expected case ~1 week better, worst case ~1–1.5 weeks worse.** That trade is still right, and the reason is not the mean — it is *where the risk sits*. §11.3's version puts 2–3 weeks of unwritten Viterbi DSP with no measured behaviour on the critical path and only discovers whether it clears the §5.5 bar at the end of it. This version spends 0.5–1 week on a spike with a binary answer, against an artefact whose behaviour on our exact datasets is already published and partially audited. **A worse tail bought with a much earlier and cheaper falsification point is a good trade for a subsystem this size — but it is a trade, and an implementer planning the milestone must budget it as one.**
+
+**The more valuable change is the risk shape, not the number.** §11.4 states *"E2 is the only architecture risk"* and lists the detector as bounded schedule risk. **That claim gets stronger, not weaker:** unwritten DSP with no measured behaviour is replaced by a vendored artefact with published, partially-audited numbers on our exact datasets, and the residual risk moves to an *integration* question (route A vs B) that a half-week spike answers definitively. **§11.4's conclusion stands unchanged: E2 — the perceptual quality of time-varying signalsmith-stretch on a real voice — remains the largest and only architecture risk, and phase 0 still runs first.**
+
+#### 5.6.8 What would reverse this recommendation
+
+Discriminating conditions, each falsifiable and none of them a matter of taste:
+
+1. **The user declines.** This is a recommendation; a new vendored artefact is their call (5.6 header). No further justification is needed or should be sought.
+2. **The §5.5 low-F0 leg fails past its stated ceiling** (5.6.5) **and** the octave sanity check does not recover it. Then the confidence signal is not trustworthy on a register we must support, criterion 4 fails in substance rather than in form, and §5.3's pick returns at §11's original cost.
+3. **The fidelity spike cannot produce an in-process artefact without vendoring ONNX Runtime, and the user rejects a dependency that size.** Route C (hand-port) then competes directly with in-house pYIN on effort, and pYIN wins that comparison on "no fourth-party artefact at all."
+4. **Ship-time licence re-verification fails** — i.e. the repo's `LICENSE` no longer covers `model.onnx`, or upstream restates the weights' terms. 5.6.2 is a 2026-08-03 reading and **must be re-verified at ship time, exactly as §9 requires of every row.**
+5. **An independent reproduction contradicts the benchmark materially.** None exists today (5.6.4). If one appears and moves SwiftF0 below pYIN on cents error, voicing recall or octave rate on singing material, this decision should be re-run against it.
+
+**What would NOT reverse it:** upstream staying dormant (we are vendoring a frozen file — 5.6.4); the paper never being peer-reviewed (the artefact's measured behaviour on our fixtures is what we ship against, not its citation count); RMVPE outscoring SwiftF0 on singing (RMVPE is rejected on architecture in §5.4, not on accuracy — see below).
+
+#### 5.6.9 Loose ends this subsection deliberately does not fix
+
+- **§5.4's rejection of the RVC-sidecar / RMVPE route stands, and is unaffected by RMVPE now being "best on human singing."** Both of §5.4's reasons are architectural and neither is an accuracy claim: it requires editing a forbidden path (`scripts/rvc/`, user sanction required), and a Python round-trip per re-analysis is the wrong shape for an interactive editor. **A better accuracy number does not touch either.** Stated explicitly so a reader arriving at RMVPE's 96.4% Vocadito does not reopen a closed decision.
+- **The survey and this document disagree on RMVPE's licence** because they checked *different repositories* — the survey found `yxlllc/RMVPE`'s LICENSE 404 and left it UNCONFIRMED; §5.2/§9 fetched `Dream-High/RMVPE` and read Apache-2.0. Both readings are correct about the repo each read. Pointer only; RMVPE is rejected on architecture either way and resolving it is not this item's job.
+- **§13's source list still describes the survey as "(skeleton, all `TODO:`)"** — the same false belief the line-10 header note already withdrew, surviving in a second place. **Noted, not edited**, per this amendment's one-addition scope. Anyone reading §13 should read line 10 first.
+- **§0's "Named detector" bullet and §5.2's `PICK` cell are not rewritten** — they are the 2026-07-29 record. This subsection supersedes them on ratification.
+
+#### 5.6.10 Sources for this subsection (all fetched or queried 2026-08-03)
+
+- `lars76/swift-f0` — repo metadata, commit list, contributors, releases/tags, issues #1–#4, and the recursive file tree giving `swift_f0/model.onnx` = **397,987 bytes** (GitHub API). https://github.com/lars76/swift-f0
+- `swift_f0/core.py` (raw fetch) — `TARGET_SAMPLE_RATE`, `HOP_LENGTH`, `MODEL_FMIN`/`MODEL_FMAX`, `DEFAULT_CONFIDENCE_THRESHOLD`, `_compute_voicing`, and the two-tensor model output. `CHANGELOG.md` (0.1.0 → 0.1.2). https://raw.githubusercontent.com/lars76/swift-f0/main/swift_f0/core.py
+- PyPI `swift-f0` — release history, last upload 0.1.2 on 2025-07-24. https://pypi.org/pypi/swift-f0/json
+- `lars76/pitch-benchmark` — current `README.md` (overall table, TL;DR recommendations) and `benchmark_report.md` (voicing precision/recall/F1, RPA/RCA/cents/RMSE/octave/gross error, smoothness); repo metadata and contributors; issues #2, #3, #6 and PR #4 (the `yxlllc` RMVPE correction, merged 2025-09-01). https://github.com/lars76/pitch-benchmark
+- arXiv API for 2508.18440 — v1 published 2025-08-25, never updated, no `journal_ref`. https://arxiv.org/abs/2508.18440
+- Semantic Scholar citations API for arXiv:2508.18440 — 2 citing papers with contexts: arXiv:2606.31729 (TTS evaluation, *"f0 correlation computed with SwiftF0"*), arXiv:2604.03636 (*FlueBricks*, CHI 2026, DOI 10.1145/3772318.3790595).
+- Core ML Tools — supported source frameworks (TF1/TF2, PyTorch, LibSVM, scikit-learn, XGBoost; ONNX absent): https://apple.github.io/coremltools/docs-guides/source/convert-learning-models.html · ONNX/Keras converter deprecation at coremltools 6 and the frozen, unmaintained `onnx-coreml`: https://github.com/onnx/onnx-coreml · https://apple.github.io/coremltools/docs-guides/source/faqs.html
+- ONNX Runtime — `microsoft/onnxruntime` (MIT, actively maintained) and `microsoft/onnxruntime-swift-package-manager` (MIT, release 1.24.2, 2026-02-25). https://github.com/microsoft/onnxruntime-swift-package-manager
+- Third-party adoption and failure reports (GitHub code/issue search): `baijum/ukulele-companion` PR #174 and `iosApp/setup_onnxruntime.sh` · `rakuri255/UltraSinger` + `MrDix/UltraSinger` PR #103 · `musicmuni/voxatrace` issue #1 · `kjranyone/RCWX` PR #4 · `SoulMelody/anyf0` · `a5632645/swift_f0_cpp` (unlicensed experiment) · **`Alice-Sabrina-Ivy/Syrinx` #75/#79/#81** (the low-F0 octave report) · **`walterfr/UltraStarKaraokeMaker` #7** (undiagnosed dense-mix contour report).
+
 ---
 ## 6. Resynthesis — the NAMED approach
 

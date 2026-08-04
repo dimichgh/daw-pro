@@ -435,6 +435,22 @@ struct GaplessLoopTransportTests {
     /// with a loop active from the start, the engine playhead wraps MODULARLY
     /// — pushes stay inside [0, loopEnd] across multiple cycles (the anchor
     /// never moves; the old behavior restarted the transport at every wrap).
+    ///
+    /// m23-bu-2: this used to also assert `wraps >= 1`, a COUNT of observed
+    /// decreases between consecutive pushes — exactly the shape starvation
+    /// converts into a red (a documented pre-existing flake, 1 failure / 8
+    /// pooled runs as of m23-bs-1), and there is no bar below `>= 1` to lower
+    /// it to. PROPERTY CONVERSION, not a skip: if the playhead were NOT
+    /// wrapping modularly, a push observed at wall-clock elapsed >= 2 loop
+    /// cycles (loopEnd = 1 beat = 500 ms at 120 BPM) would read
+    /// ~= elapsedMs / 500 >= 2.0 — but `maxPush <= 1.0` is asserted below.
+    /// So ONE push past the 2-cycle mark, still inside the loop bound,
+    /// settles it, with no tolerance needed. Deliberately NOT also checking
+    /// the pushed beat against `fmod(elapsedBeats, loopLen)` — see the
+    /// m23-bu-2 report for why a modular-position check was rejected (it
+    /// needs a tolerance, and on a 1-beat loop the tolerance ceiling is 0.5
+    /// beats, a trap one edit away given this tree's 0.25/1.2-beat
+    /// precedents elsewhere).
     @Test("live smoke: looped playback wraps the playhead modularly, never past the loop end")
     func liveLoopedPlayheadSmoke() async throws {
         let engine = AudioEngine()
@@ -444,44 +460,71 @@ struct GaplessLoopTransportTests {
             return  // headless machine without an output device
         }
 
-        var pushes: [Double] = []
-        engine.playheadHandler = { pushes.append($0) }
-
+        var pushes: [(ms: Double, beat: Double)] = []
         var transport = TransportState()
         transport.isPlaying = true
         transport.isLoopEnabled = true
         transport.loopStartBeat = 0
         transport.loopEndBeat = 1   // 0.5 s per cycle at 120 BPM
+        let callbackCountBefore = engine.performanceStats(reset: false).callbackCount
         engine.startPlayback(transport)
+        let t0 = Date()
+        engine.playheadHandler = { beat in
+            pushes.append((Date().timeIntervalSince(t0) * 1000, beat))
+        }
         // A fixed 1.7 s observation starves under parallel suite load: the
         // tick task shares the cooperative pool with dozens of offline
         // renders, and a fully descheduled tick loop collects too few pushes
-        // to catch a wrap (m15-c: measured 4 pushes/1.7 s vs 44 isolated).
-        // Poll to a generous deadline instead, exiting as soon as one wrap
-        // is OBSERVED — isolation still exits after the first cycle, and
-        // every assertion below is unchanged.
-        func observedWraps() -> Int {
-            zip(pushes, pushes.dropFirst()).filter { $1 < $0 }.count
-        }
+        // to catch a late one (m15-c: measured 4 pushes/1.7 s vs 44
+        // isolated). Poll to a generous deadline instead, exiting as soon as
+        // a push past the 2-cycle witness mark exists — isolation still
+        // exits promptly, and this loop is now an OPTIMIZATION only: unlike
+        // the deleted `wraps >= 1` exit condition, nothing below hard-asserts
+        // that this loop found what it was looking for before the deadline —
+        // that question is routed through StarvationWitness instead, which
+        // is what tells a starved window apart from a genuinely dead one.
+        let witnessMs = 2.0 * 500.0  // 2 loop cycles
         let deadline = ContinuousClock.now.advanced(by: .seconds(10))
-        while observedWraps() < 1, ContinuousClock.now < deadline {
+        while !pushes.contains(where: { $0.ms >= witnessMs }), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(200))
         }
+        // Read the render-side witness BEFORE any teardown — StarvationWitness's
+        // precondition (see its header) is a window with no reset in between.
+        let callbackCountAfter = engine.performanceStats(reset: false).callbackCount
         engine.stopPlayback()
         engine.shutdown()
 
-        let wraps = observedWraps()
-        let maxPush = pushes.max() ?? 0
-        print("[measured] live loop smoke: \(pushes.count) pushes, \(wraps) wraps, "
-              + "max \(maxPush) (loop end 1.0)")
-        #expect(!pushes.isEmpty)
+        let maxPush = pushes.map(\.beat).max() ?? 0
+        let lateWitnesses = pushes.filter { $0.ms >= witnessMs }
+        print("[measured] live loop smoke: \(pushes.count) pushes, \(lateWitnesses.count) past "
+              + "\(Int(witnessMs))ms, max \(maxPush) (loop end 1.0)")
+
+        switch StarvationWitness.classify(
+            mainActorSampleCount: lateWitnesses.count,
+            callbackCountBefore: callbackCountBefore,
+            callbackCountAfter: callbackCountAfter
+        ) {
+        case .starved(let delta, let minimum):
+            StarvationWitness.printSkip(
+                leg: "liveLoopedPlayheadSmoke", mainActorSampleCount: lateWitnesses.count,
+                minimumSamples: minimum, callbackDelta: delta)
+            return
+        case .renderDead:
+            let dead: String = "liveLoopedPlayheadSmoke: no playhead push landed past "
+                + "\(Int(witnessMs)) ms, AND the render callbackCount did not advance across the "
+                + "window (callbacks=\(callbackCountBefore)→\(callbackCountAfter)) — the render "
+                + "thread itself is not running; this is a genuine defect, not starvation."
+            Issue.record("\(dead)")
+            return
+        case .usable:
+            break
+        }
+
         // Modular playhead: the anchor never moves, derivedBeats wraps inside
-        // the window — a push can NEVER read past the loop end.
+        // the window — a push can NEVER read past the loop end. Paired with
+        // the `.usable` classification above (>= 1 push landed at wall-clock
+        // elapsed >= 2 loop cycles), this alone proves the wrap: a
+        // non-wrapping playhead would have read >= 2.0 at that push.
         #expect(maxPush <= 1.0)
-        // ≥ 1 observed wrap-back. ~3 wraps are expected in 1.7 s, but a
-        // starved tick task under parallel suite load can merge consecutive
-        // wraps into one observed decrease — the OFFLINE gates above are the
-        // wrap-continuity evidence; this smoke pins live modular wrapping.
-        #expect(wraps >= 1)
     }
 }

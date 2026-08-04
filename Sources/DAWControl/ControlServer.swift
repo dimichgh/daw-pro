@@ -1,3 +1,4 @@
+import DAWCore
 import Foundation
 import Network
 
@@ -24,11 +25,23 @@ public final class ControlServer: @unchecked Sendable {
     /// pre-m18-b behavior.
     private let livenessSnapshot: (@Sendable () -> MainActorLivenessSnapshot?)?
 
+    /// m23-av: the AU-prepare in-flight ledger read, for the QUEUE tier. Same
+    /// nil-means-no-interception contract as `livenessSnapshot`: when nil the
+    /// wedged answer simply OMITS the `inFlight` key (see `wedgeIntercept` —
+    /// emitting `[]` would be a claim this server cannot make).
+    ///
+    /// It is `nonisolated` all the way down to `AUPrepareLedger`'s lock, which
+    /// is the entire point: during a wedge the main actor is unavailable and
+    /// this is the only AU-prepare fact that can still be read.
+    private let auPrepareInFlight: (@Sendable () -> [EngineAUPrepareStats.InFlightEntry])?
+
     public init(router: CommandRouter, port: UInt16 = 17600,
-                livenessSnapshot: (@Sendable () -> MainActorLivenessSnapshot?)? = nil) {
+                livenessSnapshot: (@Sendable () -> MainActorLivenessSnapshot?)? = nil,
+                auPrepareInFlight: (@Sendable () -> [EngineAUPrepareStats.InFlightEntry])? = nil) {
         self.router = router
         self.port = port
         self.livenessSnapshot = livenessSnapshot
+        self.auPrepareInFlight = auPrepareInFlight
     }
 
     public func start() throws {
@@ -103,7 +116,8 @@ public final class ControlServer: @unchecked Sendable {
         // agent never faces a silent hang. Runs on `queue` (receiveMessage
         // callback), so `send` below is queue-legal.
         if let snapshot = livenessSnapshot?(),
-           let response = Self.wedgeIntercept(data, snapshot: snapshot) {
+           let response = Self.wedgeIntercept(data, snapshot: snapshot,
+                                              inFlight: auPrepareInFlight) {
             send(response, on: connection)
             return
         }
@@ -135,22 +149,50 @@ public final class ControlServer: @unchecked Sendable {
     ///   OMITTED; `mainActor: {responsive: false, wedgedForSeconds}` carries
     ///   the whole story. (The healthy path adds `mainActor: {responsive:
     ///   true}` next to the full engine fields — see Commands.swift.)
+    /// · `engine.auPrepareStats` (m23-av) answers with the SAME `mainActor`
+    ///   object plus `inFlight`, the AU prepares that armed a deadline race
+    ///   and have not published an outcome. The counters and the
+    ///   `tracks`/`effects` arrays are main-actor-produced and are OMITTED,
+    ///   NOT ZEROED — the watchdog rule above, applied to the same problem.
+    ///   `inFlight` itself is omitted when no provider was injected: emitting
+    ///   `[]` would assert "nothing is in flight", which this tier has no way
+    ///   to know, and this whole surface is DETECTION AND HONESTY ONLY.
     /// · Every other command fails fast with the teaching error (wire errors
     ///   are strings) instead of hanging until recovery.
     /// · Malformed JSON gets the usual malformed error, still answered here.
-    static func wedgeIntercept(_ data: Data,
-                               snapshot: MainActorLivenessSnapshot) -> ControlResponse? {
+    ///
+    /// `inFlight` carries NO DEFAULT so the compiler enumerates every call
+    /// site (the m23-bp/bq/bs house pattern); the branch structure below is
+    /// two explicit `if`s rather than a `Set.contains`, so widening the
+    /// allow-list is always a deliberate edit.
+    static func wedgeIntercept(
+        _ data: Data,
+        snapshot: MainActorLivenessSnapshot,
+        inFlight: (@Sendable () -> [EngineAUPrepareStats.InFlightEntry])?
+    ) -> ControlResponse? {
         guard !snapshot.responsive, let wedgedFor = snapshot.wedgedForSeconds else { return nil }
         guard let request = try? JSONDecoder().decode(ControlRequest.self, from: data) else {
             return .failure("?", "malformed request JSON (answered off-main during a main-actor wedge)")
         }
+        // The discriminator a client uses to know which form it received. It
+        // is ALWAYS present — the healthy path adds `{responsive: true}` next
+        // to the full fields (Commands.swift), this path says false.
+        let mainActor = JSONValue.object([
+            "responsive": .bool(false),
+            "wedgedForSeconds": .number(wedgedFor),
+        ])
         if request.command == "engine.watchdogStatus" {
-            return .success(request.id, .object([
-                "mainActor": .object([
-                    "responsive": .bool(false),
-                    "wedgedForSeconds": .number(wedgedFor),
-                ])
-            ]))
+            return .success(request.id, .object(["mainActor": mainActor]))
+        }
+        if request.command == "engine.auPrepareStats" {
+            var fields: [String: JSONValue] = ["mainActor": mainActor]
+            // Omit on a nil provider AND on the (unreachable in practice)
+            // encode failure: in both cases the honest answer is silence, not
+            // an empty array that would read as "nothing is in flight".
+            if let inFlight, let encoded = try? JSONValue(encoding: inFlight()) {
+                fields["inFlight"] = encoded
+            }
+            return .success(request.id, .object(fields))
         }
         return .failure(request.id, wedgeTeachingError(wedgedForSeconds: wedgedFor))
     }
@@ -161,7 +203,8 @@ public final class ControlServer: @unchecked Sendable {
     static func wedgeTeachingError(wedgedForSeconds: Double) -> String {
         "main actor has been unresponsive for "
             + String(format: "%.1f", wedgedForSeconds)
-            + " s — the app UI is wedged; engine.watchdogStatus reports liveness; "
+            + " s — the app UI is wedged; engine.watchdogStatus reports liveness and "
+            + "engine.auPrepareStats reports any AU prepare still in flight; "
             + "other commands cannot run until it recovers."
     }
 

@@ -245,14 +245,26 @@ struct MasterChainRenderTests {
         let engine = AudioEngine()
         engine.tracksDidChange([limited, dry])
 
-        // m19-j: the LIVE graph rate follows the hardware default output
-        // device (a Bluetooth headset in mic mode really runs at 24 kHz), so
-        // the limiter's 5 ms lookahead is DERIVED from the engine's actual
-        // rate — 240 was only ever the 48 kHz value. Same formula as
-        // LimiterEffect.prepare.
+        // m20-d: the LIVE graph rate is `AudioEngine.projectSampleRate`, not
+        // the hardware default output device's — so the limiter's 5 ms
+        // lookahead is 240 samples on every device (before m20-d a 24 kHz
+        // Bluetooth headset in mic mode made it 120). The derivation stays as
+        // an INVARIANCE pin: same formula as LimiterEffect.prepare, now
+        // constant-valued by construction.
+        //
+        // m23-ar: this used to re-type `Int((lookaheadSeconds × rate).rounded())`
+        // by hand. It now routes through the ONE HOME. The consequence is
+        // deliberate and worth stating, because it moves where this test's
+        // teeth live: the cross-checks below (`trackStageSamples == lookahead`)
+        // are now BOTH SIDES from `lookaheadSamples`, so they pin the PDC
+        // PLUMBING, not the formula. ⚠️ `== 240` MUST STAY A LITERAL — post-m23-ar
+        // it is the only independent oracle in this test, and "simplifying" it
+        // to `lookaheadSamples(sampleRate: rate)` makes the whole block
+        // tautological with nothing left to notice.
         let rate = engine.graph.graphSampleRateForTesting
-        let lookahead = Int((LimiterParams.lookaheadSeconds * rate).rounded())
-        #expect(lookahead > 0)  // a degenerate device rate must fail loudly, never vacuously
+        #expect(rate == AudioEngine.projectSampleRate)
+        let lookahead = LimiterParams.lookaheadSamples(sampleRate: rate)
+        #expect(lookahead == 240)  // pre-m20-d on a 44.1 kHz device this read 221
 
         let before = try #require(engine.pdcReport())
         #expect(before.trackStageSamples == lookahead)

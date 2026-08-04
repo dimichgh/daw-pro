@@ -66,6 +66,13 @@ public enum ProjectError: Error, LocalizedError {
     case transportBusy(String)
     case recordingFailed(String)
     case inputDeviceNotFound(String)
+    /// m20-j: the playback twin of `inputDeviceNotFound`.
+    case outputDeviceNotFound(String)
+    /// m20-j: the output AUHAL accepted the pin write and then did not honour
+    /// it (see `AudioEngine.applyOutputDevicePin` — `AudioUnitSetProperty`
+    /// returns `noErr` on writes the unit discards, so the read-back is the
+    /// only proof). Carries the device UID that failed to take.
+    case outputDeviceNotApplied(String)
     case projectPathRequired
     case saveFailed(String)
     case openFailed(String)
@@ -77,7 +84,26 @@ public enum ProjectError: Error, LocalizedError {
     case nothingToUndo
     case nothingToRedo
     // Takes / comping (M5 iii-a).
-    case clipInTakeGroup(String)
+    //
+    // m23-am ADDED `clipID` — the OFFENDING clip, not merely the group's name.
+    // A multi-clip edit (`removeClips`, a track-header union delete) refuses the
+    // WHOLE batch on one comp member, and the app has to anchor its amber bubble
+    // on SOMETHING. Before this payload the app's only material was the batch
+    // itself, so it anchored on `Set.first` — an arbitrary element that named the
+    // take group over an INNOCENT clip (MEASURED: 8 clips, offender at creation
+    // index 4, bubble landed on index 3). The offender is knowable only at the
+    // throw, so the throw carries it: the app learns WHICH clip refused from the
+    // error and needs no second "is this a comp member?" predicate of its own —
+    // `requireNotCompMember` stays the ONE home for that question.
+    //
+    // Wire-invisible: `ProjectError` is `Error, LocalizedError` and NOT Codable,
+    // and the control plane surfaces only `errorDescription`, whose text this
+    // payload deliberately does not touch (the wording is contract — see
+    // `errorDescription` below and `TakeCommandTests`).
+    //
+    // Ids beside a name follow `clipsWouldOverlapOnDestination` (m23-aj): the
+    // name is for the human, the id is for the surface that must point at it.
+    case clipInTakeGroup(String, clipID: UUID)
     case takeGroupNotFound
     case laneNotFound
     case laneInUse
@@ -190,6 +216,18 @@ public enum ProjectError: Error, LocalizedError {
     // interim. Message built at throw time so it can name the offending
     // ratio (the `invalidClipEdit` ready-to-show precedent).
     case transcriptionRequiresUnstretchedClip(UUID, ratio: Double)
+    // m23-aj (§18): the cross-track group move COLLAPSES a multi-track selection
+    // onto one track (`moveClips(ids:toTrackId:byBeats:)`), so two movers from
+    // DIFFERENT source tracks can be asked to occupy the same beats. That
+    // collision is MANUFACTURED by the verb — it did not exist before — and the
+    // whole move is refused before any mutation rather than letting two ordinary
+    // clips silently stack (the no-silent-overlap invariant, m11-d/m13-b) or
+    // picking which of the user's own clips dies. Carries IDS as well as names
+    // deliberately: clip names are not unique (two takes are routinely both
+    // `Audio 1`) and this error fires exactly when duplicate names are likeliest,
+    // while `errorDescription` can reach no store to look one up.
+    case clipsWouldOverlapOnDestination(firstID: UUID, firstName: String,
+                                        secondID: UUID, secondName: String)
 
     public var errorDescription: String? {
         switch self {
@@ -309,6 +347,12 @@ public enum ProjectError: Error, LocalizedError {
         case .inputDeviceNotFound(let uid):
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "no input device with uid '\(uid)' — use input.listDevices"
+        case .outputDeviceNotFound(let uid):
+            // Exact wording is contract (control protocol + MCP surface it verbatim).
+            return "no output device with uid '\(uid)' — use output.listDevices"
+        case .outputDeviceNotApplied(let uid):
+            return "output device '\(uid)' would not accept the selection — "
+                + "it may have been unplugged; use output.listDevices"
         case .projectPathRequired:
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "project has no file yet — pass a path to project.save (e.g. ~/Documents/DAW Pro/My Song.dawproj)"
@@ -331,8 +375,11 @@ public enum ProjectError: Error, LocalizedError {
         case .nothingToRedo:
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "nothing to redo"
-        case .clipInTakeGroup(let name):
+        case .clipInTakeGroup(let name, _):
             // Exact wording is contract (control protocol + MCP surface it verbatim).
+            // The m23-am `clipID` payload is deliberately NOT interpolated: it is
+            // for the UI's anchoring decision, and adding it here would change a
+            // string the wire, the MCP surface and `TakeCommandTests` all pin.
             return "clip belongs to take group '\(name)' — edit the comp (take.setComp) or take.flatten first"
         case .takeGroupNotFound:
             // Exact wording is contract (control protocol + MCP surface it verbatim).
@@ -525,6 +572,39 @@ public enum ProjectError: Error, LocalizedError {
                 + ") — un-stretch it (clip.setStretch ratio 1) first; clip.transcribe maps word "
                 + "timings assuming one source second equals one timeline second, which only "
                 + "holds at ratio 1 (stretch-aware transcription lands in a future version)"
+        case .clipsWouldOverlapOnDestination(let firstID, let firstName,
+                                             let secondID, let secondName):
+            // m23-aj (§18). Exact wording is contract (control protocol + MCP
+            // surface it verbatim); the ids are in the payload because clip names
+            // are not unique and this refusal fires precisely when they collide.
+            return "clips '\(firstName)' (\(firstID.uuidString)) and '\(secondName)'"
+                + " (\(secondID.uuidString)) would overlap on the destination track — moving several tracks'"
+                + " clips onto one track needs them at different beats (move them one at a time, or use"
+                + " clip.moveManyByTracks to keep them on separate tracks)"
+        }
+    }
+
+    /// THE clip a refusal should be shown ON — nil when the error does not name
+    /// a live clip the user can be pointed at (m23-am).
+    ///
+    /// The ONE home for "which clip does this error blame", so no surface has to
+    /// re-derive it by re-testing the model. A multi-clip edit refuses whole and
+    /// names exactly one offender (`removeClips` picks it deterministically); the
+    /// app anchors its amber bubble here in preference to the selection's focus,
+    /// because the focus is whatever the user last clicked and is routinely NOT
+    /// the clip that refused.
+    ///
+    /// DELIBERATELY NARROW. `clipNotFound(UUID)` also carries a clip id and is
+    /// deliberately excluded: that clip is by definition absent from the project,
+    /// so no block is drawn for it and anchoring there would render nothing —
+    /// exactly the silence this convention exists to prevent. Only ids that name
+    /// a clip still IN the project belong here.
+    public var refusalAnchorClipID: UUID? {
+        switch self {
+        case .clipInTakeGroup(_, let clipID):
+            return clipID
+        default:
+            return nil
         }
     }
 }

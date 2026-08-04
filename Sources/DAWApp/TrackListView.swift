@@ -406,9 +406,142 @@ struct TrackRow: View {
             sidebarWidth: sidebarWidth, hasTakeGroups: TakeLaneSelection.hasTakeGroups(track))
     }
 
+    // MARK: - Header-click acknowledgement (m23-an)
+
+    /// The plain-language word a header click gets when it landed and there was
+    /// nothing to select.
+    ///
+    /// PINNED HERE, IN THE VIEW — `DAWAppKit.ArrangeTrackClickFeedback` returns a
+    /// VERDICT and no prose (the `ArrangeRefusalBubble` / `deleteBarBlockedReason`
+    /// convention: the headless type decides, the view owns wording, placement and
+    /// colour). `deleteBarBlockedReason` is the shape being copied, down to being
+    /// a `static let` so a gate can read the exact sentence out of this source
+    /// rather than carry its own literal.
+    ///
+    /// NO CALL TO ACTION, deliberately, and this is a design decision rather than
+    /// terseness. The obvious addition — "double-click the lane to add one" — is
+    /// already the empty-lane hint's job (m23-v), it would be a near-identical
+    /// second copy of that sentence, and it would be **WRONG on an audio or bus
+    /// track**, where that double-click legitimately refuses
+    /// (`midiClipsRequireInstrumentTrack`). The hint is shown only where
+    /// `Track.canHoldMIDIClips` holds for exactly that reason, and this word is
+    /// shown on every kind of track — so it says only what is true everywhere.
+    /// "Advertising an action that will refuse is worse than saying nothing"
+    /// (docs/DESIGN-LANGUAGE.md, empty-lane hint).
+    ///
+    /// SHORTENED WHEN THE CHIP MOVED INSIDE THE ROW. It read "This track has no
+    /// clips to select." while it hung BELOW the row, where "this track" was doing
+    /// real work — a chip floating between two rows has to name its owner. Drawn
+    /// inside the row, the row's own name is right there and the deixis is free,
+    /// so what remains is only the part that carries information. The shorter
+    /// string is also what lets the chip sit at the row's trailing edge at the
+    /// narrowest sidebar the app allows (250 pt) without reaching that name.
+    static let noClipsToSelectNotice = "No clips to select"
+
+    /// The row's acknowledgement chip (m23-an).
+    ///
+    /// ═══ WHY IT IS A CHILD OF THE ROW IT NAMES ═══
+    ///
+    /// ⚠️ IT WAS NOT, AND THE BUG THAT CAUSED IS WORTH KEEPING WRITTEN DOWN. The
+    /// first build drew it from `TrackRowsList` as an overlay on the row stack,
+    /// hung 2 pt under the clicked row's bottom edge — `tops[i] + heights[i] + 2`
+    /// — by copying `dropIndicator`'s geometry. That geometry is right for a drop
+    /// indicator, which is a LINE at a boundary and belongs to neither neighbour.
+    /// A chip is not a line: it has a body. With `VStack(spacing: 6)` and a ~21 pt
+    /// chip, MEASURED at 2x from a real capture, the body landed at y 298.5…319.5
+    /// pt while the NEXT row's band was 302.5…336.5 pt. The sentence naming track
+    /// i was painted across track i+1's row, over its icon and the top of its
+    /// name — the model named the right track and the pixels blamed an innocent
+    /// one, which is exactly the defect m23-am was opened for. Every seam leg,
+    /// `trackClickAckTrackId` included, stayed green through all of it.
+    ///
+    /// So it now hangs off `row` itself. That is not merely a better offset: the
+    /// chip is a CHILD of the row it describes, so "drawn on the wrong row" stops
+    /// being a thing the code can express — no index lookup, no ladder read, no
+    /// arithmetic to get wrong. (The same reason `ArrangeDropSnap` has a
+    /// `fileprivate init`: make the inconsistent state unrepresentable rather than
+    /// test for it.) Three consequences fall out for free: it cannot be clipped
+    /// away on the LAST row, which the old geometry could be — and a newly added
+    /// track lands last with no clips, the likeliest way a user meets this at all;
+    /// it rides along correctly during a reorder drag, where the ladder holds
+    /// un-parted positions; and it is centred by `alignment: .trailing` on any row
+    /// height in the 24…64 pt range with no pinned constant to drift.
+    ///
+    /// TRAILING, because the one thing that must stay legible under it is the
+    /// track NAME — the row's identity, and what makes the attribution readable at
+    /// a glance. The chip covers the right end of the row (automation button,
+    /// M/S/R) for three seconds. That is a real cost, taken deliberately: it is
+    /// occlusion WITHOUT interaction loss (`.allowsHitTesting(false)` — the
+    /// controls under it still take a click), where the geometry it replaced
+    /// occluded just as much of the NEXT row and misattributed the message too.
+    ///
+    /// ═══ THE COLOUR REGISTER: NEUTRAL, AND WHY IT IS NOT AMBER ═══
+    ///
+    /// This is **not a refusal**. Nothing was rejected, nothing was destroyed, and
+    /// the click did exactly what clicking an empty track means. Amber
+    /// (`DAWTheme.record`) is this app's REFUSAL register — `ArrangeRefusalBubble`
+    /// and `PianoRollView.deleteBarBlockedReason` both wear it to say "the edit did
+    /// not happen" — and borrowing it here would teach the user that a perfectly
+    /// ordinary click was an error. Rule 3: one accent per meaning, and an accent
+    /// is EARNED by state. Cyan is playback/active, green is success (nothing
+    /// succeeded — nothing happened), violet is AI-touched content only. None of
+    /// the five is honest, so this takes none of them.
+    ///
+    /// The precedent for neutral informational furniture is already in the design
+    /// language, twice: the session-marker flags ("navigation furniture, not an
+    /// active or AI state, so the flags are deliberately NEUTRAL — a dark
+    /// raised-glass chip with the name in SF Pro") and the empty-lane hint ("no
+    /// glow, no accent, never cyan and never violet"). This follows both: dark
+    /// glass + hairline, SF Pro (prose, so never SF Mono — that is reserved for
+    /// numeric readouts), `textSecondary` ink, and **no glow** ("never glow static
+    /// chrome"; there is no state here to earn one). It is `panelRaised` over a
+    /// hairline rather than `panel`, because it sits ON a `panelRaised` row and a
+    /// darker chip on a raised card reads as a hole rather than as a layer.
+    ///
+    /// Its salience is MOTION, not colour — 0.15 s in, 0.3 s out, matching
+    /// `PianoRollView.flashBarOpsNotice` exactly.
+    ///
+    /// ═══ IT MUST NEVER READ AS SELECTION STATE ═══
+    ///
+    /// Hence: transient (3 s, model-owned — `AppModel.trackClickAck`), a chip that
+    /// floats OVER the row and never a fill or a border ON it, and no persistent
+    /// mark of any kind. `ArrangeTrackSelection`'s standing prohibition — "a track
+    /// as a distinct selectable object ships only on the user's word; do not add it
+    /// on the way past" — is one careless `.background(isSelected …)` away, and
+    /// this chip is the nearest thing in the tree to that mistake.
+    @ViewBuilder
+    private var trackClickAckBubble: some View {
+        // ONE condition, and it is the model comparison and nothing else: remove
+        // the `Text` and there is no second thing left reporting that a chip was
+        // drawn (the m23-v drawing-layer rule). The pixel legs in
+        // `scripts/gates/m23an-header-feedback.mjs` are what catch a build that
+        // keeps the state and the echo and draws nothing.
+        if model.trackClickAck?.trackID == track.id {
+            Text(Self.noClipsToSelectNotice)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(DAWTheme.textSecondary)
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(DAWTheme.panelRaised)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4)
+                    .stroke(DAWTheme.hairline, lineWidth: 1))
+                .shadow(color: .black.opacity(0.5), radius: 6, y: 2)
+                .padding(.trailing, 8)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            row
+            // ON THE HEADER ROW ITSELF, never on this VStack: an expanded track
+            // also carries its takes and automation sections here, and centring
+            // the chip on the whole card would drift it downward the more of the
+            // track is unfolded.
+            row.overlay(alignment: .trailing) { trackClickAckBubble }
             if isTakesExpanded {
                 TakeTrackControls(track: track)
             }

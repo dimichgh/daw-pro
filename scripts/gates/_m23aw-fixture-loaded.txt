@@ -1,0 +1,4 @@
+◇ Test run started.
+[measured] GM bank prepare-to-ready wall time: 30.900 seconds, horizon 60.0 seconds, margin 1.942
+[measured] m19-e contended prepares: n=32, min 0.161555 s, median 2.777165 s, p90 23.920 s, max 39.034 s, under1s 8, horizon 60.0 seconds
+✔ Test run with 4716 tests in 487 suites passed after 160.000 seconds.

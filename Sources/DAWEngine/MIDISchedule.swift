@@ -82,8 +82,16 @@ final class MIDIEventSchedule {
     ///  · off at min(note end, clip end); off ≥ on + 1 frame defensively
     ///    (`MIDINote.minLengthBeats` at the 400 BPM tempo cap is ≥ 7 frames at
     ///    48 kHz, so rounding can never collapse a note — the clamp is defense)
-    ///  · NO note chase v0: the onset must also be ≥ fromBeat, else BOTH events
-    ///    are dropped (a note sounding across the start point does not sound)
+    ///  · NOTE CHASE (m23-bp): OFF BY DEFAULT — the onset must also be ≥ fromBeat,
+    ///    else BOTH events are dropped (a note sounding across the start point does
+    ///    not sound). `chaseHeldNotes: true` — passed ONLY by a CONTINUATION
+    ///    reschedule (`RescheduleCause`; never a relocation, never a loop-cycle
+    ///    block) — instead admits a note whose onset is behind the anchor while its
+    ///    off is strictly ahead of it, with the ONSET CLAMPED to fromBeat (so its
+    ///    frame is the block's anchorFrame) and the off at its true time. The note
+    ///    RE-ATTACKS; true voice continuation is out of reach (design-m23bp §4). A
+    ///    chased note with no whole frame of tail left is dropped rather than
+    ///    clamped to 1 frame.
     ///  · same-pitch overlaps are legal: noteID pairs ons with their offs
     ///  · sort key: (sampleTime, kindRank[off BEFORE on], pitch, noteID) — the
     ///    off-before-on tie rule is load-bearing: back-to-back same-pitch notes
@@ -119,7 +127,9 @@ final class MIDIEventSchedule {
     /// and every unrolled loop-cycle block (fromBeat == loop.startBeat)
     /// chases at the loop start, so each cycle opens with the state a fresh
     /// seek-to-loop-start would produce (deterministic cycles, §8.6 prune
-    /// self-containment). The note NO-CHASE guard survives verbatim.
+    /// self-containment). The note guard is INDEPENDENT of this prefix: it
+    /// stays no-chase unless `chaseHeldNotes` is passed (m23-bp), which a
+    /// loop-cycle block never does.
     ///
     /// m16-b2 signature (C5): returns the events AND the next unconsumed
     /// noteID — controller events consume IDs from the same running counter
@@ -131,27 +141,52 @@ final class MIDIEventSchedule {
                             sampleRate: Double,
                             onsetEndBeat: Double? = nil,
                             offsetSeconds: Double = 0,
-                            noteIDBase: UInt64 = 0)
+                            noteIDBase: UInt64 = 0,
+                            chaseHeldNotes: Bool = false)
         -> (events: [ScheduledMIDIEvent], nextNoteID: UInt64) {
         // m12-b (design row 37): event frames are the tempo-map integral from
         // the schedule anchor — `round(seconds(from: fromBeat, to: beat) ·
         // rate)`. Trivial-map arithmetic is bit-identical to the old
         // `(beat − fromBeat) · spb` (the map's same-segment fast path). The
-        // no-chase guard below is beat-domain and stays untouched.
+        // chase guard below is beat-domain, and with `chaseHeldNotes == false`
+        // it reduces to the v0 no-chase rule bit-identically (m23-bp, C1b).
         var events: [ScheduledMIDIEvent] = []
         var nextNoteID: UInt64 = noteIDBase
         for clip in clips where clip.isMIDI {
             for note in clip.notes ?? [] {
                 guard note.startBeat < clip.lengthBeats else { continue }  // [0, clipLen)
                 let onBeat = clip.startBeat + note.startBeat
-                guard onBeat >= fromBeat else { continue }                 // no chase v0
-                if let onsetEndBeat, onBeat >= onsetEndBeat { continue }   // loop window
                 let offBeat = clip.startBeat + min(note.endBeat, clip.lengthBeats)
+                // m23-bp. NOT chasing is the v0 rule verbatim: an onset behind
+                // the anchor drops BOTH events. Chasing (continuation resumes
+                // only) admits a note that is still SOUNDING at the anchor and
+                // clamps its onset to `fromBeat` — in the BEAT domain, so the
+                // frame lands on the block's own anchorFrame by the same
+                // expression the controller chase prefix uses. The
+                // `offBeat > fromBeat` test is beat-domain and runs BEFORE any
+                // `tempoMap.seconds` call: resuming at beat 500 of a long song
+                // must not pay a map integral for every note in the past.
+                var onsetBeat = onBeat
+                let chased = onBeat < fromBeat
+                if chased {
+                    guard chaseHeldNotes, offBeat > fromBeat else { continue }
+                    onsetBeat = fromBeat
+                }
+                // The loop window reads the ORIGINAL onset: a chased note's true
+                // onset is < fromBeat ≤ onsetEndBeat, so it is never windowed
+                // out here (pinning the original is what keeps the rule stable
+                // if the window ever moves).
+                if let onsetEndBeat, onBeat >= onsetEndBeat { continue }   // loop window
                 let on = Int64(((offsetSeconds
-                    + tempoMap.seconds(from: fromBeat, to: onBeat)) * sampleRate).rounded())
-                let off = max(on + 1,
-                              Int64(((offsetSeconds
-                                  + tempoMap.seconds(from: fromBeat, to: offBeat)) * sampleRate).rounded()))
+                    + tempoMap.seconds(from: fromBeat, to: onsetBeat)) * sampleRate).rounded())
+                let offRaw = Int64(((offsetSeconds
+                    + tempoMap.seconds(from: fromBeat, to: offBeat)) * sampleRate).rounded())
+                // A chased note with no whole frame of tail left is DROPPED,
+                // never rescued by the defensive clamp below: a 1-frame
+                // re-attack is an attack transient with no note behind it, i.e.
+                // a click. Un-chased notes keep the clamp byte-identically.
+                if chased, offRaw <= on { continue }
+                let off = max(on + 1, offRaw)
                 let id = nextNoteID
                 nextNoteID += 1
                 let pitch = UInt8(clamping: note.pitch)

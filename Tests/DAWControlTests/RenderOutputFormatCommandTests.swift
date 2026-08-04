@@ -284,6 +284,6 @@ struct RenderOutputFormatCommandTests {
 
     @Test("the wire surface is unmoved: m23-m2 added PARAMS, not verbs")
     func wireCountUnmoved() {
-        #expect(CommandRouter.allCommands.count == 166)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af
+        #expect(CommandRouter.allCommands.count == 171)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2
     }
 }

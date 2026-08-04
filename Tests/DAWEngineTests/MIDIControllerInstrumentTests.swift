@@ -431,11 +431,54 @@ struct MIDIControllerInstrumentTests {
             + Double(emptyBest.components.seconds) * 1e9
         let denseNs = Double(denseBest.components.attoseconds) / 1e9
             + Double(denseBest.components.seconds) * 1e9
-        let perEventMicroseconds = max(0, denseNs - emptyNs) / 512.0 / 1_000.0
+        let rawDeltaNs = denseNs - emptyNs
+        let perEventMicroseconds = max(0, rawDeltaNs) / 512.0 / 1_000.0
         print("[measured] DLS dense-512 quantum: empty \(emptyNs / 1e6) ms, "
               + "dense \(denseNs / 1e6) ms → scheduleMIDIEventBlock ≈ "
               + "\(perEventMicroseconds) µs/event")
         // Sanity envelope only — the number itself is the rider deliverable.
         #expect(perEventMicroseconds < 100)
+        // Floor — the missing other side of the envelope above (m23-as-2d).
+        // Asserted on the RAW unclamped delta, not perEventMicroseconds:
+        // that value's own `max(0, …)` is what turns a genuine regression
+        // (dense costing no more than empty, i.e. a negative delta) into an
+        // innocent-looking 0, which would sail straight past a floor picked
+        // against it. Mutation evidence (run and reverted, not re-derived
+        // here): a hosted AU that silently drops every forwarded MIDI event
+        // (`for event in events where false` in
+        // HostedAUInstrument.render) still walks the 512-frame buffer, so
+        // the failure does NOT measure 0 — it measures a residual 0.00635
+        // µs/event, a different number from the 0.0 a no-events vacuity
+        // probe produces. Healthy measured 0.0367–0.0448 µs/event across 12
+        // runs (4 isolated, 8 full-suite-historical); worst healthy =
+        // 0.0367. Floor = geometric midpoint of worst-healthy and the
+        // measured regression residual: sqrt(0.0367 × 0.00635) ≈ 0.01527,
+        // taken as 0.015 µs/event — healthy sits 2.45× ABOVE it, the
+        // measured regression sits 2.36× BELOW it, deliberately balanced so
+        // neither a slow machine nor a partial regression decides it by
+        // luck. (Measured full-suite inflation here is ~1.08–1.22×
+        // (isolated 0.0367–0.0397, loaded 0.0387–0.0448) — there is no load
+        // contamination to cancel via a same-run ratio, and this quantity
+        // is already a same-run difference, so an absolute floor is the
+        // correct instrument, not a calibrated ratio.)
+        //
+        // This floor has itself been SEEN to fire (m23-as-2d), not just
+        // asserted: a test-side probe scaling `rawDeltaNs` by 0.164 (to land
+        // in the measured-regression band rather than at a suspicious 0)
+        // produced a reading of 0.006833 µs/event, exactly ONE issue (this
+        // leg only — the `< 100` envelope above stayed green as it should),
+        // with the failure message rendering the real numbers. Reverted
+        // byte-exact; re-run the same way to re-verify.
+        let floorMicroseconds = 0.015
+        let rawPerEventMicroseconds = rawDeltaNs / 512.0 / 1_000.0
+        let floorFailureMessage = "scheduleMIDIEventBlock ≈ "
+            + "\(rawPerEventMicroseconds) µs/event, at or below the "
+            + "\(floorMicroseconds) µs/event floor — the dense block cost "
+            + "no more than the empty one, meaning scheduleMIDIEventBlock "
+            + "is not being fed: the hosted AU is silently dropping events "
+            + "instead of forwarding them. Healthy measured "
+            + "0.0367–0.0448 µs/event; a hosted AU that drops all forwarded "
+            + "events measured a residual 0.00635 µs/event."
+        #expect(rawPerEventMicroseconds > floorMicroseconds, "\(floorFailureMessage)")
     }
 }

@@ -2425,6 +2425,65 @@ registerTool(
 );
 
 // ---------------------------------------------------------------------------
+// Output
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "output_list_devices",
+  {
+    title: "List audio output devices",
+    description:
+      "List the Mac's available audio output devices (built-in speakers, " +
+      "headphones, USB/Thunderbolt audio interfaces, etc). Each entry has " +
+      "`uid` (stable identifier to pass to output_set_device), `name`, " +
+      "`sampleRate` (Hz), `channelCount`, `isDefault` (true for the " +
+      "system's current default output — the macOS Sound setting), and " +
+      "`isSelected` (true for the device DAW Pro has explicitly pinned). " +
+      "The two are independent, and reading them together is what tells " +
+      "you the actual state: all `isSelected` false means DAW Pro is " +
+      "following the system default and will keep following it if the " +
+      "user changes it; `isSelected` true with `isDefault` false means " +
+      "playback is pinned somewhere other than the system default; both " +
+      "true means it is pinned to the device that currently happens to BE " +
+      "the default, and will stay on that device even if the default " +
+      "moves. No params. Call this before output_set_device to find a " +
+      "device's uid, or afterwards to confirm what is now selected.",
+  },
+  async () => toToolResult(() => bridge.send("output.listDevices"))
+);
+
+registerTool(
+  "output_set_device",
+  {
+    title: "Pin the playback output device",
+    description:
+      "Pin DAW Pro's own playback to a specific audio output device by uid " +
+      "(from output_list_devices), independent of the Mac's system default " +
+      "output. This is app-local — it does NOT change the macOS default " +
+      "output device (System Settings > Sound stays untouched), so other " +
+      "apps and system sounds keep playing wherever they already were; it " +
+      "only redirects what DAW Pro itself sends out, e.g. to send the mix " +
+      "to an audio interface while notification sounds stay on the " +
+      "speakers. Returns the device list reflecting the new selection — the " +
+      "pinned device comes back with `isSelected: true` — so no follow-up " +
+      "output_list_devices call is needed. Omit `uid` (or pass nothing) to " +
+      "clear the pin and go back to following the Mac's system default " +
+      "output device, which comes back as `isSelected` false on every entry.",
+    inputSchema: {
+      uid: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Uid of the output device to pin, from output_list_devices. Omit " +
+            "to revert to the system default output device."
+        ),
+    },
+  },
+  async ({ uid }) => toToolResult(() => bridge.send("output.setDevice", { uid: uid ?? null }))
+);
+
+// ---------------------------------------------------------------------------
 // Clips
 // ---------------------------------------------------------------------------
 
@@ -4436,6 +4495,55 @@ server.registerTool(
       "silence better than any mix parameter will.",
   },
   async () => toToolResult(() => bridge.send("engine.watchdogStatus"))
+);
+
+server.registerTool(
+  "engine_au_prepare_stats",
+  {
+    title: "Read how many times plug-ins have been (re)loaded by the audio engine",
+    description:
+      "Read the audio engine's plug-in LOADING ledger — how many times hosted Audio Unit " +
+      "instruments and effects have been prepared (loaded/configured) and released (torn down) " +
+      "since the app's engine came up. This is a diagnostic, not a mix control: it never " +
+      "changes anything. No params. Returns `{instrumentPrepares, instrumentReleases, " +
+      "effectPrepares, effectReleases, tracks: [{trackId, keyDigest?, status?}], effects: " +
+      "[{effectId, keyDigest?, status?}]}`. HOW TO USE IT: the four counters only ever go UP " +
+      "and there is deliberately NO reset — read them, do the thing you are testing (change " +
+      "the output device, change the sample rate, switch a preset, recover from a stall), read " +
+      "them again, and SUBTRACT. A difference of exactly 0 is a hard proof that nothing was " +
+      "reloaded; that is far stronger than listening for a glitch. `instrumentPrepares` counts " +
+      "load ATTEMPTS that actually did work, so a plug-in that failed or was missing still " +
+      "counts (a storm of failing loads is the worst kind); repeated no-op passes over an " +
+      "unchanged project count nothing. `instrumentReleases` counts only real teardowns of a " +
+      "live plug-in instance. Swapping a track's plug-in (or its sample rate) bumps BOTH by " +
+      "one; loading a plug-in for the first time bumps only the prepare counter. " +
+      "`keyDigest` is a short opaque fingerprint of the exact configuration each track/effect " +
+      "was last loaded with — compare it between two reads to see WHICH slot changed, but " +
+      "never try to parse or decode it. `status` reads 'pending', 'ready', 'missing' (no such " +
+      "plug-in installed) or 'failed: <reason>'; both `keyDigest` and `status` are omitted when " +
+      "the engine holds nothing for that slot. The counters survive an engine restart (a " +
+      "device change or an automatic stall recovery), so they stay comparable across one; only " +
+      "live playback is counted, never an offline bounce. Always safe: read-only, never " +
+      "throws, and with no engine (headless) everything reads zero. " +
+      "ALSO RETURNS `inFlight`: plug-in loads that have STARTED and not yet finished — " +
+      "`[{slot: 'instrument'|'effect', id, component?: {type, subType, manufacturer}, " +
+      "startedSecondsAgo, deadlineSeconds, overdue}]`, sorted by (slot, id) and almost always " +
+      "empty. This is the ONLY way to find out which plug-in is hanging the app WHILE it is " +
+      "hanging it. `overdue: true` means that load has already blown its time budget. " +
+      "READ IT CAREFULLY: overdue does NOT mean the plug-in failed (the load keeps running and " +
+      "may still succeed), does NOT by itself mean the app is frozen (a load can be slow on a " +
+      "busy but perfectly healthy machine — check `mainActor` for that), and says NOTHING about " +
+      "audio: sound that is already playing keeps playing even while the UI is frozen. A slot " +
+      "that is absent just means no load is in progress for it, not that it is healthy. " +
+      "AND `mainActor`: `{responsive: true}` on a normal reply. If the app's UI is frozen you " +
+      "get a REDUCED reply instead — `{mainActor: {responsive: false, wedgedForSeconds}, " +
+      "inFlight: [...]}` with the four counters and the `tracks`/`effects` arrays OMITTED " +
+      "(not zeroed), because those can only be produced by the frozen part of the app and " +
+      "reporting stale ones as current would be a lie. Check `mainActor.responsive` to know " +
+      "which of the two shapes you got; during a freeze this is one of only two commands that " +
+      "answers at all — the other is engine_watchdog_status.",
+  },
+  async () => toToolResult(() => bridge.send("engine.auPrepareStats"))
 );
 
 // ---------------------------------------------------------------------------
@@ -7817,8 +7925,12 @@ registerTool(
       "one. ALL-OR-NOTHING: every id must resolve to a live clip and must not belong " +
       "to a take group (the clip_remove contract) or the WHOLE call is refused and " +
       "the project is left untouched — never a partial delete. Duplicate ids " +
-      "collapse. `ids` may be empty, which is a safe no-op. Returns `{clips}`, the " +
-      "removed clips.",
+      "collapse. `ids` may be empty, which is a safe no-op. WHICH refusal you get " +
+      "is deterministic (m23-am): an unknown id is reported before any take-group " +
+      "member, and when several ids are take-group members the error names the " +
+      "first one in arrangement order — track order, then the clip's position in " +
+      "its track — never the order you happened to pass them in. Returns `{clips}`, " +
+      "the removed clips.",
     inputSchema: {
       ids: z
         .array(z.string().uuid())
@@ -7874,4 +7986,121 @@ registerTool(
     },
   },
   async ({ ids, byBeats }) => toToolResult(() => bridge.send("clip.moveMany", { ids, byBeats }))
+);
+
+// ---------------------------------------------------------------------------
+// Cross-track group move (m23-aj) — the vertical twins of clip_move_many.
+// Two tools, not one either/or param: the design rejected a single
+// `clip_move_many_across` because neither this schema surface nor the
+// control-protocol one can express "exactly one of byTracks/toTrackId", and
+// advertising a call shape the router would then refuse is worse than never
+// advertising it at all.
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "clip_move_many_by_tracks",
+  {
+    title: "Move several clips down or up the track list, rigidly, as one undo step",
+    description:
+      "Move SEVERAL clips DOWN or UP the track list by the SAME whole number of tracks, " +
+      "rigidly, in ONE undo step — a selection spanning several tracks keeps its shape " +
+      "(vertical offsets between the clips are preserved). A move onto a track that " +
+      "cannot hold the clip REFUSES THE WHOLE CALL: a MIDI clip needs an instrument " +
+      "track, an audio clip needs an audio track, and bus tracks hold no clips at all — " +
+      "nothing is skipped and nothing is partially applied. Running off the top or " +
+      "bottom of the track list is CLAMPED, not refused (the whole group, never per " +
+      "clip) — read `effectiveTrackDelta`/`clampedTracks` rather than assuming " +
+      "`byTracks` fully applied, the same precedent as clip_move_many's `clamped`. " +
+      "`byBeats` optionally rides along in the SAME undo step, so one call can move " +
+      "down AND along at once (same whole-group beat-0 clamp as clip_move_many). " +
+      "`landings` is the per-clip truth: a move of a selection spanning several tracks " +
+      "lands on several tracks, so there is no single destination to report. Prefer " +
+      "clip_move_many_to_track when you know the destination track by id rather than a " +
+      "relative offset — an agent choosing the wrong one of these two is the most " +
+      "likely misuse. Returns `{requestedTrackDelta, effectiveTrackDelta, " +
+      "clampedTracks, requestedDeltaBeats, effectiveDeltaBeats, clamped, landings: " +
+      "[{clipId, fromTrackId, toTrackId}], trimmedClipIDs, removedClipIDs, clips}`.",
+    inputSchema: {
+      ids: z
+        .array(z.string().uuid())
+        .describe(
+          "Ids of the clips to move together, from project_snapshot. May be empty " +
+            "(a no-op). Order does not matter; duplicates collapse."
+        ),
+      byTracks: z
+        .number()
+        .describe(
+          "Signed WHOLE number of tracks to move every listed clip by. Negative = up " +
+            "the track list, positive = down. Every clip moves the SAME number of " +
+            "tracks, so a selection spanning several tracks keeps its shape. A NON-" +
+            "INTEGRAL value (e.g. 1.5) is REFUSED outright — it is never rounded or " +
+            "truncated for you. Reduced (never per-clip) if it would carry the group " +
+            "past the first or last track — check `clampedTracks`/`effectiveTrackDelta`."
+        ),
+      byBeats: z
+        .number()
+        .optional()
+        .describe(
+          "Optional signed beat delta applied at the same time, so one call can move " +
+            "down AND along in ONE undo step. Same whole-group beat-0 clamp as " +
+            "clip_move_many. Defaults to 0."
+        ),
+    },
+  },
+  async ({ ids, byTracks, byBeats }) =>
+    toToolResult(() => bridge.send("clip.moveManyByTracks", { ids, byTracks, byBeats }))
+);
+
+registerTool(
+  "clip_move_many_to_track",
+  {
+    title: "Move several clips onto one named destination track, as one undo step",
+    description:
+      "Move SEVERAL clips onto ONE NAMED destination track, in ONE undo step. This " +
+      "COLLAPSES a multi-track selection by construction: relative BEAT offsets " +
+      "survive, relative TRACK offsets do not (there is nowhere for them to go — " +
+      "everything lands on one track). Use this when you know the destination by id " +
+      "(\"move these to the Drums track\"); use clip_move_many_by_tracks instead when " +
+      "the goal is a shape-preserving relative move — an agent choosing the wrong one " +
+      "of these two is the most likely misuse. A move onto a track that cannot hold a " +
+      "clip REFUSES THE WHOLE CALL (a MIDI clip needs an instrument track, an audio " +
+      "clip needs an audio track, bus tracks hold no clips at all). An unknown " +
+      "`toTrackId` is refused EVEN WHEN `ids` is empty — a typo'd track id must be " +
+      "caught immediately, not silently ignored. Because several source tracks can " +
+      "collapse onto one, two of the listed clips ending up on the same beats on the " +
+      "destination is ALSO refused whole (move them one at a time, or use " +
+      "clip_move_many_by_tracks to keep them on separate tracks); two clips that " +
+      "already overlapped each other on the SAME source track — a sanctioned crossfade " +
+      "— are unaffected by this check. `byBeats` optionally rides along in the SAME " +
+      "undo step. Returns the SAME shape as clip_move_many_by_tracks MINUS " +
+      "`requestedTrackDelta`/`effectiveTrackDelta` (a destination-shaped move has no " +
+      "delta to report — they are omitted, not null): `{clampedTracks, " +
+      "requestedDeltaBeats, effectiveDeltaBeats, clamped, landings: [{clipId, " +
+      "fromTrackId, toTrackId}], trimmedClipIDs, removedClipIDs, clips}`.",
+    inputSchema: {
+      ids: z
+        .array(z.string().uuid())
+        .describe(
+          "Ids of the clips to move together, from project_snapshot. May be empty — " +
+            "toTrackId is still validated even so. Order does not matter; duplicates " +
+            "collapse."
+        ),
+      toTrackId: z
+        .string()
+        .uuid()
+        .describe(
+          "Id of the track every listed clip lands on, from project_snapshot. An " +
+            "unknown id is refused even when `ids` is empty."
+        ),
+      byBeats: z
+        .number()
+        .optional()
+        .describe(
+          "Optional signed beat delta applied at the same time, so one call can move " +
+            "down AND along in ONE undo step. Defaults to 0."
+        ),
+    },
+  },
+  async ({ ids, toTrackId, byBeats }) =>
+    toToolResult(() => bridge.send("clip.moveManyToTrack", { ids, toTrackId, byBeats }))
 );

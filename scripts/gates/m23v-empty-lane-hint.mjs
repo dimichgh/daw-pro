@@ -34,9 +34,17 @@
 // lands 10 pt in, its designed inset) but whose Y sits ~34.5 pt ABOVE the lanes'
 // content origin IN THE CAPTURE'S PIXEL SPACE. The two debug seams do not share
 // an origin: `debug.captureUI` rasterizes `contentView.bounds`
-// (`DAWProApp.swift:7373-7380`), while `.explainable` reports
-// `geo.frame(in: .named(ExplainCoordinateSpace.name))` (`Explain.swift:172`) and
-// that space is declared further IN, at `ContentView.swift:220`. Filed as m23-ag.
+// (`DAWProApp.swift:7866-7873`), while `.explainable` reports
+// `geo.frame(in: .named(ExplainCoordinateSpace.name))` (`Explain.swift:329`) and
+// that space is declared further IN, at `ContentView.swift:224`. Filed as m23-ag.
+//
+// ⚠️ m23-ag (2026-08-02) RESOLVED that mismatch: `debug.explainFrames` now also
+// returns `captureOrigin`, so `contentPoint = frame.origin + captureOrigin` and a
+// new consumer never needs the derivation below. THIS GATE DELIBERATELY KEEPS ITS
+// OWN INK DERIVATION — it predates the payload, and it is the INDEPENDENT check
+// that m23-ag's own L9b asserts against. Rewriting it to consume `captureOrigin`
+// would make the pair circular: the payload would be checked against itself and
+// a wrong origin would go green in both places at once. Leave it deriving.
 // ⚠️ Do NOT "explain" the offset with `.offset(y: rulerInset)`
 // (`TimelineLanesView.swift:1446-1447`): this gate drives `.lanes` content, where
 // `rulerInset == 0` (`:378`), so that cannot be the cause — an earlier revision of
