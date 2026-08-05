@@ -79,10 +79,37 @@ public final class PianoRollNoteSelectionBridge {
     /// What the staged event asks for: select every note in the draft, or none.
     @ObservationIgnored public private(set) var stagedSelectAll = false
 
+    /// ASKED OF THE ROLL by Edit ▸ Delete (m23-cf): delete the notes you have
+    /// selected. The view watches the nonce, for `stageNonce`'s reason — the menu
+    /// must be able to ask twice, and two deletes in a row are two distinct
+    /// requests carrying identical payloads.
+    ///
+    /// A SECOND NONCE RATHER THAN A SECOND MEANING ON `stageNonce`, deliberately:
+    /// that one carries "select all / select none" and its `stagedSelectAll`
+    /// payload, and folding a destructive verb into it would make one number mean
+    /// two things — the exact confusion `dropForWidenedArrangeSelection` was given
+    /// its own name to avoid, only with the user's notes at stake.
+    public private(set) var deleteNonce = 0
+
     public init() {}
 
     /// The roll's report. Idempotent — the view calls it with `initial: true`.
     public func report(hasSelection: Bool) { self.hasSelection = hasSelection }
+
+    /// EDIT ▸ DELETE ASKED THE ROLL TO DELETE ITS SELECTION (m23-cf).
+    ///
+    /// The only way anything outside can reach the roll's `@State private
+    /// PianoRollModel`, which is why the request is a nonce rather than a direct
+    /// call. It carries no payload: WHAT gets deleted is the roll's own
+    /// selection, so the menu cannot name a target the roll disagrees with.
+    ///
+    /// INERT WITH NO ROLL MOUNTED, and inert with a mounted roll holding no
+    /// selection — the view re-applies its own `guard !model.selection.isEmpty`,
+    /// the same test its `.onKeyPress(.delete)` uses. The menu item is disabled in
+    /// both states anyway (`DeleteMenuPolicy.editMenuItem` reads `hasSelection`);
+    /// the view's guard is what makes a stale menu impossible to act on rather
+    /// than merely unlikely.
+    public func requestDelete() { deleteNonce += 1 }
 
     /// Stage a note selection into whatever roll is on screen.
     public func stage(selectAll: Bool) {

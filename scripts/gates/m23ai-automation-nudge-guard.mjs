@@ -143,9 +143,10 @@ function idOf(res, label) {
 /// A BARE `{}` IS A PURE READ, verified structurally rather than assumed:
 /// `DAWProApp.swift:3694` gates the entire act switch behind
 /// `if let act = params["act"]`, so with no act nothing mutates and only the
-/// report object is built. That is NOT true of every debug seam in this tree —
-/// `debug.arrangeScroll` mutates on a bare read (m23-ah-2) — so it is checked
-/// here rather than inherited.
+/// report object is built. That was NOT true of every debug seam in this tree —
+/// `debug.arrangeScroll` used to mutate on a bare read (m23-ah-2, fixed: a bare
+/// call is now classified by `ArrangeScrollQuery.isQuery` and is read-only like
+/// this one) — so it is checked here rather than inherited.
 const echo = () => req("debug.arrangeSelection", {});
 
 const nudge = (dir = "right") =>

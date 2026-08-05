@@ -65,7 +65,7 @@ struct EffectEditorModelTests {
         let track = store.addTrack(kind: .audio)
         let model = Self.makeStoreBacked(store)
         // ≥3 kinds explicitly, then the full sweep (eq = 10 legacy + 12 m22-a).
-        for (kind, count) in [(EffectDescriptor.Kind.eq, 22), (.compressor, 6), (.limiter, 2)] {
+        for (kind, count) in [(EffectDescriptor.Kind.eq, 22), (.compressor, 6), (.limiter, 3)] {
             let fx = try! store.addEffect(toTrack: track.id, kind: kind)
             model.prepare(trackID: track.id, effectID: fx.id, targetLabel: "on Test")
             #expect(model.specs.count == count, "\(kind) row count")
@@ -373,7 +373,7 @@ struct EffectEditorModelTests {
         ]))
         #expect(matches(layout(.limiter), [
             ("TIME", ["releaseMs"]),
-            ("OUTPUT", ["ceilingDb"]),
+            ("OUTPUT", ["ceilingDb", "truePeak"]),
         ]))
         #expect(matches(layout(.reverb), [
             ("CHARACTER", ["roomSize", "damping", "width"]),
@@ -452,8 +452,9 @@ struct EffectEditorModelTests {
         for kind in Self.builtInKinds {
             for spec in EffectParamSpec.specs(for: kind) {
                 // m22-f adds the delay's tempo `sync` to the binary family.
+                // m23-ch adds the limiter's truePeak mode to the family.
                 let expected = spec.name == "pingPong" || spec.name == "sync"
-                    || spec.name.hasSuffix("Enabled")
+                    || spec.name == "truePeak" || spec.name.hasSuffix("Enabled")
                 #expect(EffectEditorModel.isToggleParam(spec) == expected,
                         "\(kind).\(spec.name)")
             }

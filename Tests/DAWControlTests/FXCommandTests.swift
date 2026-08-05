@@ -333,7 +333,8 @@ struct FXCommandTests {
         #expect(paramNames("compressor") == [
             "thresholdDb", "ratio", "attackMs", "releaseMs", "kneeDb", "makeupDb",
         ])
-        #expect(paramNames("limiter") == ["ceilingDb", "releaseMs"])
+        // m23-ch appends truePeak in slot 2 — ceilingDb/releaseMs keep 0/1.
+        #expect(paramNames("limiter") == ["ceilingDb", "releaseMs", "truePeak"])
         #expect(paramNames("reverb") == ["roomSize", "damping", "mix", "preDelayMs", "width"])
         // The five legacy params stay in slots 0…4 (automation slot
         // stability); the m22-f tempo-sync params are APPENDED.

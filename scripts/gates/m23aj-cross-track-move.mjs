@@ -587,9 +587,13 @@ try {
   //      real-key route is closed too: m23-g1 MEASURED that an unbundled staging
   //      binary does not route real key events (`keyDelete` -> `delivered:false`),
   //      re-probed at G3 below rather than inherited.
-  //   2. NOTHING REPORTS THE OFFSET. The shared `ScrollView(.vertical)` in
-  //      `ContentView` publishes no offset anywhere; `debug.arrangeScroll` SETS a
-  //      target track and bumps a nonce, it does not read a position.
+  //   2. NOTHING REPORTS A RAW PIXEL OFFSET. The shared `ScrollView(.vertical)`
+  //      in `ContentView` publishes no numeric offset anywhere — SwiftUI's
+  //      `ScrollViewReader.scrollTo` exposes none, confirmed still true post-
+  //      m23-ah-2, which made a bare `debug.arrangeScroll {}` a genuine
+  //      side-effect-free QUERY (it used to always mutate) but only ever HAD a
+  //      target-track + anchor pair to echo for the vertical axis, never a pixel
+  //      number — so reading it now still cannot answer "how far down".
   //
   // A leg that read a scroll offset here would therefore pass identically under
   // M6 — i.e. it would measure nothing, which is precisely what §13 exists to
@@ -654,10 +658,12 @@ try {
            + "binary does not route real key events (m23-g1), and the nudge seam calls the "
            + "handler DIRECTLY, so SwiftUI never sees a KeyPress and the ScrollView cannot "
            + "react whatever the consume rule returns. (2) nothing publishes that "
-           + "ScrollView's offset — debug.arrangeScroll sets a target and a nonce, it does "
-           + "not read a position. A leg reading an offset here would pass identically "
-           + "under M6, i.e. measure nothing. §10.5's premise stays REASONED, not proven; "
-           + "G1/G2 pin the decision, which is the half that exists to be observed.");
+           + "ScrollView's RAW PIXEL offset — post-m23-ah-2 debug.arrangeScroll can be read "
+           + "without mutating, but the vertical axis was only ever a target-track + anchor "
+           + "pair, never a pixel number, so a read still cannot answer \"how far down\". A leg "
+           + "reading an offset here would pass identically under M6, i.e. measure nothing. "
+           + "§10.5's premise stays REASONED, not proven; G1/G2 pin the decision, which is the "
+           + "half that exists to be observed.");
     }
   }
 

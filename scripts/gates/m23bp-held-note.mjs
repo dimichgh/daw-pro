@@ -27,11 +27,22 @@
 // THE FIX, AS SHIPPED. `RescheduleCause` (Sources/DAWEngine/RescheduleCause.swift)
 // is threaded WITHOUT A DEFAULT through every `restart`/`startPlayers` call —
 // the compiler, not a comment, enumerates every reschedule site. `.relocation`
-// (a CHOSEN beat: start, seek, record, loop-wrap) keeps the v0 no-chase rule.
+// (a CHOSEN beat: seek, record, loop-wrap) keeps the v0 no-chase rule.
 // `.continuation` (the beat playback would have reached anyway — nothing was
 // "chosen") now CHASES: a note whose onset is behind `fromBeat` but whose OFF
 // is still ahead of it is re-admitted with its onset clamped to `fromBeat`.
 // `chasesHeldNotes` has exactly ONE read in the tree — `PlaybackGraph.swift:2582`.
+//
+// ⚠️ AMENDED BY m23-cd (2026-08-04): TRANSPORT START LEFT `.relocation`. The
+// user hit the no-chase contract by pausing mid-pad and resuming, and ruled
+// that the play button must chase ("lets do what other DAWs do"), so
+// `AudioEngine.startPlayback` now passes a THIRD cause, `.transportStart`,
+// which chases. THIS GATE IS UNAFFECTED AND ITS EXPECTATIONS ARE UNCHANGED:
+// every act here plays from `transport.seek(0)`, and at beat 0 there is no
+// onset behind the anchor for any policy to admit. Nothing below asserts that
+// a mid-note `transport.play` is silent — if you ever add such a leg, it must
+// now expect SOUND. The m23-cd measurement lives in
+// `Tests/DAWEngineTests/ResumeChaseTests.swift` (offline).
 //
 // THE TRIGGER ACT 1/2 BELOW USE (reconcile-during-playback). Currently
 // `AudioEngine.tracksDidChangeBody`, `AudioEngine.swift:1064-1070` — line

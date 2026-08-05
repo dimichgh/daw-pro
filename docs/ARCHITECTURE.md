@@ -388,7 +388,7 @@ through `AudioEngine.restart`/`startPlayers` — so the compiler, not a comment,
 sites — into `PlaybackGraph.scheduleAll`, whose single read of `cause.chasesHeldNotes` is the ONE
 home of the mapping. `.continuation` (tempo change, structural reconcile during playback, the
 routing-rewire and `rebuildEngine` resumes, loop-bounds edits, `recoverEngine`) chases;
-`.relocation` (transport start, seek, record start, the loop-wrap fallback, every offline bounce)
+`.relocation` (seek while rolling, record start, the loop-wrap fallback, every offline bounce)
 does not, and neither does any loop-cycle unroll block — each block must still reproduce a fresh
 seek-to-loop-start (the §8.6 prune self-containment law), and chasing there would re-attack
 straddling notes every cycle on top of the still-ringing head voice. Semantics: onset clamps to
@@ -416,6 +416,25 @@ frame-exact (`NoteChaseScheduleTests`), audibility and the cycle-block non-leak 
 (`NoteChaseGraphTests`), the site table source-pinned as an ORDERED SEQUENCE and mutant-proven
 (`NoteChaseSiteTests`) — the per-site LIVE legs (design §9 layer 3(b)) are cycle B and have not run,
 so the wiring is source-pinned, not live-proven. Design: docs/research/design-m23bp-note-chase.md.
+**AMENDED by m23-cd (2026-08-04, design §2.4): THE PLAY BUTTON CHASES.** The user hit the v0
+contract in ordinary use — pause mid-pad, resume, silence until the next onset — and ruled *"for
+1st one lets do what other DAWs do"* (Logic/Ableton/Cubase). `RescheduleCause` gained a THIRD case,
+`.transportStart`, which `AudioEngine.startPlayback` passes and whose `chasesHeldNotes` is true.
+It is a third case rather than relabelling site 1 `.continuation` because the beat WAS chosen: the
+start must keep `anchorPolicy: .asSoonAsPractical`, and "a CONTINUATION cannot fix the beat" (the
+m23-bs-2 anchor-policy law) has to stay true. So the amended law is: **chase iff playback is
+CONTINUING or the user just pressed PLAY.** `chasesHeldNotes` is now an exhaustive switch so a
+fourth cause cannot inherit an answer, and `RescheduleCause` is `CaseIterable` so the site pin's
+token list is asserted to cover every case (a case missing from it would make its sites VANISH from
+the pin instead of failing it). **Accepted cost, ruled on with the counter-case in hand:** a note
+already decaying at the pause re-attacks at full velocity on the next play. **Unmoved, deliberately:**
+seek-while-rolling, record start, the loop-wrap fallback and every offline bounce keep `.relocation`
+— so stop→click-ruler→play chases while click-ruler-while-rolling does not, which is a real
+user-visible asymmetry and the user's to rule on; and m23-bv (region bounce) is untouched, with not
+one rendered byte changed offline. Proven by `ResumeChaseTests`, which renders the gesture (play →
+`stopAllPlayers` → silence → resume at the stop beat) and takes its chase arm's cause FROM
+`AudioEngine.swift` SOURCE, so reverting the site reddens an audible measurement: held-note RMS
+0.0644 vs exactly 0.0, three same-run controls, re-measured off a written wav.
 - **Transport anchor clock across an engine bounce: SETTLED (m23-bq, 2026-08-02).** A schedule
 build anchors the transport on the OUTPUT RENDER CLOCK iff the engine has NOT bounced (stop→start)
 since its last render callback; otherwise it anchors on the HOST clock. `outputNode.lastRenderTime`
@@ -527,8 +546,10 @@ count reads 0 at both natural read sites. `restart` takes a `RestartOrigin` (`.b
 `.continuing(from:)`) rather than a forwarded policy, because `.atHostTime(H)` is a CONTRACT ("the
 beat was derived FOR H") that a primitive receiving a pre-computed beat cannot honour — and because
 `cause` (does this build chase held notes?) and the anchor policy (who chose the beat?) correlate at
-today's five call sites by coincidence, not by law (m23-bv is actively debating a chase-yes-with-a-
-chosen-beat case). Full design: `docs/research/design-m23bs-recovery-anchor.md` §14.
+today's five call sites by coincidence, not by law — and m23-cd (2026-08-04) DECORRELATED them for
+real: `.transportStart` is the chase-yes-with-a-chosen-beat case (`startPlayback` chases while
+keeping `.asSoonAsPractical`), so the two axes are now independent in the tree, not merely in
+principle. The BOUNCE half of that question (m23-bv) is still open and still the user's to rule on. Full design: `docs/research/design-m23bs-recovery-anchor.md` §14.
 - **The output-device pin across engine recovery: SETTLED (m23-bt, 2026-08-02) — recovery does NOT
 re-apply it, and does NOT need to.** `prepare()` and `rebuildEngine` both call
 `reapplyOutputDevicePinIfNeeded()`; `recoverEngine()` does not, and that asymmetry is CORRECT rather

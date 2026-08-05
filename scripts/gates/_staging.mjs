@@ -63,6 +63,43 @@ const live = new Map(); // gate -> { child, pidfile, out, log }
 
 /** Where a gate's pidfile lives. One resolver, so start and stop cannot disagree. */
 export function pidfilePath(gate, override) {
+  // m23-ah-3: `override` survived m23-ah-1 unvalidated — an object, number,
+  // or array here used to fall straight into the `return override || ...`
+  // below, then get handed to `existsSync` by every caller, which coerces it
+  // to `false` and takes the SAME silent early-return path m23-ah-1 exists to
+  // eliminate, just one argument over. `undefined` and `null` both stay legal
+  // and both take the derived-path branch below, because they are ABSENCE
+  // markers — "no path was named" — matching pre-existing behaviour
+  // (`return override || derived`) and the callers that rely on
+  // `stopStaging(GATE)` / `pidfilePath(GATE)` with no second argument, who
+  // outnumber every other shape in this corpus. `""` is different in kind,
+  // not degree: it is an AFFIRMATIVE attempt to name a path that cannot be
+  // one, so it throws rather than silently falling through to derived (no
+  // live caller passes it — every `PIDFILE` in this corpus is
+  // `process.env.X || "/tmp/..."`, a template literal, or `pidfilePath(GATE)`,
+  // none of which can produce `""`). The rule is "if present, a non-empty
+  // string" — not "must be present".
+  if (override !== undefined && override !== null &&
+      (typeof override !== "string" || override.length === 0)) {
+    throw new Error(
+      `pidfilePath(gate, override) requires override to be a non-empty string ` +
+      `when given (omit it, or pass null/undefined, to derive the path from ` +
+      `gate); got ${typeof override}: ${JSON.stringify(override)}`
+    );
+  }
+  // m23-ah-1: this is the function that silently produced
+  // `/tmp/daw-gate-out/[object Object]/staging.pid` when `gate` was actually
+  // an options object. `stopStaging` now rejects that before calling here, but
+  // this function is itself exported and called directly by a couple of
+  // gates — guard it too. Only checked when there is no explicit override,
+  // since an override makes `gate` unused and every existing caller that
+  // supplies one already passes a real gate string regardless.
+  if (!override && (typeof gate !== "string" || gate.length === 0)) {
+    throw new Error(
+      `pidfilePath(gate, override) requires gate to be a non-empty string ` +
+      `when no override is given; got ${typeof gate}: ${JSON.stringify(gate)}`
+    );
+  }
   return override || `/tmp/daw-gate-out/${gate}/staging.pid`;
 }
 
@@ -193,6 +230,25 @@ export function startStaging({
  * cannot share the Swift one.
  */
 export function sessionLockPath(override) {
+  // m23-ah-4: same rule as `pidfilePath` (m23-ah-1) and `stopStaging`'s
+  // `pidfileOverride` (m23-ah-3) — this used to be `return override || ...`,
+  // so any TRUTHY non-path (an object, a number, an array) was returned AS
+  // the path and only blew up two calls later, inside `releaseSessionLock`'s
+  // `readFileSync`, as a bare TypeError swallowed by that function's own
+  // catch (see its comment) — silently leaving a stale `session.lock` in
+  // place instead of raising anything. `undefined` and `null` are ABSENCE
+  // markers and stay legal, deriving the default Autosave path below; `""` is
+  // an affirmative attempt to name a path that cannot be one and still
+  // throws — the same "present-but-invalid throws, absent is legal" split as
+  // the other two resolvers in this file.
+  if (override !== undefined && override !== null &&
+      (typeof override !== "string" || override.length === 0)) {
+    throw new Error(
+      `sessionLockPath(override) requires override to be a non-empty string ` +
+      `when given (omit it, or pass null/undefined, to derive the default ` +
+      `Autosave lock path); got ${typeof override}: ${JSON.stringify(override)}`
+    );
+  }
   return override || `${process.env.HOME}/Library/Application Support/DAWPro/Autosave/session.lock`;
 }
 
@@ -216,11 +272,44 @@ export function sessionLockPath(override) {
  */
 export function releaseSessionLock(pid, lockPathOverride) {
   const lock = sessionLockPath(lockPathOverride);
+  // m23-ah-4: split into two try/catches on purpose — they guard DIFFERENT
+  // failure classes and must not be collapsed back into one bare catch.
+  //
+  // The read: a TypeError here means `lock` was not a value `readFileSync`
+  // could use as a path AT ALL — either the wrong JS type (the historical
+  // bug: `sessionLockPath`/`stopStaging` used to hand this function an
+  // object/number/array unvalidated) or, MEASURED to still be reachable even
+  // after those guards, a non-empty STRING containing a null byte (Node's fs
+  // layer rejects that with its own TypeError — `ah-1`/`ah-3`/`ah-4`'s
+  // `typeof x !== "string" || x.length === 0` checks accept it, since it IS
+  // a non-empty string). Either way that is a caller/programmer bug, not a
+  // fact about the lock file, so it is deliberately LOUD: it propagates
+  // rather than being reported identically to a lock that simply is not
+  // there — which is exactly how this defect hid (m23-ah-4's filed bug).
+  // Every OTHER failure here (ENOENT: absent, EACCES/EISDIR: unreadable,
+  // ...) is an ordinary fs `Error` with a `.code`, never a `TypeError`, and
+  // keeps returning null exactly as before.
+  let raw;
+  try {
+    raw = readFileSync(lock, "utf8");
+  } catch (e) {
+    if (e instanceof TypeError) throw e;
+    return null; // absent / unreadable — never guess at ownership
+  }
+  // The parse: kept as a BARE catch, unlike the read above, because both of
+  // its failure modes are facts about the LOCK FILE's CONTENT, not about our
+  // own arguments, and m23-ah-4 must not turn either into a throw — that
+  // would weaken the exact guarantee this function exists for. This covers
+  // JSON syntax errors AND structurally-wrong-but-valid JSON: a lock file
+  // holding the literal `null` parses fine but throws its own TypeError on
+  // `.pid` access below (`Cannot read properties of null`) — that TypeError
+  // must NOT propagate, so it is caught here rather than folded into the
+  // stricter check above.
   let owner;
   try {
-    owner = JSON.parse(readFileSync(lock, "utf8")).pid;
+    owner = JSON.parse(raw).pid;
   } catch {
-    return null; // absent / unreadable / malformed — never guess at ownership
+    return null; // malformed — never guess at ownership
   }
   // ⚠️ STRICT `typeof`, NOT `Number(owner)`. The app writes `pid` as a JSON
   // number; anything else was written by something we do not recognise, and
@@ -263,7 +352,65 @@ export function releaseSessionLock(pid, lockPathOverride) {
  * m23-ac-2c — m23a2 still reports 31/31 with the sleep gone.)
  */
 export function stopStaging(gate, pidfileOverride, { lockPath } = {}) {
-  if (!gate) throw new Error("stopStaging requires the gate name");
+  // ⚠️ m23-ah-1: `startStaging({...})` takes an OPTIONS OBJECT but this is
+  // POSITIONAL — `stopStaging({pidfile, proc})` passes an object as `gate`,
+  // which is truthy, so a bare `if (!gate)` guard never fires. `pidfilePath`
+  // then silently builds `.../[object Object]/staging.pid`, which never
+  // exists, and this function early-returns as if teardown succeeded: no
+  // SIGTERM, no lock release, no pidfile removal. Reject anything but a
+  // non-empty string so the next copy-paste fails LOUDLY at the call site
+  // instead of disarming itself.
+  if (typeof gate !== "string" || gate.length === 0) {
+    throw new Error(
+      `stopStaging(gate, pidfileOverride, { lockPath }) requires gate to be a ` +
+      `non-empty string (positional signature — this is NOT startStaging's ` +
+      `{ gate, ... } options object); got ${typeof gate}: ${JSON.stringify(gate)}`
+    );
+  }
+  // m23-ah-3: same defect, one argument over. `pidfileOverride` used to reach
+  // `pidfilePath`'s override branch unchecked and get handed straight to
+  // `existsSync`, which coerces a non-path to `false` and silently takes the
+  // early-return two lines below — no SIGTERM, no `releaseSessionLock`, no
+  // pidfile removal — exactly the outcome m23-ah-1 fixed for argument one.
+  // `undefined` (the common omitted case) and `null` are both absence
+  // markers and remain legal, deriving the pidfile path from `gate`, same as
+  // `pidfilePath` itself tolerates; `""` is an affirmative non-path and still
+  // throws (see `pidfilePath`'s comment for why those are different in
+  // kind). This check is REDUNDANT with the one in `pidfilePath` below —
+  // every call here already reaches it via `pidfilePath(gate, pidfileOverride)`
+  // two lines down — kept explicit anyway, in lockstep with `pidfilePath`, so
+  // the error names `stopStaging`'s own signature rather than a callee's.
+  if (pidfileOverride !== undefined && pidfileOverride !== null &&
+      (typeof pidfileOverride !== "string" || pidfileOverride.length === 0)) {
+    throw new Error(
+      `stopStaging(gate, pidfileOverride, { lockPath }) requires pidfileOverride ` +
+      `to be a non-empty string when given (omit it, or pass null/undefined, to ` +
+      `derive the pidfile path from gate); got ${typeof pidfileOverride}: ` +
+      `${JSON.stringify(pidfileOverride)}`
+    );
+  }
+  // m23-ah-4: same defect, one argument further. `lockPath` used to reach
+  // `sessionLockPath` unchecked and be returned AS the path, which
+  // `releaseSessionLock` then handed to `readFileSync` — a TypeError that
+  // function's own bare catch swallowed (see its docstring), so the process
+  // still got SIGTERM'd but `session.lock` silently SURVIVED with nothing
+  // raised. That is worse than m23-ah-1/-3's no-op: it reaches the USER, as a
+  // phantom crash-recovery prompt at the next real launch (m23-ac-2c).
+  // `undefined` and `null` stay legal (absence markers, deriving the default
+  // Autosave path); `""` still throws. REDUNDANT with `sessionLockPath`
+  // below — every call here already reaches it via
+  // `releaseSessionLock(pid, lockPath)` a few lines down — kept explicit
+  // anyway, in lockstep with the two guards above, so the error names
+  // `stopStaging`'s own signature rather than a callee's.
+  if (lockPath !== undefined && lockPath !== null &&
+      (typeof lockPath !== "string" || lockPath.length === 0)) {
+    throw new Error(
+      `stopStaging(gate, pidfileOverride, { lockPath }) requires lockPath to ` +
+      `be a non-empty string when given (omit it, or pass null/undefined, to ` +
+      `derive the default Autosave lock path); got ${typeof lockPath}: ` +
+      `${JSON.stringify(lockPath)}`
+    );
+  }
   const pidfile = pidfilePath(gate, pidfileOverride);
   if (!existsSync(pidfile)) { live.delete(gate); return; }
   const pid = Number(readFileSync(pidfile, "utf8").trim());

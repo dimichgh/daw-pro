@@ -139,6 +139,13 @@ struct TimelineLanesView: View {
     /// `ProjectStore.fitClipToContent` — MIDI: last note end, audio: remaining
     /// source duration).
     var onFitClipToContent: (_ trackID: UUID, _ clip: Clip) -> Void = { _, _ in }
+    /// Removes a clip from the clip context menu (m23-cf). The `ClipDeleteCommand`
+    /// says whether the whole arrange selection is the target or just this clip,
+    /// and carries the exact title the user was shown — so the handler and the
+    /// menu can never name different blast radii. Wired to
+    /// `AppModel.deleteClipFromContextMenu`, which routes to the SAME
+    /// `ProjectStore.removeClips` the DELETE key uses.
+    var onDeleteClip: (_ clip: Clip, _ command: ClipDeleteCommand) -> Void = { _, _ in }
     var onSplitClip: (_ trackID: UUID, _ clip: Clip, _ atBeat: Double) -> Void = { _, _, _ in }
     var onSetClipFades: (_ trackID: UUID, _ clip: Clip, _ fadeIn: Double, _ fadeOut: Double,
                          _ inCurve: FadeCurve, _ outCurve: FadeCurve) -> Void = { _, _, _, _, _, _ in }
@@ -1072,6 +1079,7 @@ struct TimelineLanesView: View {
                     tint: tint(clip),
                     isSelected: selection.contains(clip.id),
                     isFocused: selection.isFocus(clip.id),
+                    arrangeSelectionCount: selection.count,
                     width: width,
                     height: rowHeight,
                     laneOriginY: laneTop(index),
@@ -1090,6 +1098,7 @@ struct TimelineLanesView: View {
                     onMove: { onMoveClip(track.id, clip, $0, $1) },
                     onTrim: { onTrimClip(track.id, clip, $0, $1) },
                     onFitToContent: { onFitClipToContent(track.id, clip) },
+                    onDelete: { onDeleteClip(clip, $0) },
                     onSplit: { onSplitClip(track.id, clip, $0) },
                     onSetFades: { onSetClipFades(track.id, clip, $0, $1, $2, $3) },
                     onSetGain: { onSetClipGain(track.id, clip, $0) },
@@ -2319,6 +2328,12 @@ private struct ClipBlock: View {
     /// moment a user selects three audio clips — visually confusing, and an
     /// invitation to edit a curve on a clip the editor isn't pointed at.
     var isFocused: Bool
+    /// How many clips the arrange selection holds (m23-cf) — read ONLY to title
+    /// the context menu's Delete entry, never to draw. A THIRD selection input
+    /// beside `isSelected`/`isFocused` because the menu needs the SIZE of the set
+    /// this clip may belong to, which neither of those carries: "Delete 3 Clips"
+    /// is the user's only warning of the blast radius they are about to accept.
+    var arrangeSelectionCount: Int = 0
     var width: CGFloat
     var height: CGFloat
     /// This clip lane's top y in content space — lets a drag classify its start
@@ -2356,6 +2371,11 @@ private struct ClipBlock: View {
     /// Fits the clip's length to its content (m21-d, Pro context menu — MIDI:
     /// last note end, audio: remaining source). One store call, no gesture math.
     var onFitToContent: () -> Void = {}
+    /// Removes this clip — or the whole arrange selection it belongs to (m23-cf).
+    /// The `ClipDeleteCommand` it is handed carries the decision AND the title the
+    /// user was shown, so the handler cannot act on a different blast radius from
+    /// the one the menu named. Defaulted to a no-op so previews stay one-liners.
+    var onDelete: (ClipDeleteCommand) -> Void = { _ in }
     var onSplit: (_ atBeat: Double) -> Void
     var onSetFades: (_ fadeIn: Double, _ fadeOut: Double, _ inCurve: FadeCurve, _ outCurve: FadeCurve) -> Void
     var onSetGain: (_ gainDb: Double) -> Void
@@ -3228,6 +3248,43 @@ private struct ClipBlock: View {
 
     @ViewBuilder
     private var contextMenu: some View {
+        // ═══ DELETE, FIRST AND IN BOTH DENSITIES (m23-cf) ═══
+        //
+        // ⚠️ DELIBERATELY OUTSIDE THE `if pro` BLOCK BELOW, and that placement is
+        // the whole user-facing point of the item. Every other entry here is
+        // clip-EDIT chrome and Pro-only (sp-c), which means a non-take clip in
+        // SIMPLE density produced an EMPTY BUILDER — i.e. no context menu at all.
+        // So a beginner, in the density built for beginners, had no route to
+        // removing a clip except the bare DELETE key. A user hit exactly that and
+        // reported "I cannot remove them". Removing a clip is not an expert edit;
+        // it is the other half of creating one.
+        //
+        // FIRST rather than last because a destructive entry buried under nine
+        // fade/quantize/crossfade items is not discoverable, and in Simple it is
+        // the only entry there is.
+        Button(deleteCommand.title, role: .destructive) { onDelete(deleteCommand) }
+        // The separator is CONDITIONAL because in SIMPLE density on a NON-TAKE
+        // clip both blocks below are empty, so an unconditional one would be a
+        // trailing rule with nothing under it — in the beginner density, on the
+        // beginner's first context menu.
+        //
+        // ⚠️ MEASURED, AND THE MEASUREMENT SAYS THE GUARD IS NOT LOAD-BEARING
+        // HERE. A/B on staging (m23-cf, macOS 26 / Darwin 25.4), menu window
+        // heights read off the window list at layer 101:
+        //   • conditional (this code), Simple non-take ....... 99 × 34
+        //   • UNCONDITIONAL `Divider()`, same state .......... 99 × 34   ← collapsed
+        //   • calibration `Button + Divider + Button` ........ 165 × 69
+        // The 34 → 69 step (one item ≈ 23 pt + one separator ≈ 12 pt) proves the
+        // probe SEES separators, so the first two reading the same is a real
+        // negative: SwiftUI drops a trailing `Divider()` in menu content.
+        // The guard stays anyway — it states the intent in the source instead of
+        // leaning on undocumented AppKit behaviour, and it costs one Bool. Do not
+        // "simplify" it away on the strength of the measurement alone; the
+        // measurement is one OS version wide.
+        //
+        // A keyboard-driven check could not have decided this either way: a
+        // separator is unselectable, so Down still lands on Delete.
+        if pro || !takeMenuLanes.isEmpty { Divider() }
         // Take-group members: comp is edited via the take lanes, so the member's
         // menu offers take swaps + the flatten escape hatch instead of clip edits.
         // These stay in BOTH modes — take lanes are density-unaffected (sp-c).
@@ -3240,7 +3297,9 @@ private struct ClipBlock: View {
             if pro { Divider() }
         }
         // Clip-edit entries are Pro-only (sp-c): split / gain / fade curves. In
-        // Simple a non-take clip has no context menu (empty builder → no menu).
+        // Simple a non-take clip now shows the Delete entry above and nothing
+        // else — before m23-cf this builder was EMPTY there, so SwiftUI produced
+        // no menu at all.
         if pro {
             Button("Split at Playhead") {
                 if let beat = ClipEdit.snappedSplit(
@@ -3302,6 +3361,14 @@ private struct ClipBlock: View {
                 Button("Convert to Voice…") { onConvertToVoice() }
             }
         }
+    }
+
+    /// What this block's Delete entry says and targets (m23-cf). ONE producer for
+    /// both — the label and the id list must never disagree, so the menu reads
+    /// `.title` and the action passes the SAME value back to `onDelete`.
+    private var deleteCommand: ClipDeleteCommand {
+        DeleteMenuPolicy.clipContextCommand(clickedClipIsSelected: isSelected,
+                                            arrangeSelectionCount: arrangeSelectionCount)
     }
 
     /// Compact beat readout for the drag bubble (2 decimals, trailing zeros trimmed).

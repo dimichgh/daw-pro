@@ -1,5 +1,260 @@
 # Changelog
 
+## 2026-08-04 — The limiter can now count the peaks that matter for delivery
+
+The limiter's ceiling has always been honest about one thing and silent about another. It guarantees no
+single sample goes above the ceiling you set, and it does that by construction — it cannot fail. What it
+never measured is what happens *between* samples, which is what a streaming service or a mastering house
+actually checks. Those two numbers are not the same, and on dense material they can differ by nearly two
+decibels.
+
+That gap has a real cost. If you are trying to hit a delivery target, the only way to find the right
+ceiling was to render, measure the file somewhere else, lower the ceiling, and render again — and the
+number you converge on is a guess about how much headroom to leave, not a setting that means anything.
+
+The limiter now has a true-peak mode. Turn it on and the ceiling counts the peaks a delivery spec counts,
+so you can set it to your actual target and stop guessing. Measured with an outside tool rather than our
+own meter: at a −1 dB ceiling, off it overshoots to +0.92, on it lands at −1.00.
+
+It is off by default and every existing project is untouched — verified sample-for-sample against the old
+algorithm, not approximately. Turning it on costs about a twentieth of a decibel of loudness and buys back
+close to half a decibel of headroom.
+
+One limit stated plainly, because a limiter that quietly over-promises is worse than one that does not
+try: the detection is an approximation, and it is most accurate on normal musical material and least
+accurate on material with a lot of energy right at the top of the audible range. On a deliberately
+punishing test signal it reads about 0.4 dB low. That worst case lives in the test suite so the limit is a
+number rather than a promise.
+
+Also fixed while in there: the documentation described the limiter as having a true-peak ceiling when it
+did not. That single wrong line is very likely what sent someone chasing an imaginary bug.
+
+## 2026-08-04 — Two ways to delete anything, and sound that comes back the instant you press play
+
+Deleting a clip or a note had exactly one route: the Delete key. If that key was not reaching the
+editor — and there is reason to think it sometimes was not — there was no other way to do it. Not a
+hidden one, not an awkward one. None. The most common destructive operation in the whole app rested on
+its most fragile input path.
+
+It now has three routes. Right-click a clip and Delete is the first thing in the menu, before any of the
+fade and quantize entries, and it is there in the simple density too, where it is the only entry there
+is. The note editor has a right-click menu for the first time. And the Edit menu has a Delete that knows
+what you are looking at — it names the notes, the automation points or the clips it is about to remove,
+and greys out and says so when there is nothing selected.
+
+That Edit item deliberately has no keyboard shortcut. Giving it one would take Backspace away from every
+field in the app where you rename something, which is a worse bug than the one being fixed.
+
+Separately: pausing and resuming used to drop any note that was already sounding. On a long pad the
+effect was that the sound simply stopped and did not return until the next bar started it again — which
+on that kind of part can be a long, silent wait. Audio clips never had this problem, because resuming
+one just seeks back into the file; only played notes did. Pressing play now picks up notes that are
+already meant to be sounding, the way other DAWs do. Measured on a real rendered file rather than
+inferred: the pad is audibly there on resume where before it was silence.
+
+One gap left honestly open: this covers the play button, not dragging the ruler while the music is
+already rolling. That case still drops the note, and making the two agree is a design question rather
+than a copy-paste.
+
+## 2026-08-04 — The same misspelling problem, found in a second place and traced to its root
+
+Yesterday's fix covered one internal inspection command. Looking at its neighbours turned up the same
+shape in the command that stages the generation-progress card — and this one was worse, because it did
+not merely ignore the misspelled word. It substituted a different value and reported success.
+
+Ask it to stage a row from an imported file, misspell the word "origin", and it would stage the row as
+if it had come from somewhere else entirely, and tell you it worked. Anyone using that card to check
+how generation was being tracked would have been reading a fact they had not asked for.
+
+The root cause is worth saying plainly, because it is not really about that one word. A setting you
+are *required* to provide gets checked for free — if it is missing, nothing can proceed. A setting
+that is *optional* has a fallback, and a misspelling looks exactly like choosing not to provide it. So
+every optional setting on that command had the same hole, not just the one we noticed. One of them is
+worse still: leaving out the job identifier is a deliberate, meaningful choice, which made a typo
+there indistinguishable from intent.
+
+All of them now fail by name. Two related holes turned up while fixing it: passing the wrong *kind* of
+value entirely was silently ignored, and — a problem the fix itself introduced — a request that was
+about to be refused could still clear the card before refusing. That second one matters more than it
+sounds. Adding a new refusal to the middle of an existing sequence can leave a request half-applied
+when it was never half-applied before. Everything is now checked before anything is changed, and a
+refused request leaves the card exactly as it found it.
+
+Verified against a running copy: seventeen checks, including the specific misspellings measured
+earlier, and — the part that matters — the card itself is inspected afterwards rather than trusting
+what the command said about itself.
+
+## 2026-08-04 — A misspelled setting now says so instead of pretending to work
+
+The same internal inspection command we fixed yesterday had one more way to mislead. Ask it to scroll
+to a particular track and misspell the setting name — `trackID` instead of `trackId`, a capital letter
+apart — and it would answer "done" without doing anything. Not because it disagreed with you, but
+because it had no idea the word was meant for it.
+
+This is the milder half of a problem we fixed earlier: before that fix, a typo scrolled to the wrong
+place, which at least you could see. Afterwards it quietly did nothing and reported success, which you
+could not. Safer, and still wrong — a tool that answers "yes" to a question it did not understand is
+worse than one that answers wrongly, because there is nothing to notice.
+
+It now names the word it did not recognise and lists the ones it does. Asking with no settings at all
+is still a plain read, and still changes nothing — that is a legitimate way to use it and it keeps
+working exactly as before.
+
+We checked the fix against a running copy of the app rather than only in tests: four kinds of
+misspelling are now refused by name, and — the part that matters — the view provably did not move on
+any of them. Checking that the command *reported* failure would not have been enough, since reporting
+success while doing nothing was the entire bug.
+
+Every other inspection command of this kind was surveyed at the same time. None of them can be made to
+change something by accident, which was the serious version of this problem. One does have a related
+rough edge — a mistyped option falls back to a default instead of complaining — and it is written down
+to fix next.
+
+## 2026-08-04 — Our own tests had been quietly filling your disk
+
+Running the test suite wrote audio files into your real application-support folder — about three per
+run, every run, for a long time. There are now 2745 of them there, taking 1.8 GB.
+
+The cause was a small design slip. Tests are supposed to redirect that folder somewhere temporary,
+and the code offered a way to do exactly that — but it was something each test had to remember to
+switch on. Any test that forgot wrote to your disk instead, silently, and nothing ever complained.
+The default now redirects itself when it detects it is running under test, so forgetting is no longer
+possible. Outside of tests nothing changes: the app writes exactly where it always did.
+
+We confirmed this by counting your folder before and after a full test run — 2783 entries both times,
+where it used to grow — and then confirmed the files had *moved* rather than merely stopped, by
+finding them in the temporary location. A fix that made the writes vanish entirely would have looked
+identical on the first check and been a different bug.
+
+**The 1.8 GB already there is untouched and is yours to decide about.** We have not deleted anything.
+That folder also holds real material you generated, mixed in with the test spill, so it is not a
+folder anything should clear wholesale — separating the two is a conversation, not a cleanup script.
+
+One neighbouring folder was examined and deliberately left alone: the recordings folder has the same
+shape of exposure but does not actually leak, and some of its contents may be your own aborted takes.
+We could not tell for certain, which is exactly why we did not touch it.
+
+## 2026-08-04 — A diagnostic that moved the thing it was asked to report
+
+One of our internal inspection commands could be asked "where is the arrange view scrolled to?" — and
+answering that question scrolled the view to the bottom. Anyone using it to check the state of the
+screen was therefore changing that state, and then measuring the change they had just caused. It is
+hard to imagine a worse property in a tool whose entire job is to observe.
+
+Asked with no arguments it is now a genuine read: it reports where things are and touches nothing.
+Asked to scroll, it still scrolls. It also now reports the horizontal position, which it never could
+before, and says plainly that there is no numeric vertical position to report rather than quietly
+leaving the field out. Each answer carries a counter that ticks only when something actually moved,
+so "did that change anything?" is now a question you can answer by looking, instead of by trusting.
+
+We checked every existing use before changing it; none depended on the old behaviour. One rough edge
+remains and is written down rather than glossed over: a misspelled argument is currently treated as
+a read instead of being rejected, so a typo fails quietly. Elsewhere in the codebase we already
+reject unknown arguments by name, and this should match.
+
+## 2026-08-04 — The export was rendering a sound you had never heard
+
+A user wrote in about their AI-generated trance project: in the app it played back thin and quiet,
+with barely anything but drums, while the WAV they exported sounded full and right. Their words were
+the clearest possible statement of what a DAW owes you — *"I should hear the same true sound that
+would be exported."*
+
+They were hearing two different songs, and both of them were ours.
+
+When you load a plug-in instrument like Surge XT, the patch it is playing lives inside the plug-in,
+not inside your project file. Nothing copies it back as you work. Turn a knob in the plug-in's own
+window, or have the AI adjust a parameter, and the project file still remembers whatever was there
+the last time you saved. Live playback asks the plug-in what it sounds like. Every export — mixdown,
+bounce, stems, and the loudness measurement the mastering tools rely on — asked the project file
+instead. So the moment those two disagreed, which was most of the time, your export was a rendering
+of a patch you had never listened to.
+
+We proved it rather than reasoned about it. With a bass track playing, we turned that plug-in's
+master volume all the way down and exported: the file came out at exactly the level it had before,
+as if nothing had happened. Then we saved the project — saving *does* ask the plug-in — reopened it,
+and exported again. Silence. The change had been real all along; the export simply could not see it.
+
+Now every export reads the same source the save does. What you hear is what you get, by
+construction. After the fix that same test exports silence, matching what the track actually sounds
+like, and a full mix of the reference project measures within 0.04 dB of what the app plays through
+your speakers.
+
+There is a second thing this uncovered, and it is the reason the report took so long to run down.
+When a track's instrument cannot be loaded — the plug-in isn't installed, or it fails, or it takes
+too long — we quietly wired that track to silence and said nothing. No message, no warning, nothing
+in the interface. The loudest track in a song could disappear with no explanation available
+anywhere. That is over: a track that cannot host its instrument now tells you so by name, and tells
+you what to do about it.
+
+One correction worth recording, because it inverts the original diagnosis. We had assumed the
+quiet playback was the broken one and the good-sounding export was correct. It was the other way
+around: that export sounded good because the plug-ins were falling back to their factory default
+patches. The quiet mix is the honest sound of the patches actually saved in the project. Fixing the
+disagreement is the fix; it does not make the song louder, and we would have been wrong to make it.
+
+## 2026-08-04 — A teardown that reported success and did nothing, and a bug report we have not solved yet
+
+> Written earlier the same day. The quiet-playback problem described at the end of this entry was
+> traced and fixed later — see "The export was rendering a sound you had never heard" above. This
+> entry is left as written, because it records what we knew at the time and two of the explanations
+> in it turned out to be wrong.
+
+Our test harness has two functions that look almost identical at a glance. One takes a bag of
+options — `startStaging({ gate, port })`. The other takes plain positional arguments —
+`stopStaging(gate, pidfile)`. Anyone reading them quickly will eventually write the first shape
+where the second belongs, and pass a bag of options where a name was expected.
+
+When that happened, nothing complained. The teardown built a file path with the word
+`[object Object]` in the middle of it, looked for that file, did not find it, and returned as
+though it had finished cleanly. No process was stopped. No lock was released. The one guard meant
+to catch this asked only whether the argument was *missing* — and a bag of options is not missing,
+so it sailed straight through. The only reason no test run ever leaked a stray app is that a
+separate safety net, written by someone else for another purpose, quietly did the real cleanup.
+
+Both functions now refuse anything that is not a proper name, and say so loudly, naming the two
+signatures so the next person sees the confusion immediately instead of debugging a phantom. We
+checked all 79 places that call this and every one of them was already correct — this protects
+future code, not existing code. We also confirmed the fix by running the *old* version alongside
+the new one and watching it reproduce the bug, because a test that passes tells you nothing unless
+you have seen it fail.
+
+Closing it turned up the same flaw one argument over, in the second parameter, still unguarded and
+reachable through the exact two-argument form much of the suite already uses. That is now written
+down as its own piece of work rather than quietly patched, and Node already warns that a future
+version may turn that silent shrug into a hard error.
+
+The same flaw turned out to live in the next argument along, and then the one after that. Fixing
+the first exposed the second; fixing the second exposed a third, where the consequence finally
+escapes the test harness — a lock file that fails to be cleaned up can make the app later offer you
+a recovery prompt for a session that ended perfectly cleanly. Two of the three are fixed and the
+third is written down. We are fixing them one at a time and confirming each against a controlled
+copy, rather than making three changes at once and hoping.
+
+All three are now fixed. The third one turned out to need more than a stricter check on the way in.
+We had been rejecting anything that was not a plain non-empty piece of text — but a piece of text can
+still be an impossible filename, and one of those slipped through the check and crashed exactly the
+same way. So the error handling underneath was split too: a genuine mistake in the code now surfaces
+loudly, while the ordinary cases it was written for — a missing lock file, an unreadable one, a
+garbled one — still behave exactly as before and still refuse to guess at ownership.
+
+That last part was the delicate bit. The "garbled file" case happens to fail in a way that looks
+identical to a programming mistake, so a careless split would have made the safe case start throwing.
+It was kept separate deliberately, and we tested that a garbled lock, a lock owned by someone else,
+and a lock whose owner is recorded oddly all still leave the file untouched.
+
+One honest limit worth stating: about ten places wrap this teardown in a "ignore any error" block.
+There, our new loud complaint is swallowed and becomes a different quiet failure. A guard is only
+as loud as the place that calls it.
+
+Separately, and more importantly: we are still chasing the reported problem where a project sounds
+correct when exported but too quiet when played back in the app. We thought we had it this week and
+said so. We were wrong — the measurement that convinced us was taken a fraction of a second after
+opening the project, before the instruments had finished loading, so a counter that was merely
+*early* was read as *never*. Reading the same counter a few seconds later showed everything
+loading normally. The underlying complaint is real and reproducible to within a hundredth of a
+decibel, and the investigation continues; we would rather say that plainly than offer a third
+confident explanation.
+
 ## 2026-08-04 — A second timing check that was quietly grading its own homework, and what we found replacing it
 
 Five days ago we raised how long a test process is allowed to wait for a plug-in to finish loading,

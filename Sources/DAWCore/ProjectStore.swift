@@ -358,19 +358,24 @@ public final class ProjectStore {
     /// swept; `importGeneration` copies the WAV here — a stable, project-
     /// adjacent home (sibling of the recordings scratch) that survives until a
     /// save folds it into the `.dawproj` `media/` (planMedia). Defaults to the
-    /// real Application Support location; a public seam so tests (and a future
-    /// relocation preference) can point it elsewhere.
+    /// real Application Support location IN PRODUCTION ONLY — under a detected
+    /// Swift test process `generationImportsDefault()` redirects to a per-process
+    /// temp root, so a test that never mentions this property still cannot write
+    /// into the user's profile. Remains a public seam so tests (and a future
+    /// relocation preference) can point it somewhere specific.
     @ObservationIgnored public var generationImportsDirectory =
-        ProjectStore.defaultGenerationImportsDirectory()
+        ProjectStore.generationImportsDefault()
 
     /// Base directory for imported REFERENCE audio (m22-g). `reference.import`
     /// COPIES the source file here (import copies, never moves — the
     /// SoundBank/VoiceDataset law): a stable pre-save home that survives
     /// until a save folds it into the `.dawproj` `media/` (planMedia) — the
     /// generation-imports precedent above. Defaults to the real Application
-    /// Support location; a public seam so tests point it at temp dirs.
+    /// Support location IN PRODUCTION ONLY — redirected to a per-process temp
+    /// root under a detected Swift test process (`referenceImportsDefault()`);
+    /// still a public seam so tests can point it somewhere specific.
     @ObservationIgnored public var referenceImportsDirectory =
-        ProjectStore.defaultReferenceImportsDirectory()
+        ProjectStore.referenceImportsDefault()
 
     /// In-flight AI clip fixes, jobId-keyed (M6 v-b). In-memory only: cleared by
     /// project.open/new, not persisted (a pending fix does not survive relaunch
@@ -2687,6 +2692,7 @@ public final class ProjectStore {
             switch name {
             case "ceilingDb": params.ceilingDb = value
             case "releaseMs": params.releaseMs = value
+            case "truePeak": params.truePeak = value >= 0.5
             default: return
             }
             effect.limiter = params
@@ -5786,7 +5792,11 @@ public final class ProjectStore {
         // Measured off the FULL session — excluding the longest track must not
         // shorten the render.
         let duration = try renderWindowSeconds(fromBeat: startBeat, requested: durationSeconds)
-        let exclusion = try RenderExclusion.resolve(session: tracks, excluding: excludeTrackIds)
+        // m23-bx-1: the LIVE hosted-AU state, never the raw model — see
+        // `tracksWithLiveAudioUnitState`. Without this the export renders the
+        // last-saved patch while the user hears the current one.
+        let exclusion = try RenderExclusion.resolve(session: tracksWithLiveAudioUnitState(),
+                                                    excluding: excludeTrackIds)
 
         let url = Self.mixdownDestination(from: path, format: format)
         // The format crosses HERE, not at `writeAudioFile`: on this path the
@@ -6034,7 +6044,7 @@ public final class ProjectStore {
         // any filesystem mutation. The document is built from a LOCAL COPY of
         // the tracks with each hosted AU's live state captured in — no model
         // mutation, no undo entry, no dirty flip.
-        let persistedTracks = tracksWithCapturedAudioUnitState()
+        let persistedTracks = tracksWithLiveAudioUnitState()
         var stateWarnings: [String] = []
         for track in persistedTracks {
             if let byteCount = track.instrument?.audioUnit?.stateData?.count,
@@ -6159,10 +6169,42 @@ public final class ProjectStore {
     /// with a size warning in the save result.
     static let audioUnitStateSoftCapBytes = 8 * 1024 * 1024
 
-    /// A LOCAL COPY of `tracks` with each `.audioUnit` descriptor's
-    /// `stateData` refreshed from `instrumentStateProvider` (when wired and
-    /// when it has state for the track). The live model is never mutated.
-    private func tracksWithCapturedAudioUnitState() -> [Track] {
+    /// ⭐ THE ONE HOME (m23-bx-1) for **"the session as the ENGINE is actually
+    /// playing it right now"**: a LOCAL COPY of `tracks` with each
+    /// `.audioUnit` descriptor's `stateData` refreshed from
+    /// `instrumentStateProvider` (when wired and when it has state for the
+    /// track). The live model is never mutated.
+    ///
+    /// ⚠️ EVERY OFFLINE RENDER MUST COME THROUGH HERE, not through the raw
+    /// `tracks` array — that is the m23-bx-1 defect, and it is worth stating
+    /// exactly why, because the raw array LOOKS like the right thing.
+    ///
+    /// A hosted AU's live state lives in `AUHostRegistry`, NOT in the model.
+    /// Nothing writes it back as the user works: `au.setParam` says so in its
+    /// own doc ("the value persists via save-time fullStateForDocument
+    /// capture"), and edits made in the vendor's own plugin window never touch
+    /// the model at all. So `tracks[i].instrument.audioUnit.stateData` is
+    /// whatever was last LOADED or last SAVED — routinely a different patch
+    /// from the one the user is listening to.
+    ///
+    /// `OfflineRenderer` builds its own registry and prepares each AU from the
+    /// `stateData` it is handed (`OfflineRenderer.prepareAudioUnits`). Hand it
+    /// the raw model and the export renders a patch the user never heard;
+    /// hand it this, and **what you hear is what you get**, by construction.
+    ///
+    /// MEASURED, m23-bx-1: with a live Surge XT's Global Volume driven to 0,
+    /// `render.mixdown` off the raw model was UNCHANGED (−39.0 LUFS, the stale
+    /// patch) while a save — which already came through here — plus a reopen
+    /// rendered −70.0 LUFS. Same instant, same session, two different sounds.
+    /// The user's report was the same split in the field: their export
+    /// measured −12.9 LUFS against live playback's −22.26.
+    ///
+    /// The capture is a main-actor `fullStateForDocument` GET per hosted AU
+    /// (the save path's cost, now also paid per render — ~6 plists for the
+    /// reference project). Tracks whose AU is not prepared keep the model's
+    /// bytes, so an un-hosted or still-preparing track degrades to the old
+    /// behaviour rather than losing its state.
+    func tracksWithLiveAudioUnitState() -> [Track] {
         var copy = tracks
         if let provider = instrumentStateProvider {
             for index in copy.indices {
@@ -6543,7 +6585,7 @@ public final class ProjectStore {
     /// personal/lyrical content and must never ride a diagnostics bundle,
     /// even with `includeProject: true`.
     func buildAutosaveDocument(includeChats: Bool = true) -> ProjectDocument {
-        let persistedTracks = tracksWithCapturedAudioUnitState()
+        let persistedTracks = tracksWithLiveAudioUnitState()
         var refs: [UUID: String?] = [:]
         for track in persistedTracks {
             for clip in track.clips {
@@ -6954,14 +6996,94 @@ public final class ProjectStore {
     /// Default home for imported generated audio (M6 iii-a). Sibling of the
     /// recordings scratch under Application Support so it persists across the
     /// volatile sidecar temp cache and undo/redo resurrection.
+    ///
+    /// ALWAYS the real profile location, in every process — the one, unredirected
+    /// computation, pinned equal to `AppDirectories.applicationSupport(.generations)`
+    /// by `AppDirectoriesTests.migratedEntryPointsResolveTheirCategories`. The
+    /// test-process redirection is layered ABOVE it in
+    /// `generationImportsDefault()`; do not fold it in here.
     static func defaultGenerationImportsDirectory() -> URL {
         AppDirectories.applicationSupport(.generations)
     }
 
     /// Default home for imported reference audio (m22-g) — the Generations
     /// sibling under Application Support (design §3.3).
+    ///
+    /// ALWAYS the real profile location — see the note on
+    /// `defaultGenerationImportsDirectory()`; the redirection lives in
+    /// `referenceImportsDefault()`.
     static func defaultReferenceImportsDirectory() -> URL {
         AppDirectories.applicationSupport(.references)
+    }
+
+    /// A fresh per-PROCESS temp base shared by BOTH media-import redirections,
+    /// `nil` outside a detected test process.
+    ///
+    /// One base rather than two (the point of departure from
+    /// `DiagnosticsReporter.testOutputDirRoot`, which is deliberately its own
+    /// root): in production `Generations/` and `References/` are SIBLINGS under
+    /// one `DAWPro/` parent — the reference importer is documented as "the
+    /// Generations sibling" (design §3.3) — and two independent UUID bases would
+    /// silently break that relationship under test while leaving it true in the
+    /// shipped app. Sharing the base keeps the redirected pair structurally
+    /// identical to the real pair; only the root moves.
+    private static let testMediaImportsBase: URL? = {
+        guard TestEnvironment.isRunningTests else { return nil }
+        return FileManager.default.temporaryDirectory
+            .appendingPathComponent("DAWPro-test-media-imports-\(UUID().uuidString)",
+                                    isDirectory: true)
+    }()
+
+    /// Builds one redirected media-import root under `testMediaImportsBase`.
+    ///
+    /// Uses the SAME path math as production (`AppDirectories.applicationSupport`)
+    /// with a different `systemBase` — not a second, hand-rolled temp path — so a
+    /// future change to the Application Support rule moves the redirected roots
+    /// with it. Created eagerly (not lazily on first write) so a test that lists
+    /// the directory before anything has imported never races an unmade parent.
+    private static func testMediaImportsRoot(_ category: AppDirectories.Category) -> URL? {
+        guard let base = testMediaImportsBase else { return nil }
+        let root = AppDirectories.applicationSupport(category, systemBase: base)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    /// Per-PROCESS redirected home for `generationImportsDefault()`. `static let`,
+    /// so every `ProjectStore` built in this process shares ONE root — mirroring
+    /// production, where every default-constructed store shares the one real
+    /// Generations directory.
+    private static let testGenerationImportsRoot: URL? = testMediaImportsRoot(.generations)
+
+    /// Per-PROCESS redirected home for `referenceImportsDefault()`. See
+    /// `testGenerationImportsRoot`.
+    private static let testReferenceImportsRoot: URL? = testMediaImportsRoot(.references)
+
+    /// The default value for `generationImportsDirectory` (the m23-aa
+    /// `autosaveRecoveryDefault()` / m23-aq `outputDirDefault()` shape). Production:
+    /// exactly `defaultGenerationImportsDirectory()` — unchanged, still the real
+    /// profile location. Under a detected Swift test process: a redirected temp
+    /// root.
+    ///
+    /// **Why this had to become opt-OUT.** The seam was already public and already
+    /// documented as "tests point it at temp dirs" — but it was opt-IN, so any test
+    /// that forgot wrote into the user's real
+    /// `~/Library/Application Support/DAWPro/Generations/`. It did: that directory
+    /// had accumulated 2751 `bounce-<hex>.wav` files (1.8 GB), growing by ~3 per
+    /// full-suite run, because `bounceInPlace` (`ProjectStore+Bounce.swift`) and
+    /// `copyGeneratedAudioToStableLocation` (`ProjectStore+Generation.swift`) both
+    /// write through the PROPERTY. Fixing the default fixes every writer at once;
+    /// enumerating and patching call sites would leave the trap armed for the next
+    /// one. Production pays one `TestEnvironment.isRunningTests` read.
+    static func generationImportsDefault() -> URL {
+        testGenerationImportsRoot ?? defaultGenerationImportsDirectory()
+    }
+
+    /// The default value for `referenceImportsDirectory` — the same shape and the
+    /// same reason as `generationImportsDefault()`. `reference.import` COPIES its
+    /// source here, and confirmed test spill (`orch-clicks.wav`, `orch-sine-2.wav`)
+    /// is sitting in the user's real `References/` from before this guard existed.
+    static func referenceImportsDefault() -> URL {
+        testReferenceImportsRoot ?? defaultReferenceImportsDirectory()
     }
 
     /// Readable reason from any error (LocalizedError message when present).

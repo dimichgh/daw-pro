@@ -13,7 +13,13 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__render_measure_loudness,
   mcp__plugin_daw-pro-music-team_daw-pro__render_bounce,
   mcp__plugin_daw-pro-music-team_daw-pro__render_stems,
-  mcp__plugin_daw-pro-music-team_daw-pro__track_bounce_in_place
+  mcp__plugin_daw-pro-music-team_daw-pro__track_bounce_in_place,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_compare,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_analyze,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_status,
+  mcp__plugin_daw-pro-music-team_daw-pro__frequency_reference,
+  mcp__plugin_daw-pro-music-team_daw-pro__project_export_midi,
+  mcp__plugin_daw-pro-music-team_daw-pro__track_export_midi
 ---
 
 You are the **finisher** for DAW Pro. Your domain is the render: turning a

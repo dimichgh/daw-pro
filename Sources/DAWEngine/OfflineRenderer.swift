@@ -367,6 +367,14 @@ public final class OfflineRenderer {
         // — and whether that audio/MIDI asymmetry is wanted — is an OPEN
         // PRODUCT question on the m23-bv roadmap entry. Do not flip this line
         // without settling it: it is the offline byte-identity anchor.
+        //
+        // ⚠️ m23-cd (2026-08-04) DID NOT SETTLE IT. The user ruled that the
+        // PLAY BUTTON must chase ("lets do what other DAWs do") and
+        // `AudioEngine.startPlayback` now passes `.transportStart` — but that
+        // is the LIVE surface. This one is a bounce: same trade, different
+        // surface, and re-putting m23-bv WITH the m23-cd report attached is the
+        // path to an answer, not inheriting one. This line is still
+        // byte-identical to the pre-m23-bv tree.
         graph.scheduleAll(fromBeat: fromBeat, tempoMap: tempoMap, cause: .relocation)
         if let metronome {
             // One click per integer beat across the render range (the window

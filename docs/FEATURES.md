@@ -87,7 +87,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Gain** | Utility | Level (dB) | ✅ Shipped |
 | **EQ** | Tone | 4 bands (bass/low-mid/high-mid/treble), freq/gain/Q per band | ✅ Shipped |
 | **Compressor** | Dynamics | Ratio, threshold, attack, release, makeup gain (soft-knee, stereo-linked) | ✅ Shipped |
-| **Limiter** | Dynamics | Threshold, attack, release (5 ms lookahead, true peak ceiling) | ✅ Shipped |
+| **Limiter** | Dynamics | Ceiling, release, `truePeak` (5 ms lookahead. `truePeak: 0` — the default — makes Ceiling a hard **dBFS sample-peak** limit; a dBTP meter reads ~0.4–1 dB above it on dense material, which is arithmetic, not a fault. `truePeak: 1` makes Ceiling a **dBTP true-peak** limit via 4× oversampled detection (ITU-R BS.1770-4), so a −1 dBTP delivery spec is met on the first render — m23-ch) | ✅ Shipped |
 | **Reverb** | Space | Freeverb (8 combs + 4 allpasses), room, damping, width, pre-delay | ✅ Shipped |
 | **Delay** | Space | Integer delay lines, feedback, high-cut, ping-pong stereo crossfeed | ✅ Shipped |
 | **Saturator** | Tone | Drive (−driveDb/2 dB compensation), tanh nonlinearity | ✅ Shipped |

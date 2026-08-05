@@ -104,7 +104,27 @@ public final class AutomationPointSelectionBridge {
     /// because the guard asks "is any lane claiming", not "which one".
     @ObservationIgnored public private(set) var stagedSelect = false
 
+    /// ASKED OF THE EDITORS by Edit ▸ Delete (m23-cf): delete the breakpoint you
+    /// have selected. Watched by EVERY mounted editor, exactly like `stageNonce`
+    /// and for the same reason — the guard asks "is any lane claiming", not
+    /// "which one", so there is no per-lane addressing to invent here either. A
+    /// lane holding no live selection re-applies its own `liveSelectionIndex`
+    /// guard and does nothing, so the broadcast cannot touch a lane the user was
+    /// not editing.
+    ///
+    /// A SECOND NONCE, NOT A SECOND MEANING ON `stageNonce` — the
+    /// `PianoRollNoteSelectionBridge.deleteNonce` reason: one number that meant
+    /// both "select" and "delete" would be one refactor away from destroying the
+    /// user's automation on a staging call.
+    public private(set) var deleteNonce = 0
+
     public init() {}
+
+    /// EDIT ▸ DELETE ASKED THE LANES TO DELETE THEIR SELECTION (m23-cf). The only
+    /// way anything outside can reach `selection`/`draft`, which are `@State
+    /// private` on the editor. Carries no payload: each editor deletes its own
+    /// live breakpoint or nothing.
+    public func requestDelete() { deleteNonce += 1 }
 
     /// One lane's report. Idempotent — the views call it with `initial: true`,
     /// and only ever about themselves.

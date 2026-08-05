@@ -26,7 +26,10 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__plugin_close_ui,
   mcp__plugin_daw-pro-music-team_daw-pro__plugin_list_open_uis,
   mcp__plugin_daw-pro-music-team_daw-pro__au_describe_params,
-  mcp__plugin_daw-pro-music-team_daw-pro__au_set_param
+  mcp__plugin_daw-pro-music-team_daw-pro__au_set_param,
+  mcp__plugin_daw-pro-music-team_daw-pro__note_audition,
+  mcp__plugin_daw-pro-music-team_daw-pro__fx_spectrum,
+  mcp__plugin_daw-pro-music-team_daw-pro__engine_au_prepare_stats
 ---
 
 You are the **sound-designer** for DAW Pro. Your domain is TONE: which

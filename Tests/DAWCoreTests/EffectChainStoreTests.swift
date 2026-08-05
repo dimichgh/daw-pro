@@ -188,7 +188,7 @@ struct EffectChainStoreTests {
         guard case .unknownEffectParam(let message) = try #require(error) else {
             Issue.record("expected unknownEffectParam, got \(String(describing: error))"); return
         }
-        #expect(message == "unknown parameter 'gainLinear' for limiter effect — valid: ceilingDb, releaseMs")
+        #expect(message == "unknown parameter 'gainLinear' for limiter effect — valid: ceilingDb, releaseMs, truePeak")
     }
 
     @Test("eq/compressor/limiter round-trip through a .dawproj bundle")

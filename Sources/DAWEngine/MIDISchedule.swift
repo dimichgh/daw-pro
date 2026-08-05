@@ -84,10 +84,12 @@ final class MIDIEventSchedule {
     ///    48 kHz, so rounding can never collapse a note — the clamp is defense)
     ///  · NOTE CHASE (m23-bp): OFF BY DEFAULT — the onset must also be ≥ fromBeat,
     ///    else BOTH events are dropped (a note sounding across the start point does
-    ///    not sound). `chaseHeldNotes: true` — passed ONLY by a CONTINUATION
-    ///    reschedule (`RescheduleCause`; never a relocation, never a loop-cycle
-    ///    block) — instead admits a note whose onset is behind the anchor while its
-    ///    off is strictly ahead of it, with the ONSET CLAMPED to fromBeat (so its
+    ///    not sound). `chaseHeldNotes: true` — passed by a CONTINUATION reschedule
+    ///    and, since m23-cd, by a TRANSPORT START (`RescheduleCause`; never a
+    ///    relocation — seek, record start, loop-wrap fallback, offline bounce —
+    ///    and never a loop-cycle block) — instead admits a note whose onset is
+    ///    behind the anchor while its off is strictly ahead of it, with the
+    ///    ONSET CLAMPED to fromBeat (so its
     ///    frame is the block's anchorFrame) and the off at its true time. The note
     ///    RE-ATTACKS; true voice continuation is out of reach (design-m23bp §4). A
     ///    chased note with no whole frame of tail left is dropped rather than

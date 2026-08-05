@@ -100,14 +100,18 @@ extension ProjectStore {
         // 2. Render the single stem OUTSIDE the edit body, under the FORCED
         //    full-session compensation plan (probed once) — byte-parity with
         //    render.stems' one-track pass.
-        let targets = await engine.offlineCompensationTargets(tracks: tracks)
+        // m23-bx-1: the LIVE hosted-AU state — a track bounce that baked the
+        // last-saved patch instead of the one playing would land clip material
+        // the user never heard, permanently.
+        let liveTracks = tracksWithLiveAudioUnitState()
+        let targets = await engine.offlineCompensationTargets(tracks: liveTracks)
         // STEM class (m13-d, design §2): a track bounce must never bake the
         // master bus into clip material — byte==stem stays BY CONSTRUCTION.
         // The master volume lane is excluded too (m15-c, S-3′ extension): a
         // baked fade would double-apply when the landed clip plays back
         // through the live master fade.
         let audio = try await engine.renderOffline(
-            tracks: StemPlan.passTracks(for: descriptor, session: tracks),
+            tracks: StemPlan.passTracks(for: descriptor, session: liveTracks),
             tempoMap: transport.tempoMap, masterVolume: masterVolume,
             masterEffects: [],
             masterAutomation: [],

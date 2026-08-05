@@ -134,6 +134,34 @@ struct AutomationLaneEditor: View {
                 guard let pointSelection else { return }
                 selection = pointSelection.stagedSelect ? draft.indices.first : nil
             }
+            // m23-cf: EDIT ▸ DELETE reaching this lane. The menu item cannot call
+            // `deleteSelection()` itself (`selection`/`draft` are `@State
+            // private`), so it bumps `deleteNonce` and every mounted lane applies
+            // it — which is safe precisely because the operation re-applies the
+            // editor's OWN `liveSelectionIndex` guard. A lane the user was not
+            // editing returns `.ignored` and mutates nothing, so the broadcast
+            // touches exactly the lane (or lanes) that would have consumed the
+            // DELETE key.
+            //
+            // THE SAME FUNCTION THE KEY PRESS CALLS, never a parallel mutation:
+            // one `commit(AutomationEdit.removePoint(…))`, so undo behaves
+            // identically through both routes. The result is discarded because a
+            // menu click has no `KeyPress.Result` to answer.
+            //
+            // ⚠️ NOTE WHAT IS BEING OBSERVED: `Optional<Int>`, exactly like the
+            // `stageNonce` handler above, so this also fires on `nil → n` when a
+            // bridge ATTACHES — not only on a real `requestDelete()`. That is
+            // deliberately harmless rather than accidentally harmless: there is
+            // no caller-side emptiness guard here BECAUSE the callee is the one
+            // home for it. `deleteSelection()` returns `.ignored` unless
+            // `liveSelectionIndex` is non-nil, and a lane that does have a point
+            // selected at attach time is precisely a lane where deleting is the
+            // correct answer. Do not "fix" this by adding a second selection
+            // test at this call site; that is the divergence `liveSelectionIndex`
+            // exists to prevent.
+            .onChange(of: pointSelection?.deleteNonce) { _, _ in
+                _ = deleteSelection()
+            }
             .onDisappear {
                 // m23-ai: drop THIS lane's claim, and only this lane's. A
                 // latched id would kill the arrange's arrow keys for the rest

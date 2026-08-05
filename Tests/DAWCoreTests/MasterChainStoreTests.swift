@@ -150,7 +150,7 @@ struct MasterChainStoreTests {
             Issue.record("expected unknownEffectParam, got \(String(describing: error))")
             return
         }
-        #expect(message == "unknown parameter 'threshold' for limiter effect — valid: ceilingDb, releaseMs")
+        #expect(message == "unknown parameter 'threshold' for limiter effect — valid: ceilingDb, releaseMs, truePeak")
 
         // Silent clamp to the spec range (ceilingDb ∈ −24…0).
         let clamped = try store.setMasterEffectParam(

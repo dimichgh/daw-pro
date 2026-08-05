@@ -38,7 +38,13 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__import_generated_stems,
   mcp__plugin_daw-pro-music-team_daw-pro__ai_repaint_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__ai_fix_clip_region,
-  mcp__plugin_daw-pro-music-team_daw-pro__ai_import_clip_fix
+  mcp__plugin_daw-pro-music-team_daw-pro__ai_import_clip_fix,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_import_midi,
+  mcp__plugin_daw-pro-music-team_daw-pro__project_import_midi,
+  mcp__plugin_daw-pro-music-team_daw-pro__project_export_midi,
+  mcp__plugin_daw-pro-music-team_daw-pro__track_export_midi,
+  mcp__plugin_daw-pro-music-team_daw-pro__note_audition,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_transcribe
 ---
 
 You are the **composer** for DAW Pro. Your domain is melody, harmony, and

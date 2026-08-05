@@ -30,7 +30,10 @@ extension ProjectStore {
         // The master volume lane rides the class (m15-c): a programmed fade
         // IS part of the measured program.
         let audio = try await engine.renderOffline(
-            tracks: tracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
+            // m23-bx-1: measuring a patch the user is not hearing would make
+            // every loudness number a measurement of the wrong program.
+            tracks: tracksWithLiveAudioUnitState(),
+            tempoMap: transport.tempoMap, masterVolume: masterVolume,
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
             fromBeat: startBeat, durationSeconds: duration,
@@ -102,7 +105,10 @@ extension ProjectStore {
         // instrumental must land the same length as the mix, even when the
         // excluded track is the longest one.
         let duration = try renderWindowSeconds(fromBeat: startBeat, requested: durationSeconds)
-        let exclusion = try RenderExclusion.resolve(session: tracks, excluding: excludeTrackIds)
+        // m23-bx-1: LIVE hosted-AU state — the deliverable must be the thing
+        // the user auditioned (`tracksWithLiveAudioUnitState`).
+        let exclusion = try RenderExclusion.resolve(session: tracksWithLiveAudioUnitState(),
+                                                    excluding: excludeTrackIds)
         // MASTERED class (m13-d, design §2): the deliverable bounce carries
         // the master chain AND the master volume lane (m15-c — "fade out the
         // song" lands in the deliverable); the loudness report measures the
@@ -264,9 +270,15 @@ extension ProjectStore {
         let dir = Self.stemsDestination(from: directory)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
+        // m23-bx-1: captured ONCE for the whole stem set, so every pass below
+        // renders the SAME hosted-AU state — re-capturing per pass would let a
+        // mid-export plugin edit land in some stems and not others, and the
+        // partition (Σ stems nulls against "00 Mixdown.wav") would stop
+        // holding for a reason no one could see in the files.
+        let liveTracks = tracksWithLiveAudioUnitState()
         // The full-session plan, probed ONCE — every pass below is forced
         // under it (WYSIWYG stretch awaits ride inside each renderOffline).
-        let targets = await engine.offlineCompensationTargets(tracks: tracks)
+        let targets = await engine.offlineCompensationTargets(tracks: liveTracks)
 
         var stems: [StemFile] = []
         var sampleRate = 0.0
@@ -281,7 +293,7 @@ extension ProjectStore {
             // would destroy the re-mixable partition (the static masterVolume
             // stays included, exactly as ever).
             let audio = try await engine.renderOffline(
-                tracks: StemPlan.passTracks(for: descriptor, session: tracks),
+                tracks: StemPlan.passTracks(for: descriptor, session: liveTracks),
                 tempoMap: transport.tempoMap, masterVolume: masterVolume,
                 masterEffects: [],
                 masterAutomation: [],
@@ -308,7 +320,7 @@ extension ProjectStore {
             // null-check anchor Σ-stems compares against. A MASTERED file
             // comes from `render.bounce`.
             let audio = try await engine.renderOffline(
-                tracks: tracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
+                tracks: liveTracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
                 masterEffects: [],
                 masterAutomation: [],
                 fromBeat: startBeat, durationSeconds: duration,
@@ -339,7 +351,7 @@ extension ProjectStore {
             // is a parity no-op, and it removes timing as a confound when
             // someone diffs this file against the stems' sum.
             let rendered = try await engine.renderOffline(
-                tracks: tracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
+                tracks: liveTracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
                 masterEffects: masterEffects,
                 masterAutomation: masterAutomation,
                 fromBeat: startBeat, durationSeconds: duration,

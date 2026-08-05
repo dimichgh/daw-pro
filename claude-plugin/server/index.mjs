@@ -33240,10 +33240,16 @@ var LONG_RUNNING_COMMANDS = /* @__PURE__ */ new Set([
   "render.bounce",
   "render.mixdown",
   "render.stems",
-  "render.measureLoudness"
+  "render.measureLoudness",
+  // m22-g: reference.import runs a whole-file offline analysis (loudness +
+  // spectrum + stereo) before responding — seconds-class for typical songs,
+  // but well past the 5 s default for long files on slow disks.
+  "reference.import"
 ]);
 var VOICE_CONVERT_TIMEOUT_MS = 33e4;
 var VOICE_CONVERT_COMMANDS = /* @__PURE__ */ new Set(["vc.convertVocals"]);
+var CLIP_TRANSCRIBE_TIMEOUT_MS = 3e5;
+var CLIP_TRANSCRIBE_COMMANDS = /* @__PURE__ */ new Set(["clip.transcribe"]);
 function isControlResponse(value) {
   if (typeof value !== "object" || value === null) return false;
   const record2 = value;
@@ -33270,7 +33276,7 @@ var DawBridge = class {
   async send(command, params = {}) {
     const socket = await this.ensureConnected();
     const id = `mcp-${this.nextId++}-${Date.now()}`;
-    const timeoutMs = VOICE_CONVERT_COMMANDS.has(command) ? VOICE_CONVERT_TIMEOUT_MS : LONG_RUNNING_COMMANDS.has(command) ? LONG_RUNNING_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+    const timeoutMs = VOICE_CONVERT_COMMANDS.has(command) ? VOICE_CONVERT_TIMEOUT_MS : CLIP_TRANSCRIBE_COMMANDS.has(command) ? CLIP_TRANSCRIBE_TIMEOUT_MS : LONG_RUNNING_COMMANDS.has(command) ? LONG_RUNNING_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
     return new Promise((resolve5, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -43924,6 +43930,15 @@ registerTool(
   async () => toToolResult(() => bridge.send("transport.stop"))
 );
 registerTool(
+  "transport_panic",
+  {
+    title: "Panic \u2014 silence stuck notes",
+    description: "PANIC / all-notes-off. Silences a note that is stuck sounding \u2014 a key whose note-off was lost because the cable was unplugged, the device was removed, or the sending app crashed mid-note. Sends all-notes-off to every instrument track and releases any held preview notes. Works while stopped (transport_stop cannot clear a stuck note \u2014 it does nothing when already stopped), and deliberately does NOT stop playback or recording, so it is safe mid-take. Returns tracksFlushed, the number of instrument renderers asked.",
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("transport.panic"))
+);
+registerTool(
   "transport_seek",
   {
     title: "Move the playhead",
@@ -44133,6 +44148,20 @@ registerTool(
     }
   },
   async ({ trackId, name }) => toToolResult(() => bridge.send("track.rename", { trackId, name }))
+);
+registerTool(
+  "track_reorder",
+  {
+    title: "Move a track up or down the track list",
+    description: 'Move a track to a different position in the track list \u2014 how you group a session (all the drums together, the vocals under them) instead of leaving tracks in whatever order they were created. `index` is the FINAL position the track ends up at, counting from 0 at the TOP: with tracks [Kick, Snare, Bass, Vox], moving Kick to index 2 gives [Snare, Bass, Kick, Vox] (this is NOT an "insert before" offset \u2014 ask for the slot you want the track to occupy afterwards). Out-of-range values clamp: a huge index means "last", a negative one means "first". Moving a track to the position it already holds changes nothing and adds no undo step. Track order is organizational only: it never changes what anything sounds like and never touches routing, sends, effects, clips or automation \u2014 and because it cannot reach the audio graph, it is allowed even while recording. One undoable step (edit_undo). Returns {index, order} \u2014 the index the track landed at, and the ids of every track in the resulting order.',
+    inputSchema: {
+      trackId: external_exports.string().min(1).describe("Id of the track to move, from project_snapshot."),
+      index: external_exports.number().int().describe(
+        "The FINAL position the track should end up at, 0 = top of the list. Out-of-range values clamp to the first/last slot."
+      )
+    }
+  },
+  async ({ trackId, index }) => toToolResult(() => bridge.send("track.reorder", { trackId, index }))
 );
 registerTool(
   "track_set_volume",
@@ -44447,6 +44476,33 @@ server.registerTool(
   },
   async () => toToolResult(() => bridge.send("midi.listInputs"))
 );
+registerTool(
+  "note_audition",
+  {
+    title: "Sound notes now (preview, not an edit)",
+    description: "Sound notes RIGHT NOW on an instrument track so the user can hear a pitch, a chord voicing, or how a patch responds. This is a PREVIEW, not an edit: nothing is written to any clip, nothing is recorded, and the notes release themselves after `durationMs` (default 500). It returns immediately \u2014 it never blocks for the duration. Works with the transport STOPPED and also WHILE PLAYING, and it never disturbs notes already playing back (audition rides its own path into the instrument, separate from the sequencer). Use it to answer 'what does this voicing sound like' before writing it with clip_add_midi, or to confirm an instrument actually makes sound. `audible:false` in the reply is a REAL ANSWER, not an error: `reason` names why nothing will be heard \u2014 `trackMuted` (unmute it, or it is excluded by another track's solo), `instrumentNotReady` (a plugin is still loading \u2014 try again in a moment), `engineStopped`, `engineRebuilding`. It deliberately IGNORES the user's in-app 'audition while editing' preference, because that preference means 'do not sound notes while I drag', not 'never make sound'. Refused while a take is recording.",
+    inputSchema: {
+      trackId: external_exports.string().describe(
+        "Id of the INSTRUMENT track to sound the notes on (from project_snapshot). Audio and bus tracks carry no instrument and are refused."
+      ),
+      pitches: external_exports.array(external_exports.number().int().min(0).max(127)).min(1).max(8).describe(
+        "MIDI note numbers to sound together, 1-8 of them (60 = middle C). One entry is a single note; several make a chord."
+      ),
+      velocity: external_exports.number().int().min(1).max(127).optional().describe("How hard the notes are struck, 1-127. Defaults to 100."),
+      durationMs: external_exports.number().int().min(10).max(5e3).optional().describe(
+        "How long to hold the notes, 10-5000 ms. Defaults to 500. The release is automatic."
+      )
+    }
+  },
+  async ({
+    trackId,
+    pitches,
+    velocity,
+    durationMs
+  }) => toToolResult(
+    () => bridge.send("note.audition", { trackId, pitches, velocity, durationMs })
+  )
+);
 server.registerTool(
   "instrument_list_audio_units",
   {
@@ -44526,9 +44582,10 @@ var fxKindSchema = external_exports.enum([
   "saturator",
   "gate",
   "chorus",
+  "bassEnhancer",
   "audioUnit"
 ]).describe(
-  "Effect kind. `gain` is a simple linear gain stage. `eq` is a parametric equalizer (low shelf, two peaking/bell bands, high shelf, plus optional high-pass and low-pass filters at 12 or 24 dB/oct, shelf Q, and per-band bypass) \u2014 call fx_describe to see its exact parameter names and each one's teaching `note`, e.g. `peak1Freq`/`peak1GainDb`/`peak1Q` for the first peaking band (the second peaking band follows the same naming pattern), `highPassFreq`/`highPassSlopeDbPerOct`/`highPassEnabled` for the high-pass (off until you set its frequency or enable it). `compressor` is a soft-knee, stereo-linked dynamics processor: `thresholdDb`, `ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`. `limiter` is a lookahead brick-wall limiter: `ceilingDb`, `releaseMs` \u2014 it adds 5 ms of processing latency, reported per-effect as `latencySamples` in project_snapshot's `effects` array. The dynamics kinds (compressor/limiter/gate) also report a live `gainReductionDb` meter there (positive dB, held-peak, \u221220 dB/s release) \u2014 poll project_snapshot during playback to verify a compressor is actually working. `reverb` is a Freeverb-style room simulation: `roomSize`, `damping`, `mix`, `preDelayMs`, `width`. `delay` is a stereo echo: `timeMs`, `feedback`, `mix`, `pingPong` (0 or 1 \u2014 1 alternates repeats left/right), `highCutHz`, plus tempo sync \u2014 `sync` (0 or 1; 1 derives the effective time from the project tempo, tracking tempo changes, while `timeMs` stays stored as the unsync fallback) and `division` (the synced note length as its duration in BEATS, snapped to the nearest of 1/1\u20261/32 straight/dotted/triplet \u2014 e.g. 1 = 1/4, 0.75 = 1/8 dotted, 0.333 = 1/8 triplet; the snapshot echoes a human `divisionLabel` like \"1/8d\"). `saturator` is a tanh-based drive/color stage: `driveDb`, `mix`, `outputDb`. `gate` is a noise gate: `thresholdDb`, `attackMs`, `holdMs`, `releaseMs`. `chorus` is a 2-voice modulated thickener: `rateHz`, `depthMs`, `mix`. `audioUnit` hosts an installed Audio Unit EFFECT plugin \u2014 third-party or Apple effects registered with the system \u2014 selected via fx_add's `audioUnit` param (REQUIRED when this kind is used); call fx_list_audio_units first to discover what's installed."
+  "Effect kind. `gain` is a simple linear gain stage. `eq` is a parametric equalizer (low shelf, two peaking/bell bands, high shelf, plus optional high-pass and low-pass filters at 12 or 24 dB/oct, shelf Q, and per-band bypass) \u2014 call fx_describe to see its exact parameter names and each one's teaching `note`, e.g. `peak1Freq`/`peak1GainDb`/`peak1Q` for the first peaking band (the second peaking band follows the same naming pattern), `highPassFreq`/`highPassSlopeDbPerOct`/`highPassEnabled` for the high-pass (off until you set its frequency or enable it). `compressor` is a soft-knee, stereo-linked dynamics processor: `thresholdDb`, `ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`. `limiter` is a lookahead brick-wall limiter: `ceilingDb`, `releaseMs` \u2014 it adds 5 ms of processing latency, reported per-effect as `latencySamples` in project_snapshot's `effects` array. The dynamics kinds (compressor/limiter/gate) also report a live `gainReductionDb` meter there (positive dB, held-peak, \u221220 dB/s release) \u2014 poll project_snapshot during playback to verify a compressor is actually working. `reverb` is a Freeverb-style room simulation: `roomSize`, `damping`, `mix`, `preDelayMs`, `width`. `delay` is a stereo echo: `timeMs`, `feedback`, `mix`, `pingPong` (0 or 1 \u2014 1 alternates repeats left/right), `highCutHz`, plus tempo sync \u2014 `sync` (0 or 1; 1 derives the effective time from the project tempo, tracking tempo changes, while `timeMs` stays stored as the unsync fallback) and `division` (the synced note length as its duration in BEATS, snapped to the nearest of 1/1\u20261/32 straight/dotted/triplet \u2014 e.g. 1 = 1/4, 0.75 = 1/8 dotted, 0.333 = 1/8 triplet; the snapshot echoes a human `divisionLabel` like \"1/8d\"). `saturator` is a tanh-based drive/color stage: `driveDb`, `mix`, `outputDb`. `gate` is a noise gate: `thresholdDb`, `attackMs`, `holdMs`, `releaseMs`. `chorus` is a 2-voice modulated thickener: `rateHz`, `depthMs`, `mix`. `bassEnhancer` is a psychoacoustic bass enhancer (RBass class): `crossoverHz`, `amount`, `mix`. It low-passes the signal at `crossoverHz`, synthesizes the 2nd/3rd/4th harmonics OF THAT LOW BAND ONLY, high-passes them back at the same corner, and ADDS them to an untouched dry path \u2014 so a speaker that cannot reproduce a 50 Hz fundamental still hears its harmonic series and the ear infers the missing fundamental. Reach for it when a mix has no low end on laptops or phones. It is NOT the `saturator`: the shaper only ever sees the low band and the series stops at the 4th partial. Be honest with users that it ADDS harmonics that were not in the recording. `amount` 0 or `mix` 0 is bit-exact bypass. `audioUnit` hosts an installed Audio Unit EFFECT plugin \u2014 third-party or Apple effects registered with the system \u2014 selected via fx_add's `audioUnit` param (REQUIRED when this kind is used); call fx_list_audio_units first to discover what's installed."
 );
 var fxAudioUnitSchema = external_exports.object({
   type: external_exports.string().length(4).optional().describe(
@@ -44547,7 +44604,7 @@ registerTool(
   "fx_add",
   {
     title: "Add an effect to a track or bus's insert chain",
-    description: 'Insert a new effect into a track or bus\'s insert chain. Insert effects are PRE-FADER \u2014 they process the signal before the track\'s own volume/pan (track_set_volume/track_set_pan) \u2014 unlike sends (track_add_send), which tap the signal POST-fader. The chain is an ordered array and ARRAY ORDER IS PROCESSING ORDER: index 0 processes first, and reordering the chain later with fx_reorder changes what the signal actually hears (e.g. EQ before vs. after a compressor sounds different). `kind` selects which effect to insert; `index` is where it lands in the chain (0 = processed first) \u2014 omit to append at the end, and out-of-range values clamp into range rather than erroring. `params` seeds the new effect\'s parameters by name (e.g. `{ gain: 1.5 }`); call fx_describe first to see each kind\'s exact parameter names, ranges, defaults, and units \u2014 omitted params start at their default, and out-of-range values clamp. `audioUnit` (see its own description) selects a specific installed Audio Unit effect plugin by component triple and is REQUIRED when `kind` is `audioUnit` (call fx_list_audio_units first to discover what\'s installed); it\'s ignored for every other kind. Each track/bus\'s insert chain is capped at 16 effects (adding a 17th errors). Adding an effect never interrupts or glitches playback. MASTER CHAIN: pass `trackId` as the exact string "master" to insert on the whole mix\'s master output chain (post-fader, the last stop before the speakers) instead of a track/bus. The master chain hosts BUILT-IN effects only in v1 \u2014 `kind: "audioUnit"` on "master" is rejected (pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus). Classic mastering move: fx_add {trackId: "master", kind: "eq"} then {trackId: "master", kind: "limiter"}, then render_measure_loudness to check the level. Returns `{effectId, effects}`: the new effect\'s server-minted id, and the track\'s full updated insert chain (same shape as project_snapshot\'s per-track `effects` array).',
+    description: 'Insert a new effect into a track or bus\'s insert chain. Insert effects are PRE-FADER \u2014 they process the signal before the track\'s own volume/pan (track_set_volume/track_set_pan) \u2014 unlike sends (track_add_send), which tap the signal POST-fader. The chain is an ordered array and ARRAY ORDER IS PROCESSING ORDER: index 0 processes first, and reordering the chain later with fx_reorder changes what the signal actually hears (e.g. EQ before vs. after a compressor sounds different). `kind` selects which effect to insert; `index` is where it lands in the chain (0 = processed first) \u2014 omit to append at the end, and out-of-range values clamp into range rather than erroring. `params` seeds the new effect\'s parameters by name (e.g. `{ gain: 1.5 }`); call fx_describe first to see each kind\'s exact parameter names, ranges, defaults, and units \u2014 omitted params start at their default, and out-of-range values clamp. `audioUnit` (see its own description) selects a specific installed Audio Unit effect plugin by component triple and is REQUIRED when `kind` is `audioUnit` (call fx_list_audio_units first to discover what\'s installed); it\'s ignored for every other kind. Each track/bus\'s insert chain is capped at 16 effects (adding a 17th errors). Adding an effect never interrupts or glitches playback. MASTER CHAIN: pass `trackId` as the exact string "master" to insert on the whole mix\'s master output chain (post-fader, the last stop before the speakers) instead of a track/bus. The master chain hosts BUILT-IN effects only in v1 \u2014 `kind: "audioUnit"` on "master" is rejected (pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|bassEnhancer). Classic mastering move: fx_add {trackId: "master", kind: "eq"} then {trackId: "master", kind: "limiter"}, then render_measure_loudness to check the level. Returns `{effectId, effects}`: the new effect\'s server-minted id, and the track\'s full updated insert chain (same shape as project_snapshot\'s per-track `effects` array).',
     inputSchema: {
       trackId: external_exports.string().min(1).describe('Id of the track or bus to add the effect to, from project_snapshot, OR the exact string "master" for the master output chain (built-in kinds only there).'),
       kind: fxKindSchema.default("gain"),
@@ -44726,11 +44783,28 @@ registerTool(
     () => bridge.send("fx.setSidechain", { trackId, effectId, sourceTrackId: sourceTrackId ?? null })
   )
 );
+registerTool(
+  "fx_spectrum",
+  {
+    title: "Read (and hold) an insert's own spectrum \u2014 not just the master mix",
+    description: 'Read the real-time analysis snapshot measured on ONE effect insert\'s own output \u2014 the same shape mixer_master_analysis returns (bands/levelDB/peakDB/centroidHz/flux/correlation/width/balance \u2014 see that tool\'s description for what each field means), but scoped to a single insert instead of the whole mix, so you can see what an EQ or compressor is actually PRODUCING rather than what the master bus receives overall. Pass `trackId` as a track/bus id, or the exact string "master" for the master output chain, plus the `effectId` of the insert to measure. `arm` (default true) arms \u2014 or, on every subsequent call, RENEWS \u2014 a 3-second measurement lease and then reads; a call with `arm: false` reads one last time and releases the tap immediately. Poll at 5-30 Hz while you want the reading live: below roughly 12 Hz the underlying ring buffer drops its oldest frames, so peak release and flux smoothing lag behind wall-clock. If you stop polling, the lease simply expires on its own after 3 seconds \u2014 no separate cleanup call is required, though an explicit `arm: false` releases it immediately and is more polite if you know you are done. A freshly armed tap honestly reads the floor (-80 dB bands) for its first ~43 ms, never a fabricated non-floor value. At most 8 inserts total \u2014 shared with the app\'s own EQ meter, first-come-first-served \u2014 can be measured at once; a 9th is refused (naming the cap and how to free a slot), never silently evicted. Returns the snapshot fields plus `armed` (whether the lease is held as of this response), `tapPoint` ("postInsertPreFader" for a track/bus insert \u2014 measured BEFORE that track\'s own fader, so moving the fader does not move this curve \u2014 or "postInsertPostFader" for a master insert, measured AFTER the master fader; comparing a strip reading to a master reading without checking `tapPoint` is how you\'d wrongly conclude the meter is broken), and `leaseSeconds` (the full lease length, currently 3). A refusal never carries analysis fields \u2014 an unarmed tap never masquerades as a live silent meter.',
+    inputSchema: {
+      trackId: external_exports.string().min(1).describe(
+        'Id of the track or bus that owns the effect, from project_snapshot, OR "master" for the master output chain.'
+      ),
+      effectId: external_exports.string().min(1).describe("Id of the effect to measure, from fx_add's result or project_snapshot."),
+      arm: external_exports.boolean().optional().describe(
+        "Default true: arm (or renew) the 3-second measurement lease and read. False: read one last time and release the tap immediately."
+      )
+    }
+  },
+  async ({ trackId, effectId, arm }) => toToolResult(() => bridge.send("fx.spectrum", { trackId, effectId, arm }))
+);
 server.registerTool(
   "fx_describe",
   {
     title: "List effect kinds and their parameters",
-    description: 'Look up the parameter schema for one or every available effect kind \u2014 the reference for fx_add\'s `params` and fx_set_param\'s `name`/`value`. Returns, per kind, its parameter list as `{name, min, max, default, unit}` (`unit` is a short human label, e.g. "linear gain", "dB", "Hz", "ms", "seconds"), plus a teaching `note` on parameters whose bare range hides semantics (the eq\'s nil-means-off high/low-pass, 12/24 slope snapping, 0/1 per-band bypass). Omit `kind` to list every available kind at once. Available kinds: `gain` (simple linear gain stage), `eq` (parametric \u2014 low shelf, two peaking bands, high shelf, plus optional high/low-pass filters, shelf Q, and per-band `*Enabled` bypass), `compressor` (soft-knee, stereo-linked dynamics), `limiter` (lookahead brick-wall, adds 5 ms latency \u2014 see project_snapshot\'s per-effect `latencySamples`), `reverb` (Freeverb-style room \u2014 roomSize/damping/mix/preDelayMs/width), `delay` (stereo echo \u2014 timeMs/feedback/mix/pingPong/highCutHz, plus m22-f tempo sync: `sync` 0/1 and `division` in beats, snapped to 1/1\u20261/32 straight/dotted/triplet \u2014 their `note`s teach the exact semantics; when synced the effective time is division \xD7 60000 / tempo BPM and follows tempo changes, `timeMs` staying the unsync fallback), `saturator` (tanh drive color \u2014 driveDb/mix/outputDb), `gate` (noise gate \u2014 thresholdDb/attackMs/holdMs/releaseMs), and `chorus` (2-voice modulated thickener \u2014 rateHz/depthMs/mix).',
+    description: 'Look up the parameter schema for one or every available effect kind \u2014 the reference for fx_add\'s `params` and fx_set_param\'s `name`/`value`. Returns, per kind, its parameter list as `{name, min, max, default, unit}` (`unit` is a short human label, e.g. "linear gain", "dB", "Hz", "ms", "seconds"), plus a teaching `note` on parameters whose bare range hides semantics (the eq\'s nil-means-off high/low-pass, 12/24 slope snapping, 0/1 per-band bypass). Omit `kind` to list every available kind at once. Available kinds: `gain` (simple linear gain stage), `eq` (parametric \u2014 low shelf, two peaking bands, high shelf, plus optional high/low-pass filters, shelf Q, and per-band `*Enabled` bypass), `compressor` (soft-knee, stereo-linked dynamics), `limiter` (lookahead brick-wall, adds 5 ms latency \u2014 see project_snapshot\'s per-effect `latencySamples`), `reverb` (Freeverb-style room \u2014 roomSize/damping/mix/preDelayMs/width), `delay` (stereo echo \u2014 timeMs/feedback/mix/pingPong/highCutHz, plus m22-f tempo sync: `sync` 0/1 and `division` in beats, snapped to 1/1\u20261/32 straight/dotted/triplet \u2014 their `note`s teach the exact semantics; when synced the effective time is division \xD7 60000 / tempo BPM and follows tempo changes, `timeMs` staying the unsync fallback), `saturator` (tanh drive color \u2014 driveDb/mix/outputDb), `gate` (noise gate \u2014 thresholdDb/attackMs/holdMs/releaseMs), `chorus` (2-voice modulated thickener \u2014 rateHz/depthMs/mix), and `bassEnhancer` (psychoacoustic bass enhancer \u2014 crossoverHz/amount/mix: it generates the 2nd/3rd/4th harmonics of the sub-crossover content and adds them above the crossover so small speakers imply a fundamental they cannot play; the params\' `note`s teach the exact semantics).',
     inputSchema: {
       kind: fxKindSchema.optional().describe("Effect kind to describe. Omit to list every available kind.")
     }
@@ -44757,6 +44831,27 @@ registerTool(
     }
   },
   async ({ uid }) => toToolResult(() => bridge.send("input.setDevice", { uid: uid ?? null }))
+);
+server.registerTool(
+  "output_list_devices",
+  {
+    title: "List audio output devices",
+    description: "List the Mac's available audio output devices (built-in speakers, headphones, USB/Thunderbolt audio interfaces, etc). Each entry has `uid` (stable identifier to pass to output_set_device), `name`, `sampleRate` (Hz), `channelCount`, `isDefault` (true for the system's current default output \u2014 the macOS Sound setting), and `isSelected` (true for the device DAW Pro has explicitly pinned). The two are independent, and reading them together is what tells you the actual state: all `isSelected` false means DAW Pro is following the system default and will keep following it if the user changes it; `isSelected` true with `isDefault` false means playback is pinned somewhere other than the system default; both true means it is pinned to the device that currently happens to BE the default, and will stay on that device even if the default moves. No params. Call this before output_set_device to find a device's uid, or afterwards to confirm what is now selected."
+  },
+  async () => toToolResult(() => bridge.send("output.listDevices"))
+);
+registerTool(
+  "output_set_device",
+  {
+    title: "Pin the playback output device",
+    description: "Pin DAW Pro's own playback to a specific audio output device by uid (from output_list_devices), independent of the Mac's system default output. This is app-local \u2014 it does NOT change the macOS default output device (System Settings > Sound stays untouched), so other apps and system sounds keep playing wherever they already were; it only redirects what DAW Pro itself sends out, e.g. to send the mix to an audio interface while notification sounds stay on the speakers. Returns the device list reflecting the new selection \u2014 the pinned device comes back with `isSelected: true` \u2014 so no follow-up output_list_devices call is needed. Omit `uid` (or pass nothing) to clear the pin and go back to following the Mac's system default output device, which comes back as `isSelected` false on every entry.",
+    inputSchema: {
+      uid: external_exports.string().min(1).optional().describe(
+        "Uid of the output device to pin, from output_list_devices. Omit to revert to the system default output device."
+      )
+    }
+  },
+  async ({ uid }) => toToolResult(() => bridge.send("output.setDevice", { uid: uid ?? null }))
 );
 var noteSchema = external_exports.object({
   pitch: external_exports.number().int().min(0).max(127).describe("MIDI pitch number, 0-127 (60 = middle C, 69 = A4/440Hz)."),
@@ -45436,6 +45531,95 @@ server.registerTool(
   },
   async ({ reset }) => toToolResult(() => bridge.send("mixer.liveLoudness", { reset }))
 );
+registerTool(
+  "reference_import",
+  {
+    title: "Import a reference track to compare the mix against",
+    description: "Import an audio file as the project's REFERENCE TRACK \u2014 a finished song you trust, to compare the mix against. The file is COPIED (never moved) into the app's References library, and a one-time analysis runs immediately: loudness (integrated / max momentary / max short-term LUFS, true peak dBTP, loudness range LU \u2014 the same BS.1770 math as render_measure_loudness), a 24-band average spectrum (40 Hz-16 kHz, dB, floor -80), and whole-file stereo image (correlation -1..+1, width 0..1, balance -1..+1). The reference lives in a dedicated project slot \u2014 it is NOT a track, never plays in bounces/stems/mixdowns, and travels with the saved .dawproj. A project holds ONE reference: importing over an existing slot REPLACES it in a single undoable edit (one undo restores the previous reference, analysis included). Returns the slot verbatim: `{id, name, path, offsetSeconds, trimDb, analysis?}` \u2014 `analysis` is omitted (plus a `warnings` array naming the cause) when analysis failed; the slot still lands and reference_analyze retries. Errors readably when the file is missing or not audio. After importing, play a representative section of your mix and call reference_status to see the level-match preview.",
+    inputSchema: {
+      path: external_exports.string().describe(
+        "Required. Absolute filesystem path of the audio file to import (WAV/AIFF/MP3/M4A \u2014 anything CoreAudio reads); ~ expands. The file is copied, never moved."
+      ),
+      name: external_exports.string().optional().describe(
+        "Optional display name for the reference (shown in the UI and status). Defaults to the file's basename without extension."
+      )
+    }
+  },
+  async ({ path: path6, name }) => toToolResult(() => bridge.send("reference.import", { path: path6, name }))
+);
+registerTool(
+  "reference_remove",
+  {
+    title: "Remove the reference track",
+    description: "Remove the project's reference track slot in one undoable edit (undo restores the slot with its analysis). The imported audio copy stays on disk \u2014 only the project's slot is cleared. Returns `{removed: true, name}`. Errors with the teaching message 'no reference track is loaded \u2014 import one with reference.import' when the project has no reference.",
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("reference.remove"))
+);
+registerTool(
+  "reference_status",
+  {
+    title: "Read the reference-track slot and level-match preview",
+    description: "Read the project's reference-track state \u2014 read-only, never errors. Returns `{reference?, monitoring, wouldMatchGainDb?}`: `reference` is the slot verbatim (`{id, name, path, offsetSeconds, trimDb, analysis?}`, with the stored one-time analysis \u2014 loudness/spectrum/stereo \u2014 inside) and is OMITTED when no reference is loaded; `monitoring` is the transient A/B monitor state (false until the monitor lane ships; never persisted); `wouldMatchGainDb` previews the level-match law \u2014 the gain in dB that would be applied to the reference so it auditions at the MIX's loudness (mix live integrated LUFS, or the -14 LUFS streaming target when the mix has no reading yet, minus the reference's integrated, plus the user trim, clamped so the reference's true peak never exceeds -1 dBTP) \u2014 present only when the slot carries a computable analysis. Call this first in any compare workflow: is a reference loaded and analyzed?",
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("reference.status"))
+);
+registerTool(
+  "reference_analyze",
+  {
+    title: "Re-run the reference track's one-time analysis",
+    description: "Re-run the one-time analysis of the project's reference track and store the fresh result in the slot (one undoable edit). Use it when an import landed without analysis (see the import response's `warnings`), after restoring a missing file, or when a newer app version bumped `analyzerVersion`. Returns the fresh analysis verbatim: `{integratedLufs?, maxMomentaryLufs?, maxShortTermLufs?, truePeakDbtp?, loudnessRangeLu?, bandsDb, correlation, width, balance, durationSeconds, sampleRateHz, analyzerVersion}` \u2014 `bandsDb` is the 24-band average spectrum (40 Hz-16 kHz, dB, floor -80); nil loudness fields are OMITTED and mean the program is gated-silent or too short (honest absence, never 0). Errors readably: no reference loaded (import one with reference_import), the audio file missing from disk (names the path), or no audio engine attached (an analysis is never fabricated).",
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("reference.analyze"))
+);
+registerTool(
+  "reference_set_monitor",
+  {
+    title: "A/B the mix against the reference, level-matched",
+    description: "Toggle the reference A/B monitor. on=true mutes the MIX at the speakers (post-master-chain gate) and auditions the REFERENCE level-matched instead: the match gain is computed ONCE at toggle-on \u2014 mix live integrated LUFS (or the -14 LUFS streaming target when the mix has no reading yet) minus the reference's integrated, plus the user trim, clamped so the reference's true peak never exceeds -1 dBTP \u2014 and snapshotted for the whole audition (louder-sounds-better bias removed; toggle again to re-match against a newer mix reading). The reference follows the timeline (offset-mapped, latency-aligned); toggling mid-play re-anchors the reference player only \u2014 the transport and the mix keep rolling. Master meters and mixer_live_loudness KEEP reading the MIX while auditioning (the meter tap sits upstream of the gate). on=false returns to the mix (idempotent, never errors). Transient state: never saved, never undoable, off project_snapshot. Returns `{monitoring, matchGainDb?, matchBasis? ('liveIntegrated'|'fallbackTarget'), mixIntegratedLufs?, referenceIntegratedLufs?, ceilingLimited?}` \u2014 match fields only while on; ceilingLimited=true means the gain was reduced to protect the -1 dBTP ceiling. Errors readably: no reference (import with reference_import), not analyzed (run reference_analyze), gated-silent reference (cannot be level-matched), audio file missing (names the path), or no audio engine (a monitor is never faked).",
+    inputSchema: {
+      on: external_exports.boolean().describe(
+        "Required. true = audition the reference (mix mutes, level-matched); false = back to the mix."
+      )
+    }
+  },
+  async ({ on }) => toToolResult(() => bridge.send("reference.setMonitor", { on }))
+);
+registerTool(
+  "reference_set_offset",
+  {
+    title: "Set the reference track's timeline offset",
+    description: "Set the reference's timeline offset in seconds: reference file time = timeline seconds + offsetSeconds. Use it to line the reference's chorus/drop up with yours (e.g. your chorus at 60 s, the reference's at 45 s -> offset -15). Negative offsets defer the reference's start until file time reaches 0. One coalesced undoable edit; while monitoring during playback the reference player re-anchors at the newly mapped position immediately (player-local \u2014 the transport never moves). Returns the slot verbatim `{id, name, path, offsetSeconds, trimDb, analysis?}`. Errors with the teaching message when no reference is loaded.",
+    inputSchema: {
+      seconds: external_exports.number().describe(
+        "Required. Offset in seconds (any sign). Reference file time = timeline seconds + this value."
+      )
+    }
+  },
+  async ({ seconds }) => toToolResult(() => bridge.send("reference.setOffset", { seconds }))
+);
+registerTool(
+  "reference_set_trim",
+  {
+    title: "Trim the reference's audition level",
+    description: "Set the user trim in dB (clamped to \xB124) applied ON TOP of the automatic level match when auditioning the reference. One coalesced undoable edit. While monitoring, the match law recomputes against the SNAPSHOTTED toggle-on basis (the gain never chases the evolving live reading) and only the gain re-applies \u2014 no dropout, no re-anchor; the -1 dBTP true-peak ceiling still clamps. Returns the slot verbatim (trimDb reveals the clamp) plus `{matchGainDb}` \u2014 the re-applied total gain \u2014 when monitoring. Errors with the teaching message when no reference is loaded.",
+    inputSchema: {
+      db: external_exports.number().describe("Required. Trim in dB, clamped to -24..+24. 0 = pure level match.")
+    }
+  },
+  async ({ db }) => toToolResult(() => bridge.send("reference.setTrim", { db }))
+);
+registerTool(
+  "reference_compare",
+  {
+    title: "Compare the mix's live numbers against the reference",
+    description: "Compare the CURRENT MIX against the reference's stored whole-file analysis. Returns `{mix, reference, delta}`: mix = `{integratedLufs?, maxTruePeakDbtp?, loudnessRangeLu?, width?, correlation?, bandsDb?}` from the live master meters (loudness fields are the running gated measurement; bandsDb/width/correlation are the RECENT LIVE ballistic reading, NOT a whole-song average \u2014 call during steady playback of a representative section); reference = the stored analysis verbatim; delta = reference \u2212 mix per field (`{lufs?, truePeakDb?, lra?, width?, correlation?, bandsDb?}`), each omitted when either side lacks evidence \u2014 honest nils, never fabricated zeros. Reading deltas: delta.lufs +2.1 means your mix is 2.1 LU QUIETER than the reference; positive low-band bandsDb deltas mean the reference carries more low-end energy. Workflow: reference_status -> play a representative section -> reference_compare -> suggest concrete moves (EQ bands, the built-in limiter for loudness) -> offer reference_set_monitor so the human hears the A/B level-matched. Errors readably: no reference, not analyzed, or no live meter (headless engine) \u2014 deltas are never faked from floor values.",
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("reference.compare"))
+);
 server.registerTool(
   "engine_performance_stats",
   {
@@ -45456,6 +45640,14 @@ server.registerTool(
     description: "Read the engine watchdog's state \u2014 the stall detector that keeps the audio engine from dying silently. While the engine claims to be running, the watchdog checks (about every 2 seconds) that the engine's render-callback heartbeat is still advancing; a heartbeat frozen across two consecutive checks means the render side is dead (a silent hardware stall or a device that died without any notification), and the watchdog automatically restarts the engine through the same recovery routine a device/format change uses \u2014 position preserved, mixer state restored, playback resumed. No params. Returns `{state, restartCount, consecutiveFailures, lastHeartbeat, engineRunning}`. `state` is one of: 'idle' (engine intentionally stopped, or no heartbeat signal expected \u2014 e.g. an empty session; NOT a problem), 'ok' (engine running and the heartbeat advancing \u2014 healthy), 'recovering' (a stall was declared and an automatic restart is in progress or retrying), 'failed' (three consecutive restart attempts failed \u2014 the watchdog has stopped retrying and the engine needs manual intervention: check the output device, then start playback again to re-arm). `restartCount` is the lifetime count of successful self-heals \u2014 any nonzero value means the engine DIED at some point this session and recovered on its own, worth mentioning to the user. `consecutiveFailures` counts failed restart attempts in the current stall. `lastHeartbeat` is the raw render-callback count at the last check. `engineRunning` is the engine's own running claim. Read-only and always safe: never throws, and with no engine (headless) everything reads idle/zero. As an agent, poll this after audio dropouts or before long renders: 'ok' with restartCount 0 is a clean bill of health; 'failed' explains silence better than any mix parameter will."
   },
   async () => toToolResult(() => bridge.send("engine.watchdogStatus"))
+);
+server.registerTool(
+  "engine_au_prepare_stats",
+  {
+    title: "Read how many times plug-ins have been (re)loaded by the audio engine",
+    description: "Read the audio engine's plug-in LOADING ledger \u2014 how many times hosted Audio Unit instruments and effects have been prepared (loaded/configured) and released (torn down) since the app's engine came up. This is a diagnostic, not a mix control: it never changes anything. No params. Returns `{instrumentPrepares, instrumentReleases, effectPrepares, effectReleases, tracks: [{trackId, keyDigest?, status?}], effects: [{effectId, keyDigest?, status?}]}`. HOW TO USE IT: the four counters only ever go UP and there is deliberately NO reset \u2014 read them, do the thing you are testing (change the output device, change the sample rate, switch a preset, recover from a stall), read them again, and SUBTRACT. A difference of exactly 0 is a hard proof that nothing was reloaded; that is far stronger than listening for a glitch. `instrumentPrepares` counts load ATTEMPTS that actually did work, so a plug-in that failed or was missing still counts (a storm of failing loads is the worst kind); repeated no-op passes over an unchanged project count nothing. `instrumentReleases` counts only real teardowns of a live plug-in instance. Swapping a track's plug-in (or its sample rate) bumps BOTH by one; loading a plug-in for the first time bumps only the prepare counter. `keyDigest` is a short opaque fingerprint of the exact configuration each track/effect was last loaded with \u2014 compare it between two reads to see WHICH slot changed, but never try to parse or decode it. `status` reads 'pending', 'ready', 'missing' (no such plug-in installed) or 'failed: <reason>'; both `keyDigest` and `status` are omitted when the engine holds nothing for that slot. The counters survive an engine restart (a device change or an automatic stall recovery), so they stay comparable across one; only live playback is counted, never an offline bounce. Always safe: read-only, never throws, and with no engine (headless) everything reads zero. ALSO RETURNS `inFlight`: plug-in loads that have STARTED and not yet finished \u2014 `[{slot: 'instrument'|'effect', id, component?: {type, subType, manufacturer}, startedSecondsAgo, deadlineSeconds, overdue}]`, sorted by (slot, id) and almost always empty. This is the ONLY way to find out which plug-in is hanging the app WHILE it is hanging it. `overdue: true` means that load has already blown its time budget. READ IT CAREFULLY: overdue does NOT mean the plug-in failed (the load keeps running and may still succeed), does NOT by itself mean the app is frozen (a load can be slow on a busy but perfectly healthy machine \u2014 check `mainActor` for that), and says NOTHING about audio: sound that is already playing keeps playing even while the UI is frozen. A slot that is absent just means no load is in progress for it, not that it is healthy. AND `mainActor`: `{responsive: true}` on a normal reply. If the app's UI is frozen you get a REDUCED reply instead \u2014 `{mainActor: {responsive: false, wedgedForSeconds}, inFlight: [...]}` with the four counters and the `tracks`/`effects` arrays OMITTED (not zeroed), because those can only be produced by the frozen part of the app and reporting stale ones as current would be a lie. Check `mainActor.responsive` to know which of the two shapes you got; during a freeze this is one of only two commands that answers at all \u2014 the other is engine_watchdog_status."
+  },
+  async () => toToolResult(() => bridge.send("engine.auPrepareStats"))
 );
 registerTool(
   "app_feedback_bundle",
@@ -45517,7 +45709,7 @@ var automationTargetSchema = external_exports.discriminatedUnion("type", [
     param: external_exports.string().min(1).describe("Exact parameter name, as listed by fx_describe for the effect's kind.")
   })
 ]).describe(
-  "What this lane drives on the track, by discriminator `type`. `volume`: the track fader gain \u2014 while the lane is enabled it REPLACES manual fader control (track_set_volume), the way to draw fades, swells, and rides \u2014 no other fields. `pan`: the track pan, same override behavior as volume \u2014 no other fields. `sendLevel` (needs `sendId`, from track_add_send/project_snapshot): one send's level \u2014 REJECTED in v0 (automation_add_lane errors: send-level automation has no render path yet; the shape is accepted now so projects stay forward-compatible). `effectParam` (needs `effectId` from fx_add/project_snapshot, and `param` \u2014 the EXACT name from fx_describe for that effect's kind): one parameter of a BUILT-IN effect already in the track's insert chain \u2014 use it for filter sweeps, reverb-mix rises, delay-feedback build-ups, etc.; built-in kinds (gain, eq, compressor, limiter, reverb, delay, saturator, gate, chorus) work today. `effectParam` is REJECTED in v0 when the effect is a hosted Audio Unit (`kind: \"audioUnit\"` from fx_add), since its generic parameter surface is empty."
+  "What this lane drives on the track, by discriminator `type`. `volume`: the track fader gain \u2014 while the lane is enabled it REPLACES manual fader control (track_set_volume), the way to draw fades, swells, and rides \u2014 no other fields. `pan`: the track pan, same override behavior as volume \u2014 no other fields. `sendLevel` (needs `sendId`, from track_add_send/project_snapshot): one send's level \u2014 REJECTED in v0 (automation_add_lane errors: send-level automation has no render path yet; the shape is accepted now so projects stay forward-compatible). `effectParam` (needs `effectId` from fx_add/project_snapshot, and `param` \u2014 the EXACT name from fx_describe for that effect's kind): one parameter of a BUILT-IN effect already in the track's insert chain \u2014 use it for filter sweeps, reverb-mix rises, delay-feedback build-ups, etc.; built-in kinds (gain, eq, compressor, limiter, reverb, delay, saturator, gate, chorus, bassEnhancer) work today. `effectParam` is REJECTED in v0 when the effect is a hosted Audio Unit (`kind: \"audioUnit\"` from fx_add), since its generic parameter surface is empty."
 );
 var automationPointSchema = external_exports.object({
   beat: external_exports.number().describe(
@@ -45596,7 +45788,7 @@ registerTool(
   "render_mixdown",
   {
     title: "Render (bounce) the session to a WAV file",
-    description: "Bounce the current session to a stereo 48 kHz WAV file, rendered offline \u2014 much faster than realtime and without needing audio hardware or realtime playback. Returns `{path, durationSeconds, sampleRate, channels}`; use the returned absolute `path` to reference the bounced audio afterwards (e.g. to import it elsewhere or ship it as a deliverable). Errors only if the render range holds no clips at all \u2014 of ANY kind, audio or MIDI \u2014 and no explicit `durationSeconds` was given, since there would be nothing to render and no way to infer a render length.",
+    description: "Bounce the current session to a stereo 48 kHz WAV file, rendered offline \u2014 much faster than realtime and without needing audio hardware or realtime playback. Returns `{path, durationSeconds, sampleRate, channels}`; use the returned absolute `path` to reference the bounced audio afterwards (e.g. to import it elsewhere or ship it as a deliverable). Pass `excludeTrackIds` to bounce an INSTRUMENTAL / minus-vocal version \u2014 the full session with those tracks silenced for this render only, leaving the project itself completely untouched. Errors only if the render range holds no clips at all \u2014 of ANY kind, audio or MIDI \u2014 and no explicit `durationSeconds` was given, since there would be nothing to render and no way to infer a render length.",
     inputSchema: {
       path: external_exports.string().min(1).optional().describe(
         "Absolute path (or a path starting with ~ for the home directory) to write the rendered .wav file to. When omitted, the app picks a temp file location and returns it in the result's `path`."
@@ -45606,10 +45798,28 @@ registerTool(
       ),
       durationSeconds: external_exports.number().gt(0).optional().describe(
         "How many seconds of audio to render, starting at fromBeat. Must be > 0. When omitted, defaults to the project's length at the current tempo \u2014 through the end of the last clip of ANY kind, audio or MIDI \u2014 plus a 2.0 s tail (the same default window as render_bounce, render_measure_loudness, and render_stems)."
+      ),
+      excludeTrackIds: external_exports.array(external_exports.string().min(1)).optional().describe(
+        "Ids of tracks to SILENCE for this render only \u2014 e.g. pass the lead vocal's track id to get an instrumental / minus-vocal mix (ids come from project_snapshot). The whole session still renders, at full length and with plugin-delay compensation intact; only these tracks are gated to silence. The PROJECT IS NOT MODIFIED: its own mute/solo flags, its unsaved-changes state and its undo history are left exactly as they were, so this is safe to call while someone is working in the app \u2014 never mute/bounce/un-mute by hand. Know what leaves with an excluded track: everything it feeds a SEND leaves too, so its reverb/delay TAIL disappears (that is what makes the instrumental genuinely clean, and it equally means you CANNOT ask for 'instrumental but keep the vocal's reverb' here), and so does its sidechain key signal, so a compressor ducking to that vocal stops ducking. Its solo flag leaves with it as well, so excluding the only soloed track gives the instrumental rather than silence. An unknown id is an error. The result echoes the silenced names in `excludedTracks`."
+      ),
+      bitDepth: external_exports.union([external_exports.literal(16), external_exports.literal(24), external_exports.literal(32)]).optional().describe(
+        "Bit depth of the written file: 16 (CD / small files), 24 (the standard delivery depth for mixes and stems) or 32 (integer). OMIT IT unless you have a reason \u2014 the default is 32-bit FLOAT, which is lossless, is what the engine renders internally, and is the only choice that preserves peaks above 0 dBFS. Every integer depth CLAMPS at full scale, and the loudness numbers in the response describe the buffer BEFORE quantization, so a render that peaks above 0 dBFS will be clipped on disk without the report saying so \u2014 normalize first (lufsTarget/truePeakCeilingDb) or stay on the default. Quantization is undithered in v0 and the response says so (`ditherApplied: false`). Echoed back as `bitDepth` only when you asked for one."
+      ),
+      container: external_exports.enum(["wav", "aiff"]).optional().describe(
+        "File container: 'wav' (default) or 'aiff'. The FILE EXTENSION is what actually selects the container, so the extension of `path` is made to agree with this \u2014 always use the `path` the response returns rather than the one you sent. AIFF is written in the AIFF-C form (big-endian, uncompressed) that macOS produces; every DAW reads it. Echoed back as `container` only when you asked for a non-default one."
       )
     }
   },
-  async ({ path: path6, fromBeat, durationSeconds }) => toToolResult(() => bridge.send("render.mixdown", { path: path6, fromBeat, durationSeconds }))
+  async ({ path: path6, fromBeat, durationSeconds, excludeTrackIds, bitDepth, container }) => toToolResult(
+    () => bridge.send("render.mixdown", {
+      path: path6,
+      fromBeat,
+      durationSeconds,
+      excludeTrackIds,
+      bitDepth,
+      container
+    })
+  )
 );
 registerTool(
   "render_measure_loudness",
@@ -45631,7 +45841,7 @@ registerTool(
   "render_bounce",
   {
     title: "Bounce the session to a loudness-measured, optionally normalized WAV",
-    description: "Render the session offline to a stereo 48 kHz WAV and report its loudness \u2014 the measured/normalizing sibling of render_mixdown (which stays the raw, fast bounce with no loudness report and no gain). Pass `lufsTarget` to normalize toward a delivery target \u2014 -14 LUFS integrated is the usual streaming-platform convention (Spotify/YouTube/Apple Music-style), -23 LUFS is EBU R128 broadcast; OMIT it for a measured but UN-normalized bounce (the loudness report is still included, nothing about the audio changes). Normalization applies ONE static gain toward the target, CLAMPED so the true peak never exceeds `truePeakCeilingDb` (default -1.0 dBTP) \u2014 there is NO limiter in v0, so when the clamp bites, the bounce lands QUIETER than asked and `report.limitedByCeiling` is true; `report.output` is the loudness ACTUALLY achieved (compare it to your target to see the shortfall \u2014 never assume the target was hit without checking this). If you need to close that gap, add the built-in limiter effect to the master bus (or the track/bus feeding it) and call render_bounce again: the limiter does real dynamics control, letting a subsequent gain push closer to the ceiling safely. `report.input` is the pre-gain measurement; `report.output` is RE-MEASURED from the gained audio (never derived from input + gain), so it is ground truth for the file written to disk. Any loudness field \u2014 in either input or output \u2014 can come back OMITTED (null): that means the signal sits at/below the -70 LUFS silence gate. A gated-silent program WITH a requested `lufsTarget` errors (there is nothing to normalize toward); silence without a target still succeeds, with all-null measurements. Returns `{path, durationSeconds, sampleRate, channels, report: {input, output, appliedGainDb, lufsTarget?, truePeakCeilingDbtp, limitedByCeiling}}`.",
+    description: "Render the session offline to a stereo 48 kHz WAV and report its loudness \u2014 the measured/normalizing sibling of render_mixdown (which stays the raw, fast bounce with no loudness report and no gain). Pass `lufsTarget` to normalize toward a delivery target \u2014 -14 LUFS integrated is the usual streaming-platform convention (Spotify/YouTube/Apple Music-style), -23 LUFS is EBU R128 broadcast; OMIT it for a measured but UN-normalized bounce (the loudness report is still included, nothing about the audio changes). Normalization applies ONE static gain toward the target, CLAMPED so the true peak never exceeds `truePeakCeilingDb` (default -1.0 dBTP) \u2014 there is NO limiter in v0, so when the clamp bites, the bounce lands QUIETER than asked and `report.limitedByCeiling` is true; `report.output` is the loudness ACTUALLY achieved (compare it to your target to see the shortfall \u2014 never assume the target was hit without checking this). If you need to close that gap, add the built-in limiter effect to the master bus (or the track/bus feeding it) and call render_bounce again: the limiter does real dynamics control, letting a subsequent gain push closer to the ceiling safely. `report.input` is the pre-gain measurement; `report.output` is RE-MEASURED from the gained audio (never derived from input + gain), so it is ground truth for the file written to disk. Any loudness field \u2014 in either input or output \u2014 can come back OMITTED (null): that means the signal sits at/below the -70 LUFS silence gate. A gated-silent program WITH a requested `lufsTarget` errors (there is nothing to normalize toward); silence without a target still succeeds, with all-null measurements. Pass `excludeTrackIds` to bounce an INSTRUMENTAL / minus-vocal version \u2014 the full session with those tracks silenced for this render only, project untouched; note that normalization then measures the instrumental's OWN loudness, not the full mix's, so a mix and its instrumental normalized to the same target end up at the same LUFS as each other rather than at the same relative level. Returns `{path, durationSeconds, sampleRate, channels, report: {input, output, appliedGainDb, lufsTarget?, truePeakCeilingDbtp, limitedByCeiling}, excludedTracks?}`.",
     inputSchema: {
       path: external_exports.string().min(1).optional().describe(
         "Absolute path (or a path starting with ~ for the home directory) to write the rendered .wav file to. When omitted, the app picks a temp file location and returns it in the result's `path`."
@@ -45647,18 +45857,45 @@ registerTool(
       ),
       truePeakCeilingDb: external_exports.number().min(-20).max(0).optional().describe(
         "The true-peak ceiling in dBTP (-20 to 0, default -1.0) that the normalizing gain will never push the bounce past. This CLAMPS the gain rather than limiting the audio \u2014 see the tool description for what to do when the clamp bites."
+      ),
+      excludeTrackIds: external_exports.array(external_exports.string().min(1)).optional().describe(
+        "Ids of tracks to SILENCE for this render only \u2014 e.g. pass the lead vocal's track id to get an instrumental / minus-vocal mix (ids come from project_snapshot). The whole session still renders, at full length and with plugin-delay compensation intact; only these tracks are gated to silence. The PROJECT IS NOT MODIFIED: its own mute/solo flags, its unsaved-changes state and its undo history are left exactly as they were, so this is safe to call while someone is working in the app \u2014 never mute/bounce/un-mute by hand. Know what leaves with an excluded track: everything it feeds a SEND leaves too, so its reverb/delay TAIL disappears (that is what makes the instrumental genuinely clean, and it equally means you CANNOT ask for 'instrumental but keep the vocal's reverb' here), and so does its sidechain key signal, so a compressor ducking to that vocal stops ducking. Its solo flag leaves with it as well, so excluding the only soloed track gives the instrumental rather than silence. An unknown id is an error. The result echoes the silenced names in `excludedTracks`."
+      ),
+      bitDepth: external_exports.union([external_exports.literal(16), external_exports.literal(24), external_exports.literal(32)]).optional().describe(
+        "Bit depth of the written file: 16 (CD / small files), 24 (the standard delivery depth for mixes and stems) or 32 (integer). OMIT IT unless you have a reason \u2014 the default is 32-bit FLOAT, which is lossless, is what the engine renders internally, and is the only choice that preserves peaks above 0 dBFS. Every integer depth CLAMPS at full scale, and the loudness numbers in the response describe the buffer BEFORE quantization, so a render that peaks above 0 dBFS will be clipped on disk without the report saying so \u2014 normalize first (lufsTarget/truePeakCeilingDb) or stay on the default. Quantization is undithered in v0 and the response says so (`ditherApplied: false`). Echoed back as `bitDepth` only when you asked for one."
+      ),
+      container: external_exports.enum(["wav", "aiff"]).optional().describe(
+        "File container: 'wav' (default) or 'aiff'. The FILE EXTENSION is what actually selects the container, so the extension of `path` is made to agree with this \u2014 always use the `path` the response returns rather than the one you sent. AIFF is written in the AIFF-C form (big-endian, uncompressed) that macOS produces; every DAW reads it. Echoed back as `container` only when you asked for a non-default one."
       )
     }
   },
-  async ({ path: path6, fromBeat, durationSeconds, lufsTarget, truePeakCeilingDb }) => toToolResult(
-    () => bridge.send("render.bounce", { path: path6, fromBeat, durationSeconds, lufsTarget, truePeakCeilingDb })
+  async ({
+    path: path6,
+    fromBeat,
+    durationSeconds,
+    lufsTarget,
+    truePeakCeilingDb,
+    excludeTrackIds,
+    bitDepth,
+    container
+  }) => toToolResult(
+    () => bridge.send("render.bounce", {
+      path: path6,
+      fromBeat,
+      durationSeconds,
+      lufsTarget,
+      truePeakCeilingDb,
+      excludeTrackIds,
+      bitDepth,
+      container
+    })
   )
 );
 registerTool(
   "render_stems",
   {
     title: "Export the session as individual stem WAV files",
-    description: "Export the session's MASTER-INPUT PARTITION as separate WAV files: one file per track routed directly to master (its dry, post-fader signal \u2014 sends stripped) and one file per bus (carrying everything routed AND sent into it, through that bus's effect chain and fader \u2014 send contributions live in the DESTINATION bus's stem, never the source track's). A track routed INTO a bus therefore has no stem of its own; request the bus instead if you want that signal. The normative guarantee: summing every returned stem reproduces render_mixdown's/render_bounce's raw output sample-for-sample (within roughly 1e-4 peak, ordinary float summation-order slop) \u2014 stems are mix-ready building blocks, not an approximation. Stems are NEVER loudness-normalized \u2014 an independent gain per stem would break both the mix balance and that summing guarantee \u2014 so instead each file ships its own full, honest loudness measurement (integratedLufs/truePeakDbtp/maxMomentaryLufs/maxShortTermLufs; any field can come back OMITTED/null, meaning that particular stem sits at/below the -70 LUFS silence gate \u2014 e.g. a track that's silent for this whole song section). Pass `includeMixdown: true` to also render a `00 Mixdown.wav` reference file under the exact same window/settings as every stem, handy for verifying the sum yourself. Files are named `NN Name.wav` (1-based partition order, sanitized, collision-suffixed with ' 2', ' 3', ...). Returns `{directory, sampleRate, durationSeconds, channels, stems: [{trackId, name, kind: \"track\"|\"bus\", path, measurement}], mixdown?: {path, measurement}}`. Errors if `trackIds` names a track that is routed into a bus (pass the bus's id instead), an unknown id, or if there is nothing to render in the requested window.",
+    description: "Export the session's MASTER-INPUT PARTITION as separate WAV files: one file per track routed directly to master (its dry, post-fader signal \u2014 sends stripped) and one file per bus (carrying everything routed AND sent into it, through that bus's effect chain and fader \u2014 send contributions live in the DESTINATION bus's stem, never the source track's). A track routed INTO a bus therefore has no stem of its own; request the bus instead if you want that signal. The normative guarantee: summing every returned stem reproduces render_mixdown's/render_bounce's raw output sample-for-sample (within roughly 1e-4 peak, ordinary float summation-order slop) \u2014 stems are mix-ready building blocks, not an approximation. Stems are NEVER loudness-normalized \u2014 an independent gain per stem would break both the mix balance and that summing guarantee \u2014 so instead each file ships its own full, honest loudness measurement (integratedLufs/truePeakDbtp/maxMomentaryLufs/maxShortTermLufs; any field can come back OMITTED/null, meaning that particular stem sits at/below the -70 LUFS silence gate \u2014 e.g. a track that's silent for this whole song section). Pass `includeMixdown: true` to also render a `00 Mixdown.wav` reference file under the exact same window/settings as every stem, handy for verifying the sum yourself. Pass `includeMasteredMixdown: true` for a SEPARATE, additional `00 Mastered Mix.wav` \u2014 the real mastered mix (full session THROUGH the master effect chain, master automation and master fader, exactly what render_bounce produces), optionally loudness-normalized via `masteredLufsTarget`. That mastered file is a SIBLING of the stems, never a version of them: 'mastered stems' in the sense of printing the shared master chain onto each stem individually is deliberately NOT offered, because a nonlinear master chain (a compressor, limiter or saturator) does not distribute over the stems \u2014 the individually processed stems would no longer add back up to the actual mix. So you get true pre-master stems that sum exactly, PLUS the mastered mix as its own file, which is how a mastering/mixing handoff is normally packaged. `includeMixdown` and `includeMasteredMixdown` are independent: the first is the chain-EXCLUDED sum reference, the second is the chain-INCLUDED deliverable, and you can ask for both. Files are named `NN Name.wav` (1-based partition order, sanitized, collision-suffixed with ' 2', ' 3', ...). Returns `{directory, sampleRate, durationSeconds, channels, stems: [{trackId, name, kind: \"track\"|\"bus\", path, measurement}], mixdown?: {path, measurement}, masteredMixdown?: {path, report}}`. Errors if `trackIds` names a track that is routed into a bus (pass the bus's id instead), an unknown id, or if there is nothing to render in the requested window.",
     inputSchema: {
       trackIds: external_exports.array(external_exports.string().min(1)).optional().describe(
         "Ids of the master-input tracks/buses to export (see project_snapshot) \u2014 omit to export every master input in the session. A track routed into a bus is not a master input itself; pass the bus's id to get its (combined) stem instead."
@@ -45673,12 +45910,55 @@ registerTool(
         "How many seconds of audio to render, starting at fromBeat \u2014 every stem file gets exactly this length, since summing them requires identical lengths. Must be > 0. When omitted, defaults to the extent of every track's clips (audio AND instrument) at the current tempo, plus a 2.0 s tail."
       ),
       includeMixdown: external_exports.boolean().optional().default(false).describe(
-        "If true, also render a `00 Mixdown.wav` reference file under the same window as the stems, for spot-checking the sum. Defaults to false."
+        "If true, also render a `00 Mixdown.wav` reference file under the same window as the stems, for spot-checking the sum. This file is the stems' own reference: like the stems, it EXCLUDES the master effect chain and master automation, which is exactly why the stems sum to it. Defaults to false."
+      ),
+      // Deliberately `.optional()` WITHOUT `.default(false)`, unlike its
+      // `includeMixdown` twin above: a defaulted flag is always present in the
+      // outgoing params, so an app build older than m23-m1 would see an
+      // unknown key and reject the whole call. Omitting it keeps the default
+      // request byte-identical to what every shipped app already accepts; the
+      // app's own default is false either way.
+      includeMasteredMixdown: external_exports.boolean().optional().describe(
+        "If true, also write `00 Mastered Mix.wav` alongside the stems: the real MASTERED mix \u2014 the whole session through the master effect chain, master automation lane and master fader, identical to what render_bounce produces. Independent of `includeMixdown` (that one is the chain-EXCLUDED sum reference; this one is the chain-INCLUDED deliverable) \u2014 ask for either, both, or neither. The stems themselves are unaffected either way: they stay pre-master and keep summing to `00 Mixdown.wav`. Defaults to false."
+      ),
+      masteredLufsTarget: external_exports.number().min(-70).max(0).optional().describe(
+        "Integrated-loudness target in LUFS (-70 to 0) for the mastered mix ONLY \u2014 the stems are never normalized. -14 is the common streaming convention, -23 is EBU R128 broadcast. Applies the same single static, true-peak-clamped gain render_bounce applies, and the returned `masteredMixdown.report` says what was actually achieved. Requires `includeMasteredMixdown: true` (passing it without that is an error rather than a silent no-op). Omit for a measured but un-normalized mastered mix."
+      ),
+      masteredTruePeakCeilingDb: external_exports.number().min(-20).max(0).optional().describe(
+        "True-peak ceiling in dBTP (-20 to 0, default -1.0) that the mastered mix's normalizing gain will never push past. Clamps the gain rather than limiting the audio, exactly like render_bounce's `truePeakCeilingDb`. Requires `includeMasteredMixdown: true`."
+      ),
+      bitDepth: external_exports.union([external_exports.literal(16), external_exports.literal(24), external_exports.literal(32)]).optional().describe(
+        "Bit depth of the written file: 16 (CD / small files), 24 (the standard delivery depth for mixes and stems) or 32 (integer). OMIT IT unless you have a reason \u2014 the default is 32-bit FLOAT, which is lossless, is what the engine renders internally, and is the only choice that preserves peaks above 0 dBFS. Every integer depth CLAMPS at full scale, and the loudness numbers in the response describe the buffer BEFORE quantization, so a render that peaks above 0 dBFS will be clipped on disk without the report saying so \u2014 normalize first (lufsTarget/truePeakCeilingDb) or stay on the default. Quantization is undithered in v0 and the response says so (`ditherApplied: false`). Echoed back as `bitDepth` only when you asked for one."
+      ),
+      container: external_exports.enum(["wav", "aiff"]).optional().describe(
+        "File container: 'wav' (default) or 'aiff'. Applies to EVERY file of the set \u2014 the stems and any `00 Mixdown` / `00 Mastered Mix` sibling \u2014 since they have to sum; their names carry the matching extension, so read the returned `path`s rather than assuming '.wav'. AIFF is written in the AIFF-C form (big-endian, uncompressed) that macOS produces; every DAW reads it. Echoed back as `container` only when you asked for a non-default one."
       )
     }
   },
-  async ({ trackIds, directory, fromBeat, durationSeconds, includeMixdown }) => toToolResult(
-    () => bridge.send("render.stems", { trackIds, directory, fromBeat, durationSeconds, includeMixdown })
+  async ({
+    trackIds,
+    directory,
+    fromBeat,
+    durationSeconds,
+    includeMixdown,
+    includeMasteredMixdown,
+    masteredLufsTarget,
+    masteredTruePeakCeilingDb,
+    bitDepth,
+    container
+  }) => toToolResult(
+    () => bridge.send("render.stems", {
+      trackIds,
+      directory,
+      fromBeat,
+      durationSeconds,
+      includeMixdown,
+      includeMasteredMixdown,
+      masteredLufsTarget,
+      masteredTruePeakCeilingDb,
+      bitDepth,
+      container
+    })
   )
 );
 registerTool(
@@ -45851,7 +46131,7 @@ server.registerTool(
   "vc_sidecar_status",
   {
     title: "Check the local voice-conversion sidecar",
-    description: "Check the status of the local RVC voice-conversion sidecar \u2014 the offline engine that will convert vocals to a voice trained from the user's OWN recordings (never a celebrity or third-party voice; training arrives with a later roadmap item \u2014 this tool is lifecycle/health only for now). No params. Always succeeds (never throws) and returns one of five states: `notInstalled` (run scripts/rvc/install.sh first), `installedNotRunning` (call vc_sidecar_start), `starting` (a vc_sidecar_start call is in flight \u2014 poll again shortly), `healthy` (ready \u2014 `version`/`engine`/`baseModelPresent`/`voiceCount` report what's loaded; `voiceCount` is 0 until a voice has been trained), or `error` (the sidecar responded but unexpectedly \u2014 check scripts/rvc/runtime/logs/rvc-facade.log). Returns `{state, message, version?, engine?, baseModelPresent?, voiceCount?, pid?}` \u2014 `message` is always a human-actionable next step, never a bare code. This is a SEPARATE sidecar from ai_sidecar_status (song generation) \u2014 call this before vc_sidecar_start to avoid an unnecessary spawn attempt, and after it to confirm readiness."
+    description: "Check the status of the local RVC voice-conversion sidecar \u2014 the offline engine that will convert vocals to a voice the user trained or supplied (the user is responsible for having the rights to it; training arrives with a later roadmap item \u2014 this tool is lifecycle/health only for now). No params. Always succeeds (never throws) and returns one of five states: `notInstalled` (run scripts/rvc/install.sh first), `installedNotRunning` (call vc_sidecar_start), `starting` (a vc_sidecar_start call is in flight \u2014 poll again shortly), `healthy` (ready \u2014 `version`/`engine`/`baseModelPresent`/`voiceCount` report what's loaded; `voiceCount` is 0 until a voice has been trained), or `error` (the sidecar responded but unexpectedly \u2014 check scripts/rvc/runtime/logs/rvc-facade.log). Returns `{state, message, version?, engine?, baseModelPresent?, voiceCount?, pid?}` \u2014 `message` is always a human-actionable next step, never a bare code. This is a SEPARATE sidecar from ai_sidecar_status (song generation) \u2014 call this before vc_sidecar_start to avoid an unnecessary spawn attempt, and after it to confirm readiness."
   },
   async () => toToolResult(() => bridge.send("vc.sidecarStatus"))
 );
@@ -45877,7 +46157,7 @@ registerTool(
   "vc_convert_vocals",
   {
     title: "Convert vocals to a voice",
-    description: `Convert an existing vocal recording to a target voice with the local RVC voice-conversion sidecar. BLOCKS until the conversion finishes (no separate poll/import step \u2014 unlike generate_song, this is a render_mixdown-class call, not an async job) and lands the result as a NEW AI-flagged audio track + clip in the project automatically, in one undoable edit (edit_undo removes it). Call vc_sidecar_start first if vc_sidecar_status isn't healthy. TYPICAL FLOW for "turn this vocal into voice X": generate or import a song, extract_stems with trackNames:["vocals"] (or import an existing a cappella recording), then convert_vocals the resulting vocal clip/file to the target voice. OWN-VOICE-ONLY POLICY: voiceId must be a voice trained from the user's OWN recordings (vc_train_voice) that they have the rights to use \u2014 NEVER a celebrity or third-party voice. The reserved id "base" is a legitimate SMOKE-TEST target: it exercises the full pipeline honestly WITHOUT a real trained voice, and its result always carries realConversion:false plus a note explaining why \u2014 use it to prove the pipeline works end-to-end before any real voice exists. Pass EXACTLY ONE of clipId or path to name the source audio: clipId converts an EXISTING audio clip's FULL backing recording (clip trims/ time-stretch are NOT applied to what gets converted, only to how the RESULT is later placed) and defaults atBeat to that clip's own start beat; path converts a local audio file directly (absolute or ~-expanded) and defaults atBeat to 0. Returns {trackId, clipId, outputPath, realConversion, inputSeconds, inferSeconds, rtf?, sampleRate, note?} \u2014 realConversion is false only for the "base" smoke target, true for a real trained voice.`,
+    description: `Convert an existing vocal recording to a target voice with the local RVC voice-conversion sidecar. BLOCKS until the conversion finishes (no separate poll/import step \u2014 unlike generate_song, this is a render_mixdown-class call, not an async job) and lands the result as a NEW AI-flagged audio track + clip in the project automatically, in one undoable edit (edit_undo removes it). Call vc_sidecar_start first if vc_sidecar_status isn't healthy. TYPICAL FLOW for "turn this vocal into voice X": generate or import a song, extract_stems with trackNames:["vocals"] (or import an existing a cappella recording), then convert_vocals the resulting vocal clip/file to the target voice. RIGHTS-RESPONSIBILITY POLICY: voiceId may be a voice trained from the user's own recordings (vc_train_voice) OR a user-supplied third-party voice model; the USER is responsible for having the rights to it. The reserved id "base" is a legitimate SMOKE-TEST target: it exercises the full pipeline honestly WITHOUT a real trained voice, and its result always carries realConversion:false plus a note explaining why \u2014 use it to prove the pipeline works end-to-end before any real voice exists. Pass EXACTLY ONE of clipId or path to name the source audio: clipId converts an EXISTING audio clip's FULL backing recording (clip trims/ time-stretch are NOT applied to what gets converted, only to how the RESULT is later placed) and defaults atBeat to that clip's own start beat; path converts a local audio file directly (absolute or ~-expanded) and defaults atBeat to 0. Returns {trackId, clipId, outputPath, realConversion, inputSeconds, inferSeconds, rtf?, sampleRate, note?} \u2014 realConversion is false only for the "base" smoke target, true for a real trained voice.`,
     inputSchema: {
       clipId: external_exports.string().optional().describe(
         "Id of an existing AUDIO clip whose FULL backing recording gets converted (from project_snapshot or a prior clip_add_audio/import result). Pass EXACTLY ONE of clipId or path \u2014 passing both, or neither, is rejected. A MIDI clip's id is rejected (no audio to convert)."
@@ -45886,7 +46166,7 @@ registerTool(
         "Absolute or ~-expanded local path to an audio file to convert directly. Pass EXACTLY ONE of clipId or path \u2014 passing both, or neither, is rejected."
       ),
       voiceId: external_exports.string().min(1).describe(
-        `The target voice's id: either a real voice trained from the user's OWN recordings (vc_train_voice; own-voice-only, never a celebrity or third-party voice), or the reserved smoke-test id "base" (untrained generic synthesizer \u2014 proves the pipeline runs, NOT a real voice conversion; its result always carries realConversion:false plus an explanatory note).`
+        `The target voice's id: either a real voice the user trained or supplied (vc_train_voice, or an imported third-party model \u2014 the user is responsible for the rights to it), or the reserved smoke-test id "base" (untrained generic synthesizer \u2014 proves the pipeline runs, NOT a real voice conversion; its result always carries realConversion:false plus an explanatory note).`
       ),
       pitchSemitones: external_exports.number().int().min(-24).max(24).optional().describe(
         "Pitch shift applied during conversion, in semitones (+12 = up an octave). Integer, -24..24. Omit for no shift (0)."
@@ -45904,12 +46184,12 @@ registerTool(
 registerTool(
   "vc_train_voice",
   {
-    title: "Train a new voice from the user's own recordings",
-    description: 'Train a new voice for vc_convert_vocals from a local directory of clean, dry vocal recordings. OWN-VOICE-ONLY POLICY: datasetDir must contain ONLY recordings the user has the rights to use as their own voice (or a voice they have explicit permission for) \u2014 NEVER a celebrity or third-party voice; this tool implies no product-compatibility claim about the underlying engine. TODAY this always answers a reserved "training not yet available" error (the facade validates the request shape, then answers that the feature ships with a later roadmap item, the in-app Voice panel) \u2014 call it anyway if a user asks to train a voice; the error IS the honest, actionable answer, not a bug. Use the "base" smoke-test target on vc_convert_vocals in the meantime to prove the pipeline itself works.',
+    title: "Train a new voice from a user-supplied recording set",
+    description: 'Train a new voice for vc_convert_vocals from a local directory of clean, dry vocal recordings. RIGHTS-RESPONSIBILITY POLICY: datasetDir must contain recordings the USER is responsible for having the rights to use; the product does not restrict whose voice that is. This tool implies no product-compatibility claim about the underlying engine. TODAY this always answers a reserved "training not yet available" error (the facade validates the request shape, then answers that the feature ships with a later roadmap item, the in-app Voice panel) \u2014 call it anyway if a user asks to train a voice; the error IS the honest, actionable answer, not a bug. Use the "base" smoke-test target on vc_convert_vocals in the meantime to prove the pipeline itself works.',
     inputSchema: {
       name: external_exports.string().min(1).describe("Display name for the new voice."),
       datasetDir: external_exports.string().min(1).describe(
-        "Absolute or ~-expanded local directory of the user's OWN clean, dry vocal recordings to train from (own-voice-only \u2014 never a celebrity or third-party voice)."
+        "Absolute or ~-expanded local directory of clean, dry vocal recordings to train from \u2014 the user is responsible for having the rights to them."
       ),
       voiceId: external_exports.string().optional().describe("Specific id for the new voice. Omit to let the facade derive one from name."),
       epochs: external_exports.number().int().positive().optional().describe("Training-length override, in epochs. Omit for the facade's default.")
@@ -45921,7 +46201,7 @@ registerTool(
   "vc_list_voices",
   {
     title: "List the available conversion voices",
-    description: 'List every voice the local RVC voice-conversion sidecar can convert to (for vc_convert_vocals\'s voiceId). No params. Returns `{voices: [{id, name, state, hasIndex?, createdAt?, kind?, trained?, note?}]}` \u2014 the sidecar\'s own descriptors verbatim. The reserved id "base" is ALWAYS listed (kind "builtin", trained false, plus a note): it is the pipeline SMOKE-TEST target, not a real voice \u2014 converting to it proves the pipeline runs and always carries realConversion:false. Real voices appear here once trained (vc_train_voice \u2014 arriving with a later update). `state` is "ready" (usable now), "needsConversion" (trained but not yet prepared for this engine), or "incomplete". Requires the sidecar to be running \u2014 call vc_sidecar_start first if vc_sidecar_status isn\'t healthy; an unreachable sidecar errors with the actionable next step, never a bare connection failure. OWN-VOICE-ONLY POLICY: any real voice listed here was trained from the user\'s OWN recordings that they have the rights to use \u2014 NEVER a celebrity or third-party voice model.',
+    description: 'List every voice the local RVC voice-conversion sidecar can convert to (for vc_convert_vocals\'s voiceId). No params. Returns `{voices: [{id, name, state, hasIndex?, createdAt?, kind?, trained?, note?}]}` \u2014 the sidecar\'s own descriptors verbatim. The reserved id "base" is ALWAYS listed (kind "builtin", trained false, plus a note): it is the pipeline SMOKE-TEST target, not a real voice \u2014 converting to it proves the pipeline runs and always carries realConversion:false. Real voices appear here once trained (vc_train_voice \u2014 arriving with a later update). `state` is "ready" (usable now), "needsConversion" (trained but not yet prepared for this engine), or "incomplete". Requires the sidecar to be running \u2014 call vc_sidecar_start first if vc_sidecar_status isn\'t healthy; an unreachable sidecar errors with the actionable next step, never a bare connection failure. RIGHTS-RESPONSIBILITY POLICY: a real voice listed here may be one the user trained from their own recordings or a third-party model they supplied; the user is responsible for having the rights to it.',
     inputSchema: {}
   },
   async () => toToolResult(() => bridge.send("vc.listVoices"))
@@ -46232,7 +46512,7 @@ registerTool(
   "ai_copilot_set_model",
   {
     title: "Set the in-app AI copilot's model",
-    description: 'Sets which Anthropic model the in-app copilot targets for SUBSEQUENT turns (an in-flight turn already resolved its provider, so this never retargets one mid-flight). `model` must be one of the curated ids from ai_copilot_get_model\'s `catalog` (e.g. "claude-sonnet-5" for balanced default use, "claude-opus-4-8" for the highest-reasoning flagship, "claude-haiku-4-5" for the fastest/cheapest option) \u2014 an unrecognized id errors with the full list of valid ids rather than silently falling back. Returns `{model}` echoing the now-effective model.',
+    description: 'Sets which Anthropic model the in-app copilot targets for SUBSEQUENT turns (an in-flight turn already resolved its provider, so this never retargets one mid-flight). `model` must be one of the curated ids from ai_copilot_get_model\'s `catalog` (e.g. "claude-sonnet-5" for balanced default use, "claude-opus-5" for the highest-reasoning flagship, "claude-haiku-4-5" for the fastest/cheapest option) \u2014 an unrecognized id errors with the full list of valid ids rather than silently falling back. Returns `{model}` echoing the now-effective model.',
     inputSchema: {
       model: external_exports.string().min(1).describe(
         'A curated model id from ai_copilot_get_model\'s `catalog`, e.g. "claude-sonnet-5".'
@@ -46325,6 +46605,235 @@ server.registerTool(
     }
   },
   async ({ prompt, size }) => toToolResult(() => generateImage({ prompt, size }))
+);
+registerTool(
+  "project_import_midi",
+  {
+    title: "Import a Standard MIDI File as new tracks",
+    description: 'Import a Standard MIDI File (.mid/.midi) as new INSTRUMENT tracks, one MIDI clip per imported part, in ONE journaled "Import MIDI File" edit \u2014 undo removes every created track and reverts any tempo/meter adoption together. RECOMMENDED WORKFLOW: call once with `dryRun: true` first \u2014 it parses the file and returns the full report, including the `parts` array (every part in the file, even ones that would be skipped, so an index means the same thing on the dry run and the real one) and the RESOLVED tempo policy, WITHOUT touching the project or creating an undo entry; inspect it, then call again for real, narrowing `parts` to just what you want \u2014 a call with no `parts` filter imports every part as its own track, which can be dozens for a full arrangement. `atBeat` (default 0) is the TIMELINE beat that file tick 0 lands on; every created clip starts there and notes stay clip-relative regardless. `tempoPolicy` controls the project\'s tempo and time-signature maps: `"auto"` (default) adopts the file\'s tempo/meter maps ONLY when the project has no clips yet, so a first import sets the grid and a later one never silently retimes existing material; `"adopt"` always replaces the project\'s maps with the file\'s (refused when combined with a non-zero `atBeat` \u2014 the maps are absolute, so there\'s no honest offset adoption); `"ignore"` never touches them. Note positions land on the same beats under every policy \u2014 a MIDI file\'s beats come from its ticks, not its tempo. `instruments` is `"none"` (default: new tracks keep the default instrument) or `"gm"` (assigns General MIDI sound-bank programs from the file\'s program changes, channel 10 as the standard drum kit) \u2014 the program each part asks for is reported either way. `force` (default false) overrides the 32-track import-count refusal. The returned report is where every fidelity loss surfaces, never applied silently: clamped out-of-range tempos, dropped or conflicting tempo/meter events, controller lanes dropped or decimated past their cap, dropped release velocities and program changes, plus a plain-English `degradations` list. Response `{report: <MIDIImportReport>, applied}`, where `applied` is true only when `dryRun` was false. Errors readably for a non-.mid/.midi extension, a missing file, any SMF decode problem, a recording in progress, the `"adopt"` + non-zero `atBeat` combination, the 32-track limit (raise it with `force`), and a file whose import would do literally nothing.',
+    inputSchema: {
+      path: external_exports.string().min(1).describe(
+        "Absolute (or ~-prefixed) path to the .mid/.midi Standard MIDI File to import on this Mac. A relative path or wrong extension is rejected."
+      ),
+      atBeat: external_exports.number().min(0).optional().describe(
+        "Timeline beat (quarter notes) that file tick 0 lands on \u2014 every created clip starts here. Must be >= 0. Omit to default to 0."
+      ),
+      tempoPolicy: external_exports.enum(["auto", "adopt", "ignore"]).optional().describe(
+        `What to do with the file's tempo/time-signature maps. "auto" (default) adopts them only when the project has no clips yet. "adopt" always replaces the project's maps with the file's (refused with a non-zero atBeat). "ignore" never touches them. Note positions are the same under every policy \u2014 only playback speed and the grid are affected.`
+      ),
+      instruments: external_exports.enum(["none", "gm"]).optional().describe(
+        `"none" (default) leaves new tracks on the default instrument. "gm" assigns General MIDI sound-bank programs from the file's program changes (channel 10 = the standard drum kit). The requested program is reported either way.`
+      ),
+      parts: external_exports.array(external_exports.number().int()).optional().describe(
+        "Which of the file's parts to import, as indices into the report's `parts` array (run with dryRun: true first to see them \u2014 the array lists every part, including ones that would be skipped, so an index means the same thing on a dry run and a real import). Omit to import every part; an explicit empty array imports nothing. An out-of-range index (including negative) is passed through and rejected by the app with a message naming the file's actual part count \u2014 not clamped or pre-validated here."
+      ),
+      dryRun: external_exports.boolean().optional().describe(
+        "true: parse the file and return the full report WITHOUT creating any tracks/clips or touching the project's tempo \u2014 use this first to inspect the file. Omit or false: apply it for real. Default false."
+      ),
+      force: external_exports.boolean().optional().describe(
+        "true: override the 32-track import-count refusal so a large file can still be imported in full. Omit or false: the limit stands (narrow with `parts` instead). Default false."
+      )
+    }
+  },
+  async ({ path: path6, atBeat, tempoPolicy, instruments, parts, dryRun, force }) => toToolResult(
+    () => bridge.send("project.importMIDI", { path: path6, atBeat, tempoPolicy, instruments, parts, dryRun, force })
+  )
+);
+registerTool(
+  "clip_import_midi",
+  {
+    title: "Import a Standard MIDI File into an existing MIDI clip",
+    description: "Import one part of a Standard MIDI File (.mid/.midi) into an EXISTING MIDI clip, replacing its notes AND controller lanes wholesale with that part's content (the clip_set_notes whole-array precedent) in ONE journaled \"Import MIDI into Clip\" edit. Deliberately narrow in two ways: it NEVER touches the project's tempo or time-signature maps \u2014 that is project_import_midi's job, so there is no `tempoPolicy` param here \u2014 and it NEVER changes the clip's length; content landing past the clip's end is imported anyway and reported via `notesPastClipEnd`/`controllerPointsPastClipEnd` rather than silently dropped (grow the clip first with clip_fit_to_content to make it all audible). `part` selects which of the file's parts to import, indexing the report's `parts` array; omit it to default to the lowest-indexed part with notes, or failing that the lowest with controller data. `atBeat` (default 0) here is CLIP-RELATIVE \u2014 an offset from the clip's own start, NOT a timeline beat (use project_import_midi to place content on the timeline). `dryRun: true` (default false) returns the full report without touching the clip or creating an undo entry \u2014 inspect a file's parts before committing. Response `{report: <MIDIImportReport>, applied}`, where `applied` is true only when `dryRun` was false. Errors readably for an unknown `clipId`, a non-MIDI clip, a take-group/comp member clip (flatten it first), a non-.mid/.midi extension, a missing file, any SMF decode problem, a recording in progress, an out-of-range `part` index, and a part with no content to import.",
+    inputSchema: {
+      clipId: external_exports.string().uuid().describe("Id of the existing MIDI clip to import into, from project_snapshot."),
+      path: external_exports.string().min(1).describe(
+        "Absolute (or ~-prefixed) path to the .mid/.midi Standard MIDI File to import on this Mac. A relative path or wrong extension is rejected."
+      ),
+      part: external_exports.number().int().optional().describe(
+        "Which part of the file to import, as an index into the report's `parts` array (run with dryRun: true first to see them). Omit to default to the lowest-indexed part with notes, or failing that the lowest with controller data. An out-of-range index (including negative) is passed through and rejected by the app with a message naming the file's actual part count \u2014 not clamped or pre-validated here."
+      ),
+      atBeat: external_exports.number().min(0).optional().describe(
+        "CLIP-RELATIVE beat offset applied to the imported content \u2014 an offset from the clip's own start, NOT a timeline beat. Must be >= 0. Omit to default to 0."
+      ),
+      dryRun: external_exports.boolean().optional().describe(
+        "true: parse the file and return the full report WITHOUT touching the clip \u2014 use this first to inspect a file's parts. Omit or false: apply it for real. Default false."
+      )
+    }
+  },
+  async ({ clipId, path: path6, part, atBeat, dryRun }) => toToolResult(() => bridge.send("clip.importMIDI", { clipId, path: path6, part, atBeat, dryRun }))
+);
+registerTool(
+  "project_export_midi",
+  {
+    title: "Export the project (or a track selection) as a Standard MIDI File",
+    description: "Export instrument tracks as a Standard MIDI File (.mid), one MTrk part per exported track plus a conductor chunk carrying the project name and the WHOLE tempo/time-signature map. Non-instrument tracks (audio, bus) are SKIPPED, not refused \u2014 each is still listed in the report's per-track ledger with a `skipReason`. Muted tracks ARE exported at their authored content (export serializes the model, not what you'd hear played back) \u2014 an agent that wants a muted track left out must filter `trackIds` itself. RECOMMENDED WORKFLOW: call once with `dryRun: true` first \u2014 it runs the full export in memory (including encoding) and returns the complete report, with the exact `byteCount` the real write would produce, WITHOUT creating or touching any file; inspect it, then call again for real. `path` (optional, absolute or ~-prefixed) is where to write the file; a non-.mid/.midi extension gets `.mid` appended. Omit it and the file goes to a fresh path under the system temp directory \u2014 always read `report.path` (filled on a dry run too) rather than assuming a location. `trackIds` (optional array of track ids) selects which tracks to export, in PROJECT order regardless of the order given; omit it to export every track in the project (still skipping non-instrument ones). An unknown id in `trackIds` is refused rather than silently dropped. `division` (default 9600 ticks per quarter note) is DERIVED, not the industry-standard 480: it is exact for every dyadic subdivision to 1/128 of a beat, every triplet/quintuplet, and every DAW Pro swing preset, so round-trip re-imports land bit-exact; lower it only to match a specific target reader, and expect more content to need quantizing (reported, never silent) as a result. `format` is 1 (default: one track per part \u2014 keeps every track name) or 0 (all parts merged into a single track, which can carry only one name; the report's `trackNamesLostToFormat0` counts the casualties). IMPORTANT: the exported bytes carry NO General MIDI program-change events in this version, even for tracks on a GM sound bank \u2014 the instrument each track asks for is only reported (`program`/`programName` per track, and the total in `programChangesNotWritten`), never written into the file, so a receiving program will use its own default sound for every part. The report is where every other fidelity loss surfaces too: quantized notes/controller points, notes widened to one tick, truncated or dropped same-pitch overlaps, dropped or colliding tempo/meter changes, and a plain-English `degradations` list \u2014 a clean project reports all of that as zero/empty. Response `{report: <MIDIExportReport>, written}`, where `written` is false on a dry run. Errors readably for a non-absolute `path`, an out-of-range `division` or invalid `format`, an unknown id in `trackIds`, content too far from the start of the file at the chosen `division` (raise the division or move content earlier), a write failure, and a selection with nothing exportable (only surfaced on a REAL export \u2014 a dry run on an all-audio/all-bus selection still returns its report, with `tracksExported: 0`).",
+    inputSchema: {
+      path: external_exports.string().min(1).optional().describe(
+        "Absolute (or ~-prefixed) path to write the .mid file to. A relative path is rejected; a non-.mid/.midi extension has .mid appended. Omit to export to a fresh path under the system temp directory \u2014 read the returned report's `path` field either way."
+      ),
+      trackIds: external_exports.array(external_exports.string().uuid()).optional().describe(
+        "Track ids to export, from project_snapshot. Exported in PROJECT order regardless of the order given here. Omit to export every track (non-instrument tracks are still skipped and reported). An id that doesn't match any track is refused."
+      ),
+      division: external_exports.number().int().min(1).max(32767).optional().describe(
+        "Ticks per quarter note for the file's MThd header, 1-32767. Omit for the default 9600 \u2014 exact for every dyadic subdivision to 1/128 beat, every triplet/quintuplet, and every DAW Pro swing preset, so a re-import lands bit-exact. The industry-common 480 quantizes swung or humanized material; content off the chosen grid is quantized to the nearest tick and reported, never silently dropped."
+      ),
+      format: external_exports.number().int().min(0).max(1).optional().describe(
+        "SMF format: 1 (default) writes one track chunk per exported part, keeping every track name. 0 merges everything into a single chunk, which can carry only one name \u2014 the report's trackNamesLostToFormat0 counts the names that were lost."
+      ),
+      dryRun: external_exports.boolean().optional().describe(
+        "true: run the export fully in memory (including encoding, so byteCount is exact) and return the report WITHOUT creating or writing any file. Omit or false: write the file for real. Default false."
+      )
+    }
+  },
+  async ({ path: path6, trackIds, division, format, dryRun }) => toToolResult(() => bridge.send("project.exportMIDI", { path: path6, trackIds, division, format, dryRun }))
+);
+registerTool(
+  "track_export_midi",
+  {
+    title: "Export one instrument track as a Standard MIDI File",
+    description: "Export a single INSTRUMENT track as a Standard MIDI File (.mid): a conductor chunk carrying the project name and the project's WHOLE tempo/time-signature map, plus one track chunk for that track's notes and controller data \u2014 the file still carries the full musical grid, it is only the note content that is narrowed to one track. Identical file shape and options to project_export_midi with `trackIds` narrowed to this one track; the two commands differ only in selection. Unlike project_export_midi, which SKIPS a non-instrument track and reports it, this one REFUSES outright if `trackId` names an audio or bus track \u2014 naming a specific track that cannot carry MIDI is a mistake worth surfacing, not silently producing a note-less file (use project_export_midi with `trackIds` to export several tracks, including a mix of kinds, into one file). The track is exported at its authored content even if muted. RECOMMENDED WORKFLOW: call once with `dryRun: true` first \u2014 it runs the full export in memory (including encoding, so `byteCount` is exact) and returns the complete report WITHOUT creating or touching any file; inspect it, then call again for real. `path` (optional, absolute or ~-prefixed) is where to write the file; a non-.mid/.midi extension gets `.mid` appended, and omitting it writes to a fresh path under the system temp directory \u2014 always read `report.path` (filled on a dry run too). `division` (default 9600 ticks per quarter note, DERIVED to be exact for dyadic subdivisions to 1/128 beat, every triplet/quintuplet, and every DAW Pro swing preset) and `format` (1 default = keeps the track name; 0 merges into a single chunk) work exactly as in project_export_midi. IMPORTANT: the exported bytes carry NO General MIDI program-change event in this version even when the track is on a GM sound bank \u2014 the requested instrument is only reported (`program`/`programName`, and counted in `programChangesNotWritten`), never written into the file. The report is where every other fidelity loss surfaces: quantized notes/controller points, notes widened to one tick, truncated or dropped same-pitch overlaps, dropped tempo/meter changes, and a plain-English `degradations` list \u2014 a clean track reports all of that as zero/empty. Response `{report: <MIDIExportReport>, written}`, where `written` is false on a dry run. Errors readably for an unknown `trackId`, a `trackId` naming an audio or bus track, a non-absolute `path`, an out-of-range `division` or invalid `format`, content too far from the start of the file at the chosen `division`, and a write failure.",
+    inputSchema: {
+      trackId: external_exports.string().uuid().describe("Id of the instrument track to export, from project_snapshot."),
+      path: external_exports.string().min(1).optional().describe(
+        "Absolute (or ~-prefixed) path to write the .mid file to. A relative path is rejected; a non-.mid/.midi extension has .mid appended. Omit to export to a fresh path under the system temp directory \u2014 read the returned report's `path` field either way."
+      ),
+      division: external_exports.number().int().min(1).max(32767).optional().describe(
+        "Ticks per quarter note for the file's MThd header, 1-32767. Omit for the default 9600 \u2014 exact for every dyadic subdivision to 1/128 beat, every triplet/quintuplet, and every DAW Pro swing preset, so a re-import lands bit-exact. The industry-common 480 quantizes swung or humanized material; content off the chosen grid is quantized to the nearest tick and reported, never silently dropped."
+      ),
+      format: external_exports.number().int().min(0).max(1).optional().describe(
+        "SMF format: 1 (default) writes the track as its own chunk, keeping its name. 0 merges it with the conductor into a single chunk, which loses the track name."
+      ),
+      dryRun: external_exports.boolean().optional().describe(
+        "true: run the export fully in memory (including encoding, so byteCount is exact) and return the report WITHOUT creating or writing any file. Omit or false: write the file for real. Default false."
+      )
+    }
+  },
+  async ({ trackId, path: path6, division, format, dryRun }) => toToolResult(() => bridge.send("track.exportMIDI", { trackId, path: path6, division, format, dryRun }))
+);
+registerTool(
+  "clip_transcribe",
+  {
+    title: "Transcribe an audio clip to text with word/segment timings on its beats",
+    description: "Run on-device speech-to-text (WhisperKit, Apple Neural Engine) over an AUDIO clip's backing recording and return the text plus every segment and WORD placed on the PROJECT's beat grid, not just in seconds \u2014 read `startBeat`/`endBeat` to place lyrics or align edits without doing any seconds-to-beats math yourself. Nothing leaves the machine. BLOCKS until finished (like render_bounce/render_mixdown, not a pollable job \u2014 there is no job registry for it): the FIRST call on a given Mac pays a one-time ~90 second model-compile cost that the OS then caches, so expect the very first transcription on a fresh install to take a minute or two and every one after that to be close to real time. `clipId` (required) must name an existing AUDIO clip \u2014 a MIDI clip has no backing recording and is refused (read its notes directly instead). `language` (optional, a BCP-47-ish code like \"en\") forces a spoken language; omit it to let the recogniser detect one automatically. A TIME-STRETCHED clip (stretchRatio != 1, from clip_set_stretch) is REFUSED rather than transcribed with wrong timings \u2014 word placement assumes one second of the source recording equals one second of project time, which a stretch breaks; un-stretch the clip first (clip_set_stretch ratio 1) if you need its words on the grid. Response: {text, language, modelVariantDirectoryName, rangeStartSeconds, anchorBeat, segments: [{text, startSeconds, endSeconds, startBeat, endBeat, words: [{text, startSeconds, endSeconds, startBeat, endBeat, confidence}]}]} \u2014 seconds are measured from the start of the SOURCE FILE (rangeStartSeconds is where the read began), while beats are measured on the PROJECT timeline from `anchorBeat` (the clip's own start beat); confidence is 0-1 per word. Errors readably for an unknown `clipId`, a MIDI clip, and a stretched clip; when no speech model is installed the error names the directory it looked in.",
+    inputSchema: {
+      clipId: external_exports.string().uuid().describe("Id of the existing AUDIO clip to transcribe, from project_snapshot."),
+      language: external_exports.string().optional().describe(
+        'Force a spoken language with a BCP-47-ish code (e.g. "en"). Omit to let the recogniser detect the language automatically, exactly as it does by default.'
+      )
+    }
+  },
+  async ({ clipId, language }) => toToolResult(() => bridge.send("clip.transcribe", { clipId, language }))
+);
+registerTool(
+  "ai_install_speech_model",
+  {
+    title: "Start installing a WhisperKit speech-to-text model",
+    description: 'Start downloading and installing an on-device WhisperKit speech-recognition MODEL (a set of CoreML weights) into Application Support, in the layout `clip_transcribe` looks for. RETURNS IMMEDIATELY \u2014 this does NOT wait for the (often multi-hundred-MB to multi-GB) download to finish. Poll `ai_speech_model_install_status` for progress and the terminal outcome, INCLUDING a FAST failure: an unrecognised `variant` name or an already-installed variant without `overwrite` both still return `ok` here (the request was accepted) and only report their failure once polled \u2014 never treat a successful response from THIS tool as "the model is installed", only `succeeded` from the status tool means that. `variant` (required) is a WhisperKit size such as "tiny.en", "base", "small", "medium", or "large-v3" (WhisperKit also publishes "-turbo" and ".en" English-only variants of several of these) or the full on-disk directory name (e.g. "openai_whisper-tiny.en"); smaller models install faster and use less disk but transcribe less accurately. `overwrite` (optional, default false) replaces an existing install of the SAME variant \u2014 omit it to keep whatever is already there rather than risk deleting a multi-hundred-MB install by mistake. ONLY ONE INSTALL RUNS AT A TIME across the whole app: a second call while one is in flight is REFUSED (never queued, never merged), naming the variant already installing \u2014 wait for `ai_speech_model_install_status` to reach a terminal state (`succeeded` or `failed`) before starting another. Response (the SAME shape `ai_speech_model_install_status` returns): {state: "installing", variantDirectoryNameRequested}.',
+    inputSchema: {
+      variant: external_exports.string().describe(
+        `A WhisperKit model size ("tiny.en", "base", "small", "medium", "large-v3", etc.) or a full on-disk directory name ("openai_whisper-tiny.en"). Determines both the CoreML weights fetched and the matching tokenizer \u2014 WhisperKit rejects a name that doesn't contain a known size.`
+      ),
+      overwrite: external_exports.boolean().optional().describe(
+        "true: replace an existing install of this SAME variant, discarding it first. Omit or false (default): refuse instead \u2014 discoverable via ai_speech_model_install_status's errorMessage, never a silent deletion of an existing multi-hundred-MB install."
+      )
+    }
+  },
+  async ({ variant, overwrite }) => toToolResult(() => bridge.send("ai.installSpeechModel", { variant, overwrite }))
+);
+registerTool(
+  "ai_speech_model_install_status",
+  {
+    title: "Poll the current or most recently finished speech-model install",
+    description: 'Poll the status of the speech-model install started by `ai_install_speech_model`. There is exactly ONE install slot for the whole app (in flight, or the most recently finished one) \u2014 nothing to name, so this tool takes no parameters. Response: {state: "idle"|"installing"|"succeeded"|"failed", variantDirectoryNameRequested?: string (what was passed to ai_install_speech_model \u2014 NOT necessarily the canonical on-disk directory name; that only exists once `descriptor` does), progress?: {phase: "preparing"|"downloadingModel"|"downloadingTokenizer"|"installing"|"finished", variantDirectoryName, phaseFraction (0-1 WITHIN the current phase, not overall progress of the whole install), completedUnitCount, totalUnitCount} \u2014 may be ABSENT even while `state` is "installing" if nothing has ticked yet, and a silent download (zero progress callbacks) still reaches a terminal state, so do not treat a missing `progress` as a hang. descriptor?: {variantDirectoryName, displayName, modelFolder, tokenizerFolder, modelSizeBytes, tokenizerSizeBytes, hasContextPrefill, totalSizeBytes, formattedTotalSize} \u2014 present only once `state` is "succeeded"; this is the model clip_transcribe will use. errorMessage?: string \u2014 present only once `state` is "failed" (an unrecognised variant name, an already-installed variant without overwrite, or a download/tokenizer failure all surface here, readably). `state: "idle"` means nothing has ever been started on this app instance.',
+    inputSchema: {}
+  },
+  async () => toToolResult(() => bridge.send("ai.speechModelInstallStatus"))
+);
+registerTool(
+  "frequency_reference",
+  {
+    title: "Cited instrument frequency reference \u2014 fundamentals, bands, HP/LP advice",
+    description: 'Look up a cited frequency reference for a recognized instrument family: its fundamental pitch range (as MIDI notes, with derived Hz and note names), 2-5 presence/problem bands (each with a plain-language effect and a source citation), and a recommended high-pass corner (always present) plus a low-pass corner (only when the source supports one \u2014 some instruments, e.g. hi-hats, have useful content to the top of the audible band and carry `recommendedLowPass.kind: "noneRecommended"` instead of a fake number). Pass `family` directly \u2014 call with NO arguments first to see the full vocabulary under the response\'s `families` array \u2014 or pass `trackId` to resolve the family from that track\'s own instrument; `family` wins when both are given (`resolvedFrom: "argument"` in the response says so). A track that cannot be resolved (a recorded audio track, an unconfigured instrument, a hosted plugin, a bus) returns `resolution: "unresolved"` with `reason`/`explanation`/`remedy` \u2014 NEVER infer a family from the track\'s name yourself either; ask the user, or pick a `family` from the enumerated list. A percussion-kit track queried with no `note` returns `resolution: "drumKit"` plus `coveredNotes` (the GM percussion notes this table knows); with an uncovered note, `unresolved` still carries `coveredNotes` so "not this one" never reads as "no data". To ACT on a recommendation, call `fx_set_param` on an "eq" insert with `name: "highPassFreq"` (the corner, in Hz) and `name: "highPassSlopeDbPerOct"` (12 or 24) \u2014 the same fields `fx_describe` documents for the eq kind.',
+    inputSchema: {
+      family: external_exports.string().optional().describe(
+        'An instrument family id to look up directly, e.g. "electricBass", "kick", "snare". Wins over trackId when both are given. Call with no arguments to see every valid id under the response\'s `families` array \u2014 an unrecognized value is refused (naming the valid ids), never silently treated as unresolved.'
+      ),
+      trackId: external_exports.string().optional().describe(
+        'Id of a track to resolve a family from, from project_snapshot. Not a bus and not "master" \u2014 a bus carries no instrument identity.'
+      ),
+      note: external_exports.number().int().min(0).max(127).optional().describe(
+        "A General MIDI percussion note (0-127) to resolve within a drum-kit track. Only meaningful together with trackId, on a track whose instrument addresses the GM percussion kit; passed against a melodic-bank track it is ignored (with `noteIgnored: true` in the response) rather than rejected, since you cannot know the bank before asking."
+      )
+    }
+  },
+  async ({ family, trackId, note }) => toToolResult(() => bridge.send("frequency.reference", { family, trackId, note }))
+);
+registerTool(
+  "clip_remove_many",
+  {
+    title: "Remove several clips as one undo step",
+    description: "Permanently remove SEVERAL clips \u2014 audio or MIDI, on one or several tracks \u2014 in ONE undo step. Prefer this over calling clip_remove in a loop: N separate clip_remove calls cost N undo steps, so edit_undo would only restore the last one. ALL-OR-NOTHING: every id must resolve to a live clip and must not belong to a take group (the clip_remove contract) or the WHOLE call is refused and the project is left untouched \u2014 never a partial delete. Duplicate ids collapse. `ids` may be empty, which is a safe no-op. WHICH refusal you get is deterministic (m23-am): an unknown id is reported before any take-group member, and when several ids are take-group members the error names the first one in arrangement order \u2014 track order, then the clip's position in its track \u2014 never the order you happened to pass them in. Returns `{clips}`, the removed clips.",
+    inputSchema: {
+      ids: external_exports.array(external_exports.string().uuid()).describe(
+        "Ids of the clips to remove, from project_snapshot. May be empty (a no-op). Order does not matter; duplicates collapse."
+      )
+    }
+  },
+  async ({ ids }) => toToolResult(() => bridge.send("clip.removeMany", { ids }))
+);
+registerTool(
+  "clip_move_many",
+  {
+    title: "Move several clips together, rigidly, as one undo step",
+    description: "Translate SEVERAL clips \u2014 possibly on different tracks \u2014 by the SAME beat delta in ONE undo step, so every gap between them survives the move exactly. Prefer this over calling clip_move in a loop: a per-clip loop applies `toStartBeat`'s own `>= 0` clamp to EACH clip independently, which can weld gaps shut the moment any one clip would cross beat 0 while the others still have room. `byBeats` is signed (positive = later, negative = earlier) and applies identically to every listed clip. WHOLE-GROUP CLAMP: if translating the group by the full `byBeats` would carry its leftmost clip past beat 0, the delta actually applied is reduced (never per-clip) so that clip lands exactly on 0 and every other clip's offset from it is preserved \u2014 check the response's `clamped`/`effectiveDeltaBeats` rather than assuming the requested `byBeats` fully applied, since it can legitimately be less. Same ALL-OR-NOTHING validation as clip_remove_many (an unknown id or a take-group member refuses the whole call). `ids` may be empty, or the clamp may reduce the effective delta to exactly 0 (e.g. the group is already at beat 0 and `byBeats` is negative) \u2014 both are safe no-ops with no undo step recorded. Landing on another same-track clip trims or removes it, same overlap policy as clip_move. Returns `{requestedDeltaBeats, effectiveDeltaBeats, clamped, trimmedClipIDs, removedClipIDs, clips}` \u2014 `clips` is every moved clip's current fields; `trimmedClipIDs`/`removedClipIDs` name any OTHER (stationary) clips the overlap policy edited.",
+    inputSchema: {
+      ids: external_exports.array(external_exports.string().uuid()).describe(
+        "Ids of the clips to move together, from project_snapshot. May be empty (a no-op). Order does not matter; duplicates collapse."
+      ),
+      byBeats: external_exports.number().describe(
+        "Signed beat delta applied identically to every listed clip. Positive moves later, negative moves earlier. May be reduced (never per-clip) if it would carry the group's leftmost clip past beat 0 \u2014 see `clamped` in the response."
+      )
+    }
+  },
+  async ({ ids, byBeats }) => toToolResult(() => bridge.send("clip.moveMany", { ids, byBeats }))
+);
+registerTool(
+  "clip_move_many_by_tracks",
+  {
+    title: "Move several clips down or up the track list, rigidly, as one undo step",
+    description: "Move SEVERAL clips DOWN or UP the track list by the SAME whole number of tracks, rigidly, in ONE undo step \u2014 a selection spanning several tracks keeps its shape (vertical offsets between the clips are preserved). A move onto a track that cannot hold the clip REFUSES THE WHOLE CALL: a MIDI clip needs an instrument track, an audio clip needs an audio track, and bus tracks hold no clips at all \u2014 nothing is skipped and nothing is partially applied. Running off the top or bottom of the track list is CLAMPED, not refused (the whole group, never per clip) \u2014 read `effectiveTrackDelta`/`clampedTracks` rather than assuming `byTracks` fully applied, the same precedent as clip_move_many's `clamped`. `byBeats` optionally rides along in the SAME undo step, so one call can move down AND along at once (same whole-group beat-0 clamp as clip_move_many). `landings` is the per-clip truth: a move of a selection spanning several tracks lands on several tracks, so there is no single destination to report. Prefer clip_move_many_to_track when you know the destination track by id rather than a relative offset \u2014 an agent choosing the wrong one of these two is the most likely misuse. Returns `{requestedTrackDelta, effectiveTrackDelta, clampedTracks, requestedDeltaBeats, effectiveDeltaBeats, clamped, landings: [{clipId, fromTrackId, toTrackId}], trimmedClipIDs, removedClipIDs, clips}`.",
+    inputSchema: {
+      ids: external_exports.array(external_exports.string().uuid()).describe(
+        "Ids of the clips to move together, from project_snapshot. May be empty (a no-op). Order does not matter; duplicates collapse."
+      ),
+      byTracks: external_exports.number().describe(
+        "Signed WHOLE number of tracks to move every listed clip by. Negative = up the track list, positive = down. Every clip moves the SAME number of tracks, so a selection spanning several tracks keeps its shape. A NON-INTEGRAL value (e.g. 1.5) is REFUSED outright \u2014 it is never rounded or truncated for you. Reduced (never per-clip) if it would carry the group past the first or last track \u2014 check `clampedTracks`/`effectiveTrackDelta`."
+      ),
+      byBeats: external_exports.number().optional().describe(
+        "Optional signed beat delta applied at the same time, so one call can move down AND along in ONE undo step. Same whole-group beat-0 clamp as clip_move_many. Defaults to 0."
+      )
+    }
+  },
+  async ({ ids, byTracks, byBeats }) => toToolResult(() => bridge.send("clip.moveManyByTracks", { ids, byTracks, byBeats }))
+);
+registerTool(
+  "clip_move_many_to_track",
+  {
+    title: "Move several clips onto one named destination track, as one undo step",
+    description: 'Move SEVERAL clips onto ONE NAMED destination track, in ONE undo step. This COLLAPSES a multi-track selection by construction: relative BEAT offsets survive, relative TRACK offsets do not (there is nowhere for them to go \u2014 everything lands on one track). Use this when you know the destination by id ("move these to the Drums track"); use clip_move_many_by_tracks instead when the goal is a shape-preserving relative move \u2014 an agent choosing the wrong one of these two is the most likely misuse. A move onto a track that cannot hold a clip REFUSES THE WHOLE CALL (a MIDI clip needs an instrument track, an audio clip needs an audio track, bus tracks hold no clips at all). An unknown `toTrackId` is refused EVEN WHEN `ids` is empty \u2014 a typo\'d track id must be caught immediately, not silently ignored. Because several source tracks can collapse onto one, two of the listed clips ending up on the same beats on the destination is ALSO refused whole (move them one at a time, or use clip_move_many_by_tracks to keep them on separate tracks); two clips that already overlapped each other on the SAME source track \u2014 a sanctioned crossfade \u2014 are unaffected by this check. `byBeats` optionally rides along in the SAME undo step. Returns the SAME shape as clip_move_many_by_tracks MINUS `requestedTrackDelta`/`effectiveTrackDelta` (a destination-shaped move has no delta to report \u2014 they are omitted, not null): `{clampedTracks, requestedDeltaBeats, effectiveDeltaBeats, clamped, landings: [{clipId, fromTrackId, toTrackId}], trimmedClipIDs, removedClipIDs, clips}`.',
+    inputSchema: {
+      ids: external_exports.array(external_exports.string().uuid()).describe(
+        "Ids of the clips to move together, from project_snapshot. May be empty \u2014 toTrackId is still validated even so. Order does not matter; duplicates collapse."
+      ),
+      toTrackId: external_exports.string().uuid().describe(
+        "Id of the track every listed clip lands on, from project_snapshot. An unknown id is refused even when `ids` is empty."
+      ),
+      byBeats: external_exports.number().optional().describe(
+        "Optional signed beat delta applied at the same time, so one call can move down AND along in ONE undo step. Defaults to 0."
+      )
+    }
+  },
+  async ({ ids, toTrackId, byBeats }) => toToolResult(() => bridge.send("clip.moveManyToTrack", { ids, toTrackId, byBeats }))
 );
 
 // src/index.ts

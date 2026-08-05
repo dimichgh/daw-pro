@@ -431,11 +431,17 @@ try {
   // the 176 pt window and the matcher's ±8 pt shift sweep silently absorbs the
   // offset. This is the m23-v four-boxes-on-the-ruler false negative one scale down.
   //
-  // ⚠️ IT IS CLOSED WITHOUT A NEW SEAM, because `debug.arrangeScroll` cannot answer
-  // it: that seam is VERTICAL only (it scrolls to a track — `DAWProApp.swift:3026`)
-  // and reports no offset, and a bare `{}` read is not a read at all — it falls
-  // through to "scroll to the last track". Instead the winning shift, a byproduct
-  // the search already produced, is inverted back into a content x:
+  // ⚠️ AT THE TIME THIS WAS WRITTEN it was closed without a new seam, because
+  // `debug.arrangeScroll` could not answer it: that seam was VERTICAL only (it
+  // scrolls to a track) and reported no offset, and a bare `{}` read was not a
+  // read at all — it fell through to "scroll to the last track" (m23-ah-2 filed
+  // exactly this). m23-ah-2 later fixed BOTH: a bare read is now side-effect-free
+  // (classified by `ArrangeScrollQuery.isQuery`) and the response carries a real
+  // `hOffset`/`hOffsetMirror` from the SAME ground truth `debug.arrangeZoom`
+  // echoes — a future rewrite of this leg could read it directly instead of
+  // inverting the shift below. Left as-is here (the inversion trick is proven and
+  // this gate did not need touching to fix m23-ah-2). Instead the winning shift, a
+  // byproduct the search already produced, is inverted back into a content x:
   //     contentX = (xA / scale) + refx − dx / scale
   // and compared with the view's OWN inset constant. MEASURED dx = 0 on every run
   // (clean and mutant alike), which is exactly (LABEL_X 4 + refx 6) == insetX 10.
@@ -453,8 +459,9 @@ try {
   check("H1 the label's ink sits at the view's OWN emptyLaneHintInsetX, recovered by inverting the "
         + "matcher's winning shift — so the lanes viewport is at CONTENT ORIGIN. Without this a "
         + "small horizontal scroll would slide the label under a crop whose x still reads correct, "
-        + "and the ±8 pt shift sweep would absorb it silently (debug.arrangeScroll cannot answer "
-        + "this: it is vertical-only and a bare read MUTATES)",
+        + "and the ±8 pt shift sweep would absorb it silently (debug.arrangeScroll's hOffset now "
+        + "answers this directly post-m23-ah-2; this leg predates that and keeps the proven "
+        + "shift-inversion instead)",
         inset.v !== null && contentX !== null
         && Math.abs(contentX - (lanesX + inset.v)) <= 1.0,
         `recovered content x=${contentX === null ? "n/a" : contentX.toFixed(2)} vs lanesX ${lanesX} + `

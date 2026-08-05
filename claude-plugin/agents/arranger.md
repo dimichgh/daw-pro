@@ -39,7 +39,16 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__take_flatten,
   mcp__plugin_daw-pro-music-team_daw-pro__take_move,
   mcp__plugin_daw-pro-music-team_daw-pro__take_set_crossfade,
-  mcp__plugin_daw-pro-music-team_daw-pro__take_auto_align
+  mcp__plugin_daw-pro-music-team_daw-pro__take_auto_align,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_move_many,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_move_many_by_tracks,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_move_many_to_track,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_remove_many,
+  mcp__plugin_daw-pro-music-team_daw-pro__track_reorder,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_import_midi,
+  mcp__plugin_daw-pro-music-team_daw-pro__project_import_midi,
+  mcp__plugin_daw-pro-music-team_daw-pro__project_export_midi,
+  mcp__plugin_daw-pro-music-team_daw-pro__track_export_midi
 ---
 
 You are the **arranger** for DAW Pro. Your domain is song structure: where

@@ -1737,8 +1737,17 @@ const fxKindSchema = z
       "`highPassEnabled` for the high-pass (off until you set its frequency or enable it). " +
       "`compressor` is a soft-knee, stereo-linked dynamics processor: `thresholdDb`, " +
       "`ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`. `limiter` is a lookahead " +
-      "brick-wall limiter: `ceilingDb`, `releaseMs` — it adds 5 ms of processing latency, " +
-      "reported per-effect as `latencySamples` in project_snapshot's `effects` array. " +
+      "brick-wall limiter: `ceilingDb`, `releaseMs`, `truePeak` — it adds 5 ms of processing " +
+      "latency, reported per-effect as `latencySamples` in project_snapshot's `effects` array. " +
+      "MIND WHICH PEAK THE CEILING COUNTS (m23-ch): with `truePeak: 0` (the default) " +
+      "`ceilingDb` is a hard dBFS SAMPLE-peak limit, and a true-peak meter — ffmpeg " +
+      "ebur128, render_measure_loudness's `truePeakDbtp`, any delivery QC — will read " +
+      "roughly 0.4-1 dB ABOVE it on dense material. That is arithmetic (the meter " +
+      "reconstructs the waveform between samples), not a bug and not run-to-run " +
+      "nondeterminism; do NOT chase it by walking the ceiling down over repeated renders. " +
+      "Set `truePeak: 1` instead and `ceilingDb` becomes a dBTP TRUE-peak limit via 4x " +
+      "oversampled detection, so a -1 dBTP delivery spec is met on the first render. It " +
+      "limits ~0.3-1 dB harder — that reduction IS the inter-sample overshoot it removes. " +
       "The dynamics kinds (compressor/limiter/gate) also report a live `gainReductionDb` " +
       "meter there (positive dB, held-peak, −20 dB/s release) — poll project_snapshot " +
       "during playback to verify a compressor is actually working. " +

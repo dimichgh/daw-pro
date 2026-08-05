@@ -737,6 +737,12 @@ struct ContentView: View {
             onFitClipToContent: { trackID, clip in
                 _ = try? store.fitClipToContent(trackId: trackID, clipId: clip.id)
             },
+            // m23-cf: the clip context menu's Delete. One handler for both blast
+            // radii (the whole selection, or just the clip that was right-clicked)
+            // — the decision was already made and SHOWN TO THE USER as the menu's
+            // title by `DeleteMenuPolicy.clipContextCommand`, and travels here in
+            // the command so the action cannot act on a different set.
+            onDeleteClip: { clip, command in model.deleteClipFromContextMenu(clip, command: command) },
             onSplitClip: { trackID, clip, atBeat in
                 // m17-c: refusals (comp member, outside-span) surface VERBATIM
                 // as an amber bubble on the clip — the same message the wire's

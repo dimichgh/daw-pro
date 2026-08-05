@@ -26,8 +26,19 @@ import Testing
 //
 // THE §2.1 TABLE (site → what → beat source → cause):
 //
-//  1. startPlayback   user pressed play              transport.positionBeats  .relocation
+//  1. startPlayback   user pressed play              transport.positionBeats  .transportStart
+//                     — m23-cd. WAS `.relocation`; the user's own pause/resume
+//                       report and their 2026-08-04 ruling ("let's do what other
+//                       DAWs do") moved it. ⚠️ IT IS A THIRD CASE, NOT
+//                       `.continuation`: the beat was CHOSEN, so the anchor stays
+//                       `.asSoonAsPractical` and StartAnchorPolicySiteTests'
+//                       "a CONTINUATION cannot fix the beat" header stays TRUE.
+//                       Chase and anchor policy are independent axes.
 //  2. seek            transport locate               transport.positionBeats  .relocation
+//                     — DELIBERATELY UNMOVED at m23-cd: the ruling was about the
+//                       play button. Stop→click-ruler→play now chases (it goes
+//                       through site 1); click-ruler-WHILE-ROLLING does not.
+//                       That asymmetry is known and is the user's to rule on.
 //  3. setTempo        tempo change WHILE ROLLING     derivedBeats()           .continuation
 //  4. reconcile       structural change while        derivedBeats()           .continuation
 //                     rolling — ANY piano-roll note
@@ -127,7 +138,7 @@ struct NoteChaseSiteTests {
     @Test("the reschedule causes in AudioEngine.swift match the §2.1 table, IN ORDER")
     func causeSequenceMatchesDesignTable() {
         let expected: [String] = [
-            "relocation",     // 1  startPlayback
+            "transportStart", // 1  startPlayback — m23-cd (was .relocation)
             "relocation",     // 2  seek
             "continuation",   // 3  setTempo
             "continuation",   // 4  reconcile structural change during playback
@@ -141,7 +152,13 @@ struct NoteChaseSiteTests {
 
         var found: [(line: Int, cause: String)] = []
         for line in Self.codeLines(of: "AudioEngine.swift") {
-            for token in ["relocation", "continuation"] where line.text.contains("cause: .\(token)") {
+            // ⚠️ EVERY case of RescheduleCause must appear in this token list.
+            // A case missing here reads as "no site", not as a failure: the site
+            // silently LEAVES the sequence and the expected array can be edited
+            // to match, which is the m23-bp "prose far from the code" failure in
+            // a new costume. m23-cd added `transportStart`.
+            for token in ["relocation", "continuation", "transportStart"]
+            where line.text.contains("cause: .\(token)") {
                 found.append((line.number, token))
             }
         }
@@ -319,9 +336,28 @@ struct NoteChaseSiteTests {
 
     // MARK: - The mapping itself
 
-    @Test("the RescheduleCause mapping: continuation chases, relocation does not")
+    @Test("the RescheduleCause mapping: continuation and transportStart chase, relocation does not")
     func mappingIsTheDesignRule() {
         #expect(RescheduleCause.continuation.chasesHeldNotes)
         #expect(!RescheduleCause.relocation.chasesHeldNotes)
+        // m23-cd — THE RULING, in one line: the play button chases.
+        #expect(RescheduleCause.transportStart.chasesHeldNotes)
+    }
+
+    /// The sequence scan above matches a HARD-CODED token list. A case absent
+    /// from it does not fail — its sites silently vanish from `found`, and the
+    /// expected array can then be "fixed" to match a sequence that is missing a
+    /// real site. This makes that impossible: every case must be scannable.
+    ///
+    /// REDDENS IF: a fourth `RescheduleCause` case lands without joining the
+    /// token list in `causeSequenceMatchesDesignTable`.
+    @Test("m23-cd: the cause-sequence scan covers EVERY RescheduleCause case")
+    func scanTokenListIsExhaustive() {
+        let scanned: Set<String> = ["relocation", "continuation", "transportStart"]
+        let all = Set(RescheduleCause.allCases.map { String(describing: $0) })
+        print("[measured] RescheduleCause cases: \(all.sorted()); scanned: \(scanned.sorted())")
+        let why = "a RescheduleCause case is missing from the sequence scan's token list — its "
+            + "sites would DISAPPEAR from the pin rather than fail it. Cases: \(all.sorted())."
+        #expect(all == scanned, "\(why)")
     }
 }

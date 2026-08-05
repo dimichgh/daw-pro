@@ -38,7 +38,7 @@ struct DAWProApp: App {
                     .keyboardShortcut(",", modifiers: .command)
             }
             FileCommands(store: model.store, model: model)
-            EditCommands(store: model.store)
+            EditCommands(store: model.store, model: model)
             // Arrange zoom (m17-b): ⌘+/⌘−/⌘0 + the Track Height ladder.
             ViewCommands(model: model)
         }
@@ -983,6 +983,132 @@ final class AppModel {
         }
     }
 
+    // MARK: - Delete MENU routes (m23-cf)
+
+    /// THE ONE HOME for "would the PIANO ROLL have consumed this keystroke?" —
+    /// the roll is on screen AND holds a note selection.
+    ///
+    /// EXTRACTED AT m23-cf, and the extraction is the point. This predicate had
+    /// exactly one site (`handleArrangeNudgeKey`'s fifth guard) and m23-cf needed
+    /// a second (`deleteMenuItem`). Spelling it twice would have been a second
+    /// computation of the same rule, free to drift — the failure
+    /// `EditorSurfaceOwnershipSiteTests`' `openEditorClip` census exists to
+    /// notice. One property, two readers, no drift; the census count is unmoved
+    /// because the raw read simply moved in here.
+    ///
+    /// ⚠️ NOT `activeEditorSurface`, and that is not an oversight. That type
+    /// answers "which editor did the user most recently ENGAGE", which is what
+    /// ⌘+/⌘−/⌘0 route on (m23-al). This answers a different question: whether the
+    /// roll would CONSUME a key it is offered. They come apart routinely — click
+    /// a note, then click the arrange ruler, and the arrange is the engaged
+    /// surface while the roll still holds the note selection that makes its own
+    /// `.onKeyPress(.delete)` claim the key. Routing DELETE by engagement would
+    /// delete the user's clips while their notes sat selected on screen.
+    ///
+    /// FOCUS IS NOT A TERM. `PianoRollNoteSelectionBridge` records the two
+    /// measurements that rejected it (`pianoRollEditorFocused` alone kills the
+    /// feature's primary case; as an extra term it alternates 6 true / 6 false
+    /// across 12 consecutive clip selections). `openEditorClip != nil` is the
+    /// deterministic way to ask "is the roll on screen" — and is knowingly
+    /// belt-and-braces rather than independently proven, since `hasSelection`
+    /// already implies a mounted roll (the bridge clears in `.onDisappear`).
+    var pianoRollWouldConsumeKey: Bool {
+        openEditorClip != nil && pianoRollNoteSelection.hasSelection
+    }
+
+    /// The Edit ▸ Delete item — title, target surface, enabled state.
+    ///
+    /// ⚠️ THE POLICY LIVES IN `DAWAppKit.DeleteMenuPolicy`, NOT HERE, and its doc
+    /// comment carries the whole argument: the precedence it applies is
+    /// `handleArrangeNudgeKey`'s guard stack, which is this app's own FOCUS-FREE
+    /// statement of what the DELETE key already does. Read that before changing
+    /// anything here — in particular the reasoned omission of the text-editing
+    /// guard, which is the one term that would make this item go stale.
+    ///
+    /// EVERY INPUT IS `@Observable` STATE, deliberately, so a `Commands` body
+    /// re-evaluates the title and the enabled flag whenever any of them moves. A
+    /// destructive menu item showing a stale count is the one staleness that
+    /// actually costs the user something.
+    var deleteMenuItem: DeleteMenuItem {
+        DeleteMenuPolicy.editMenuItem(
+            arrangeWorkspace: workspaceMode == .arrange,
+            isModalPresented: isModalPresented,
+            // The roll's own consume test — the SAME property
+            // `handleArrangeNudgeKey`'s fifth guard reads, never a second
+            // spelling of it.
+            pianoRollHasNoteSelection: pianoRollWouldConsumeKey,
+            // Each mounted lane editor holds at most ONE live breakpoint
+            // (`liveSelectionIndex` is an `Int?`), so the count of claiming lanes
+            // IS the count of points a delete would remove.
+            automationPointCount: automationPointSelection.lanesWithSelection.count,
+            arrangeClipCount: arrangeSelection.count)
+    }
+
+    /// Edit ▸ Delete fired. Routes to whichever surface `deleteMenuItem` named.
+    ///
+    /// RE-RESOLVED AT CLICK TIME rather than acting on whatever the menu was
+    /// drawn with: the item is enabled iff `surface != nil`, and this reads the
+    /// same property, so "what the user was offered" and "what runs" cannot
+    /// diverge. Every input is observable, so in practice they are the same
+    /// evaluation; re-reading makes that a property rather than a hope.
+    ///
+    /// NO SURFACE REIMPLEMENTS ITS OWN DELETE. The arrange branch calls
+    /// `deleteArrangeSelection()` — the exact function `handleArrangeDeleteKey`
+    /// calls past its guards — and the two editor branches ask the bridges, which
+    /// land in each editor's OWN key handler body. So all three routes journal
+    /// through the same store calls the key path does and undo is identical.
+    ///
+    /// WHY THE ARRANGE BRANCH IS NOT `handleArrangeDeleteKey()`: that method adds
+    /// the `isArrangeTextEditingFocused` guard, which `deleteMenuItem`
+    /// deliberately does not carry (see `DeleteMenuPolicy`). Calling it here would
+    /// ship an item that looks live and silently does nothing while a rename field
+    /// is open — the precise failure shape m23-cf exists to remove. The two
+    /// guards this route DOES apply (`workspaceMode`, `isModalPresented`) are
+    /// inside `deleteMenuItem` and were checked one line above.
+    @discardableResult
+    func performMenuDelete() -> Bool {
+        switch deleteMenuItem.surface {
+        case .pianoRollNotes:
+            pianoRollNoteSelection.requestDelete()
+            return true
+        case .automationPoints:
+            automationPointSelection.requestDelete()
+            return true
+        case .arrangeClips:
+            return deleteArrangeSelection()
+        case nil:
+            return false
+        }
+    }
+
+    /// A clip's context-menu Delete fired (m23-cf).
+    ///
+    /// TWO TARGETS, ONE STORE CALL. `ProjectStore.removeClips(ids:)` is the same
+    /// entry point the DELETE key uses; the only difference between the routes is
+    /// WHICH ids, and that decision was already made — and shown to the user as
+    /// the menu's title — by `DeleteMenuPolicy.clipContextCommand`. The command is
+    /// passed back in rather than recomputed so the action cannot act on a
+    /// different set from the one the label named.
+    ///
+    /// The whole-selection branch is `deleteArrangeSelection()` verbatim, so the
+    /// stale-id filter, the refusal bubble's anchor policy (m23-am) and the
+    /// clear-only-on-success rule all apply unchanged. The single-clip branch
+    /// repeats only the refusal handling — a take-comp member must surface the
+    /// store's words here exactly as it does on the key path — and deliberately
+    /// does NOT touch `arrangeSelection`: the user pointed at a clip they had not
+    /// selected, so their selection is not theirs to clear.
+    func deleteClipFromContextMenu(_ clip: Clip, command: ClipDeleteCommand) {
+        if command.targetsWholeSelection {
+            deleteArrangeSelection()
+            return
+        }
+        do {
+            _ = try store.removeClips(ids: [clip.id])
+        } catch {
+            presentArrangeSplitRefusal(error, clipID: clip.id)
+        }
+    }
+
     // MARK: - Arrange group drag (m23-g2)
 
     /// The arrange grid the LANES actually apply — Simple locks it to `.bar`
@@ -1489,7 +1615,7 @@ final class AppModel {
         // DESCENDANT of the arrow mount in `ArrangeDeleteKey`, and a descendant's
         // `.onKeyPress` sees the key first — once the roll handles arrows itself
         // it consumes them and this handler never runs.
-        guard !(openEditorClip != nil && pianoRollNoteSelection.hasSelection) else {
+        guard !pianoRollWouldConsumeKey else {
             return ArrangeNudgeOutcome(handled: true, refusedBy: .pianoRollNoteEdit)
         }
         // AN AUTOMATION LANE WOULD HAVE CONSUMED THIS KEY: some mounted lane
@@ -3144,7 +3270,7 @@ final class AppModel {
             case "debug.windowFrame":
                 return self.setWindowFrame(params)
             case "debug.arrangeScroll":
-                return self.setArrangeScroll(params)
+                return try self.setArrangeScroll(params)
             case "debug.arrangeZoom":
                 return try self.arrangeZoomDebug(params)
             case "debug.viewZoom":
@@ -3491,8 +3617,54 @@ final class AppModel {
     /// `debug.windowFrame` precedent). `trackId` names the target directly; `index`
     /// picks the Nth track (default: the LAST, i.e. scroll to the bottom); `bottom`
     /// (default true) anchors the target at the viewport bottom; `reset` scrolls back
-    /// to the first track (top). Echoes the resolved target.
-    private func setArrangeScroll(_ params: [String: JSONValue]) -> JSONValue {
+    /// to the first track (top).
+    ///
+    /// A BARE call — one carrying NO keys at all — is a pure, side-effect-free
+    /// QUERY (the m11-a law, already house style for `debug.arrangeZoom`/
+    /// `debug.undoHistory`/`debug.generationCard`; classified by
+    /// `ArrangeScrollQuery.isQuery`, keyed on PRESENCE of `reset`/`trackId`/
+    /// `index`/`bottom`, never their values). Before m23-ah-2 a bare `{}` fell
+    /// through every "was a target named?" check straight to `tracks[count - 1]`
+    /// — silently scrolling the arrange view to the BOTTOM and switching
+    /// `workspaceMode` to arrange — so a gate author reading it as a state query
+    /// would move the very viewport they were trying to verify, then measure the
+    /// move they caused. The query path touches NEITHER `workspaceMode` nor any
+    /// `arrangeScroll*` state; it only reads.
+    ///
+    /// An UNRECOGNIZED key is NOT a query — it THROWS (m23-ah-5). Between
+    /// m23-ah-2 and m23-ah-5 it was one: `isQuery` classifies by the presence of
+    /// the four mutating keys only, so a `trackId` typo'd as `trackID` was "none
+    /// of them" exactly like a bare `{}` and returned a successful-looking read.
+    /// Only a request with NO keys reaches the query branch now.
+    ///
+    /// The response (both paths — a scroll caller and a query caller share ONE
+    /// shape, so a caller can scroll and observe in a single round-trip) echoes
+    /// the resolved vertical target (`trackId`, `bottom`) plus the HORIZONTAL
+    /// offset, which m23-ah's H1 leg had to recover from a matcher's own shift
+    /// because this seam didn't report it: `hOffset`/`hOffsetMirror` are the SAME
+    /// ground-truth pair `debug.arrangeZoom` echoes (the lanes' own GeometryReader
+    /// report, never an analytic mirror), live only while `workspaceMode ==
+    /// "arrange"` and the lanes have reported at least once — `workspaceMode` is
+    /// echoed too so a caller can tell whether `hOffset` is fresh or a stale
+    /// leftover from before a switch to Mix. Vertical has NO numeric pixel offset
+    /// anywhere in this app (SwiftUI's `ScrollViewReader.scrollTo` exposes none),
+    /// so `vOffset` is always `null` — stated explicitly rather than omitted, so
+    /// the omission reads as "checked, unavailable" and not as an oversight;
+    /// `trackId`/`bottom` remain the only vertical truth.
+    private func setArrangeScroll(_ params: [String: JSONValue]) throws -> JSONValue {
+        let paramKeys = Set(params.keys)
+        // m23-ah-5: an unrecognized key (a `trackId` typo'd as `trackID`, a
+        // stray `foo`) must fail loudly, not fall through to the query
+        // branch below and look like a successful, side-effect-free read —
+        // see `ArrangeScrollQuery.unknownKeyRejection`'s doc comment. This
+        // check runs BEFORE `isQuery` on purpose: a truly bare `{}` has no
+        // keys at all, so it never reaches here and stays the m23-ah-2 read.
+        if let message = ArrangeScrollQuery.unknownKeyRejection(paramKeys: paramKeys) {
+            throw DebugError(message)
+        }
+        guard !ArrangeScrollQuery.isQuery(paramKeys: paramKeys) else {
+            return arrangeScrollResponse()
+        }
         workspaceMode = .arrange
         let tracks = store.tracks
         guard !tracks.isEmpty else {
@@ -3526,6 +3698,18 @@ final class AppModel {
             "ok": .bool(true),
             "trackId": arrangeScrollTarget.map { JSONValue.string($0.uuidString) } ?? .null,
             "bottom": .bool(arrangeScrollToBottom),
+            // Bumped on every MUTATING call only — unchanged across a query, so
+            // a caller can assert "nothing moved" directly rather than inferring
+            // it from trackId/bottom alone (m23-ah-2).
+            "nonce": .number(Double(arrangeScrollNonce)),
+            // Horizontal (m23-ah-2): reachable — see the doc comment above.
+            "hOffset": .number(Double(arrangeHScrollReported)),
+            "hOffsetMirror": .number(Double(arrangeHScroll)),
+            "viewportWidth": .number(Double(arrangeViewportWidth)),
+            "workspaceMode": .string(workspaceMode.rawValue),
+            // Vertical (m23-ah-2): NOT reachable as a number — see the doc
+            // comment above. Explicit null, not an omitted key.
+            "vOffset": .null,
         ])
     }
 
@@ -6631,12 +6815,67 @@ final class AppModel {
     /// the `debug.sketchpadDemo` empty-jobID rule), progress? (0…1), stage?,
     /// detail? (the boot phase hint), reason? (the failed row's verbatim
     /// text), elapsedSeconds? (backdates startedAt so the elapsed readout
-    /// shows it), stale?}`. Returns the resulting registry.
+    /// shows it), stale?}`. Returns the resulting registry. Both key sets —
+    /// this top-level one and `seed`'s own — are checked against
+    /// `GenerationCardDebugKeys` and any unrecognized key throws BEFORE
+    /// anything is read (m23-ah-6): an optional key that is silently
+    /// ignored is indistinguishable from one deliberately omitted (`jobId`
+    /// especially — omitting it on purpose keeps the live poll off the
+    /// staged row), so a typo must fail loudly rather than take a default.
+    /// ALL validation completes before ANY mutation — a rejected request
+    /// leaves the card exactly as it found it, including the `clear` leg.
     private func generationCardDebug(_ params: [String: JSONValue]) throws -> JSONValue {
-        if params["clear"]?.boolValue == true {
-            generationPresence.clearForCapture()
+        // Unknown keys teach FIRST — before `clear`/`seed` are read — the
+        // same ordering `setReferenceSeed` and (since m23-ah-5)
+        // `setArrangeScroll` use, or a typo'd top-level param would be
+        // silently ignored as "not clear, not seed" and answered as if it
+        // were a bare read. A truly bare `{}` has no keys at all, so this
+        // never trips for it (m23-ah-6).
+        if let message = GenerationCardDebugKeys.unknownTopLevelKeyRejection(
+            paramKeys: Set(params.keys)
+        ) {
+            throw DebugError(message)
         }
+        // A present-but-wrong-SHAPE `seed` (e.g. `{seed: "running"}` instead
+        // of `{seed: {phase: "running"}}`) is the same defect class the key
+        // checks above close, one type over: `params["seed"]?.objectValue`
+        // below silently reads as `nil` for ANY non-object value, which is
+        // indistinguishable from `seed` being absent altogether — a plausible
+        // slip (passing the phase string directly) would otherwise fall
+        // through to the bare-read echo with `ok: true`, exactly the
+        // "success response for a request that was not honoured" shape this
+        // item exists to close. Mirrors `Commands.swift.parseLyricsContext`'s
+        // `'context' must be an object` precedent (`.null` stays legal —
+        // JSON's own "absent" spelling).
+        if let seedValue = params["seed"], seedValue.objectValue == nil, seedValue != .null {
+            throw DebugError("debug.generationCard: seed must be an object "
+                + "{phase, origin?, label?, jobId?, progress?, stage?, detail?, "
+                + "reason?, elapsedSeconds?, stale?}")
+        }
+        // VALIDATE EVERYTHING, THEN MUTATE — the staged job is BUILT here but
+        // not applied, and `clear` runs only after every throw is behind us.
+        // ⚠️ THE BUG THIS ORDERING EXISTS TO PIN, measured live at the m23-ah-6
+        // close: `clear` used to run between the two validations, so
+        // `{clear: true, seed: <malformed>}` EMPTIED THE CARD AND THEN THREW —
+        // a half-applied request on an error path, and the caller has no way to
+        // learn from the error that the clear happened. A rejected request must
+        // leave state untouched; validating some inputs after mutating on
+        // others is the same defect class this item exists to close, one level
+        // up (the response is honest, but the state is not what it reports).
+        let stagedJob: GenerationPresenceJob?
         if let seed = params["seed"]?.objectValue {
+            // Same law, one layer down: validate `seed`'s own key set
+            // BEFORE reading any value out of it. This is the actual fix
+            // (m23-ah-6) — `phase` was safe only because it is REQUIRED
+            // (the guard below validates the key for free), but every
+            // OPTIONAL key (`origin`, `jobId`, `label`, …) used to read via
+            // `?? default` with no key-name check at all, so a misspelled
+            // key silently took the default and returned `ok: true`.
+            if let message = GenerationCardDebugKeys.unknownSeedKeyRejection(
+                paramKeys: Set(seed.keys)
+            ) {
+                throw DebugError(message)
+            }
             guard let phaseRaw = seed["phase"]?.stringValue else {
                 throw DebugError("debug.generationCard seed requires a phase")
             }
@@ -6672,7 +6911,16 @@ final class AppModel {
                 startedAt: Date().addingTimeInterval(-elapsed),
                 isStale: seed["stale"]?.boolValue ?? false)
             if !phase.isActive { job.finishedAt = Date() }
-            generationPresence.seedJobForCapture(job)
+            stagedJob = job
+        } else {
+            stagedJob = nil
+        }
+        // Every throw is now behind us — mutate.
+        if params["clear"]?.boolValue == true {
+            generationPresence.clearForCapture()
+        }
+        if let stagedJob {
+            generationPresence.seedJobForCapture(stagedJob)
         }
         return generationCardState()
     }

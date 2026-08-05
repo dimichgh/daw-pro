@@ -289,10 +289,22 @@ struct EditorSurfaceOwnershipSiteTests {
         // double-tap add, `endGesture` when the note moved, and the definition
         // itself. The velocity lane passes `commit` BY REFERENCE
         // (`onCommit: commit`), so it does not appear as `commit()`.
-        let note = "expected 4 occurrences of `commit()` in PianoRollView (3 gesture callers + "
-            + "the definition), found \(callers). A NEW caller must be checked: if it is not a "
-            + "user gesture, R6 now false-engages the roll."
-        #expect(callers == 4, "\(note)")
+        //
+        // RE-MEASURED 2026-08-04 (m23-cf), 4 -> 6, and BOTH new callers were held
+        // to the rule above rather than waved through:
+        //   • the NOTE CONTEXT MENU's Delete entry — a right-click on the grid, as
+        //     much a user gesture as the double-tap add beside it.
+        //   • the `noteSelection.deleteNonce` handler — Edit ▸ Delete. A MENU
+        //     CLICK, not a lifecycle event: the nonce's only producer is
+        //     `PianoRollNoteSelectionBridge.requestDelete()`, whose only caller is
+        //     `AppModel.performMenuDelete()`. No timer, no `.onAppear`, and
+        //     deliberately no debug seam. A user who deletes notes from the Edit
+        //     menu HAS just acted inside the roll, so engaging it there is
+        //     correct, not a false engage.
+        let note = "expected 6 occurrences of `commit()` in PianoRollView (5 gesture/menu callers "
+            + "+ the definition), found \(callers). A NEW caller must be checked: if it is not a "
+            + "user gesture or an explicit user menu action, R6 now false-engages the roll."
+        #expect(callers == 6, "\(note)")
         let lane = "the velocity lane must still commit through `commit` (that is how R6 covers "
             + "it)"
         #expect(roll.contains("onCommit: commit"), "\(lane)")
@@ -390,6 +402,15 @@ struct EditorSurfaceOwnershipSiteTests {
         // check, `debug.viewZoom`'s `rollOpen`, three `editorClipId` echoes and
         // one `editorOpen` echo = 9 real code reads, PLUS 1 occurrence inside the
         // TEXT of `act:"engage"`'s DebugError message = 10.
+        //
+        // ⚠️ STILL 10 AFTER m23-cf, BUT ONE OF THEM MOVED — re-measured, not
+        // assumed. The nudge guard's fifth term is no longer a raw read: it now
+        // says `pianoRollWouldConsumeKey`, and that new property's body carries
+        // the raw read instead. Net zero, and the reason this pin did NOT have to
+        // be raised is exactly what it is for — m23-cf needed the same predicate
+        // in a SECOND place (`deleteMenuItem`, for Edit ▸ Delete), and extracting
+        // ONE home was the alternative to spelling the rule twice. A future site
+        // that needs it must read that property, not `openEditorClip`.
         //
         // ⚠️ THAT LAST ONE IS PROSE, NOT A READ, AND IT IS A KNOWN FRAGILITY:
         // rewording that error string reddens this pin without any reader having

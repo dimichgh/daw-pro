@@ -184,9 +184,11 @@ public final class EffectEditorModel {
             ]
         case .limiter:
             // Release before Ceiling — input→output even on a 2-knob card.
+            // m23-ch: the true-peak toggle sits BESIDE the ceiling it
+            // reinterprets (dBFS vs dBTP), never in its own section.
             return [
                 ("TIME", [("releaseMs", nil)]),
-                ("OUTPUT", [("ceilingDb", nil)]),
+                ("OUTPUT", [("ceilingDb", nil), ("truePeak", "True Peak")]),
             ]
         case .reverb:
             return [
@@ -276,11 +278,13 @@ public final class EffectEditorModel {
     /// Binary-at-the-model-layer params render as TOGGLES, never knobs
     /// (report §3/§6): delay `pingPong` (`DelayParams` rounds it), the
     /// EQ's `*Enabled` band bypasses (the store snaps ≥ 0.5 to on, m22-a),
-    /// and the delay's tempo `sync` (m22-f, same ≥ 0.5 snap). The wire shape
-    /// is untouched: the toggle still writes 0.0/1.0 through the same `set`
+    /// the delay's tempo `sync` (m22-f, same ≥ 0.5 snap), and the limiter's
+    /// `truePeak` mode (m23-ch, same ≥ 0.5 snap). The wire shape is
+    /// untouched: the toggle still writes 0.0/1.0 through the same `set`
     /// path.
     public static func isToggleParam(_ spec: EffectParamSpec) -> Bool {
-        spec.name == "pingPong" || spec.name == "sync" || spec.name.hasSuffix("Enabled")
+        spec.name == "pingPong" || spec.name == "sync" || spec.name == "truePeak"
+            || spec.name.hasSuffix("Enabled")
     }
 
     /// The delay's `division` (m22-f) is an 18-way note-length CHOICE, not a
@@ -601,6 +605,7 @@ public final class EffectEditorModel {
             switch name {
             case "ceilingDb": return p.ceilingDb
             case "releaseMs": return p.releaseMs
+            case "truePeak": return p.truePeak ? 1 : 0
             default: return nil
             }
         case .reverb:

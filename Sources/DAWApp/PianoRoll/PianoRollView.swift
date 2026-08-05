@@ -334,6 +334,26 @@ struct PianoRollView: View {
                 model.clearSelection()
             }
         }
+        // m23-cf: EDIT ▸ DELETE reaching the roll. The menu item cannot call
+        // `model.deleteSelection()` itself — `model` is `@State private` — so it
+        // bumps `deleteNonce` and this applies it.
+        //
+        // THE SAME THREE LINES AS THE `.onKeyPress(.delete)` HANDLER ABOVE,
+        // INCLUDING ITS GUARD, on purpose: the menu is a SECOND ROUTE to the one
+        // operation, never a second policy. `deleteSelection()` + `commit()` is
+        // the whole key path, so undo behaves identically through both.
+        //
+        // THE GUARD IS NOT REDUNDANT with the menu item's disabled state. That
+        // state is resolved from `noteSelection.hasSelection`, which the roll
+        // reports on a transition; this is the roll's own live selection at the
+        // instant of the click. If the two ever disagree, the roll wins and the
+        // menu becomes a no-op rather than deleting something the user could not
+        // see selected.
+        .onChange(of: noteSelection.deleteNonce) { _, _ in
+            guard !model.selection.isEmpty else { return }
+            model.deleteSelection()
+            commit()
+        }
         .onDisappear {
             onFocusChange(false)
             // m23-x: and drop the note-selection claim with it. A latched
@@ -1036,6 +1056,28 @@ struct PianoRollView: View {
                                 commit()
                             }
                         )
+                        // m23-cf: THE ROLL'S FIRST CONTEXT MENU. Before this the
+                        // only way to remove a note was the bare DELETE key, and
+                        // a user reported that as "I cannot remove them" — with
+                        // the key path dead for any reason the operation was
+                        // simply unreachable.
+                        //
+                        // ⚠️ `.contentShape` IS LOAD-BEARING AND WAS MEASURED, NOT
+                        // ADDED FOR TIDINESS. `PianoRollGrid`'s body is a `Canvas`,
+                        // which draws but contributes NO hit-test region of its
+                        // own. `.gesture` does not care — SwiftUI gestures resolve
+                        // against the view's FRAME, which is why the grid's drag,
+                        // pinch and double-tap all worked without one — but
+                        // `.contextMenu` resolves against the AppKit hit region,
+                        // so without this the right-click passes straight through
+                        // and NO menu appears. MEASURED live on staging: identical
+                        // right-clicks that opened the arrange clip's menu (a real
+                        // `RoundedRectangle` fill, hence a real hit region) did
+                        // nothing here. The arrange menu's silence about this is
+                        // not a disagreement — it draws shapes and gets its region
+                        // for free.
+                        .contentShape(Rectangle())
+                        .contextMenu { noteContextMenu }
                 }
                 .coordinateSpace(name: Self.gridScrollSpace)
                 // Never animated — a page turn must not glide. The deferred
@@ -1068,6 +1110,40 @@ struct PianoRollView: View {
         // seeks the transport (m10-e). Sits over the grid area only, past the
         // keyboard gutter.
         .overlay(alignment: .topLeading) { scrubStrip }
+    }
+
+    /// The note grid's right-click menu (m23-cf) — one destructive entry.
+    ///
+    /// ⚠️ NOT DENSITY-GATED, unlike the arrange clip menu's edit entries (sp-c).
+    /// Removing a note you added is not Pro edit chrome; it is the other half of
+    /// adding one, and Simple is exactly the density a beginner who "cannot
+    /// remove them" is working in.
+    ///
+    /// SELECTION-BASED, MIRRORING THE KEY PATH. `.contextMenu` gives its builder
+    /// no click location and the notes are `Canvas`-drawn rather than per-note
+    /// views, so a "delete the note under the pointer" menu would need a
+    /// hover-tracked point plus a SECOND targeting policy beside the key
+    /// handler's `guard !model.selection.isEmpty`. Reading the selection instead
+    /// means the menu and the key can never disagree — and the title names the
+    /// count, which the Edit-menu route cannot (`DeleteMenuPolicy`).
+    ///
+    /// SHOWN-BUT-DISABLED ON AN EMPTY SELECTION rather than an empty builder (the
+    /// arrange menu's Simple-mode behaviour, which this deliberately does not
+    /// copy): a menu that does not appear teaches nothing, and "the operation
+    /// exists, it needs a selection" is precisely what the reported bug denied.
+    @ViewBuilder
+    private var noteContextMenu: some View {
+        Button(DeleteMenuPolicy.noteContextTitle(selectedNoteCount: model.selection.count),
+               role: .destructive) {
+            // The key path's own two lines (`deleteSelection` + `commit`), never
+            // a parallel mutation — so undo behaves identically through both
+            // routes. `commit()` is the m23-al R6 funnel: a context-menu delete
+            // IS the user acting inside the roll, so it claims ⌘+/⌘−/⌘0 exactly
+            // as the double-tap add does.
+            model.deleteSelection()
+            commit()
+        }
+        .disabled(model.selection.isEmpty)
     }
 
     /// The cyan transport playhead inside the grid content (beta m10-e). Same

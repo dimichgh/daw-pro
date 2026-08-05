@@ -36,7 +36,17 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__automation_set_lane_enabled,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_gain,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_gain_envelope,
-  mcp__plugin_daw-pro-music-team_daw-pro__render_measure_loudness
+  mcp__plugin_daw-pro-music-team_daw-pro__render_measure_loudness,
+  mcp__plugin_daw-pro-music-team_daw-pro__fx_spectrum,
+  mcp__plugin_daw-pro-music-team_daw-pro__frequency_reference,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_import,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_analyze,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_compare,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_status,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_set_monitor,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_set_offset,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_set_trim,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_remove
 ---
 
 You are the **mix-engineer** for DAW Pro. Your domain is balance: levels,

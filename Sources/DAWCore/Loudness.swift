@@ -535,7 +535,15 @@ public enum Loudness {
     /// rate; measured worst deviation 0.0093 dB); at 44.1 k flatness holds to
     /// ≈ 19.5 kHz (−0.35 dB at 20 kHz) — immaterial for peak estimation and
     /// documented here.
-    static let interpolatorPhases: [[Double]] = makeInterpolatorPhases()
+    ///
+    /// THE ONE HOME for the project's inter-sample-peak reconstruction, and
+    /// `public` for that reason: three consumers share these exact taps —
+    /// `truePeakLinear` (offline), `Loudness.Stream` (live tap /
+    /// `ReferenceAnalyzer`), and `DAWEngine.LimiterEffect`'s opt-in TRUE-PEAK
+    /// detection mode (m23-ch). A second, differently-behaving estimator would
+    /// let the limiter's ceiling and the meter's dBTP disagree, so nobody may
+    /// copy these coefficients — import them.
+    public static let interpolatorPhases: [[Double]] = makeInterpolatorPhases()
 
     private static func makeInterpolatorPhases() -> [[Double]] {
         let tapsPerPhase = 32

@@ -122,7 +122,7 @@ decidable by reading one line and provable by the compiler. Two supporting obser
 
 | # | Site | What | Beat source | Cause | Chase |
 |---|---|---|---|---|---|
-| 1 | `AudioEngine.swift:789` | `startPlayback` — user pressed play | `transport.positionBeats` | `.relocation` | no |
+| 1 | `AudioEngine.swift:789` | `startPlayback` — user pressed play | `transport.positionBeats` | `.transportStart` (**m23-cd**; was `.relocation`) | **yes** |
 | 2 | `AudioEngine.swift:824` | `seek` | `transport.positionBeats` | `.relocation` | no |
 | 3 | `AudioEngine.swift:837` | **`setTempo`** — tempo change while rolling | `derivedBeats()` | `.continuation` | **yes** |
 | 4 | `AudioEngine.swift:911` | structural reconcile change while rolling (note edits, clip moves/trims/fades/stretch) | `derivedBeats()` | `.continuation` | **yes** |
@@ -135,7 +135,89 @@ decidable by reading one line and provable by the compiler. Two supporting obser
 | 11 | `OfflineRenderer.swift:353` | bounce / stem render | caller's `fromBeat` | `.relocation` (default) | no |
 
 Six continuations, four relocations inside `AudioEngine.swift`, plus the offline renderer which
-takes the default and is never touched.
+takes the default and is never touched. **AMENDED BY m23-cd (2026-08-04): row 1 is now
+`.transportStart` and CHASES — six continuations, ONE transport start, three relocations. See
+§2.4.**
+
+### 2.4 AMENDMENT — m23-cd (2026-08-04): the play button chases
+
+**This section is authoritative over row 1 of §2.1 and over §2's law as written.** Everything else
+in this document stands unchanged.
+
+**What the user reported**, verbatim: *"if I pause and then resume the sound stops coming for the
+current quarter and only comes back as it moves to another quarter... it only loses sound on track
+'Atmospheric Pad' which has very long bars."* That is site 1 working exactly as §2.1 specified it.
+Pause is `ProjectStore.stop()` → `AudioEngine.stopPlayback()`, which cuts every voice and leaves
+`transport.positionBeats` at the stop beat; resume is `ProjectStore.play()` →
+`AudioEngine.startPlayback()` at that same beat, whose `.relocation` build dropped both events of
+anything sounding. The track was not special: the contract is global, and a pad holding whole-bar
+notes is simply the only place where the gap to the next onset is long enough to hear. Drums hide
+it completely.
+
+**The ruling**, verbatim (2026-08-04): *"for 1st one lets do what other DAWs do"* — chase held
+notes on resume, matching Logic/Ableton/Cubase. **The phantom-attack counter-case (a note already
+decaying when the transport stopped re-attacks at full velocity on the next play) was put to the
+user BEFORE they ruled and they ruled anyway. It is an accepted cost, not an oversight, and must
+not be re-litigated as a defect.**
+
+**Why a THIRD CASE and not `.continuation`.** The §2 law — *chase iff `fromBeat` is the position
+playback would have reached anyway* — is FALSE of a transport start: the beat was chosen. Two
+concrete costs of mislabelling it:
+
+1. `StartAnchorPolicySiteTests`' header states "A RELOCATION fixes the beat, so any instant will
+   do (`.asSoonAsPractical`); A CONTINUATION cannot". `startPlayback` must keep
+   `.asSoonAsPractical` (its beat IS fixed). Calling it a continuation makes that header false
+   with **no test able to see it** — the exact "prose far from the code" failure `NoteChaseSiteTests`
+   was written to prevent.
+2. `docs/ARCHITECTURE.md` (m23-bs-3b note) already records that `cause` and anchor policy
+   "correlate at today's five call sites **by coincidence, not by law**", and names the pending
+   **chase-yes-with-a-chosen-beat** case. This is that case, so it gets its own name.
+
+**The amended law, in one line:** a build chases held notes iff playback is CONTINUING (`fromBeat`
+reached by wall time) **or** the user just pressed PLAY. It does not chase when the beat was chosen
+by a machine that must reproduce a fresh seek — a locate while rolling, a record start, a loop-wrap
+jump, an offline bounce.
+
+**Deliberately NOT moved, and each is a real user-visible boundary:**
+
+- **Site 2, `seek` while rolling.** After m23-cd, stop → click the ruler → play CHASES (it goes
+  through site 1), while clicking the ruler WHILE PLAYING does not. Same user, same pad, same
+  symptom, different gesture. The ruling covered the play button; this one is the user's to make
+  and should be offered, not assumed.
+- **Site 8, record start.** Chasing would re-attack held playback notes into the monitor mix at the
+  moment a take begins. Out of the ruling.
+- **Site 9, the loop-wrap fallback.** §2.2's two reasons are unchanged and still binding: cycle
+  determinism, and "a once-only re-attack is worse than uniform absence".
+- **Site 11, the offline bounce.** m23-bv, a DIFFERENT SURFACE with its own measured audio/MIDI
+  asymmetry (0.354 vs 0.0 at identical geometry), still awaiting its own ruling. m23-cd is strong
+  evidence for the same answer there and should be attached when it is re-put — but it is not a
+  ruling on it, and nothing in this cycle changed a single rendered byte offline.
+
+**KNOWN CONSEQUENCE UNDER A LIVE LOOP, and the §2.2 tension it creates.** `.transportStart` goes
+through the head-build path, which chases; the appended loop-cycle blocks do not (§3.4, unchanged).
+So pressing play at bar 6 of a loop over bars 5–9, with a pad spanning bars 1–9, now sounds the pad
+from bar 6 to the loop end and then leaves it silent on every subsequent wrap — a once-only
+re-attack, which is exactly the outcome §2.2 argues AGAINST for the loop-wrap fallback ("a
+once-only re-attack is worse than uniform absence"). Three things resolve the apparent
+contradiction, and §2.4 is authoritative where they touch: (1) the shape is not new — it already
+ships for `.continuation`, so any note edit while looping produces it today; (2) §2.2's argument is
+about a build the machine performs on the user's behalf mid-flight, where uniformity is the whole
+point, whereas m23-cd is about the user's own deliberate press of PLAY, which the ruling covers
+unconditionally; (3) fixing it properly means making cycle blocks chase, which §2.2 rejects for
+independent reasons (deterministic cycles, doubled attacks on the still-ringing head voice).
+MEASURED, not assumed: `NoteChaseGraphTests` G-L2 reads the head build admitting a straddling pad
+exactly once (`ons [60: [0]]`) while the in-loop marker fires once per cycle — that is the shape
+`.transportStart` inherits verbatim, which is why no near-duplicate loop leg was written for it.
+
+**Verification (m23-cd):** `Tests/DAWEngineTests/ResumeChaseTests.swift` renders the gesture itself
+offline — play → PAUSE (`stopAllPlayers`, which flushes every voice) → silence → resume at the stop
+beat — and reads the cause its chase arm uses out of `AudioEngine.swift` source, so a reverted site
+reddens an AUDIBLE measurement rather than only a source pin. Measured 2026-08-04, 48 kHz/120 BPM,
+one 64-beat pad note resumed at beat 2: **held-note RMS 0.0644 with `.transportStart` vs exactly
+0.0 with `.relocation`**, with three controls in the same run (pre-pause audible in both arms at
+0.0642; the pause window exactly 0.0 in both, so the sound after the resume cannot be a leftover
+ring; a marker note whose onset is AFTER the resume beat audible in both arms). Round-tripped
+through a real 388 096-byte wav and re-measured off disk at the same 0.0644.
 
 ### 2.2 Where I differ from the parent's provisional split
 

@@ -926,8 +926,20 @@ public final class AudioEngine: AudioEngineControlling {
         // `withGuardedEngineIntent` for why a caught raise cannot rethrow
         // through this non-throwing protocol method.
         withGuardedEngineIntent("transport start") {
-            // relocation: the user chose this beat and pressed play — a note
-            // you started inside does not sound (the v0 policy, unchanged).
+            // transportStart (m23-cd): the user chose this beat and pressed
+            // play — so the ANCHOR is still `.asSoonAsPractical` (any instant
+            // will do for a chosen beat) — but the build CHASES. Pause is
+            // `stopPlayback()`, which leaves `transport.positionBeats` at the
+            // stop beat, so resume is exactly this call at exactly that beat;
+            // under the v0 `.relocation` rule anything sounding at the pause
+            // stayed silent until its next onset, which on a whole-bar pad is
+            // minutes (the user's own report, ruled 2026-08-04: "let's do what
+            // other DAWs do"). Chase and anchor policy are INDEPENDENT axes —
+            // see RescheduleCause. Seek-while-rolling and record start keep
+            // `.relocation`; this ruling covered the play button only.
+            // ⚠️ `cause:` MUST STAY ON THIS LINE — the m23-bp site pin
+            // (NoteChaseSiteTests) matches per line, unlike the anchor/trust
+            // pins, which paren-join.
             // renderClockTrusted: no bounce precedes this start. A transport
             // stop leaves the ENGINE running (`stopPlayback` stops players
             // only), so the common path finds a live, current render clock;
@@ -938,7 +950,7 @@ public final class AudioEngine: AudioEngineControlling {
             // audit: `AudioEngine.shutdown()` has zero callers in Sources).
             // anchorPolicy: the user chose the beat — any instant will do.
             startPlayers(fromBeat: transport.positionBeats, tempoMap: transport.tempoMap,
-                         renderClockTrusted: true, cause: .relocation,
+                         renderClockTrusted: true, cause: .transportStart,
                          anchorPolicy: .asSoonAsPractical)
             startPlayheadTask()
         }
@@ -1607,13 +1619,63 @@ public final class AudioEngine: AudioEngineControlling {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     await self.auRegistry.prepare(track: track, sampleRate: sampleRate)
-                    guard self.auRegistry.preparedInstrument(forTrack: id) != nil,
-                          self.auDesired[id] == key else { return }
+                    // A SUPERSEDED prepare (the desired key moved on while this
+                    // one ran) is not a failure and must stay silent — the
+                    // newer pass owns the outcome and will report its own.
+                    guard self.auDesired[id] == key else { return }
+                    guard self.auRegistry.preparedInstrument(forTrack: id) != nil else {
+                        // m23-bx-1 (defect 2) — THE END OF SILENT FALLBACK.
+                        // This is the exact instant at which the track becomes
+                        // audibly dead: `audioUnitProvider` will now answer nil
+                        // and `PlaybackGraph` will wire `SilentPlaceholder-
+                        // Instrument`. Before this, the loudest track in a song
+                        // could vanish with no log, no warning and no retry —
+                        // which is what hid m23-bx-1's sibling for six cycles.
+                        self.reportUnhostableInstrument(track: track)
+                        return
+                    }
                     self.graph.invalidateInstrumentNode(trackID: id)
                     self.tracksDidChange(self.lastTracks)
                 }
             }
         }
+    }
+
+    /// m23-bx-1 (defect 2) — the ONE place a hosted instrument's failure to
+    /// load becomes something a human or an agent can read.
+    ///
+    /// The registry already KNOWS why (`status[id]`); until now nothing asked.
+    /// The message is translated out of wire-speak per DESIGN-LANGUAGE (name
+    /// the track, say what the listener actually gets, say what to do about
+    /// it) because its destination is the notice ring the UI and
+    /// `project.snapshot` both read.
+    ///
+    /// Coalescing is the ring's job: one `code` for the whole family means N
+    /// dead tracks post N times and surface as one notice with `count: N`,
+    /// the same contract as `clip-file-missing`.
+    ///
+    /// ⚠️ Deliberately NOT a retry. An unchanged, terminally-failed config is
+    /// not retried by design (`needsPrepare`'s no-retry-storms rule) — this
+    /// makes the failure VISIBLE without making it a loop.
+    private func reportUnhostableInstrument(track: Track) {
+        let detail: String
+        switch auRegistry.status[track.id] {
+        case .missing:
+            detail = "the plug-in it needs isn't installed on this Mac"
+        case .failed(let reason):
+            detail = reason
+        case .pending, .none:
+            detail = "it didn't finish loading in time"
+        case .ready:
+            // Status says ready but no instance landed — a real anomaly, and
+            // reporting it honestly beats asserting a shape we haven't seen.
+            detail = "it loaded but produced no playable instrument"
+        }
+        engineNoticeHandler?(EngineNoticeEvent(
+            code: "instrument-unavailable",
+            message: "\"\(track.name)\" is playing silence — \(detail). "
+                + "Choose a different instrument for the track, or install the "
+                + "plug-in and reopen the project."))
     }
 
     /// Reconciles the AU registry with every track's insert chain (M4 v):

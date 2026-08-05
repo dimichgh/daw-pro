@@ -370,6 +370,28 @@ public struct CompressorParams: Codable, Sendable, Equatable {
 public struct LimiterParams: Codable, Sendable, Equatable {
     public var ceilingDb: Double
     public var releaseMs: Double
+    /// TRUE-PEAK mode (m23-ch) — WHICH PEAK `ceilingDb` COUNTS. Opt-in,
+    /// **default OFF** (the user's settled ruling 2026-08-04, "let's keep
+    /// opt-in, no default for now"), so every existing project renders
+    /// bit-identically until someone turns it on deliberately.
+    ///
+    /// - `false` (default): `ceilingDb` is a hard **dBFS SAMPLE-peak**
+    ///   ceiling — the original M4 (iii) contract. No output SAMPLE can
+    ///   exceed it, but a dBTP meter reconstructs the waveform BETWEEN
+    ///   samples and will read ~0.4–1 dB higher on dense material. That is
+    ///   arithmetic, not a defect.
+    /// - `true`: `ceilingDb` is a **dBTP TRUE-peak** ceiling. Detection runs
+    ///   on a 4× oversampled reconstruction (ITU-R BS.1770-4 Annex 2, the
+    ///   SAME interpolator this project's dBTP meter uses), so a −1 dBTP
+    ///   delivery target is met on the first render with no manual headroom
+    ///   guesswork. Costs ~96 multiply-adds per sample per channel and limits
+    ///   ~0.3–1 dB harder on dense material — that reduction IS the
+    ///   inter-sample overshoot being removed.
+    ///
+    /// The 5 ms lookahead latency is identical either way, and material whose
+    /// peak never reaches the ceiling nulls bit-exact in BOTH modes:
+    /// detection only ever engages gain AT the ceiling.
+    public var truePeak: Bool
 
     public static let ceilingRange: ClosedRange<Double> = -24...0
     public static let releaseRange: ClosedRange<Double> = 5...1_000
@@ -385,19 +407,25 @@ public struct LimiterParams: Codable, Sendable, Equatable {
         max(1, Int((lookaheadSeconds * sampleRate).rounded()))
     }
 
-    public init(ceilingDb: Double = -1, releaseMs: Double = 50) {
+    public init(ceilingDb: Double = -1, releaseMs: Double = 50, truePeak: Bool = false) {
         self.ceilingDb = ceilingDb.clamped(to: Self.ceilingRange)
         self.releaseMs = releaseMs.clamped(to: Self.releaseRange)
+        self.truePeak = truePeak
     }
 
-    private enum CodingKeys: String, CodingKey { case ceilingDb, releaseMs }
+    private enum CodingKeys: String, CodingKey { case ceilingDb, releaseMs, truePeak }
 
-    /// Decoding routes through the clamping init.
+    /// Decoding routes through the clamping init. `truePeak` is ABSENT from
+    /// every project saved before m23-ch and MUST decode to `false`, so an
+    /// existing session keeps its exact sample-peak behaviour — the mode is
+    /// opt-in and nothing on disk changes meaning. The schema change is
+    /// additive in both directions.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             ceilingDb: try c.decodeIfPresent(Double.self, forKey: .ceilingDb) ?? -1,
-            releaseMs: try c.decodeIfPresent(Double.self, forKey: .releaseMs) ?? 50)
+            releaseMs: try c.decodeIfPresent(Double.self, forKey: .releaseMs) ?? 50,
+            truePeak: try c.decodeIfPresent(Bool.self, forKey: .truePeak) ?? false)
     }
 }
 
@@ -834,6 +862,19 @@ public struct EffectParamSpec: Sendable, Equatable {
                                 defaultValue: -1, unit: "dB"),
                 EffectParamSpec(name: "releaseMs", range: LimiterParams.releaseRange,
                                 defaultValue: 50, unit: "ms"),
+                // m23-ch true peak — APPENDED so the automation slot indices
+                // of ceilingDb (0) and releaseMs (1) never move.
+                EffectParamSpec(name: "truePeak", range: 0...1,
+                                defaultValue: 0, unit: "linear",
+                                note: "Which peak ceilingDb counts. 0 (default) = dBFS "
+                                    + "SAMPLE peak: no output sample exceeds it, but a dBTP "
+                                    + "meter reconstructs between samples and reads ~0.4-1 dB "
+                                    + "higher on dense material - arithmetic, not a bug. "
+                                    + "1 = dBTP TRUE peak, via 4x oversampled detection "
+                                    + "(ITU-R BS.1770-4), so a -1 dBTP delivery spec is met on "
+                                    + "the first render with no manual headroom; it limits "
+                                    + "~0.3-1 dB harder, which is exactly the inter-sample "
+                                    + "overshoot it removes. Same 5 ms latency either way."),
             ]
         case .reverb:
             return [

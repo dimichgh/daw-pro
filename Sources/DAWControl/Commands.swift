@@ -5802,6 +5802,7 @@ public final class CommandRouter {
             return .object([
                 "ceilingDb": .number(limiter.ceilingDb),
                 "releaseMs": .number(limiter.releaseMs),
+                "truePeak": .number(limiter.truePeak ? 1 : 0),
             ])
         case .reverb:
             let reverb = effect.resolvedReverb
