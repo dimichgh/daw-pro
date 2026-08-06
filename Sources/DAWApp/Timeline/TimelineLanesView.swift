@@ -230,7 +230,27 @@ struct TimelineLanesView: View {
     /// Capture-only staging seam (`debug.markerRename`): when non-nil, opens that
     /// marker's inline rename field. nil in normal use (double-click / the context
     /// menu drive `renamingMarkerID` directly).
+    ///
+    /// ⚠️ SETTING THIS BACK TO nil (`debug.markerRename {clear:true}`) UNMOUNTS THE
+    /// FIELD AND DISCARDS THE DRAFT — MEASURED, not assumed (`DAWAppKit.
+    /// MarkerRenameStaging` carries the measurement). It is a focus-clearer, not a
+    /// stand-in for any gesture a user can make. Use `stageRenameAction` for those.
     var stageRenameMarkerID: UUID? = nil
+    /// Capture-only staging seam for FINISHING a rename (m23-ba-1): `commit`
+    /// (Return / click-away) or `cancel` (Escape). Runs through the flag's OWN
+    /// handlers — never a state poke behind the view's back — so the seam cannot
+    /// drift from the gesture (the `stagePointer` / `stageMarquee` precedent).
+    var stageRenameAction: MarkerRenameStage? = nil
+    /// Reports which marker's rename field this view is ACTUALLY rendering — the
+    /// live `@State`, filtered to markers that still exist, and fed by real
+    /// double-click/menu renames just as much as by the staged seam (the
+    /// `onPointerState` honesty rule). The seam refuses `commit`/`cancel` when
+    /// this is nil rather than answering `ok` for a no-op.
+    var onMarkerRenameFieldChange: ((UUID?) -> Void)? = nil
+    /// Reports what a rename resolution DID: which handler ran, on which marker,
+    /// with what draft, and what (if anything) the commit rule passed through to
+    /// the store. Real gestures report here too.
+    var onMarkerRenameResolved: ((MarkerRenameOutcome) -> Void)? = nil
 
     // MARK: Pointer affordances (m17-c)
 
@@ -667,6 +687,14 @@ struct TimelineLanesView: View {
         // staged value present before the view mounts still opens the field.
         .onChange(of: stageRenameMarkerID) { _, id in renamingMarkerID = id }
         .onAppear { if let id = stageRenameMarkerID { renamingMarkerID = id } }
+        // m23-ba-1: report the rename field this view is ACTUALLY rendering.
+        // `initial: true` so a BARE `debug.markerRename {}` read can answer
+        // before any rename has ever happened (the `laneGeometry` idiom), and
+        // gated to the marker-bearing instance so exactly one reporter exists
+        // (`markerLane` is absent from `.lanes` — the selection-report rule).
+        .onChange(of: renderedRenameMarkerID, initial: true) { _, id in
+            if rendersMarkerLane { onMarkerRenameFieldChange?(id) }
+        }
         // Pointer staging (m17-c): run a debug-staged pointer event through the
         // SAME handlers a real hover/click uses. Only the lane-bearing instance
         // reacts — the pinned `.ruler` block has no pointer layer.
@@ -2120,23 +2148,50 @@ struct TimelineLanesView: View {
         .offset(y: Self.tempoLaneTop)
     }
 
+    /// Whether THIS instance draws the marker lane at all. `markerLane` appears in
+    /// `.full` and `.ruler` and never in `.lanes`, so this is what keeps the
+    /// rename report single-sourced across the two live instances (the
+    /// `content != .ruler` selection-report rule, mirrored).
+    private var rendersMarkerLane: Bool { content != .lanes }
+
+    /// The marker whose flag is actually rendering its rename field: the live
+    /// `@State`, but only while that marker still exists. A stale id left behind
+    /// by a delete draws no field, and reporting it would have the seam claim an
+    /// open field that nothing on screen backs.
+    private var renderedRenameMarkerID: UUID? {
+        guard let id = renamingMarkerID, markers.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
+
     @ViewBuilder
     private func markerFlag(_ marker: Marker) -> some View {
         MarkerFlag(
             name: marker.name,
             height: Self.markerLaneHeight,
             isRenaming: renamingMarkerID == marker.id,
+            stageAction: stageRenameAction,
             onSeek: { onSeek(marker.beat) },
             onBeginRename: { beginMarkerRename(marker) },
             onCommitRename: { draft in
                 renamingMarkerID = nil
                 // Reuse the tested track-rename commit rule (trim / empty-cancel /
                 // unchanged-no-op); the store also enforces it, belt-and-suspenders.
-                if let name = TrackRename.committedName(draft: draft, current: marker.name) {
-                    onRenameMarker(marker.id, name)
-                }
+                let committed = TrackRename.committedName(draft: draft, current: marker.name)
+                if let committed { onRenameMarker(marker.id, committed) }
+                // m23-ba-1: report the OUTCOME, carried out rather than
+                // re-derived — a seam that recomputed the rule would agree with a
+                // broken one by construction (the `trackClipIds` discipline).
+                // `committedName: nil` here means the rule DROPPED the draft
+                // (empty / unchanged), which is a different fact from "commit
+                // never ran" even though both leave the name alone.
+                onMarkerRenameResolved?(MarkerRenameOutcome(
+                    action: .commit, markerID: marker.id, draft: draft, committedName: committed))
             },
-            onCancelRename: { renamingMarkerID = nil },
+            onCancelRename: { draft in
+                renamingMarkerID = nil
+                onMarkerRenameResolved?(MarkerRenameOutcome(
+                    action: .cancel, markerID: marker.id, draft: draft, committedName: nil))
+            },
             onRemove: { onRemoveMarker(marker.id) },
             onDragChanged: { translationWidth in
                 // First tick past the slop begins the drag and CAPTURES the origin
@@ -2216,10 +2271,15 @@ private struct MarkerFlag: View {
     var name: String
     var height: CGFloat
     var isRenaming: Bool
+    /// A staged resolution to run through this flag's own handlers (m23-ba-1);
+    /// nil in normal use. Only the flag that is actually renaming reacts.
+    var stageAction: MarkerRenameStage? = nil
     var onSeek: () -> Void
     var onBeginRename: () -> Void
     var onCommitRename: (_ draft: String) -> Void
-    var onCancelRename: () -> Void
+    /// The Escape path. Takes the abandoned draft so the resolution can be
+    /// REPORTED honestly (m23-ba-1) — the handler still does nothing with it.
+    var onCancelRename: (_ draft: String) -> Void
     var onRemove: () -> Void
     /// Live drag translation (points) — the parent decides slop/anchor/commit.
     var onDragChanged: (_ translationWidth: CGFloat) -> Void
@@ -2234,6 +2294,29 @@ private struct MarkerFlag: View {
     var body: some View {
         Group {
             if isRenaming { renameField } else { flagChip }
+        }
+        // m23-ba-1 staging. ⚠️ NO `.onAppear` TWIN, deliberately — and this is
+        // the one place this seam differs from `applyPointerStage`/
+        // `applyMarqueeStage`, which both carry one. Those live on the lanes
+        // view, which mounts once; a flag's rename field mounts EVERY time a
+        // rename opens, so an `.onAppear` here would re-run the LAST staged
+        // resolution against a brand-new field the instant it opened. The nonce
+        // makes `.onChange` fire for a repeat of the same action, which is all
+        // this needs, and the seam refuses `commit`/`cancel` outright when the
+        // view reports no field open — so there is no case an `.onAppear` would
+        // have rescued.
+        .onChange(of: stageAction) { _, stage in applyStagedResolution(stage) }
+    }
+
+    /// Routes a staged resolution to the SAME method the real gesture calls.
+    /// Pure plumbing: no rule lives here, and the guard is only "is this the
+    /// flag that is renaming" — every flag in the lane sees the staged value
+    /// (the `applyPointerStage` one-instance-reacts convention).
+    private func applyStagedResolution(_ stage: MarkerRenameStage?) {
+        guard isRenaming, let stage else { return }
+        switch stage.action {
+        case .commit: commit()
+        case .cancel: cancelRename()
         }
     }
 
@@ -2290,16 +2373,31 @@ private struct MarkerFlag: View {
             .focused($fieldFocused)
             .onAppear { draft = name; renameResolved = false; fieldFocused = true }
             .onSubmit { commit() }
-            .onKeyPress(.escape) { renameResolved = true; onCancelRename(); return .handled }
+            .onKeyPress(.escape) { cancelRename(); return .handled }
+            // ⚠️ FOCUS LOSS COMMITS — clicking away is NOT escape-equivalent, and
+            // m17-d's original "clear focus with a staged click" comment said
+            // otherwise. Anything standing in for that gesture must call
+            // `commit()`, which is exactly what `stageAction: .commit` does.
             .onChange(of: fieldFocused) { _, focused in
                 if !focused && !renameResolved { commit() }
             }
     }
 
+    /// The ONE commit body: Return (`.onSubmit`), focus loss, and the staged
+    /// `commit` mode all arrive here, so no caller can invent a second rule.
     private func commit() {
         guard !renameResolved else { return }
         renameResolved = true
         onCommitRename(draft)
+    }
+
+    /// The ONE cancel body: Escape and the staged `cancel` mode. Was inline in
+    /// `.onKeyPress` until m23-ba-1; a second spelling is exactly how a seam
+    /// starts standing in for a gesture it no longer matches.
+    private func cancelRename() {
+        guard !renameResolved else { return }
+        renameResolved = true
+        onCancelRename(draft)
     }
 }
 

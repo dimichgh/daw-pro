@@ -6,18 +6,33 @@
 // from a crash that never happened. Measured before the fix: a bare `m23d` run
 // left `{"pid":43172}` behind in the user's own profile directory.
 //
-// ⚠️ THIS GATE REASONS ABOUT A FILE IN THE USER'S REAL PROFILE. The ownership
-// check in `releaseSessionLock` is the entire safety property — the same lock
-// file is written by the user's LIVE app on port 17600. So the legs below split
-// deliberately:
+// ⚠️ THIS GATE REASONS ABOUT THE LOCK FILE. The ownership check in
+// `releaseSessionLock` is the entire safety property — the same file name is
+// written by the user's LIVE app on port 17600, in their own profile. So the
+// legs below split deliberately:
 //
-//   Leg A drives the REAL path end-to-end, because that is the only way to
-//         prove the DEFAULT path is spelled correctly. A temp-path-only suite
-//         passes perfectly while production cleans nothing.
+//   Leg A drives a real launch end-to-end, because that is the only way to prove
+//         the lifecycle actually cleans up. A temp-path-only suite passes
+//         perfectly while production cleans nothing.
 //   Legs B-F drive `releaseSessionLock` DIRECTLY against a TEMP path. They must
 //         never go through `stopStaging`, because `stopStaging` SIGTERMs the pid
 //         it finds in the pidfile — a test that fabricates a pidfile to exercise
 //         the ownership check would be a test that signals an invented pid.
+//
+// ── UPDATED AT m23-ay ────────────────────────────────────────────────────────
+// Leg A used to assert that a staging launch wrote its lock into the USER'S REAL
+// `~/Library/Application Support/DAWPro/Autosave/`, and that teardown removed it
+// from there. That was an accurate description of the app — and the defect
+// m23-ay fixed: a staging instance now gets its own profile root
+// (`DAWPRO_PROFILE_ROOT`, set for every launch by `_staging.mjs`), so the lock is
+// written and cleaned under THAT root and the user's file is never created,
+// read, or removed by a gate at all.
+//
+// So leg A now drives the staging profile's lock, and gains leg G: the user's
+// real lock must be untouched by the whole launch/teardown cycle — the stronger
+// form of the property this gate was filed for. The DEFAULT (no-override)
+// spelling that leg A used to prove end-to-end is still pinned, by leg F here
+// and by `AppDirectoriesProfileRootTests` on the Swift side.
 //
 // Run: node scripts/gates/m23ac2c-session-lock.mjs
 import fs from "node:fs";
@@ -25,7 +40,7 @@ import net from "node:net";
 import {
   ROOT, LIVE_PORT, STAGING_PORT,
   buildOrAbort, startStaging, stopStaging, connect,
-  sessionLockPath, releaseSessionLock, sleep,
+  sessionLockPath, stagingSessionLockPath, releaseSessionLock, sleep,
 } from "./_staging.mjs";
 
 const GATE = "m23ac2c";
@@ -102,35 +117,46 @@ function ownershipLegs() {
   ck("E no pidfile -> lock untouched (no provable owner)", exists(lock));
   fs.rmSync(lock, { force: true });
 
-  // Leg F — the DEFAULT path is the app's real one. Leg A proves it works;
-  // this proves it is spelled the way `DAWCore.AppDirectories` spells it.
+  // Leg F — the DEFAULT (no-override) path is the app's real one. Since m23-ay
+  // no gate LAUNCH goes there any more, which makes this the only place the
+  // real-profile spelling is pinned on the JS side: it must still match the way
+  // `DAWCore.AppDirectories` spells it, or an app running WITHOUT the override
+  // (the shipped one) would be looked for in the wrong place.
   const def = sessionLockPath();
   ck("F default path is the app's Autosave lock",
     def === `${process.env.HOME}/Library/Application Support/DAWPro/Autosave/session.lock`, def);
   ck("F an override wins over the default", sessionLockPath("/tmp/x.json") === "/tmp/x.json");
 }
 
-// ── Leg A: the real thing, on the real path ─────────────────────────────────
+// ── Legs A + G: a real launch, on the staging profile's path ────────────────
 
 async function realPathLeg() {
-  const real = sessionLockPath();
+  const real = sessionLockPath(); // the USER'S lock — read only, never written
 
-  // Refuse to run over the user's live app: a staging launch OVERWRITES
-  // whatever lock is present (measured at m23-ac-2c), so doing this while the
-  // user has DAW Pro open would clobber their real crash-detection state.
+  // Refuse to run over the user's live app. Since m23-ay a staging launch can no
+  // longer overwrite their lock, but leg G below compares that file before and
+  // after, and their own app rewrites it — the comparison would be measuring
+  // them, not us.
   if (await portBusy(LIVE_PORT)) {
     ck(`A ABORT: something is listening on ${LIVE_PORT} (the user's live app)`, false,
-      "refusing to run — a staging launch would overwrite the live session's lock");
+      "refusing to run — leg G's before/after comparison would be measuring their app");
     return;
   }
   ck(`A the user's live port ${LIVE_PORT} is free`, true);
 
+  // Leg G's "before". `null` when absent — recorded as a value, so absent-stays-
+  // absent is asserted as explicitly as present-stays-identical.
+  const realBefore = exists(real) ? fs.readFileSync(real, "utf8") : null;
+
   buildOrAbort();
-  const { pid } = startStaging({
+  const { pid, profileRoot } = startStaging({
     gate: GATE, root: ROOT, port: STAGING_PORT, binary: BINARY, pidfile: PIDFILE,
     outDir: OUT, detached: true, logPath: `${OUT}/staging.log`,
   });
-  console.log(`staging pid ${pid} on :${STAGING_PORT}`);
+  console.log(`staging pid ${pid} on :${STAGING_PORT}, profile root ${profileRoot}`);
+  // Where THIS instance's lock lives (m23-ay): under the profile root the
+  // harness handed it, not in the user's Autosave directory.
+  const staged = stagingSessionLockPath(profileRoot);
 
   try {
     const ws = await connect({ port: STAGING_PORT });
@@ -141,16 +167,24 @@ async function realPathLeg() {
     // survives teardown" is true for the wrong reason and this gate would
     // certify a fix that does nothing.
     let owner = null;
-    try { owner = Number(JSON.parse(fs.readFileSync(real, "utf8")).pid); } catch {}
+    try { owner = Number(JSON.parse(fs.readFileSync(staged, "utf8")).pid); } catch {}
     ck("A the running app DID write a lock, owned by our staging pid",
-      owner === pid, `lock pid ${owner}, staging pid ${pid}`);
+      owner === pid, `lock ${staged} pid ${owner}, staging pid ${pid}`);
   } finally {
     stopStaging(GATE, PIDFILE);
   }
 
   await sleep(800);
-  ck("A no session.lock survives teardown", !exists(real),
-    exists(real) ? `SURVIVED: ${fs.readFileSync(real, "utf8")}` : "gone");
+  ck("A no session.lock survives teardown", !exists(staged),
+    exists(staged) ? `SURVIVED: ${fs.readFileSync(staged, "utf8")}` : "gone");
+
+  // Leg G (m23-ay) — the property this gate was really filed for, in its
+  // strongest form: not "the gate cleans up after itself in the user's profile"
+  // but "the gate never touched the user's profile at all".
+  const realAfter = exists(real) ? fs.readFileSync(real, "utf8") : null;
+  ck("G the USER's own session.lock is untouched by the launch/teardown cycle",
+    realBefore === realAfter,
+    `${real}: before=${JSON.stringify(realBefore)} after=${JSON.stringify(realAfter)}`);
 }
 
 (async () => {

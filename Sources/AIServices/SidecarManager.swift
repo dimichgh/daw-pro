@@ -269,7 +269,23 @@ public actor SidecarManager: SidecarManaging {
             + "again, or check \(logPath)."
     }
 
-    // MARK: - Stop
+    // MARK: - Stop (m23-bb)
+    //
+    // The DECISION ("what should stop do, and is it safe to signal that
+    // process?") is not made here — it lives once in `SidecarStop`, shared with
+    // `VoiceConversionManager` (m23-bb-1). Two planners would be two answers to
+    // one question, which is the m23-bb defect class itself. What stays here is
+    // the ACE-specific identity/wording, the fact gathering, and applying the
+    // plan to THIS actor's state.
+
+    /// How this sidecar's own processes are recognised — one of exactly two
+    /// ACE-specific inputs to the shared planner.
+    private var stopIdentity: SidecarStop.Identity {
+        .aceStep(directoryPath: config.acestepDir?.path)
+    }
+
+    /// The wording every shared stop message speaks in — the other one.
+    static let stopVocabulary = SidecarStop.Vocabulary.aceStep
 
     @discardableResult
     public func stop() async throws -> SidecarStatus {
@@ -279,46 +295,107 @@ public actor SidecarManager: SidecarManaging {
                 message: "ACE-Step sidecar directory is not resolvable — nothing to stop."
             )
         }
-        guard let pid = readPidfile() else {
-            startedAt = nil   // clearing rule (c), even on this early "nothing to stop" path
-            return SidecarStatus(
-                state: isInstalled() ? .installedNotRunning : .notInstalled,
-                message: "ACE-Step sidecar is not running (no pidfile found)."
-            )
-        }
+
+        let plan = await resolvedStopPlan()
+
         if config.dryRun {
-            return SidecarStatus(
-                state: .installedNotRunning, message: "[dry-run] would stop pid \(pid).", pid: pid)
+            // The dry-run seam stays a pure no-op: fact-gathering above is
+            // read-only (`ps`/`lsof`/an HTTP GET), and nothing below this
+            // point runs — no signal, no pidfile removal, no state clearing.
+            let report = SidecarStop.dryRunReport(
+                for: plan, isInstalled: isInstalled(), vocabulary: Self.stopVocabulary,
+                baseURL: config.baseURL, pidfilePath: config.pidfileURL?.path)
+            return SidecarStatus(state: report.state, message: report.message, pid: report.pid)
         }
-        guard processAlive(pid) else {
+
+        switch plan {
+        case .notRunning(let reason):
+            // The ONLY branch allowed to say "not running" — and it is now
+            // only reachable when the health probe AGREES the sidecar is not
+            // answering (m23-bb's floor rule).
+            if reason.removesPidfile { removePidfile() }
+            runningProcess = nil
+            startedAt = nil   // clearing rule (c), even on this "nothing to stop" path
+            return SidecarStatus(
+                state: SidecarStop.notRunningState(reason, isInstalled: isInstalled()),
+                message: SidecarStop.notRunningMessage(reason, vocabulary: Self.stopVocabulary),
+                pid: reason.pid
+            )
+
+        case .refuse(let refusal):
+            // The sidecar IS answering and we found nothing we are willing to
+            // signal. Report the truth and change NOTHING: a failed stop must
+            // not quietly delete state on its way out.
+            throw SidecarError.stopFailed(SidecarStop.refusalMessage(
+                refusal, vocabulary: Self.stopVocabulary, baseURL: config.baseURL,
+                pidfilePath: config.pidfileURL?.path))
+
+        case .terminate(let pid, let discovery):
+            let outcome: SidecarStop.TerminationOutcome
+            switch await SidecarStop.terminateTree(
+                target: pid, discovery: discovery, identity: stopIdentity,
+                stopTimeoutSeconds: config.stopTimeoutSeconds
+            ) {
+            case .refused(let refusal):
+                // The target stopped being identifiable between planning and
+                // signalling — a recycled pid. Refuse, exactly as if it had
+                // never identified in the first place.
+                throw SidecarError.stopFailed(SidecarStop.refusalMessage(
+                    refusal, vocabulary: Self.stopVocabulary, baseURL: config.baseURL,
+                    pidfilePath: config.pidfileURL?.path))
+            case .done(let done):
+                outcome = done
+            }
             removePidfile()
             runningProcess = nil
-            startedAt = nil   // clearing rule (c)
+            startedAt = nil   // clearing rule (c): stop() always ends a tracked boot
+
+            let after = await status()
+            if after.state == .healthy || after.state == .error {
+                // Never report a stop that did not stop. Split on evidence we
+                // already hold: a target confirmed dead while the port still
+                // answers is a DIFFERENT (and likelier) story — a second
+                // instance — than a target that survived SIGKILL.
+                throw SidecarError.stopFailed(SidecarStop.stillAnsweringMessage(
+                    outcome: outcome, baseURL: config.baseURL, vocabulary: Self.stopVocabulary))
+            }
             return SidecarStatus(
                 state: .installedNotRunning,
-                message: "ACE-Step sidecar was not running (stale pidfile removed)."
+                message: SidecarStop.stoppedMessage(
+                    outcome: outcome, discovery: discovery, vocabulary: Self.stopVocabulary),
+                pid: pid
             )
         }
+    }
 
-        kill(pid, SIGTERM)
-        let deadline = Date().addingTimeInterval(config.stopTimeoutSeconds)
-        while Date() < deadline, processAlive(pid) {
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-        if processAlive(pid) {
-            kill(pid, SIGKILL)
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-        removePidfile()
-        runningProcess = nil
-        startedAt = nil   // clearing rule (c): stop() always ends a tracked boot
+    // MARK: - Stop: fact gathering (impure). The pure decision is SidecarStop's.
 
-        let after = await status()
-        if after.state == .healthy {
-            // Never lie about a sidecar that's somehow still answering.
-            return after
+    /// Gathers the facts `SidecarStop.resolvePlan` reasons over. The health
+    /// probe is ALWAYS consulted — that is the whole of m23-bb: `status()` asks
+    /// the port and `stop()` used to ask only the pidfile, so the two disagreed
+    /// about what "the sidecar" is.
+    // Not `private`: headless tests call this directly to assert the EXACT
+    // resolved plan against a real listener, rather than inferring the
+    // decision from message text.
+    func resolvedStopPlan() async -> SidecarStop.Plan {
+        // The probe mapping is the one genuinely per-manager step: each manager
+        // owns its own health-probe enum. Everything after it — which facts to
+        // gather and under what conditions — belongs to SidecarStop.
+        let probe: SidecarStop.Probe
+        switch await probeHealth() {
+        case .healthy: probe = .healthy
+        case .malformed: probe = .respondingButUnparsable
+        case .unreachable: probe = .unreachable
         }
-        return SidecarStatus(state: .installedNotRunning, message: "ACE-Step sidecar stopped.")
+
+        let pidfilePid = readPidfile()
+        return SidecarStop.resolvePlan(SidecarStop.gatherFacts(
+            probe: probe,
+            pidfilePid: pidfilePid,
+            pidfilePidAlive: pidfilePid.map { processAlive($0) } ?? false,
+            baseURL: config.baseURL,
+            identity: stopIdentity
+        ))
     }
 
     // MARK: - Health probe

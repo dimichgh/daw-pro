@@ -1,6 +1,8 @@
 // m23-m3c stems-export gate — the PLAN the dialog shows vs the FILES on disk,
-// driven through the LIVE app. Staging: DAW_CONTROL_PORT=17695 ONLY
-// (17600 is the user's live app and is never touched).
+// driven against a running app. Staging: the port comes from the harness
+// (`STAGING_PORT` = 17695) and is NOT configurable from the environment — see
+// m23-bi. 17600 is the user's live app; `assertStagingPort` hard-exits on it,
+// so it is never touched.
 //
 // The assertion that matters is never "the preview lists four names" — it is
 // "the folder afterwards holds EXACTLY those names". A preview that mirrored
@@ -27,8 +29,7 @@
 // now STRUCTURAL: every run gets a process that has never seen the sheet.
 import fs from "fs";
 import path from "path";
-import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
-const PORT = process.env.PORT || "17695";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
 const GATE = "m23m3c-stems-dialog";   // names the pidfile + out dir = the default OUT
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 const log = (s) => fs.writeSync(1, s + "\n");
@@ -67,12 +68,27 @@ const listing = (dir) => {
 
 buildOrAbort({ label: "building staging binary (m23m3c)…" });
 startStaging({ gate: GATE });
-const ws = await connect({ port: Number(PORT) });
+const ws = await connect();   // port from the harness; no env override (m23-bi)
 const cap = async (name, params = {}) => {
   const r = await cmd(ws, "debug.captureUI", { path: `${OUT}/${name}.png`, ...params });
   log(`  captured ${name} ${r?.width}x${r?.height}`);
   return r;
 };
+
+// m23-bg: PRINT-ONLY — no pin. This gate has no frame pin today and no
+// baseline to detect a pin-induced regression against, so the fix is limited
+// to making the inherited geometry visible in the log. A bare
+// `debug.windowFrame` never mutates (DAWProApp.swift:3617 only writes when
+// width/height are present). Polls briefly since `connect()` can return
+// before the window itself exists.
+{
+  let wf = null;
+  for (let i = 0; i < 20 && !(wf && typeof wf.width === "number"); i++) {
+    wf = await cmd(ws, "debug.windowFrame", {});
+    if (!(wf && typeof wf.width === "number")) await sleep(250);
+  }
+  log(`${GATE} m23-bg inherited (NOT pinned): ${JSON.stringify(wf)}`);
+}
 
 // --- the session the eligibility rule turns on ------------------------------
 // Keys (direct), Verb (bus), Bass (routed INTO Verb — no stem of its own),

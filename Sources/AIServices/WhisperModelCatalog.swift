@@ -16,6 +16,38 @@ import DAWCore
 // than calling them, which is what keeps it testable against a synthesized
 // fixture instead of the 1.5 GB copy.
 
+// MARK: - The three answers to "can this variant do word timings"
+
+/// Whether a variant can emit **word-level** timings, with the third answer
+/// kept distinct instead of collapsed (m23-ef).
+///
+/// m23-n3f established the capability check and resolved the unknown case
+/// optimistically — `supportsWordTimestamps` reads `true` when nothing on disk
+/// could be asked, because `nil → false` would fire a warning at every
+/// `.mlpackage`-form variant, capable ones included, and teach users to ignore
+/// it. That trade STANDS and this type does not touch it.
+///
+/// What this type adds is that the optimism is now VISIBLE rather than
+/// swallowed: `.supported` and `.unknown` both read `true` through
+/// `supportsWordTimestamps`, but a caller that wants to distinguish "the model
+/// said yes" from "the model could not be asked" finally can. That is the one
+/// residue m23-n3f could not close — a `.mlpackage` variant that genuinely
+/// lacks the alignment output produces a silent empty word list, and nothing on
+/// disk can contradict it.
+public enum WordTimestampSupport: String, Codable, Sendable, Equatable {
+    /// The decoder ITSELF declared the alignment output. A positive answer from
+    /// the model, not an assumption.
+    case supported
+    /// The decoder ITSELF declared its outputs and the alignment one was not
+    /// among them. **The only state that warns** — the rule stays "only ever
+    /// say NO when the model itself said no".
+    case unsupported
+    /// Nothing on disk could be asked: no `metadata.json` (the `.mlpackage`
+    /// layout has none at all), or one that would not parse. Reads as capable
+    /// through `supportsWordTimestamps` — see the type note.
+    case unknown
+}
+
 // MARK: - What a resolved model looks like
 
 /// A speech-to-text model found on disk: which variant it is, where its pieces
@@ -46,6 +78,42 @@ public struct WhisperModelDescriptor: Sendable, Equatable, Codable {
     /// WhisperKit loads it when it exists and works without it, so its absence
     /// is NOT an incompleteness — it is reported, not enforced.
     public var hasContextPrefill: Bool
+    /// Whether this variant can produce **word-level** timings (m23-n3f).
+    ///
+    /// Same shape and same contract as `hasContextPrefill` immediately above:
+    /// REPORTED, never enforced. A variant without it still transcribes and
+    /// still places SEGMENTS on the grid — only the per-word beats are missing,
+    /// which is exactly the failure that used to be invisible.
+    ///
+    /// Why it can be false at all: WhisperKit derives word timings by DTW over
+    /// a cross-attention tensor the compiled decoder has to EXPOSE as an output
+    /// (`alignment_heads_weights`). `TranscribeTask.swift:198-200` guards the
+    /// whole word-timing branch behind `if let alignmentWeights =
+    /// decodingResult.cache?.alignmentWeights` — an `if let` with **no else**,
+    /// so a variant compiled without that output returns `words: []` and never
+    /// an error. `WhisperTranscriber` asks for `wordTimestamps: true`
+    /// unconditionally, so for this app — whose whole point is lyrics on the
+    /// beat grid — such a variant is a silent total failure. This flag is what
+    /// makes it speak.
+    ///
+    /// **UNKNOWN READS AS `true`.** See
+    /// `WhisperModelCatalog.declaredWordTimestampSupport(inFolder:)` for the
+    /// three-state read this is derived from, and for why the unknown case
+    /// resolves optimistically.
+    ///
+    /// m23-ef: **COMPUTED from `wordTimestampSupport` below**, no longer stored.
+    /// The name, the type and the meaning are unchanged — `false` still means
+    /// and only means "the model itself said no" — but the two can no longer
+    /// drift apart, because there is only one value. Still ENCODED (see
+    /// `encode(to:)`): it is a live wire field on `ai.installSpeechModel` /
+    /// `ai.speechModelInstallStatus` and Swift's synthesized `Codable` would
+    /// have dropped it the moment it stopped being stored.
+    public var supportsWordTimestamps: Bool { wordTimestampSupport != .unsupported }
+
+    /// The three-state capability (m23-ef): the model said yes, the model said
+    /// no, or nothing could be asked. THE stored source of truth —
+    /// `supportsWordTimestamps` and both explanations are derived from it.
+    public var wordTimestampSupport: WordTimestampSupport
 
     public init(
         variantDirectoryName: String,
@@ -54,7 +122,8 @@ public struct WhisperModelDescriptor: Sendable, Equatable, Codable {
         tokenizerFolder: URL,
         modelSizeBytes: Int64,
         tokenizerSizeBytes: Int64,
-        hasContextPrefill: Bool
+        hasContextPrefill: Bool,
+        wordTimestampSupport: WordTimestampSupport
     ) {
         self.variantDirectoryName = variantDirectoryName
         self.displayName = displayName
@@ -63,6 +132,35 @@ public struct WhisperModelDescriptor: Sendable, Equatable, Codable {
         self.modelSizeBytes = modelSizeBytes
         self.tokenizerSizeBytes = tokenizerSizeBytes
         self.hasContextPrefill = hasContextPrefill
+        self.wordTimestampSupport = wordTimestampSupport
+    }
+
+    /// The two-state construction m23-n3f shipped, kept so every existing call
+    /// site and test reads exactly as before (m23-ef).
+    ///
+    /// It cannot express `.unknown`, and that is correct: a caller who states a
+    /// `Bool` has, by stating it, said which way the model answered. Only the
+    /// catalog — which is the thing that can fail to find out — reaches for the
+    /// three-state initializer above.
+    public init(
+        variantDirectoryName: String,
+        displayName: String,
+        modelFolder: URL,
+        tokenizerFolder: URL,
+        modelSizeBytes: Int64,
+        tokenizerSizeBytes: Int64,
+        hasContextPrefill: Bool,
+        supportsWordTimestamps: Bool
+    ) {
+        self.init(
+            variantDirectoryName: variantDirectoryName,
+            displayName: displayName,
+            modelFolder: modelFolder,
+            tokenizerFolder: tokenizerFolder,
+            modelSizeBytes: modelSizeBytes,
+            tokenizerSizeBytes: tokenizerSizeBytes,
+            hasContextPrefill: hasContextPrefill,
+            wordTimestampSupport: supportsWordTimestamps ? .supported : .unsupported)
     }
 
     public var totalSizeBytes: Int64 { modelSizeBytes + tokenizerSizeBytes }
@@ -70,6 +168,168 @@ public struct WhisperModelDescriptor: Sendable, Equatable, Codable {
     /// Rounded, human-readable total ("1.64 GB") for teaching messages and UI.
     public var formattedTotalSize: String {
         ByteCountFormatter.string(fromByteCount: totalSizeBytes, countStyle: .file)
+    }
+
+    /// THE teaching message for a variant that cannot do word timings — the one
+    /// home for that wording, and `nil` for every variant that can (m23-n3f).
+    ///
+    /// Written in `WhisperModelError.errorDescription`'s voice: what is wrong,
+    /// the exact path that was inspected, and the next action. It is carried in
+    /// `clip.transcribe`'s response rather than thrown, because the transcript
+    /// is still real and useful — segment text and segment timings come from
+    /// timestamp TOKENS, not from the alignment tensor, so refusing the whole
+    /// job would throw away a correct answer to punish a missing extra.
+    ///
+    /// Not a `WhisperModelError` case: every case in that enum means "this
+    /// directory is not a usable model", and this one IS usable.
+    public var wordTimestampsUnavailableExplanation: String? {
+        guard wordTimestampSupport == .unsupported else { return nil }
+        return "Speech model \"\(variantDirectoryName)\" produces no word timings, so per-word "
+            + "beats will be empty. Its "
+            + "\(WhisperModelCatalog.textDecoderComponentName).mlmodelc in \(modelFolder.path) "
+            + "declares no \(WhisperModelCatalog.wordTimestampAlignmentOutputName) output, and that "
+            + "tensor is where word-level alignment comes from — the text and the SEGMENT timings "
+            + "below are still correct. Install a variant compiled with it "
+            + "(openai_whisper-large-v3-v20240930_turbo has it) via ai.installSpeechModel and "
+            + "transcribe again, or work from the segment beats."
+    }
+
+    /// THE wording for the UNKNOWN case (m23-ef) — the one home for it, exactly
+    /// as `wordTimestampsUnavailableExplanation` above is the one home for the
+    /// `.unsupported` wording. `nil` for `.supported` and `.unsupported`.
+    ///
+    /// **Non-nil whenever the state is `.unknown`, unconditionally — this
+    /// property is the WORDING, not the decision to show it.** Emitting a
+    /// caveat at every `.mlpackage` variant regardless of outcome is precisely
+    /// the alarm fatigue m23-n3f refused, so the gate lives one layer up, on
+    /// `Transcription.wordTimestampsUnverified`, which can see whether the run
+    /// actually came back wordless. Keeping the two apart is deliberate: a
+    /// wording that decided its own visibility could not be reused by a caller
+    /// with a different question (an installer, say, listing what it just put
+    /// on disk).
+    ///
+    /// Hedged on purpose. Unlike the `.unsupported` message this one asserts
+    /// nothing about the model — it says what could not be determined, where
+    /// the answer would have been, and what to do about it.
+    ///
+    /// **It names the decoder component that was ACTUALLY RESOLVED, which is
+    /// why it reads the disk.** The sibling message above can hard-code
+    /// `TextDecoder.mlmodelc` because reaching `.unsupported` requires a
+    /// `metadata.json` that was read and parsed — in practice the compiled
+    /// form. `.unknown` is the opposite case and is dominated by the
+    /// `.mlpackage` form, whose on-disk name is NOT `…​.mlmodelc`; printing the
+    /// compiled name there would send the reader looking in the right folder
+    /// for a directory that does not exist. The lookup is the same
+    /// `componentURL` rule `inspect` used, so the two can't disagree.
+    ///
+    /// The `nil` fallback is unreachable for a descriptor the catalog produced
+    /// — `TextDecoder` is a REQUIRED component, so a variant missing it is
+    /// reported `.incomplete` and never becomes a descriptor at all — but this
+    /// is a public value type anyone can construct, so it degrades to naming
+    /// the folder rather than trapping.
+    public var wordTimestampsUnverifiedExplanation: String? {
+        guard wordTimestampSupport == .unknown else { return nil }
+        let decoderDescription = resolvedTextDecoderEntryName
+            .map { "\($0) in \(modelFolder.path)" }
+            ?? "\(WhisperModelCatalog.textDecoderComponentName) component in \(modelFolder.path)"
+        return "Speech model \"\(variantDirectoryName)\" did not say whether it can produce word "
+            + "timings, so this is a caution rather than a verdict. Its "
+            + "\(decoderDescription) has no readable "
+            + "\(WhisperModelCatalog.compiledModelMetadataFileName) — the .mlpackage "
+            + "layout carries none at all — and that file is where the "
+            + "\(WhisperModelCatalog.wordTimestampAlignmentOutputName) output would have been "
+            + "listed. Most variants do have it, so this model was used as if it does. If word "
+            + "beats are missing and the audio really does contain singing or speech, install a "
+            + "compiled variant whose capability CAN be read "
+            + "(openai_whisper-large-v3-v20240930_turbo) via ai.installSpeechModel and transcribe "
+            + "again; the text and the SEGMENT timings below are correct either way."
+    }
+
+    /// The decoder entry a reader would actually FIND inside `modelFolder` —
+    /// `TextDecoder.mlmodelc` or `TextDecoder.mlpackage` — or `nil` when neither
+    /// form is on disk.
+    ///
+    /// ⚠️ Not `componentURL(…)?.lastPathComponent`, and a test proves why:
+    /// `componentURL` mirrors WhisperKit's `detectModelURL`, which for the
+    /// `.mlpackage` form resolves all the way to the INNER
+    /// `…/Data/com.apple.CoreML/model.mlmodel`. Its last component is therefore
+    /// `model.mlmodel` for every variant in that layout — a name that is both
+    /// wrong to look for and identical across components. What a message wants
+    /// is the first path component BELOW the model folder, which is the bundle
+    /// directory in either layout.
+    private var resolvedTextDecoderEntryName: String? {
+        guard let resolved = WhisperModelCatalog.componentURL(
+            inFolder: modelFolder, named: WhisperModelCatalog.textDecoderComponentName)
+        else { return nil }
+        let folderParts = modelFolder.standardizedFileURL.pathComponents
+        let resolvedParts = resolved.standardizedFileURL.pathComponents
+        guard resolvedParts.count > folderParts.count,
+              Array(resolvedParts.prefix(folderParts.count)) == folderParts
+        else { return resolved.lastPathComponent }
+        return resolvedParts[folderParts.count]
+    }
+
+    // MARK: Codable — hand-written, and the reason is specific (m23-ef)
+
+    /// `supportsWordTimestamps` is a LIVE field of the `descriptor` payload on
+    /// `ai.installSpeechModel` / `ai.speechModelInstallStatus`, and m23-ef made
+    /// it computed. Swift synthesizes `Codable` over STORED properties only, so
+    /// synthesis would have silently REMOVED it from the wire — the one thing
+    /// the additive-only rule forbids. It is therefore encoded explicitly, as a
+    /// derived mirror of `wordTimestampSupport`.
+    ///
+    /// ⚠️ The price of hand-writing this is that a new stored property will NOT
+    /// reach the wire by itself. `WhisperModelCatalogEncodingTests` asserts the
+    /// exact key SET for that reason — add the property here and the test tells
+    /// you so.
+    private enum CodingKeys: String, CodingKey {
+        case variantDirectoryName
+        case displayName
+        case modelFolder
+        case tokenizerFolder
+        case modelSizeBytes
+        case tokenizerSizeBytes
+        case hasContextPrefill
+        case supportsWordTimestamps
+        case wordTimestampSupport
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(variantDirectoryName, forKey: .variantDirectoryName)
+        try container.encode(displayName, forKey: .displayName)
+        try container.encode(modelFolder, forKey: .modelFolder)
+        try container.encode(tokenizerFolder, forKey: .tokenizerFolder)
+        try container.encode(modelSizeBytes, forKey: .modelSizeBytes)
+        try container.encode(tokenizerSizeBytes, forKey: .tokenizerSizeBytes)
+        try container.encode(hasContextPrefill, forKey: .hasContextPrefill)
+        // Derived, never stored — see the note above for why it is here at all.
+        try container.encode(supportsWordTimestamps, forKey: .supportsWordTimestamps)
+        try container.encode(wordTimestampSupport, forKey: .wordTimestampSupport)
+    }
+
+    /// Prefers the three-state field; falls back to the m23-n3f `Bool` when only
+    /// that is present; treats "neither" as `.unknown` — which is what neither
+    /// literally means, and matches the optimistic reading (`.unknown` still
+    /// reports `supportsWordTimestamps == true`).
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        variantDirectoryName = try container.decode(String.self, forKey: .variantDirectoryName)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        modelFolder = try container.decode(URL.self, forKey: .modelFolder)
+        tokenizerFolder = try container.decode(URL.self, forKey: .tokenizerFolder)
+        modelSizeBytes = try container.decode(Int64.self, forKey: .modelSizeBytes)
+        tokenizerSizeBytes = try container.decode(Int64.self, forKey: .tokenizerSizeBytes)
+        hasContextPrefill = try container.decode(Bool.self, forKey: .hasContextPrefill)
+        if let support = try container.decodeIfPresent(
+            WordTimestampSupport.self, forKey: .wordTimestampSupport) {
+            wordTimestampSupport = support
+        } else if let legacy = try container.decodeIfPresent(
+            Bool.self, forKey: .supportsWordTimestamps) {
+            wordTimestampSupport = legacy ? .supported : .unsupported
+        } else {
+            wordTimestampSupport = .unknown
+        }
     }
 }
 
@@ -185,10 +445,22 @@ public struct WhisperModelCatalog: Sendable {
     public static let tokenizerDirectoryName = "tokenizer"
     /// The file whose presence defines a tokenizer folder (WhisperKit's rule).
     public static let tokenizerFileName = "tokenizer.json"
+    /// The component whose DECLARED OUTPUTS decide word-timestamp support.
+    /// Named once so `requiredComponents` and the m23-n3f capability check can
+    /// never drift apart about which component that is.
+    public static let textDecoderComponentName = "TextDecoder"
     /// CoreML components WhisperKit refuses to load without.
-    public static let requiredComponents = ["MelSpectrogram", "AudioEncoder", "TextDecoder"]
+    public static let requiredComponents = ["MelSpectrogram", "AudioEncoder", textDecoderComponentName]
     /// Loaded when present, skipped when absent.
     public static let optionalComponentName = "TextDecoderContextPrefill"
+    /// The decoder output WhisperKit's word-timing DTW needs (m23-n3f). Baked
+    /// into some compiled variants and not others; when it is missing the word
+    /// branch is skipped silently.
+    public static let wordTimestampAlignmentOutputName = "alignment_heads_weights"
+    /// The interface description coremltools writes INSIDE a compiled
+    /// `.mlmodelc` directory. Nothing else in this repo reads it; the shape is
+    /// documented on `declaredOutputNames(ofCompiledModelAt:)`.
+    public static let compiledModelMetadataFileName = "metadata.json"
 
     /// The folder searched for variant directories. Injected, so tests never
     /// touch the real copy.
@@ -401,7 +673,15 @@ public struct WhisperModelCatalog: Sendable {
                 modelSizeBytes: Self.directorySizeBytes(at: directory),
                 tokenizerSizeBytes: Self.directorySizeBytes(at: tokenizer),
                 hasContextPrefill: Self.componentURL(
-                    inFolder: directory, named: Self.optionalComponentName) != nil
+                    inFolder: directory, named: Self.optionalComponentName) != nil,
+                // m23-n3f. Computed HERE and nowhere else, for the same reason
+                // the validity rule is: `WhisperModelInstaller` gets its
+                // descriptor back from this very call, so a second derivation
+                // would silently disagree for freshly installed models.
+                // m23-ef: the THREE-state value, not the collapsed `Bool`. The
+                // descriptor computes `supportsWordTimestamps` back out of it,
+                // so what reaches the wire is unchanged and one field more.
+                wordTimestampSupport: Self.wordTimestampSupport(inFolder: directory)
             )
         )
     }
@@ -426,6 +706,108 @@ public struct WhisperModelCatalog: Sendable {
     public static func isTokenizerFolder(_ folder: URL) -> Bool {
         FileManager.default.fileExists(
             atPath: folder.appendingPathComponent(tokenizerFileName).path)
+    }
+
+    // MARK: The word-timestamp capability (m23-n3f)
+
+    /// Output names a COMPILED CoreML model declares, or `nil` when that could
+    /// not be determined at all.
+    ///
+    /// **Shape, read off the real installed decoder (2026-08-05) rather than
+    /// assumed:** `<component>.mlmodelc/metadata.json` is a JSON **array** whose
+    /// first element is the model description; that element's `outputSchema` is
+    /// an array of dictionaries each carrying a `name`. For
+    /// `openai_whisper-large-v3-v20240930_turbo` those names are exactly
+    /// `logits`, `key_cache_updates`, `value_cache_updates`,
+    /// `alignment_heads_weights`. Parsed with `JSONSerialization` and plucked,
+    /// deliberately: a `Codable` model of coremltools' metadata would be a
+    /// second thing to keep in sync with a format we do not own.
+    ///
+    /// **Every failure is `nil`, never a crash and never a guess** — absent
+    /// file, unreadable file, invalid JSON, an unexpected top-level type, no
+    /// `outputSchema`, or a schema that parsed to zero names (no CoreML model
+    /// has zero outputs, so that is shape drift, not a model without outputs).
+    /// `nil` means "did not determine", which is a different thing from "has no
+    /// such output" and must stay distinguishable from it.
+    public static func declaredOutputNames(ofCompiledModelAt url: URL) -> [String]? {
+        let metadata = url.appendingPathComponent(compiledModelMetadataFileName)
+        guard let data = try? Data(contentsOf: metadata),
+              let top = try? JSONSerialization.jsonObject(with: data)
+        else { return nil }
+        // The array form is what CoreML writes. The bare-object form is accepted
+        // too so a future single-object metadata file degrades to a correct read
+        // rather than to "unknown".
+        let description: [String: Any]?
+        if let array = top as? [Any] {
+            description = array.first as? [String: Any]
+        } else {
+            description = top as? [String: Any]
+        }
+        guard let schema = description?["outputSchema"] as? [Any] else { return nil }
+        let names = schema.compactMap { ($0 as? [String: Any])?["name"] as? String }
+        return names.isEmpty ? nil : names
+    }
+
+    /// Three-state read of whether a variant's decoder declares the alignment
+    /// output: `true`/`false` when the decoder SAID, `nil` when we could not
+    /// tell (m23-n3f).
+    ///
+    /// `nil` is a real answer here, not a placeholder: the `.mlpackage` form
+    /// `componentURL` also accepts carries no `metadata.json` at all, so an
+    /// otherwise perfectly good model can be unknowable. Keeping that distinct
+    /// from `false` is what stops a tool that never looked and a tool that
+    /// looked and saw nothing from producing the same output.
+    public static func declaredWordTimestampSupport(inFolder folder: URL) -> Bool? {
+        guard let decoder = componentURL(inFolder: folder, named: textDecoderComponentName),
+              let outputs = declaredOutputNames(ofCompiledModelAt: decoder)
+        else { return nil }
+        // EXACT name match. A substring/prefix test would call a decoder that
+        // merely mentions the tensor elsewhere (an input, a description) capable.
+        return outputs.contains(wordTimestampAlignmentOutputName)
+    }
+
+    /// The `Bool` that lands on `WhisperModelDescriptor.supportsWordTimestamps`.
+    ///
+    /// **UNKNOWN RESOLVES TO `true`, and that direction is deliberate.** The
+    /// flag drives a WARNING, so the cost of each mistake is asymmetric:
+    ///
+    /// * `nil → false` would fire the warning at models that are FINE — every
+    ///   `.mlpackage`-form variant (no `metadata.json` exists in that layout at
+    ///   all) and every variant whose metadata we simply failed to parse. The
+    ///   user would read "no word timings" next to a transcript full of word
+    ///   timings, which teaches them to ignore the warning.
+    /// * `nil → true` leaves those variants exactly where they were before this
+    ///   check existed — no worse than the status quo, and no false alarm.
+    ///
+    /// So the rule is: **only ever say NO when the model itself said no.** The
+    /// honest limit that buys is stated rather than hidden — a `.mlpackage`
+    /// variant lacking the output is still a silent empty word list, because
+    /// nothing on disk can be asked.
+    ///
+    /// A missing/unreadable/malformed `metadata.json` therefore also cannot make
+    /// an otherwise-usable model unusable: `inspect` does not consult this at
+    /// all when deciding usability.
+    public static func supportsWordTimestamps(inFolder folder: URL) -> Bool {
+        declaredWordTimestampSupport(inFolder: folder) ?? true
+    }
+
+    /// The same read as `declaredWordTimestampSupport`, in the shape that
+    /// travels: `true → .supported`, `false → .unsupported`, `nil → .unknown`
+    /// (m23-ef).
+    ///
+    /// **This is a rename of the answer, not a change to it.** Nothing here
+    /// decides anything `declaredWordTimestampSupport` did not already decide;
+    /// what changes is that the third answer survives the trip to the caller
+    /// instead of being collapsed into `true` by
+    /// `supportsWordTimestamps(inFolder:)` above — which keeps its exact
+    /// behaviour, unknown included, because a warning that cries wolf at every
+    /// `.mlpackage` is worse than the residue it would close.
+    public static func wordTimestampSupport(inFolder folder: URL) -> WordTimestampSupport {
+        switch declaredWordTimestampSupport(inFolder: folder) {
+        case .some(true): return .supported
+        case .some(false): return .unsupported
+        case .none: return .unknown
+        }
     }
 
     /// WhisperKit's `detectModelURL`: `<name>.mlmodelc`, else the `.mlpackage`

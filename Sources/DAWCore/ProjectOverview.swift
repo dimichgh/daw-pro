@@ -42,6 +42,30 @@ public struct ProjectOverview: Codable, Sendable, Equatable {
 
     public struct Master: Codable, Sendable, Equatable {
         public var volume: Double
+        /// Peak level of the last frame the MASTER BUS was HEARD producing, in
+        /// dBFS (m23-dm). Floor −80, always finite; a POSITIVE value means the
+        /// mix clipped.
+        ///
+        /// Identical semantics and identical naming to ``Track/peakDb``, and
+        /// deliberately so: it is the REFERENCE those per-track numbers are
+        /// read against ("the kick is 8 dB under the master" is a judgement,
+        /// "the kick is −14 dBFS" is a number that still needs one).
+        ///
+        /// Present only when the master has actually produced a non-silent
+        /// frame at some point this session — `nil` means "no signal
+        /// observed", which is honestly different from "measured silent", and
+        /// −80 would claim a measurement that never happened.
+        ///
+        /// RETAINED ACROSS A STOP, and that is the whole point of the field:
+        /// an agent reads this projection BETWEEN actions, i.e. while the
+        /// transport is stopped, and the live `masterMeter` is deliberately
+        /// zeroed at that moment. The source is
+        /// `ProjectStore.lastNonSilentMasterMeter` — see its doc comment.
+        public var peakDb: Double?
+        /// RMS of that same frame in dBFS — "how loud is this mix sitting",
+        /// where ``peakDb`` is "did it clip". Same floor, same finiteness
+        /// guarantee, same present-only-if-ever-heard rule.
+        public var rmsDb: Double?
     }
 
     public struct Send: Codable, Sendable, Equatable {
@@ -104,6 +128,26 @@ public struct ProjectOverview: Codable, Sendable, Equatable {
         public var fx: [Effect]
         public var clips: [Clip]
         public var automation: [AutomationLane]
+        /// Peak level of the last frame this track was HEARD producing, in
+        /// dBFS (m23-cv). Floor −80, always finite; a POSITIVE value means the
+        /// track clipped.
+        ///
+        /// Present only when the track has actually produced a non-silent
+        /// frame at some point this session — the "gain-if-nonzero" rule
+        /// applied to levels: `nil` means "no signal observed", which is
+        /// honestly different from "measured silent", and −80 would claim a
+        /// measurement that never happened.
+        ///
+        /// RETAINED ACROSS A STOP, and that is the whole point of the field:
+        /// an agent reads this projection BETWEEN actions, i.e. while the
+        /// transport is stopped, and the live `trackMeters` are deliberately
+        /// zeroed at that moment. The source is
+        /// `ProjectStore.lastNonSilentTrackMeters` — see its doc comment.
+        public var peakDb: Double?
+        /// RMS of that same frame in dBFS — "how loud does this sit in the
+        /// mix", where ``peakDb`` is "did it clip". Same floor, same finiteness
+        /// guarantee, same present-only-if-ever-heard rule.
+        public var rmsDb: Double?
     }
 
     public var transport: Transport
@@ -141,13 +185,38 @@ extension ProjectStore {
                     outBeat: transport.punchOutBeat
                 )
             ),
-            master: ProjectOverview.Master(volume: masterVolume),
-            tracks: tracks.map(Self.overviewTrack),
+            master: Self.overviewMaster(volume: masterVolume,
+                                        heard: lastNonSilentMasterMeter),
+            // The retained (stop-surviving) meter, not the live one — see
+            // `ProjectOverview.Track.peakDb` for why (m23-cv).
+            tracks: tracks.map { Self.overviewTrack($0, heard: lastNonSilentTrackMeters[$0.id]) },
             markerCount: markers.count
         )
     }
 
-    private static func overviewTrack(_ track: Track) -> ProjectOverview.Track {
+    /// - Parameter heard: the MASTER bus's last SIGNAL-carrying meter frame,
+    ///   or nil if it has never been heard this session (m23-dm) — the
+    ///   RETAINED (stop-surviving) frame, never the live `masterMeter`, for
+    ///   the reason spelled out on `ProjectOverview.Master.peakDb`. Passed in
+    ///   rather than read here so this stays a pure function of its inputs,
+    ///   exactly like `overviewTrack`.
+    private static func overviewMaster(volume: Double,
+                                       heard: MeterFrame?) -> ProjectOverview.Master {
+        ProjectOverview.Master(
+            volume: volume,
+            // dB via `MeterLevel` — the ONE meter-amplitude → dBFS conversion
+            // in the project, the same one the per-track fields use. Both keys
+            // are omitted together when the master has never been heard.
+            peakDb: heard?.peakDb,
+            rmsDb: heard?.rmsDb
+        )
+    }
+
+    /// - Parameter heard: the track's last SIGNAL-carrying meter frame, or nil
+    ///   if it has never been heard this session (m23-cv). Passed in rather
+    ///   than read here so this stays a pure function of its inputs.
+    private static func overviewTrack(_ track: Track,
+                                      heard: MeterFrame?) -> ProjectOverview.Track {
         ProjectOverview.Track(
             id: track.id,
             name: track.name,
@@ -183,7 +252,12 @@ extension ProjectStore {
                     enabled: $0.isEnabled,
                     pointCount: $0.points.count
                 )
-            }
+            },
+            // dB via `MeterLevel` — the ONE meter-amplitude → dBFS conversion
+            // in the project. Both keys are omitted together when the track has
+            // never been heard.
+            peakDb: heard?.peakDb,
+            rmsDb: heard?.rmsDb
         )
     }
 

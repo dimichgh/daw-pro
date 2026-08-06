@@ -3199,10 +3199,19 @@ public final class CommandRouter {
             return .success(request.id, try JSONValue(encoding: startedStatus))
 
         case "ai.sidecarStop":
-            // No params (m16-e, audit F5 survey). Graceful stop (SIGTERM via
-            // the pidfile, escalating to SIGKILL if it doesn't exit in time)
-            // of a running sidecar; a no-op success (not an error) if it
-            // wasn't running. Response: SidecarStatus (state settles to
+            // No params (m16-e, audit F5 survey). Graceful stop (SIGTERM,
+            // escalating to SIGKILL if it doesn't exit in time) of a running
+            // sidecar, together with the child process it spawned — that
+            // child is what holds the loaded models' memory. The target comes
+            // from the pidfile when that points at a live process, and
+            // otherwise from whichever process holds the listening socket on
+            // the sidecar's port (m23-bb: a stale pidfile used to make this
+            // verb report "was not running" while the sidecar kept running).
+            // A no-op success (not an error) if it genuinely wasn't running.
+            // ERRORS (SidecarError.stopFailed) rather than reporting success
+            // when the sidecar is still answering afterwards, or when the only
+            // process on its port can't be identified as ACE-Step — which is
+            // never signalled. Response: SidecarStatus (state settles to
             // installedNotRunning/notInstalled).
             try params.rejectUnknownKeys([], verb: "ai.sidecarStop")
             let stoppedStatus = try await sidecarManager.stop()
@@ -4494,11 +4503,21 @@ public final class CommandRouter {
             return .success(request.id, try JSONValue(encoding: startedVCStatus))
 
         case "vc.sidecarStop":
-            // No params. Graceful stop (SIGTERM via the pidfile, escalating
-            // to SIGKILL if it doesn't exit in time) of a running sidecar; a
-            // no-op success (not an error) if it wasn't running. Response:
-            // VoiceConversionStatus (state settles to installedNotRunning/
-            // notInstalled).
+            // No params. Graceful stop (SIGTERM, escalating to SIGKILL if it
+            // doesn't exit in time) of a running sidecar. The target comes
+            // from the pidfile when that points at a live process, and
+            // otherwise from whichever process holds the listening socket on
+            // the sidecar's port (m23-bb-1: a stale pidfile used to make this
+            // verb report "was not running" while the sidecar kept running —
+            // the same defect m23-bb fixed for ai.sidecarStop, and the
+            // planning/identity/termination logic is now literally shared with
+            // it, see Sources/AIServices/SidecarStopPlanner.swift).
+            // A no-op success (not an error) if it genuinely wasn't running.
+            // ERRORS (SidecarError.stopFailed) rather than reporting success
+            // when the sidecar is still answering afterwards, or when the only
+            // process on its port can't be identified as the RVC facade —
+            // which is never signalled. Response: VoiceConversionStatus (state
+            // settles to installedNotRunning/notInstalled).
             try params.rejectUnknownKeys([], verb: "vc.sidecarStop")
             let stoppedVCStatus = try await voiceConversionManager.stop()
             return .success(request.id, try JSONValue(encoding: stoppedVCStatus))
@@ -4714,9 +4733,47 @@ public final class CommandRouter {
             //
             // Response: the Transcription value verbatim — {text, language,
             // modelVariantDirectoryName, rangeStartSeconds, anchorBeat,
-            // segments: [{text, startSeconds, endSeconds, startBeat,
-            // endBeat, words: [{text, startSeconds, endSeconds, startBeat,
-            // endBeat, confidence}]}]}. Errors: clipNotFound /
+            // supportsWordTimestamps, wordTimestampSupport,
+            // wordTimestampsUnavailable?, wordTimestampsUnverified?, segments:
+            // [{text, startSeconds, endSeconds, startBeat, endBeat, words:
+            // [{text, startSeconds, endSeconds, startBeat, endBeat,
+            // confidence}]}]}.
+            //
+            // m23-n3f — the word-timestamp fields are ADDITIVE FIELDS on this
+            // existing response, not a new verb: WhisperKit's word timings come
+            // from a CoreML `alignment_heads_weights` decoder output that some
+            // compiled variants simply do not have, and without it the word
+            // branch is skipped with no else and no error, so every `words`
+            // array comes back empty. `supportsWordTimestamps` is a property
+            // of the resolved MODEL (never inferred from `words.isEmpty` —
+            // an instrumental clip has no words either), and when it is false
+            // `wordTimestampsUnavailable` carries the teaching text naming the
+            // variant, the decoder path inspected, and what to install
+            // instead. The job still SUCCEEDS: the text and the SEGMENT beats
+            // are correct regardless, so this reports rather than refuses.
+            //
+            // m23-ef — `wordTimestampSupport` ("supported" | "unsupported" |
+            // "unknown") is the ADDITIVE third state, and the field to read
+            // when an empty `words` array has to be explained. n3f could only
+            // say yes-or-no, so a variant whose capability could not be read at
+            // all (the `.mlpackage` layout carries no `metadata.json` to ask)
+            // was reported identically to one that declared the output. That
+            // optimism is deliberate and UNCHANGED — `supportsWordTimestamps`
+            // still reads `true` for "unknown", because saying no at every
+            // `.mlpackage`, capable ones included, teaches callers to ignore
+            // the warning — but it is no longer LOSSY. The two message fields
+            // are mutually exclusive and each is OMITTED (never null) when it
+            // does not apply: `wordTimestampsUnavailable` is the VERDICT, present
+            // only for "unsupported"; `wordTimestampsUnverified` is a hedged
+            // CAUTION, present only when the state is "unknown" AND this run
+            // returned at least one segment but not one word — the shape where
+            // an unreadable capability is genuinely the suspect. It stays silent
+            // on a run that produced words (nothing to apologise for) and on one
+            // that heard nothing at all (silence and instrumentals are wordless
+            // for reasons that have nothing to do with the weights). ⚠️ That
+            // emptiness gates the CAUTION only; the CAPABILITY itself is never
+            // inferred from `words.isEmpty`.
+            // Errors: clipNotFound /
             // transcriptionRequiresAudioClip /
             // transcriptionRequiresUnstretchedClip surface via the
             // LocalizedError mapping in handle(_:); WhisperModelError
@@ -4773,8 +4830,25 @@ public final class CommandRouter {
             // variantDirectoryName, phaseFraction, completedUnitCount,
             // totalUnitCount}, descriptor?: {variantDirectoryName,
             // displayName, modelFolder, tokenizerFolder, modelSizeBytes,
-            // tokenizerSizeBytes, hasContextPrefill, totalSizeBytes,
-            // formattedTotalSize}, errorMessage?}.
+            // tokenizerSizeBytes, hasContextPrefill, supportsWordTimestamps,
+            // wordTimestampSupport}, errorMessage?}.
+            // `supportsWordTimestamps` is m23-n3f's additive descriptor field:
+            // false means the installed variant's decoder declares no
+            // `alignment_heads_weights` output, so clip.transcribe will return
+            // segments but never words. Reported here so that is knowable at
+            // INSTALL time rather than after a transcription comes back empty.
+            // `wordTimestampSupport` ("supported" | "unsupported" | "unknown")
+            // is m23-ef's additive third state, and the one to branch on: the
+            // Bool above reads TRUE for "unknown" on purpose (see
+            // clip.transcribe), so it cannot distinguish a variant that declared
+            // the output from one whose capability could not be read at all.
+            // ⚠️ `totalSizeBytes` / `formattedTotalSize` were listed here and in
+            // the MCP tool description until m23-ef and were NEVER encoded —
+            // they are computed properties of `WhisperModelDescriptor` and the
+            // payload has always omitted them. The docs were corrected rather
+            // than the payload grown (an additive wire change nobody asked for
+            // is still a wire change); `WhisperModelCatalogEncodingTests`
+            // asserts the exact key set, so this list can now be checked.
             try params.rejectUnknownKeys(["variant", "overwrite"], verb: "ai.installSpeechModel")
             let installVariant = try params.require("variant", \.stringValue)
             let installOverwrite = params["overwrite"]?.boolValue ?? false

@@ -21,13 +21,33 @@
 //    remember — the whole point of one home.
 // ⚠️ Kill by EXACT pid from the pidfile. Never pkill/pgrep: those match on a
 //    name and would take the user's live app down with the staging one.
+// ⚠️ EVERY LAUNCH IS PROFILE-ISOLATED (m23-ay). `startStaging` sets
+//    `DAWPRO_PROFILE_ROOT` so the child's Application-Support profile — autosave,
+//    recordings, generations, references, feedback, sound banks — lands in a
+//    per-run temp root instead of the USER'S OWN
+//    `~/Library/Application Support/DAWPro/`. Also enforced here rather than in
+//    each caller: a gate author cannot forget what they never have to write.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, openSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, openSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export const ROOT = "/Users/dsemenov/Views/daw-pro";
 export const STAGING_PORT = 17695;
 export const LIVE_PORT = 17600; // the user's app — never a target
 export const DEFAULT_BINARY = ".build/debug/DAWApp";
+
+/**
+ * The variable `DAWCore.AppDirectories` reads to relocate a process's whole
+ * Application-Support profile (m23-ay).
+ *
+ * ⚠️ SECOND SPELLING OF A NAME SWIFT OWNS —
+ * `AppDirectories.profileRootEnvironmentKey`. Pinned on the Swift side by
+ * `AppDirectoriesProfileRootTests.environmentKeyIsPinned` precisely because a
+ * rename there and not here would silently un-isolate every gate in this
+ * directory while all the code still looked correct.
+ */
+export const PROFILE_ROOT_ENV = "DAWPRO_PROFILE_ROOT";
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -60,6 +80,61 @@ export function buildOrAbort({ root = ROOT, label = "building…", skip = false 
 }
 
 const live = new Map(); // gate -> { child, pidfile, out, log }
+const profileRoots = new Map(); // gate -> the profile root we launched it with
+
+/**
+ * `<base>/DAWPro/<Category>` — the JS mirror of `AppDirectories`' path math.
+ *
+ * ⚠️ SECOND SPELLING OF A PATH `DAWCore.AppDirectories` OWNS, the same hazard
+ * `sessionLockPath` already carries and the same reason it is spelled ONCE here:
+ * the Swift side appends `DAWPro/<Category>` to a base, and the override
+ * (m23-ay) replaces only the BASE. Category names are pinned on the Swift side
+ * by `AppDirectoriesTests.categoryNamesArePinned`.
+ */
+export function profileCategoryDir(base, category) {
+  if (typeof base !== "string" || base.length === 0) {
+    throw new Error(`profileCategoryDir(base, category) requires a non-empty base; got ${typeof base}: ${JSON.stringify(base)}`);
+  }
+  if (typeof category !== "string" || category.length === 0) {
+    throw new Error(`profileCategoryDir(base, category) requires a non-empty category; got ${typeof category}: ${JSON.stringify(category)}`);
+  }
+  return `${base}/DAWPro/${category}`;
+}
+
+/** The base the app resolves with NO override — the user's real profile base. */
+export const REAL_PROFILE_BASE = `${process.env.HOME}/Library/Application Support`;
+
+let processProfileRoot = null;
+
+/**
+ * The profile root every staging launch in THIS node process shares (m23-ay).
+ *
+ * ONE root per gate process, not one per launch, and not one per gate file:
+ *   • per-LAUNCH would break any gate that restarts staging and expects the
+ *     first instance's autosave/recovery state to still be there — crash
+ *     recovery is exactly that shape;
+ *   • per-GATE-FILE (a fixed path derived from the gate name) would carry state
+ *     between separate runs of the same gate, so a leftover `session.lock` from
+ *     yesterday's run would make today's app believe it crashed.
+ * A fresh mkdtemp per process gives restart continuity WITHIN a run and no
+ * inheritance ACROSS runs.
+ *
+ * Deliberately NOT deleted at exit: the gate that launched the app has to be
+ * able to inspect what it wrote after teardown (that is m23-ay's positive
+ * control), and these roots are small and live under the OS-purged temp dir.
+ *
+ * An operator who exports `DAWPRO_PROFILE_ROOT` themselves keeps it — that is a
+ * deliberate ask, and it is still isolated from the user's real profile (the
+ * Swift side refuses a value equal to the real base).
+ */
+export function stagingProfileRoot() {
+  if (processProfileRoot) return processProfileRoot;
+  const inherited = process.env[PROFILE_ROOT_ENV];
+  processProfileRoot = (typeof inherited === "string" && inherited.length > 0)
+    ? inherited
+    : mkdtempSync(join(tmpdir(), "dawpro-staging-profile-"));
+  return processProfileRoot;
+}
 
 /** Where a gate's pidfile lives. One resolver, so start and stop cannot disagree. */
 export function pidfilePath(gate, override) {
@@ -176,23 +251,58 @@ export function startStaging({
   pidfile: pidfileOverride,
   outDir,
   logPath,
+  profileRoot,
 } = {}) {
   if (!gate) throw new Error("startStaging requires a { gate } name for its pidfile/out dir");
   assertStagingPort(port);
+  // m23-ay: same "present-but-invalid throws, absent is legal" split as every
+  // other optional argument in this file. A non-string here would be spread into
+  // `env` and reach the child as the STRING "[object Object]" or "42", which the
+  // Swift side would refuse — a launch failure two layers away from its cause.
+  if (profileRoot !== undefined && profileRoot !== null &&
+      (typeof profileRoot !== "string" || profileRoot.length === 0)) {
+    throw new Error(
+      `startStaging({ profileRoot }) requires a non-empty absolute path when given ` +
+      `(omit it to use this process's shared staging profile root); ` +
+      `got ${typeof profileRoot}: ${JSON.stringify(profileRoot)}`
+    );
+  }
+  if (typeof profileRoot === "string" && !profileRoot.startsWith("/")) {
+    throw new Error(
+      `startStaging({ profileRoot }) requires an ABSOLUTE path; got ${JSON.stringify(profileRoot)}`
+    );
+  }
 
   const out = outDir || `/tmp/daw-gate-out/${gate}`;
   const pidfile = pidfilePath(gate, pidfileOverride);
   mkdirSync(out, { recursive: true });
 
   // A pidfile left by a crashed earlier run would otherwise be orphaned.
+  // ⚠️ BEFORE `profileRoots` learns this run's root, on purpose: that orphan
+  // belongs to a PREVIOUS process with a different (or, if it predates m23-ay,
+  // no) profile root, so its lock must still be looked for where `stopStaging`
+  // has always looked for it.
   stopStaging(gate, pidfileOverride);
+
+  const profile = profileRoot || stagingProfileRoot();
+  profileRoots.set(gate, profile);
+  // ⚠️ ORDER: the caller's `env` is spread LAST, so a gate that names
+  // DAWPRO_PROFILE_ROOT itself still wins. There is deliberately no way to UNSET
+  // it from here — an opt-out would be a per-gate switch that puts writes back
+  // in the user's real profile, which is the defect m23-ay exists to remove.
+  const childEnv = {
+    ...process.env,
+    DAW_CONTROL_PORT: String(port),
+    [PROFILE_ROOT_ENV]: profile,
+    ...env,
+  };
 
   let child, log;
   if (detached) {
     const fd = openSync(logPath || `${out}/staging.log`, "a");
     child = spawn(binary, [], {
       cwd: root,
-      env: { ...process.env, DAW_CONTROL_PORT: String(port), ...env },
+      env: childEnv,
       stdio: ["ignore", fd, fd],
       detached: true,
     });
@@ -200,7 +310,7 @@ export function startStaging({
   } else {
     child = spawn(binary, [], {
       cwd: root,
-      env: { ...process.env, DAW_CONTROL_PORT: String(port), ...env },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
     });
@@ -216,7 +326,7 @@ export function startStaging({
   // Registered AFTER the log-flush hook above, so `exit` runs them in that
   // order: write the log we captured, then kill the app that produced it.
   armTeardown(gate, pidfileOverride);
-  return { pid: child.pid, out, pidfile };
+  return { pid: child.pid, out, pidfile, profileRoot: profile };
 }
 
 /**
@@ -249,7 +359,18 @@ export function sessionLockPath(override) {
       `Autosave lock path); got ${typeof override}: ${JSON.stringify(override)}`
     );
   }
-  return override || `${process.env.HOME}/Library/Application Support/DAWPro/Autosave/session.lock`;
+  // ⚠️ THE DEFAULT IS STILL THE USER'S REAL LOCK, deliberately. This function
+  // answers "where does an app with NO profile override write its lock", which
+  // is what `m23ac2c` leg F pins and what the orphan-cleanup path in
+  // `startStaging` needs. A staging instance launched since m23-ay writes its
+  // lock under its own profile root instead — `stagingSessionLockPath` below,
+  // which `stopStaging` now uses for the gates it started.
+  return override || `${profileCategoryDir(REAL_PROFILE_BASE, "Autosave")}/session.lock`;
+}
+
+/** Where a staging instance launched with `profileRoot` writes its lock. */
+export function stagingSessionLockPath(profileRoot) {
+  return `${profileCategoryDir(profileRoot, "Autosave")}/session.lock`;
 }
 
 /**
@@ -412,14 +533,21 @@ export function stopStaging(gate, pidfileOverride, { lockPath } = {}) {
     );
   }
   const pidfile = pidfilePath(gate, pidfileOverride);
-  if (!existsSync(pidfile)) { live.delete(gate); return; }
+  if (!existsSync(pidfile)) { live.delete(gate); profileRoots.delete(gate); return; }
   const pid = Number(readFileSync(pidfile, "utf8").trim());
   if (Number.isInteger(pid) && pid > 0) {
     try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
-    releaseSessionLock(pid, lockPath);
+    // m23-ay: if THIS process launched the instance, its lock is under the
+    // profile root we gave it — not in the user's real Autosave directory. An
+    // explicit `lockPath` still wins (m23ac2c drives that seam directly), and a
+    // gate we did not start falls back to the real path exactly as before, which
+    // is what the orphan cleanup in `startStaging` depends on.
+    const known = profileRoots.get(gate);
+    releaseSessionLock(pid, lockPath ?? (known ? stagingSessionLockPath(known) : undefined));
   }
   rmSync(pidfile, { force: true });
   live.delete(gate);
+  profileRoots.delete(gate);
 }
 
 /** Connect to the staging control port, retrying while the app boots. */
@@ -439,7 +567,7 @@ export async function connect({ port = STAGING_PORT, attempts = 40, intervalMs =
 
 /**
  * The one call most gates want: build, launch, connect.
- * Returns { ws, stop, out }. `stop` is idempotent.
+ * Returns { ws, stop, out, profileRoot }. `stop` is idempotent.
  */
 export async function launchStaging({
   gate,
@@ -454,10 +582,16 @@ export async function launchStaging({
   outDir,
   logPath,
   settleMs = 0,
+  profileRoot,
 } = {}) {
   buildOrAbort({ root, skip: skipBuild });
-  const info = startStaging({ gate, root, port, binary, env, detached, pidfile, outDir, logPath });
+  const info = startStaging({
+    gate, root, port, binary, env, detached, pidfile, outDir, logPath, profileRoot,
+  });
   if (settleMs) await sleep(settleMs);
   const ws = await connect({ port, attempts });
-  return { ws, out: info.out, pid: info.pid, stop: () => stopStaging(gate, pidfile) };
+  return {
+    ws, out: info.out, pid: info.pid, profileRoot: info.profileRoot,
+    stop: () => stopStaging(gate, pidfile),
+  };
 }

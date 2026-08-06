@@ -9,9 +9,24 @@
 //       [6,8); 64@6 len1 boundary-exact (start == clipLength, strict-<)
 //       wholly ghost; 72@7.5 len2 wholly latent ghost; hairline at beat 6;
 //       VEL stems: 60+67 lit (onsets fire), 64+72 ghost.
-// Leg (a) is fully automated (analytic snapshot comparison). Leg (b) is NOT
-// machine-verified — it emits my-setnotes.png under OUT for a human/agent to
-// read against the law above.
+// Leg (a) is fully automated (analytic snapshot comparison).
+//
+// Leg (b), the ghost LAW itself, is STILL a human/agent read — of c2-settled.png
+// under OUT. A hash proves a frame CHANGED or DID NOT, never WHAT is on screen
+// (m23-bc), so "67 shows a ghost tail over [6,8)" cannot be asserted here.
+// What m23-dr made machine-checkable are the two PREMISES that read silently
+// stood on, both of which this gate performed and neither of which it checked:
+//   SETTLE   sha(c1) === sha(c2) — the double-capture idiom assumes the frame has
+//            stopped moving by the second shot. If it flaps, the PNG handed to
+//            the human is a mid-animation frame and the read is worthless.
+//   CONTROL  sha(c0) !== sha(c2) — c0 is the SAME window at the SAME density with
+//            an EMPTY clip, so the ONLY difference is the injected notes. Without
+//            it, "identical" could be the degenerate result of captureUI emitting
+//            the same bytes regardless of state, and SETTLE would be vacuous.
+// Measured 5/5 each before being asserted (m23-bc's "prove it is stable first"),
+// and the settled frame was byte-identical across all 10 runs of the measurement.
+// ⚠️ If SETTLE ever flaps the fix is CROPPING to the editor region, not deleting
+// the leg — a whole-frame hash is exposed to anything time-varying in the window.
 //
 // Provenance: filed m19-g (out-of-clip note ghost treatment), written as an
 // orchestrator disjoint gate 2026-07-16 (never in the implementation brief),
@@ -27,11 +42,21 @@
 // override is preserved and now passes through assertStagingPort, so this gate can no
 // longer be pointed at 17600 even by an env var.
 import fs from "fs";
+import crypto from "crypto";
 import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
 const GATE = "m19g-setnotes-ghost";   // names the pidfile + out dir = the default OUT below
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 fs.mkdirSync(OUT, { recursive: true });
+// Three DISTINCT capture paths. Previously both shots wrote my-setnotes.png, so the
+// second silently overwrote the first and no comparison was possible at all.
+const C0 = `${OUT}/c0-empty.png`, C1 = `${OUT}/c1-presettle.png`, C2 = `${OUT}/c2-settled.png`;
+// m23-bc's stale-adoption law: OUT is a FIXED, REUSED path, so a captureUI that
+// returned ok without writing would let a PREVIOUS run's PNG be hashed and both
+// pixel legs would pass on stale-but-identical bytes. Unlinking first turns that
+// into a loud ENOENT from readFileSync instead of a silent adoption of old bytes.
+for (const p of [C0, C1, C2]) { try { fs.unlinkSync(p); } catch {} }
+const sha = (p) => crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
 const killer = setTimeout(() => { console.error("GATE TIMEOUT"); process.exit(2); }, 120_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -77,6 +102,61 @@ const clip = await request(ws, "clip.addMIDI", {
 console.log("clip", clip.id);
 await sleep(200);
 
+// Pro density (VEL lane) is set BEFORE the control capture on purpose: c0 and c2
+// then differ ONLY by the injected notes, which makes CONTROL a sharp "setNotes
+// repainted the editor" claim instead of a vague "something moved".
+// m23-du(c) CLOSED: this used to leak `pianoRoll=pro` into the shared `DAWApp`
+// defaults domain on every run, because `debug.panelDensity` had no read form and
+// a gate cannot put back a value it cannot read. m23-du(a) added that read form,
+// so the prior is captured here and restored below.
+//
+// ⚠️ Restore from `stored`, NEVER from `mode`. `mode` is the EFFECTIVE density and
+// reads `simple` both when a panel was explicitly set to simple AND when it was
+// never set at all; writing that back would convert an unset key into an explicit
+// one. `stored` is null in the never-set case, and that case is handled separately
+// below — see the note at the restore.
+const priorRollDensity = (await request(ws, "debug.panelDensity", { panel: "pianoRoll" })).stored ?? null;
+console.log(`prior pianoRoll density: stored=${priorRollDensity ?? "UNSET"}`);
+await request(ws, "debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
+await sleep(300);
+
+let densityRestored = false;
+async function restoreDensity(reason) {
+  if (densityRestored) return;          // idempotent: normal path AND handlers call it
+  densityRestored = true;
+  try {
+    if (priorRollDensity) {
+      await request(ws, "debug.panelDensity", { panel: "pianoRoll", mode: priorRollDensity });
+      console.log(`   density restored (${reason}): pianoRoll=${priorRollDensity}`);
+    } else {
+      // The prior was UNSET and `debug.panelDensity` has no clear verb yet, so
+      // "unset" is not reachable from here (m23-du(a) documents this half as
+      // still open). The choice is between leaving OUR `pro` behind and writing
+      // the app default explicitly — and `simple` is strictly better: a fresh
+      // machine's EFFECTIVE density is simple, so writing it makes the next gate
+      // behave identically to a fresh machine, differing only by the presence of
+      // a key. Leaving `pro` would change behaviour, which is the actual defect
+      // m23-du is about. Logged, never silent.
+      await request(ws, "debug.panelDensity", { panel: "pianoRoll", mode: "simple" });
+      console.log(`   density prior was UNSET (${reason}): wrote the app default `
+        + `"simple" rather than leaving our "pro" behind — this CREATES an explicit `
+        + `key, which only a clear verb (m23-du(a), still open) could avoid.`);
+    }
+  } catch (e) {
+    console.error(`   ⚠️ DENSITY RESTORE FAILED (${reason}): ${e.message}`);
+  }
+}
+for (const sig of ["unhandledRejection", "uncaughtException"]) {
+  process.on(sig, async (err) => {
+    console.error(`\n${sig.toUpperCase()} — restoring density before exit:`, err);
+    await restoreDensity(sig);
+    stopStaging(GATE);
+    process.exit(3);
+  });
+}
+const cap0 = await request(ws, "debug.captureUI", { selectClip: clip.id, path: C0 });
+await sleep(400);
+
 const NOTES = [
   { pitch: 60, startBeat: 0,   lengthBeats: 2, velocity: 100 }, // lit full
   { pitch: 67, startBeat: 2,   lengthBeats: 6, velocity: 118 }, // overhang: lit [2,6) + ghost [6,8)
@@ -97,22 +177,34 @@ check("setNotes stores out-of-clip notes un-clamped (4 verbatim)",
   JSON.stringify(got) === JSON.stringify(want), got);
 check("clip length unchanged at 6", (cl.lengthBeats ?? cl.length) === 6, cl.lengthBeats ?? cl.length);
 
-// (b) Render: Pro density (VEL lane), capture twice (settle law). Pixel leg
-// requires a human/agent to read the emitted capture against the law in the
-// header comment — NOT machine-verified here.
-await request(ws, "debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
-await sleep(300);
-await request(ws, "debug.captureUI", { selectClip: clip.id, path: `${OUT}/my-setnotes.png` });
+// (b) Render: capture twice (the settle law), then CHECK the two premises the
+// human read stands on. The ghost LAW itself stays a human read of c2 — see header.
+const cap1 = await request(ws, "debug.captureUI", { selectClip: clip.id, path: C1 });
 await sleep(400);
-const cap = await request(ws, "debug.captureUI", { selectClip: clip.id, path: `${OUT}/my-setnotes.png` });
-console.log("captured", JSON.stringify(cap));
+const cap2 = await request(ws, "debug.captureUI", { selectClip: clip.id, path: C2 });
+const s0 = sha(C0), s1 = sha(C1), s2 = sha(C2);
+console.log("captured", JSON.stringify({ c0: cap0, c1: cap1, c2: cap2 }));
+
+// Both legs print BOTH hashes, sizes and paths on failure, so the human pixel read
+// stays reachable when the machine leg is the thing that broke (m23-bc's precedent).
+const pixelDetail = {
+  c0: { sha: s0.slice(0, 16), bytes: fs.statSync(C0).size, path: C0 },
+  c1: { sha: s1.slice(0, 16), bytes: fs.statSync(C1).size, path: C1 },
+  c2: { sha: s2.slice(0, 16), bytes: fs.statSync(C2).size, path: C2 },
+};
+check("pixel SETTLE: the frame stopped moving by the second capture (c1 == c2)",
+  s1 === s2, pixelDetail);
+check("pixel CONTROL: the injected notes repainted the editor (c0 != c2)",
+  s0 !== s2, pixelDetail);
 
 await request(ws, "project.new", { discardChanges: true });
 await sleep(300);
+await restoreDensity("normal exit");   // m23-du(c)
 ws.close();
 clearTimeout(killer);
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 console.log(failures === 0
-  ? `\nORCH SETNOTES GATE (analytic legs): ALL PASS — pixel leg is a human/agent read of ${OUT}/my-setnotes.png`
+  ? `\nORCH SETNOTES GATE: ALL PASS (2 analytic + 2 pixel-premise legs)`
+    + `\n  the ghost LAW itself is still a human/agent read of ${C2}`
   : `\nORCH SETNOTES GATE: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

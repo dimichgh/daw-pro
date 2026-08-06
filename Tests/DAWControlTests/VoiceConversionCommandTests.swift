@@ -187,6 +187,30 @@ struct VoiceConversionCommandTests {
         #expect(response.error == "could not signal pid 123")
     }
 
+    // m23-bb-1: the exact twin of `SidecarCommandTests.stopFailedSurfacesVerbatim`.
+    // Contract discipline says the two stop verbs have the SAME semantics, so
+    // the router-level guarantee has to be pinned on both: a stop that could
+    // not stop a still-healthy sidecar is a FAILURE, not a success-shaped
+    // status, and it reaches the wire carrying the manager's own actionable
+    // message. The agent must not be able to read it as "stopped" — and above
+    // all not as "it wasn't running", which is the m23-bb-1 defect verbatim.
+    @Test("vc.sidecarStop surfaces a stopFailed refusal verbatim, and never as ok (m23-bb-1)")
+    func stopFailedSurfacesVerbatim() async throws {
+        let voiceConversion = FakeVoiceConversionManager()
+        let message = "RVC voice-conversion sidecar is STILL UP — it is answering on "
+            + "http://127.0.0.1:8002 — but it could not be stopped: pid 4242 holds the "
+            + "listening socket on port 8002, but its command line does not identify it as "
+            + "the RVC voice-conversion sidecar (/usr/sbin/cupsd -l)."
+        await voiceConversion.setStopResult(.failure(SidecarError.stopFailed(message)))
+        let (router, _) = makeRouter(voiceConversion: voiceConversion)
+
+        let response = await router.handle(ControlRequest(id: "1", command: "vc.sidecarStop"))
+
+        #expect(!response.ok)
+        #expect(response.error == message)
+        #expect(response.error?.localizedCaseInsensitiveContains("not running") != true)
+    }
+
     @Test("vc.sidecarStop rejects unknown params")
     func stopRejectsUnknownParams() async throws {
         let (router, _) = makeRouter()

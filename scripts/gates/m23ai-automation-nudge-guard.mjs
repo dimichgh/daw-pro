@@ -43,7 +43,7 @@
 // Staging :17695 ONLY — port 17600 is the user's live app and is never touched.
 
 import fs from "fs";
-import { startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
 
 const GATE = "m23ai";
 const PORT = 17695;
@@ -57,6 +57,12 @@ fs.mkdirSync(OUT, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
 
+// m23-dq: BUILD FIRST. Without this the gate launches whatever was compiled
+// last and reports a confident PASS against it — measured 2026-08-05: after
+// touching Sources/DAWAppKit/ArrangeNudge.swift this gate returned 15/15 with
+// the binary's mtime unchanged. `startStaging` does NOT build; only
+// `launchStaging` does (_staging.mjs:587), so a direct caller must build itself.
+buildOrAbort({ root: REPO, label: "m23ai: building\u2026" });
 const staging = startStaging({ gate: GATE, root: REPO, port: PORT,
   binary: BINARY, detached: true, pidfile: PIDFILE, outDir: OUT });
 console.log(`staging pid ${staging.pid} on :${PORT}`);

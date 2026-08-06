@@ -243,7 +243,39 @@ public actor VoiceConversionManager: VoiceConversionManaging {
             + "check \(logPath)."
     }
 
-    // MARK: - Stop
+    // MARK: - Stop (m23-bb-1)
+    //
+    // ⚠️ THE DEFECT THIS REPLACED, and it was a STRUCTURAL TWIN of m23-bb:
+    // `status()` resolved "the sidecar" from the HEALTH PROBE while `stop()`
+    // resolved it from the PIDFILE alone, via two early returns that never
+    // consulted the probe —
+    //
+    //     guard let pid = readPidfile() else { …"is not running (no pidfile found)" }
+    //     guard processAlive(pid) else { removePidfile(); …"was not running (stale pidfile removed)" }
+    //
+    // — so a healthy RVC facade on 8002 whose pidfile had gone stale was told
+    // it "was not running", its pidfile was deleted, and it kept running.
+    //
+    // The DECISION is not made here. It lives once in `SidecarStop`, shared
+    // verbatim with `SidecarManager`: copying the ACE planner would have
+    // recreated the very defect class this fixes (two resolutions of one
+    // question, drifting until one lies). Only two things below are
+    // RVC-specific — the identity predicate and the wording.
+
+    /// How this sidecar's own processes are recognised.
+    ///
+    /// ⚠️ `scripts/rvc/run.sh` ends in `exec "$VENV_PY" "$SCRIPT_DIR/server.py"`
+    /// — it EXECs, so unlike ACE-Step's `uv run` → python topology there is no
+    /// parent/child split: the pid `run.sh` wrote into `.rvc.pid` IS uvicorn.
+    /// The shared planner's descendant capture and ancestor climb therefore
+    /// find nothing to do here, which costs nothing and defends if that
+    /// launcher ever stops `exec`ing.
+    private var stopIdentity: SidecarStop.Identity {
+        .rvc(directoryPath: config.rvcDir?.path)
+    }
+
+    /// The wording every shared stop message speaks in.
+    static let stopVocabulary = SidecarStop.Vocabulary.rvc
 
     @discardableResult
     public func stop() async throws -> VoiceConversionStatus {
@@ -253,48 +285,105 @@ public actor VoiceConversionManager: VoiceConversionManaging {
                 message: "RVC voice-conversion sidecar directory is not resolvable — nothing to stop."
             )
         }
-        guard let pid = readPidfile() else {
-            startedAt = nil
-            return VoiceConversionStatus(
-                state: isInstalled() ? .installedNotRunning : .notInstalled,
-                message: "RVC voice-conversion sidecar is not running (no pidfile found)."
-            )
-        }
+
+        let plan = await resolvedStopPlan()
+
         if config.dryRun {
+            // The dry-run seam stays a pure no-op: fact-gathering above is
+            // read-only (`ps`/`lsof`/an HTTP GET), and nothing below this
+            // point runs — no signal, no pidfile removal, no state clearing.
+            let report = SidecarStop.dryRunReport(
+                for: plan, isInstalled: isInstalled(), vocabulary: Self.stopVocabulary,
+                baseURL: config.baseURL, pidfilePath: config.pidfileURL?.path)
             return VoiceConversionStatus(
-                state: .installedNotRunning, message: "[dry-run] would stop pid \(pid).", pid: pid)
+                state: report.state, message: report.message, pid: report.pid)
         }
-        guard processAlive(pid) else {
-            removePidfile()
+
+        switch plan {
+        case .notRunning(let reason):
+            // The ONLY branch allowed to say "not running" — and it is
+            // reachable only when the health probe AGREES the sidecar is not
+            // answering (m23-bb's floor rule, inherited whole).
+            //
+            // Deviation 1 (see this type's doc comment) is preserved: WE remove
+            // the pidfile even though `run.sh` wrote it, so a later `status()`
+            // reads a clean installedNotRunning rather than misreading a stale
+            // file as a failed boot.
+            if reason.removesPidfile { removePidfile() }
             runningProcess = nil
             startedAt = nil
             return VoiceConversionStatus(
+                state: SidecarStop.notRunningState(reason, isInstalled: isInstalled()),
+                message: SidecarStop.notRunningMessage(reason, vocabulary: Self.stopVocabulary),
+                pid: reason.pid
+            )
+
+        case .refuse(let refusal):
+            // The sidecar IS answering and we found nothing we are willing to
+            // signal. Report the truth and change NOTHING: a failed stop must
+            // not quietly delete state on its way out.
+            throw SidecarError.stopFailed(SidecarStop.refusalMessage(
+                refusal, vocabulary: Self.stopVocabulary, baseURL: config.baseURL,
+                pidfilePath: config.pidfileURL?.path))
+
+        case .terminate(let pid, let discovery):
+            let outcome: SidecarStop.TerminationOutcome
+            switch await SidecarStop.terminateTree(
+                target: pid, discovery: discovery, identity: stopIdentity,
+                stopTimeoutSeconds: config.stopTimeoutSeconds
+            ) {
+            case .refused(let refusal):
+                // The target stopped being identifiable between planning and
+                // signalling — a recycled pid. Refuse, exactly as if it had
+                // never identified in the first place.
+                throw SidecarError.stopFailed(SidecarStop.refusalMessage(
+                    refusal, vocabulary: Self.stopVocabulary, baseURL: config.baseURL,
+                    pidfilePath: config.pidfileURL?.path))
+            case .done(let done):
+                outcome = done
+            }
+            removePidfile()
+            runningProcess = nil
+            startedAt = nil
+
+            let after = await status()
+            if after.state == .healthy || after.state == .error {
+                // Never report a stop that did not stop.
+                throw SidecarError.stopFailed(SidecarStop.stillAnsweringMessage(
+                    outcome: outcome, baseURL: config.baseURL, vocabulary: Self.stopVocabulary))
+            }
+            return VoiceConversionStatus(
                 state: .installedNotRunning,
-                message: "RVC voice-conversion sidecar was not running (stale pidfile removed)."
+                message: SidecarStop.stoppedMessage(
+                    outcome: outcome, discovery: discovery, vocabulary: Self.stopVocabulary),
+                pid: pid
             )
         }
+    }
 
-        kill(pid, SIGTERM)
-        let deadline = Date().addingTimeInterval(config.stopTimeoutSeconds)
-        while Date() < deadline, processAlive(pid) {
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-        if processAlive(pid) {
-            kill(pid, SIGKILL)
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-        // Deviation 1: WE remove the pidfile here even though `run.sh` wrote
-        // it — see this type's own doc comment for why (a clean
-        // installedNotRunning read afterward, not a stale-file misread).
-        removePidfile()
-        runningProcess = nil
-        startedAt = nil
+    // MARK: - Stop: fact gathering (impure). The pure decision is SidecarStop's.
 
-        let after = await status()
-        if after.state == .healthy {
-            return after
+    /// Gathers the facts `SidecarStop.resolvePlan` reasons over. The health
+    /// probe is ALWAYS consulted — that is the whole of m23-bb-1.
+    // Not `private`: headless tests call this directly to assert the EXACT
+    // resolved plan against a real listener, rather than inferring the
+    // decision from message text.
+    func resolvedStopPlan() async -> SidecarStop.Plan {
+        let probe: SidecarStop.Probe
+        switch await probeHealth() {
+        case .healthy: probe = .healthy
+        case .malformed: probe = .respondingButUnparsable
+        case .unreachable: probe = .unreachable
         }
-        return VoiceConversionStatus(state: .installedNotRunning, message: "RVC voice-conversion sidecar stopped.")
+
+        let pidfilePid = readPidfile()
+        return SidecarStop.resolvePlan(SidecarStop.gatherFacts(
+            probe: probe,
+            pidfilePid: pidfilePid,
+            pidfilePidAlive: pidfilePid.map { processAlive($0) } ?? false,
+            baseURL: config.baseURL,
+            identity: stopIdentity
+        ))
     }
 
     // MARK: - Health probe

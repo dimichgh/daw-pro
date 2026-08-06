@@ -349,6 +349,400 @@ struct TranscriptionBeatMappingTests {
     }
 }
 
+// MARK: - m23-n3f: the model's word-timestamp capability reaches the answer
+
+/// The WIRING between "the catalog knows this variant cannot do word timings"
+/// and "the caller is told so", pinned in BOTH directions.
+///
+/// It has to be pinned here, through `WhisperTranscriber.makeTranscription`,
+/// because the live `transcribe` path cannot reach the false direction on any
+/// machine we have: a synthesized fixture has no loadable weights, and the one
+/// real installed variant HAS the capability. `WhisperTranscriberFixtureTests`
+/// below can therefore only ever prove the true direction — which is exactly
+/// the blindness the m23-n3b law names.
+@Suite("Transcription reports the model's word-timestamp capability (m23-n3f)")
+struct TranscriptionWordTimestampCapabilityTests {
+
+    /// A descriptor as a VALUE. Nothing here is read from or written to disk;
+    /// the path only has to be recognizable inside the teaching message.
+    private func descriptor(_ variant: String, supportsWordTimestamps: Bool) -> WhisperModelDescriptor {
+        let base = URL(fileURLWithPath: "/private/tmp/n3f-\(UUID().uuidString)")
+        return WhisperModelDescriptor(
+            variantDirectoryName: variant,
+            displayName: variant,
+            modelFolder: base.appendingPathComponent(variant),
+            tokenizerFolder: base.appendingPathComponent("tokenizer"),
+            modelSizeBytes: 1024,
+            tokenizerSizeBytes: 128,
+            hasContextPrefill: false,
+            supportsWordTimestamps: supportsWordTimestamps)
+    }
+
+    private func oneWordResult() -> TranscriptionResult {
+        fakeResult(segments: [
+            fakeSegment(text: " Hello there.", start: 0, end: 2, words: [
+                FakeWord(text: " Hello", start: 0, end: 1),
+                FakeWord(text: " there.", start: 1, end: 2),
+            ])
+        ])
+    }
+
+    @Test("A capable model: reported true, no message, words untouched")
+    func capableModelSaysNothing() {
+        let model = descriptor("openai_whisper-large-v3-v20240930_turbo", supportsWordTimestamps: true)
+        let mapped = WhisperTranscriber.makeTranscription(
+            results: [oneWordResult()],
+            descriptor: model,
+            rangeStartSeconds: 0,
+            anchorBeat: 0,
+            tempoMap: TempoMap(constantBPM: 120))
+
+        #expect(mapped.supportsWordTimestamps)
+        #expect(mapped.wordTimestampsUnavailable == nil)
+        #expect(mapped.words.count == 2)
+        #expect(mapped.modelVariantDirectoryName == "openai_whisper-large-v3-v20240930_turbo")
+    }
+
+    /// THE case that cannot happen on this machine's real model. The recogniser
+    /// hands back segments with NO words — exactly what WhisperKit does when the
+    /// decoder declares no alignment output — and the answer must explain that
+    /// rather than look like silence.
+    @Test("An incapable model: reported false, teaching message carried verbatim, segments intact")
+    func incapableModelTeaches() throws {
+        let model = descriptor("openai_whisper-base", supportsWordTimestamps: false)
+        let wordless = fakeResult(segments: [
+            fakeSegment(text: " Hello there.", start: 0, end: 2, words: nil)
+        ])
+        let mapped = WhisperTranscriber.makeTranscription(
+            results: [wordless],
+            descriptor: model,
+            rangeStartSeconds: 0,
+            anchorBeat: 4,
+            tempoMap: TempoMap(constantBPM: 120))
+
+        #expect(!mapped.supportsWordTimestamps)
+        let message = try #require(mapped.wordTimestampsUnavailable)
+        // One home for the wording: the descriptor's, not a second copy here.
+        #expect(message == model.wordTimestampsUnavailableExplanation)
+        #expect(message.contains("openai_whisper-base"))
+        #expect(message.contains(model.modelFolder.path))
+
+        // The transcript is still real: text and SEGMENT beats survive, which is
+        // why this reports instead of throwing.
+        #expect(mapped.words.isEmpty)
+        #expect(mapped.segments.count == 1)
+        #expect(mapped.text == "Hello there.")
+        #expect(abs(mapped.segments[0].startBeat - 4.0) < tolerance)
+        #expect(abs(mapped.segments[0].endBeat - 8.0) < tolerance)
+    }
+
+    /// The flag is a property of the MODEL, never of the audio. An instrumental
+    /// clip transcribed by a fully capable model has no words either — if the
+    /// value were derived from `words.isEmpty` it would blame the weights for
+    /// the recording, and this leg would go red.
+    @Test("A capable model with no recognised words still reports true, with no message")
+    func emptyWordsFromACapableModelIsNotAWarning() {
+        let model = descriptor("openai_whisper-large-v3-v20240930_turbo", supportsWordTimestamps: true)
+        let mapped = WhisperTranscriber.makeTranscription(
+            results: [],
+            descriptor: model,
+            rangeStartSeconds: 0,
+            anchorBeat: 0,
+            tempoMap: TempoMap(constantBPM: 120))
+
+        #expect(mapped.words.isEmpty)
+        #expect(mapped.supportsWordTimestamps)
+        #expect(mapped.wordTimestampsUnavailable == nil)
+    }
+
+    /// The wire shape: both fields ENCODE, since `clip.transcribe` returns this
+    /// value verbatim and a field the router cannot serialize is not reported.
+    @Test("Both fields reach the encoded payload clip.transcribe returns")
+    func fieldsAreOnTheWire() throws {
+        let model = descriptor("openai_whisper-base", supportsWordTimestamps: false)
+        let mapped = WhisperTranscriber.makeTranscription(
+            results: [oneWordResult()],
+            descriptor: model,
+            rangeStartSeconds: 0,
+            anchorBeat: 0,
+            tempoMap: TempoMap(constantBPM: 120))
+
+        let data = try JSONEncoder().encode(mapped)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["supportsWordTimestamps"] as? Bool == false)
+        #expect((object["wordTimestampsUnavailable"] as? String)?
+            .contains("openai_whisper-base") == true)
+        // Additive: the fields m23-n2b's callers already read are untouched.
+        #expect(object["modelVariantDirectoryName"] as? String == "openai_whisper-base")
+        #expect(object["segments"] is [Any])
+        #expect(object["text"] is String)
+    }
+}
+
+// MARK: - m23-ef: UNKNOWN travels as its own state, and its caution is gated
+
+/// m23-n3f collapsed "the model said yes" and "the model was never asked" into
+/// one `true`. m23-ef keeps them apart, and this suite pins BOTH halves of that:
+///
+///   1. the three-state value survives the production seam and the wire, and
+///   2. **`supportsWordTimestamps` still reads `true` for `.unknown`** — the
+///      item forbids flipping that default, so every `.unknown` leg asserts it.
+///      A policy change then has to walk past a test that NAMES the policy.
+///
+/// Driven through `WhisperTranscriber.makeTranscription(results:descriptor:…)`,
+/// not through `TranscriptionBeatMapper.map` directly. That is deliberate: `map`
+/// takes the state, the `.unsupported` wording and the `.unknown` wording as
+/// three independent parameters that a mis-wired caller could make disagree, and
+/// only the seam proves the descriptor is where all three actually come from.
+@Suite("Transcription — unknown is its own state, and cautions only when it matters (m23-ef)")
+struct TranscriptionUnknownCapabilityTests {
+
+    /// A descriptor as a VALUE, built through the THREE-state initializer. The
+    /// path need only be recognizable inside the wordings.
+    private func descriptor(
+        _ variant: String,
+        _ support: WordTimestampSupport
+    ) -> WhisperModelDescriptor {
+        let base = URL(fileURLWithPath: "/private/tmp/m23ef-\(UUID().uuidString)")
+        return WhisperModelDescriptor(
+            variantDirectoryName: variant,
+            displayName: variant,
+            modelFolder: base.appendingPathComponent(variant),
+            tokenizerFolder: base.appendingPathComponent("tokenizer"),
+            modelSizeBytes: 1024,
+            tokenizerSizeBytes: 128,
+            hasContextPrefill: false,
+            wordTimestampSupport: support)
+    }
+
+    /// One segment the recogniser heard, with NO word alignment — exactly what
+    /// WhisperKit returns when the decoder has no alignment output.
+    private func wordlessResults() -> [TranscriptionResult] {
+        [fakeResult(segments: [fakeSegment(text: " Hello there.", start: 0, end: 2, words: nil)])]
+    }
+
+    /// The same audio, heard WITH word alignment.
+    private func wordedResults() -> [TranscriptionResult] {
+        [fakeResult(segments: [
+            fakeSegment(text: " Hello there.", start: 0, end: 2, words: [
+                FakeWord(text: " Hello", start: 0, end: 1),
+                FakeWord(text: " there.", start: 1, end: 2),
+            ])
+        ])]
+    }
+
+    private func mapped(
+        _ support: WordTimestampSupport,
+        _ results: [TranscriptionResult],
+        variant: String = "openai_whisper-base"
+    ) -> (Transcription, WhisperModelDescriptor) {
+        let model = descriptor(variant, support)
+        return (
+            WhisperTranscriber.makeTranscription(
+                results: results,
+                descriptor: model,
+                rangeStartSeconds: 0,
+                anchorBeat: 0,
+                tempoMap: TempoMap(constantBPM: 120)),
+            model
+        )
+    }
+
+    @Test("The state reaches the answer unflattened, and unknown still reads capable")
+    func stateSurvivesTheSeam() {
+        let (supported, _) = mapped(.supported, wordedResults())
+        #expect(supported.wordTimestampSupport == .supported)
+        #expect(supported.supportsWordTimestamps)
+
+        let (unsupported, _) = mapped(.unsupported, wordlessResults())
+        #expect(unsupported.wordTimestampSupport == .unsupported)
+        #expect(!unsupported.supportsWordTimestamps)
+
+        let (unknown, _) = mapped(.unknown, wordlessResults())
+        #expect(unknown.wordTimestampSupport == .unknown)
+        // ⚠️ THE FORBIDDEN FLIP. m23-ef must not turn unknown into a warning.
+        #expect(unknown.supportsWordTimestamps)
+        // ...and never into the `.unsupported` VERDICT either.
+        #expect(unknown.wordTimestampsUnavailable == nil)
+    }
+
+    /// THE case m23-ef exists for: nothing on disk could be asked, and the run
+    /// came back with something heard but not one word. The wording is the
+    /// descriptor's, verbatim — one home, and the seam is what proves it.
+    @Test("Unknown + heard something + no words: the caution fires, in the descriptor's words")
+    func unknownAndWordlessCautions() throws {
+        let (transcription, model) = mapped(.unknown, wordlessResults())
+
+        let caution = try #require(transcription.wordTimestampsUnverified)
+        #expect(caution == model.wordTimestampsUnverifiedExplanation)
+        #expect(caution.contains("openai_whisper-base"))
+        #expect(caution.contains(model.modelFolder.path))
+        // The transcript is still real — this reports, it does not refuse.
+        #expect(transcription.segments.count == 1)
+        #expect(transcription.text == "Hello there.")
+    }
+
+    /// The alarm-fatigue guard, and the reason the caution is computed rather
+    /// than carried: an `.mlpackage` variant that DID produce words has nothing
+    /// to apologise for, and a caveat on every one of them is what m23-n3f
+    /// refused.
+    @Test("Unknown but words came back: silent")
+    func unknownWithWordsIsSilent() {
+        let (transcription, _) = mapped(.unknown, wordedResults())
+
+        #expect(transcription.words.count == 2)
+        #expect(transcription.wordTimestampsUnverified == nil)
+        #expect(transcription.wordTimestampSupport == .unknown)
+        #expect(transcription.supportsWordTimestamps)
+    }
+
+    /// ⚠️ THE THREE-CONDITION CONTRACT, and the leg most likely to surprise:
+    /// `!segments.isEmpty` is load-bearing. A run that heard NOTHING — silence,
+    /// an instrumental, an empty range — is wordless vacuously, and firing there
+    /// would put the caution where it has least to do with word timings. So
+    /// "unknown + zero words" alone does NOT caution; "unknown + heard something
+    /// + zero words" does.
+    @Test("Unknown but the recogniser returned nothing at all: silent")
+    func unknownWithNoSegmentsIsSilent() {
+        let (transcription, _) = mapped(.unknown, [])
+
+        #expect(transcription.segments.isEmpty)
+        #expect(transcription.words.isEmpty)
+        #expect(transcription.wordTimestampsUnverified == nil)
+    }
+
+    /// The two states that are NOT unknown never carry the caution, whatever the
+    /// audio did — including the wordless shape that triggers it for `.unknown`.
+    /// This is what keeps the caution a statement about the MODEL's silence and
+    /// not about the run's.
+    @Test("A model that DID answer never cautions, wordless run or not")
+    func answeredModelsNeverCaution() throws {
+        let (supported, _) = mapped(.supported, wordlessResults())
+        #expect(supported.wordTimestampsUnverified == nil)
+        #expect(supported.wordTimestampsUnavailable == nil)
+
+        let (unsupported, unsupportedModel) = mapped(.unsupported, wordlessResults())
+        #expect(unsupported.wordTimestampsUnverified == nil)
+        // It gets the VERDICT wording instead — the two are never both present.
+        #expect(try #require(unsupported.wordTimestampsUnavailable)
+            == unsupportedModel.wordTimestampsUnavailableExplanation)
+    }
+
+    /// The capability is read off the MODEL and the caution is gated on the RUN,
+    /// and m23-n3f's core law is that the first must never be derived from the
+    /// second. Same audio, three descriptors: the reported capability changes
+    /// with the descriptor and never with the words.
+    @Test("Same wordless audio, three models: capability tracks the model, never the emptiness")
+    func capabilityIsModelDerivedNotContentDerived() {
+        let audio = wordlessResults()
+        #expect(mapped(.supported, audio).0.wordTimestampSupport == .supported)
+        #expect(mapped(.unsupported, audio).0.wordTimestampSupport == .unsupported)
+        #expect(mapped(.unknown, audio).0.wordTimestampSupport == .unknown)
+    }
+}
+
+// MARK: - m23-ef: the transcription's encoded shape, key by key
+
+/// `Transcription` is hand-`Encodable` since m23-ef, because
+/// `supportsWordTimestamps` became computed and synthesis encodes STORED
+/// properties only — which would have silently DELETED a live field from
+/// `clip.transcribe`'s response, the one thing the additive-only rule forbids.
+///
+/// **Asserting the exact key SET, not just presence, is the point** — and
+/// `TranscriptionBeats.swift`'s own doc comment names this suite as that guard.
+/// Hand-writing `encode(to:)` trades one silent-rot vector for another: the next
+/// stored property added to `Transcription` would simply not appear on the wire
+/// and nothing would notice. A set comparison notices.
+@Suite("Transcription — encoded wire shape (m23-ef)")
+struct TranscriptionEncodingTests {
+
+    /// Every key that is present unconditionally, in every state.
+    private static let alwaysPresent: Set<String> = [
+        "text",
+        "language",
+        "segments",
+        "modelVariantDirectoryName",
+        "rangeStartSeconds",
+        "anchorBeat",
+        "supportsWordTimestamps",
+        "wordTimestampSupport",
+    ]
+
+    private func encoded(
+        _ support: WordTimestampSupport,
+        words: Bool,
+        heardAnything: Bool = true
+    ) throws -> [String: Any] {
+        let base = URL(fileURLWithPath: "/private/tmp/m23ef-\(UUID().uuidString)")
+        let model = WhisperModelDescriptor(
+            variantDirectoryName: "openai_whisper-base",
+            displayName: "base",
+            modelFolder: base.appendingPathComponent("openai_whisper-base"),
+            tokenizerFolder: base.appendingPathComponent("tokenizer"),
+            modelSizeBytes: 1024,
+            tokenizerSizeBytes: 128,
+            hasContextPrefill: false,
+            wordTimestampSupport: support)
+        let segments: [TranscriptionResult] = heardAnything
+            ? [fakeResult(segments: [
+                fakeSegment(
+                    text: " Hello there.", start: 0, end: 2,
+                    words: words ? [FakeWord(text: " Hello", start: 0, end: 2)] : nil)
+            ])]
+            : []
+        let transcription = WhisperTranscriber.makeTranscription(
+            results: segments,
+            descriptor: model,
+            rangeStartSeconds: 0,
+            anchorBeat: 0,
+            tempoMap: TempoMap(constantBPM: 120))
+        let data = try JSONEncoder().encode(transcription)
+        return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    @Test("A model that said yes: the m23-n2b keys plus the state, and neither message")
+    func supportedEncodesNoMessages() throws {
+        let object = try encoded(.supported, words: true)
+        #expect(Set(object.keys) == Self.alwaysPresent)
+        #expect(object["wordTimestampSupport"] as? String == "supported")
+        #expect(object["supportsWordTimestamps"] as? Bool == true)
+    }
+
+    @Test("A model that said no: the verdict key appears, the caution key does not")
+    func unsupportedEncodesTheVerdictOnly() throws {
+        let object = try encoded(.unsupported, words: false)
+        #expect(Set(object.keys) == Self.alwaysPresent.union(["wordTimestampsUnavailable"]))
+        #expect(object["wordTimestampSupport"] as? String == "unsupported")
+        #expect(object["supportsWordTimestamps"] as? Bool == false)
+    }
+
+    /// The additive field the item asks for, on the wire, in the shape that
+    /// motivated it — and with the live `Bool` still reading `true` beside it.
+    @Test("A model that never answered, on a wordless run: the caution key appears")
+    func unknownWordlessEncodesTheCaution() throws {
+        let object = try encoded(.unknown, words: false)
+        #expect(Set(object.keys) == Self.alwaysPresent.union(["wordTimestampsUnverified"]))
+        #expect(object["wordTimestampSupport"] as? String == "unknown")
+        // ⚠️ THE FORBIDDEN FLIP, asserted where a wire consumer would see it.
+        #expect(object["supportsWordTimestamps"] as? Bool == true)
+        #expect((object["wordTimestampsUnverified"] as? String)?
+            .contains("did not say") == true)
+        // Never the verdict wording — that would be an accusation nobody made.
+        #expect(object["wordTimestampsUnavailable"] == nil)
+    }
+
+    /// The gate, seen from the wire: a nil message OMITS its key rather than
+    /// writing `null`, which is what the `?` in the documented response shape
+    /// means and what MCP callers already read.
+    @Test("Unknown with words, and unknown with nothing heard: the caution key is ABSENT")
+    func unknownOmitsTheCautionWhenItDoesNotApply() throws {
+        #expect(Set(try encoded(.unknown, words: true).keys) == Self.alwaysPresent)
+        #expect(Set(try encoded(.unknown, words: false, heardAnything: false).keys)
+            == Self.alwaysPresent)
+    }
+}
+
 // MARK: - Requests that never reach the model
 
 @Suite("Whisper transcriber — request and model errors (m23-n2a)")

@@ -90,10 +90,18 @@ public struct SidecarLaunchPlan: Sendable, Equatable {
 public enum SidecarError: Error, LocalizedError, Equatable {
     case notInstalled(String)
     case launchFailed(String)
+    /// `stop()` could not stop a sidecar that is demonstrably still answering
+    /// its health probe (m23-bb). Deliberately an ERROR rather than a
+    /// success-shaped `SidecarStatus`: a stop that did not stop is a failure,
+    /// and reporting it as ok-with-a-state is exactly the "success-shaped
+    /// response to a request that did not happen" defect family m23-ah closed
+    /// elsewhere. The message always names what is still up, why nothing was
+    /// signalled, and what the user can run themselves.
+    case stopFailed(String)
 
     public var errorDescription: String? {
         switch self {
-        case .notInstalled(let message), .launchFailed(let message):
+        case .notInstalled(let message), .launchFailed(let message), .stopFailed(let message):
             return message
         }
     }

@@ -27,7 +27,9 @@ struct SpeechModelInstallCommandTests {
             tokenizerFolder: base.appendingPathComponent(variant).appendingPathComponent("tokenizer"),
             modelSizeBytes: 1024,
             tokenizerSizeBytes: 128,
-            hasContextPrefill: false)
+            hasContextPrefill: false,
+            // m23-n3f: stated, not defaulted (see the AIServices twin).
+            supportsWordTimestamps: true)
     }
 
     /// A gated fake install function — same shape as

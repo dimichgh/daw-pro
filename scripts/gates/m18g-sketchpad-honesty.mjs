@@ -103,6 +103,21 @@ function rowDisplayText(row) {
   }
 }
 
+// m23-bg: PRINT-ONLY — no pin. This gate has no frame pin today and no
+// baseline to detect a pin-induced regression against, so the fix is limited
+// to making the inherited geometry visible in the log. A bare
+// `debug.windowFrame` never mutates (DAWProApp.swift:3617 only writes when
+// width/height are present). Polls briefly since `connect()` can return
+// before the window itself exists.
+{
+  let wf = null;
+  for (let i = 0; i < 20 && !(wf && typeof wf.width === "number"); i++) {
+    wf = (await cmd("debug.windowFrame", {})).result;
+    if (!(wf && typeof wf.width === "number")) await sleep(250);
+  }
+  console.log(`${GATE} m23-bg inherited (NOT pinned): ${JSON.stringify(wf)}`);
+}
+
 // -- Arrange the stage -------------------------------------------------------
 let r = await cmd("project.new", { discardChanges: true });
 check("project.new", r.ok, JSON.stringify(r.error ?? ""));

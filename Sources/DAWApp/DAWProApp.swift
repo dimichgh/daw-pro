@@ -239,7 +239,37 @@ final class AppModel {
     /// a marker id, the timeline opens that flag's rename field. Driven ONLY by the
     /// `debug.markerRename` capture command (the live UI uses double-click / the
     /// context menu); nil at rest. Not persisted — a capture-only view override.
+    ///
+    /// ⚠️ NILLING THIS DISCARDS THE DRAFT — the field is unmounted before SwiftUI
+    /// would deliver the focus-loss `.onChange`, so neither resolution handler
+    /// runs. MEASURED live 2026-08-05 (`DAWAppKit.MarkerRenameStaging` carries the
+    /// experiment and the trap in the obvious alternative one). That is fine for
+    /// what it is used for — resigning the field editor — and it is why
+    /// `markerRenameStage` exists for everything else.
     var stagedMarkerRenameID: UUID?
+
+    /// The staged rename RESOLUTION `debug.markerRename {commit|cancel}` injects
+    /// (m23-ba-1; nil in normal use) — ContentView threads it into the timeline,
+    /// whose marker flag runs it through the SAME `commit()` / cancel handlers
+    /// Return, a click away, and Escape run. Real keystrokes are not injectable on
+    /// the unbundled staging binary (the m17-b Accessibility measurement).
+    var markerRenameStage: MarkerRenameStage?
+    /// The marker whose rename field the TIMELINE reports it is rendering — never
+    /// the seam's own input (the `arrangeHScrollReported` honesty rule). This is
+    /// what lets the seam refuse `commit`/`cancel` with nothing open instead of
+    /// answering `ok` for a request that did nothing.
+    var markerRenameFieldID: UUID?
+    /// What the last rename resolution ACTUALLY did, as the flag that ran it
+    /// reported. Real double-click renames fill this too.
+    var markerRenameOutcome: MarkerRenameOutcome?
+    /// Bumped every time the timeline reports rename state back UP (field opened
+    /// or closed, or a resolution ran). Not state anyone renders — it is the
+    /// seam's proof that a staged action has been THROUGH the view, which
+    /// `markerRenameDebug` waits on before it answers (the m23-e echo-seam law:
+    /// an echo that reports state the caller just changed must wait for the view
+    /// to confirm it applied, or it returns the PREVIOUS call's state and can
+    /// stale-green a gate).
+    var markerRenameReportSeq = 0
 
     /// The Undo-history panel's headless model (m11-b): projects the store's
     /// labeled undo/redo stacks into a clickable step plan and jumps to any point
@@ -3370,7 +3400,7 @@ final class AppModel {
             case "debug.undoHistory":
                 return self.undoHistoryDebug(params)
             case "debug.markerRename":
-                return self.markerRenameDebug(params)
+                return try self.markerRenameDebug(params)
             case "ui.showCopilot":
                 return self.showCopilotCommand(params)
             case "debug.copilotSeed":
@@ -3414,19 +3444,122 @@ final class AppModel {
         return .object(["mode": .string(workspaceMode.rawValue)])
     }
 
-    /// `debug.panelDensity {panel, mode}` — stages a panel's Simple/Pro density so
-    /// a headless capture / E2E can drive a panel into Pro before `debug.captureUI`
-    /// (the `debug.sketchpadDemo` seed-then-capture precedent). Writes straight to
-    /// the shared `panelDensity` store, so the panel's live `SimpleProToggle`
-    /// reflects it. Debug tier ONLY — off `allCommands`/MCP (density is UI chrome;
-    /// agents drive the protocol directly, not the chrome). Params: `panel`
-    /// (required, e.g. `"pianoRoll"`), `mode` (`"simple"` | `"pro"`). Unknown mode
-    /// → error; happy path returns the resulting `{panel, mode}`.
+    /// `debug.panelDensity` — reads or stages a panel's Simple/Pro density so a
+    /// headless capture / E2E can drive a panel into Pro before `debug.captureUI`
+    /// (the `debug.sketchpadDemo` seed-then-capture precedent) AND put the prior
+    /// value back afterwards. Writes straight to the shared `panelDensity` store,
+    /// so the panel's live `SimpleProToggle` reflects it. Debug tier ONLY — off
+    /// `allCommands`/MCP (density is UI chrome; agents drive the protocol
+    /// directly, not the chrome).
+    ///
+    /// FOUR FORMS (m23-du(a) added the two read ones, m23-ej-1 the clear; the
+    /// write form is byte-for-byte unchanged, existing callers keep working):
+    ///
+    /// 1. `{panel, mode}` → WRITE. `mode` is `"simple"` | `"pro"`; unknown mode
+    ///    errors. Returns `{panel, mode}`.
+    /// 2. `{panel}` with NO `mode` → READ-ONLY, one panel. Returns
+    ///    `{panel, mode, stored}`.
+    /// 3. Bare call (no `panel`, no `mode`, no `clear`) → READ-ONLY, every panel
+    ///    that carries an explicitly persisted value: `{panels: {mixer: "pro",
+    ///    …}}`. Enumerated from the defaults domain itself, never a hardcoded
+    ///    panel list. A panel nobody has set is ABSENT.
+    /// 4. `{panel, clear: true}` → CLEAR. Removes the persisted value AND the
+    ///    store's in-session cache entry, returning the panel to GENUINELY
+    ///    UNSET. Returns the POST-CLEAR read (form 2's shape), so
+    ///    `stored` is null and `mode` is `"simple"` — a caller can assert the
+    ///    clear took without a second round trip. Clearing a panel that was
+    ///    never set is a NO-OP returning the same shape, not an error: a restore
+    ///    should not have to know whether it has anything to undo.
+    ///
+    /// The bare-call-is-read-only law is m11-a's, already carried by
+    /// `debug.pianoRollBarOps` and `debug.panelLayout`.
+    ///
+    /// PARAM COMPOSITION, decided here and worth stating because two of the
+    /// three choices could plausibly have gone the other way:
+    /// - `{panel, mode, clear: true}` → ERRORS as a contradictory request
+    ///   ("write this value" + "have no value"), rather than silently preferring
+    ///   one. It errors BEFORE `mode` is parsed, so `{panel, mode: 5,
+    ///   clear: true}` reports the contradiction and not the mode.
+    /// - `{panel, mode, clear: false}` → the plain WRITE. `clear: false` is a
+    ///   caller explicitly declining to clear, which contradicts nothing; a
+    ///   restore helper that always sends `clear: prior == nil` composes.
+    /// - `{panel, clear: false}` → the plain READ (form 2), same reasoning.
+    /// - `clear` must be a BOOLEAN. `{panel, clear: 5}` errors rather than
+    ///   coercing to false and degrading into a read — the same law `mode` got
+    ///   at m23-du(a), where the read/write switch turns on key PRESENCE so a
+    ///   malformed value can never quietly become a different verb.
+    /// - `{clear: true}` with NO panel errors. The bare-call read-all is
+    ///   literally BARE: any addressing/mutation key present without a panel is
+    ///   a malformed request, never a silent whole-domain read (and never a
+    ///   whole-domain wipe, which this command deliberately cannot do).
+    ///
+    /// ⚠️ `mode` vs `stored` — the distinction this command exists for, and the
+    /// reason a naive read was worse than no read. `mode` is the EFFECTIVE
+    /// density, what the UI is showing, `.simple` fallback included. `stored` is
+    /// the EXPLICITLY PERSISTED value, or **null** when the panel has never been
+    /// set. `PanelDensityStore.density(forPanel:)` returns `.simple` for both
+    /// "never set" and "explicitly simple", so a gate that reads the effective
+    /// mode and writes it back CONVERTS AN UNSET KEY INTO AN EXPLICIT ONE —
+    /// silently changing what a fresh machine looks like, which is the exact
+    /// defect class m23-du exists to fix. Restore from `stored`, not `mode`.
+    ///
+    /// ⚠️ RESTORING NULL — what form 4 exists for (m23-ej-1 closed this hole).
+    /// The write form only ever writes an explicit value, so before the clear
+    /// verb a caller whose prior was null had to choose between leaving its own
+    /// value behind and writing `simple` explicitly — and the second is the very
+    /// conversion the paragraph above forbids. Now: restore a NON-NULL `stored`
+    /// with `{panel, mode: stored}`, and restore a NULL one with
+    /// `{panel, clear: true}`. Both are idempotent, so a restore helper can run
+    /// on the throw path as well as the happy path.
     private func setPanelDensity(_ params: [String: JSONValue]) throws -> JSONValue {
-        guard let panel = params["panel"]?.stringValue, !panel.isEmpty else {
+        guard let panelValue = params["panel"] else {
+            // Form 3 — the bare call. NO addressing or mutation param present,
+            // so there is nothing to write, nothing to clear and nothing to
+            // refuse: report the whole set. Both mutation keys are tested by
+            // PRESENCE here (not truthiness) so the read-all stays literally
+            // bare — `{mode: …}` alone errors exactly as it always did, and
+            // `{clear: …}` alone joins it rather than wiping the domain.
+            if params["mode"] == nil, params["clear"] == nil {
+                return panelDensityStateResponse()
+            }
             throw DebugError("debug.panelDensity requires a panel")
         }
-        guard let modeRaw = params["mode"]?.stringValue else {
+        guard let panel = panelValue.stringValue, !panel.isEmpty else {
+            throw DebugError("debug.panelDensity requires a panel")
+        }
+        // `clear` is a TYPED param, parsed before it is believed: a non-boolean
+        // must error, never coerce to false and let the request degrade into a
+        // different verb (the m23-du(a) law that keeps `{panel, mode: 5}` an
+        // error instead of a read).
+        var clearRequested = false
+        if let clearValue = params["clear"] {
+            guard let flag = clearValue.boolValue else {
+                throw DebugError("debug.panelDensity clear must be true or false")
+            }
+            clearRequested = flag
+        }
+        if clearRequested {
+            // Contradiction check FIRST, so `{panel, mode: 5, clear: true}`
+            // reports the contradiction rather than the mode.
+            guard params["mode"] == nil else {
+                throw DebugError(
+                    "debug.panelDensity cannot take mode and clear:true together"
+                        + " — write a value or clear it, not both")
+            }
+            // Form 4. A never-set panel makes this a no-op; the response is the
+            // post-clear read either way, so a caller asserts `stored == null`
+            // and never has to distinguish "cleared" from "was already clear".
+            panelDensity.clearDensity(forPanel: panel)
+            return panelDensityReadResponse(panel: panel)
+        }
+        // Read-vs-write turns on the PRESENCE of the `mode` key, not on whether
+        // it parses: `{panel, mode: 5}` must stay the error it has always been
+        // rather than silently degrading into a read.
+        guard let modeValue = params["mode"] else {
+            // Form 2 — one panel, read-only.
+            return panelDensityReadResponse(panel: panel)
+        }
+        guard let modeRaw = modeValue.stringValue else {
             throw DebugError("debug.panelDensity requires a mode (\"simple\" or \"pro\")")
         }
         guard let density = PanelDensity(rawValue: modeRaw) else {
@@ -3436,6 +3569,35 @@ final class AppModel {
         return .object([
             "panel": .string(panel),
             "mode": .string(density.rawValue),
+        ])
+    }
+
+    /// One panel's `debug.panelDensity` payload: the EFFECTIVE `mode` plus the
+    /// EXPLICITLY persisted `stored` (null when the panel was never set — see
+    /// the handler's doc for why the pair, not just `mode`).
+    ///
+    /// Shared by form 2 (the read) and form 4 (the clear) ON PURPOSE: "the clear
+    /// returns the post-clear read" is then a structural fact rather than two
+    /// literals that drift apart. Never mutates — both store reads are
+    /// documented pure.
+    private func panelDensityReadResponse(panel: String) -> JSONValue {
+        .object([
+            "panel": .string(panel),
+            "mode": .string(panelDensity.density(forPanel: panel).rawValue),
+            "stored": panelDensity.storedDensity(forPanel: panel)
+                .map { JSONValue.string($0.rawValue) } ?? .null,
+        ])
+    }
+
+    /// The bare `debug.panelDensity` payload: every panel with an EXPLICITLY
+    /// persisted density, keyed by panel ID. Panels nobody set are absent — a
+    /// caller reading `{}` learns "no panel has a stored value", which is a real
+    /// answer, not a hardcoded list rendering as one.
+    private func panelDensityStateResponse() -> JSONValue {
+        .object([
+            "panels": .object(panelDensity.storedDensities().mapValues {
+                JSONValue.string($0.rawValue)
+            }),
         ])
     }
 
@@ -8319,21 +8481,161 @@ final class AppModel {
         }
     }
 
-    /// Staging for the arrange marker-lane inline rename capture (m11-c): opens the
-    /// rename field on `markerId` (or the first marker when omitted), or clears it
-    /// with `{clear:true}`. Capture-only — the live UI reaches rename by double-
-    /// click / context menu. READ-ONLY beyond the view override (never mutates the
-    /// project), the `debug.undoHistory` precedent.
-    private func markerRenameDebug(_ params: [String: JSONValue]) -> JSONValue {
-        workspaceMode = .arrange
-        if params["clear"]?.boolValue == true {
-            stagedMarkerRenameID = nil
-        } else if let raw = params["markerId"]?.stringValue, let id = UUID(uuidString: raw) {
-            stagedMarkerRenameID = id
-        } else {
-            stagedMarkerRenameID = store.markers.first?.id
+    /// Spins the main runloop, BOUNDED, until the timeline has reported the state
+    /// this call was supposed to produce — the `awaitPointerStageApplied`
+    /// contract, same reasons (the m23-e echo-seam law).
+    ///
+    /// ⚠️ A BARE SEQ BUMP IS NOT ENOUGH HERE, and that is a difference from the
+    /// pointer seam worth stating. A resolution produces TWO reports from two
+    /// different places — the outcome (synchronously, inside the flag's handler)
+    /// and the field going away (later, when SwiftUI re-evaluates the body) — so
+    /// "the seq moved" is satisfied by the first of them and the echo would still
+    /// name a field that has since closed. The caller passes the condition it
+    /// actually needs instead.
+    ///
+    /// Bounded twice over: it stops the instant the condition holds, and
+    /// hard-stops at the deadline when no marker-bearing timeline is mounted at
+    /// all (the Mix workspace, a not-yet-created arrange surface), so the main
+    /// actor is never held indefinitely.
+    private func awaitMarkerRename(_ satisfied: () -> Bool) {
+        let deadline = Date().addingTimeInterval(0.50)
+        while !satisfied(), Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
         }
-        return .object(["renamingMarkerId": stagedMarkerRenameID.map { .string($0.uuidString) } ?? .null])
+    }
+
+    /// `debug.markerRename {markerId?|clear?|commit?|cancel?}` — the arrange
+    /// marker-lane inline rename's staging seam (m11-c; modes added m23-ba-1).
+    /// App-level, debug tier ONLY (off `allCommands`/MCP — ZERO wire growth; the
+    /// rename itself is already agent-invokable as `marker.rename`, and what this
+    /// stages is the GESTURE, which no wire verb models).
+    ///
+    ///   - `{}` — open the FIRST marker's rename field. Refused when the project
+    ///     has no markers (answering `renamingMarkerId: null` for a request that
+    ///     opened nothing is the m23-ah success-shaped-failure class).
+    ///   - `{markerId}` — open that marker's field. Refused when unknown.
+    ///   - `{clear:true}` — tear the field down. ⚠️ **DISCARDS the typed draft**:
+    ///     the `TextField` is unmounted before SwiftUI would deliver the
+    ///     focus-loss `.onChange`, so NEITHER resolution handler runs. MEASURED
+    ///     live 2026-08-05 — see `DAWAppKit.MarkerRenameStaging` for the
+    ///     experiment, and for why the obvious alternative experiment (type
+    ///     spaces, then clear) cannot tell the two outcomes apart. A
+    ///     focus-clearer, never a stand-in for a user gesture. Idempotent, so it
+    ///     is legal with nothing open.
+    ///   - `{commit:true}` — the flag's OWN `commit()`, i.e. `onCommitRename` with
+    ///     the field's LIVE draft through `TrackRename.committedName`. That body is
+    ///     what BOTH Return (`.onSubmit`) and CLICK-AWAY (`.onChange(of:
+    ///     fieldFocused)`) reach — ⚠️ clicking away COMMITS, and m17-d's
+    ///     "escape-equivalent" comment was wrong about the app. ⚠️ BUT THE SEAM
+    ///     RUNS THE BODY, NOT THE TRIGGER: it never drives the `fieldFocused`
+    ///     transition, so focus-loss DETECTION is not exercised here (the same
+    ///     limitation in kind as `debug.arrangePointer` never producing an
+    ///     `NSEvent`). This item exists because a seam was mistaken for a
+    ///     gesture; do not let this one be read as more than it is.
+    ///   - `{cancel:true}` — `onCancelRename`, the Escape path. Reverts.
+    ///
+    /// Every refusal is decided in `MarkerRenameStaging.resolve` BEFORE anything
+    /// here is assigned (the m23-ah-6 half-applied-path lesson), and every rule
+    /// lives there rather than in this file because `DAWApp` has no test target.
+    /// This method is plumbing: read params, resolve, stage, wait, echo.
+    private func markerRenameDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        // Mechanical extraction — no decisions. A recognized key whose value has
+        // the wrong JSON type goes to `malformedKeys` rather than reading as
+        // "absent", which is the difference between refusing `{clear:"true"}` and
+        // cheerfully opening the first marker instead.
+        func flag(_ key: String) -> (value: Bool?, malformed: Bool) {
+            guard let raw = params[key] else { return (nil, false) }
+            guard let value = raw.boolValue else { return (nil, true) }
+            return (value, false)
+        }
+        let clear = flag("clear"), commit = flag("commit"), cancel = flag("cancel")
+        var malformed: Set<String> = []
+        if clear.malformed { malformed.insert("clear") }
+        if commit.malformed { malformed.insert("commit") }
+        if cancel.malformed { malformed.insert("cancel") }
+        var markerID: String?
+        if let raw = params["markerId"] {
+            if let text = raw.stringValue { markerID = text } else { malformed.insert("markerId") }
+        }
+        let resolvedUUID = markerID.flatMap { UUID(uuidString: $0) }
+        let request = MarkerRenameStaging.Request(
+            keys: Set(params.keys),
+            markerID: markerID,
+            clear: clear.value, commit: commit.value, cancel: cancel.value,
+            malformedKeys: malformed,
+            markerIDIsKnown: markerID == nil
+                ? nil
+                : (resolvedUUID.map { id in store.markers.contains { $0.id == id } } ?? false),
+            markerCount: store.markers.count,
+            // Ground truth from the VIEW, not from `stagedMarkerRenameID`: a
+            // rename opened by a real double-click is just as open, and a staged
+            // id whose marker has since been deleted is not.
+            fieldOpenMarkerID: markerRenameFieldID?.uuidString)
+
+        let action: MarkerRenameStaging.Action
+        do { action = try MarkerRenameStaging.resolve(request) }
+        catch let refusal as MarkerRenameStaging.Refusal { throw DebugError(refusal.message) }
+
+        // ── Nothing above this line mutated anything. ──────────────────────
+        workspaceMode = .arrange
+        // Drop the previous outcome for EVERY action, so the echo can only ever
+        // describe THIS call (the `arrangeCreatedClipID` convention). Never
+        // optimistically filled: the value can arrive solely from the view.
+        //
+        // ⚠️ MEASURED, NOT ANTICIPATED. The first cut nilled this only on the two
+        // resolution paths, and the gate's clear leg then reported the PREVIOUS
+        // call's `{action:"cancel", draft:"Padded"}` — a `clear` answering with a
+        // cancel it never ran, which is the exact "the seam claims a handler ran"
+        // failure this whole item exists to prevent. `resolution: null` is the
+        // honest answer for `open` and `clear`, and it is load-bearing: it is how
+        // a caller tells "no handler ran" from "a handler ran and the rule
+        // dropped the draft" (both leave the marker's name alone).
+        markerRenameOutcome = nil
+        switch action {
+        case .clear:
+            stagedMarkerRenameID = nil
+            awaitMarkerRename { self.markerRenameFieldID == nil }
+        case .open(let id):
+            let target = id.flatMap { UUID(uuidString: $0) } ?? store.markers.first?.id
+            stagedMarkerRenameID = target
+            awaitMarkerRename { self.markerRenameFieldID == target }
+        case .commit, .cancel:
+            markerRenameStage = MarkerRenameStage(
+                action: action == .commit ? .commit : .cancel,
+                nonce: (markerRenameStage?.nonce ?? 0) + 1)
+            awaitMarkerRename { self.markerRenameOutcome != nil && self.markerRenameFieldID == nil }
+            // ⚠️ AND ONLY NOW release the staged OPEN override. The view closed
+            // the field itself (its own handler nils `renamingMarkerID`), but
+            // `stagedMarkerRenameID` still names the marker, and
+            // `.onChange(of: stageRenameMarkerID)` fires on CHANGE — so leaving
+            // it set would make a later `{markerId: <same id>}` a silent no-op
+            // that reopens nothing. Releasing it BEFORE the wait would be worse:
+            // the field would unmount on the staged-id change and the commit
+            // would arrive at a flag that is no longer renaming.
+            stagedMarkerRenameID = nil
+        }
+
+        return .object([
+            // The staged override, unchanged since m11-c so existing callers keep
+            // reading what they always read.
+            "renamingMarkerId": stagedMarkerRenameID.map { .string($0.uuidString) } ?? .null,
+            "action": .string(action.wireName),
+            // What the VIEW says is open — the honest instrument. After a commit
+            // or a cancel this is null, which is itself the proof the field went
+            // away through a handler rather than being poked shut.
+            "fieldOpenMarkerId": markerRenameFieldID.map { .string($0.uuidString) } ?? .null,
+            "resolution": markerRenameOutcome.map { outcome in
+                .object([
+                    "action": .string(outcome.action.rawValue),
+                    "markerId": .string(outcome.markerID.uuidString),
+                    "draft": .string(outcome.draft),
+                    // nil = the commit rule DROPPED it (empty / unchanged), which
+                    // is a different fact from "commit never ran".
+                    "committedName": outcome.committedName.map { .string($0) } ?? .null,
+                ])
+            } ?? .null,
+            "reportSeq": .number(Double(markerRenameReportSeq)),
+        ])
     }
 
     /// Read-only snapshot of the Undo-history panel so a capture flow can poll — the

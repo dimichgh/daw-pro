@@ -1277,14 +1277,31 @@ struct MasterAutomationSection: View {
 /// control" rule forbids. Stacking costs ≈7 pt over the design's budget and
 /// keeps both the name and the chip's pixel identity.
 ///
-/// **Line 2's width budget (measured, m22-g P3 fix):** chip 65 pt + 6 pt
+/// **Line 2's width budget (re-measured 2026-08-05, m23-dt):** chip 69 pt + 6 pt
 /// spacing + the widest possible readout 43 pt (`-24.0 dB`, 8 glyphs — the
-/// match gain is bounded by `ReferenceSlot.trimRangeDb` = ±24) = 114 pt inside
-/// 132, so `Spacer(minLength: 0)` absorbs ≈18 pt. Both the chip and the readout
+/// match gain is bounded by `ReferenceSlot.trimRangeDb` = ±24) = 118 pt inside
+/// 132, so `Spacer(minLength: 0)` absorbs ≈14 pt. Both the chip and the readout
 /// therefore PIN their widths (`fixedSize`) instead of competing: HStack's
-/// proposal split, not a real overflow, was collapsing the chip to `M… | R…`
+/// proposal split, not a real overflow, WAS collapsing the chip to `M… | R…`
 /// whenever the readout grew a glyph. Line 1's tail-truncating NAME stays the
 /// row's one honest place to lose characters.
+///
+/// ⚠️ **The chip figure was 65 pt here until m23-dt measured it at 69** — off
+/// `debug.explainFrames` (`referenceABToggle` = 69×18 pt at x 1230, row 132×32
+/// at y 826), which is 4 pt of budget this paragraph had been quietly spending
+/// twice. Re-derive from the seam, never from this prose.
+///
+/// ⚠️ **BOTH PINS ARE PRECAUTIONARY AND UNEXERCISED AT THESE WIDTHS** (m23-dt).
+/// With ≈14 pt of slack the `Spacer` absorbs the residual, so removing EITHER
+/// `.fixedSize` alone moves ZERO pixels — the squeeze described above is HISTORY
+/// (the m22-g P3 regression), not a constraint currently biting. They are kept
+/// deliberately: a `minimumScaleFactor` would hide a real future overflow, and
+/// the pins keep one VISIBLE. The pin that becomes load-bearing first is the
+/// chip's own, in `ReferenceABToggle` — measured at m23-be by widening the `dB`
+/// unit past the slack, at which point dropping it fans the chip out to one
+/// width per glyph. `m22g-reference-panel.mjs` leg **E2c** is what notices if a
+/// future edit grows the readout past the row's slack; it is green today
+/// (50 PASS / 0 FAIL, chip byte-identical `455e08d59005` at all five gains).
 ///
 /// Poll cadence: 5 Hz UNPAUSED `.periodic` (the `MasterLoudnessReadout`
 /// pattern) — the monitor state and match gain both move from the wire, so the
@@ -1350,11 +1367,18 @@ struct MasterReferenceRow: View {
         .lineLimit(1)
         // Pinned, NOT scaled. `ReferenceSlot.trimRangeDb` bounds the match gain
         // at ±24 dB, so the widest string this can ever render is 8 glyphs
-        // (`-24.0 dB`) ≈ 43 pt — which fits beside the 65 pt chip inside the
-        // strip's 132 pt of content width with ~18 pt to spare. A
+        // (`-24.0 dB`) ≈ 43 pt — which fits beside the 69 pt chip inside the
+        // strip's 132 pt of content width with ~14 pt to spare. A
         // `minimumScaleFactor` here would turn any future squeeze into a
         // silently-shrunken primary number that no pixel gate would flag;
         // pinning keeps a genuine overflow VISIBLE.
+        //
+        // ⚠️ PRECAUTIONARY, AND CURRENTLY INERT (m23-dt, measured at m23-be with
+        // the row proven rasterized): at these widths the `Spacer(minLength: 0)`
+        // absorbs the residual, so removing this pin alone changes NOTHING on
+        // screen. That is not a reason to delete it — it is the guard that keeps
+        // a future overflow visible instead of silently scaled. A pin is inert
+        // or load-bearing AT A WIDTH, and this one is inert at today's.
         .fixedSize(horizontal: true, vertical: false)
         .help(clamped
               ? "The reference is turned down further than a level match asks for, so it cannot clip."

@@ -40,6 +40,30 @@ const ck = (name, cond, extra) => {
   else { fail++; console.log("FAIL " + name + (extra !== undefined ? " :: " + extra : "")); }
 };
 
+// m23-bg: pin the capture window and CONFIRM it stuck before anything else
+// runs. A pin's own echo is not proof it took — `debug.windowFrame
+// {width:1440,height:640}` returns 640 exactly, then the window drifts to
+// 672 within ~100ms and holds there (WindowFloor is applied to the content
+// area below the titlebar while this command sets a contentRect INCLUDING
+// it, +32 exactly) — {1400,1000} holds perfectly instead. So this settles,
+// then re-reads with a BARE (mutation-free — DAWProApp.swift:3617 only
+// mutates when width/height are present) call and asserts the re-read
+// matches the request. Unpinned, this gate would inherit whatever size the
+// LAST gate run on this machine left in the shared DAWApp autosave domain.
+{
+  let wf = null;
+  for (let i = 0; i < 20 && !(wf && typeof wf.width === "number"); i++) {
+    wf = (await cmd("debug.windowFrame", {})).result;
+    if (!(wf && typeof wf.width === "number")) await sleep(250);
+  }
+  ck(`${GATE} m23-bg window exists pre-pin`, wf && typeof wf.width === "number", JSON.stringify(wf));
+  await cmd("debug.windowFrame", { width: 1400, height: 1000 });
+  await sleep(300);
+  wf = (await cmd("debug.windowFrame", {})).result;
+  console.log(`${GATE} m23-bg pin: requested 1400x1000, confirmed ${wf?.width}x${wf?.height}`);
+  ck(`${GATE} m23-bg pin took (re-read matches request)`, wf?.width === 1400 && wf?.height === 1000, JSON.stringify(wf));
+}
+
 let r = await cmd("project.new");
 ck("project.new ok", r.ok, r.error);
 r = await cmd("track.add", { kind: "instrument", name: "ZoomOrch" });

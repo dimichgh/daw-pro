@@ -1,5 +1,7 @@
 // m23-m3b gate — the track-header "Export MIDI…" surface, through the LIVE app.
-// Staging: DAW_CONTROL_PORT=17695 ONLY (17600 is the user's live app).
+// Staging: the port comes from the harness (`STAGING_PORT` = 17695) and is NOT
+// configurable from the environment — see m23-bi. 17600 is the user's live app;
+// `assertStagingPort` hard-exits on it.
 // Usage: node m23m3b-track-midi-export.mjs <ABSOLUTE outdir>
 //
 // What this can and CANNOT reach, stated up front so nobody reads more into a
@@ -22,7 +24,6 @@
 import fs from "fs";
 import path from "path";
 import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
-const PORT = process.env.PORT || "17695";
 const GATE = "m23m3b-track-midi-export";   // names the pidfile + out dir = the default OUT
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 const log = (s) => fs.writeSync(1, s + "\n");
@@ -90,7 +91,7 @@ function parseSMF(buf) {
 
 buildOrAbort({ label: "building staging binary (m23m3b)…" });
 startStaging({ gate: GATE });
-const ws = await connect({ port: Number(PORT) });
+const ws = await connect();   // port from the harness; no env override (m23-bi)
 try {
   // ---- Fixture: one track of every kind, plus one instrument routed through a
   // bus (the configuration where "exports" and "bounces" disagree).
@@ -189,6 +190,15 @@ try {
 
   // ---- LEG 10: sidebar width does not change the EXPORT item (only the
   // automation one is width-sensitive) — a guard against a copy-pasted rule.
+  // m23-dv-1: `sidebarWidth` is a STICKY pref in the shared `DAWApp` domain, and
+  // this leg used to leave 400 behind on every green run (MEASURED from a seeded
+  // app-defaults baseline: 400 vs a default of 260). Capture the prior BEFORE the
+  // first write — after it, the "prior" is this gate's own value.
+  // ⚠️ THIS FILE'S `cmd` RESOLVES `m.result` DIRECTLY (`:43`), unlike m22g/m23c2
+  // whose helpers resolve the whole envelope. Reading `.result` here yields
+  // undefined — measured: the first version of this restore silently no-opped and
+  // the gate still leaked 400 with a green run.
+  const priorSidebarWidth = (await cmd(ws, "debug.panelLayout", {}))?.sidebarWidth;
   await cmd(ws, "debug.panelLayout", { sidebarWidth: 250 });
   const narrow = await menuOf(lead.id);
   await cmd(ws, "debug.panelLayout", { sidebarWidth: 400 });
@@ -196,6 +206,20 @@ try {
   leg("L10 the export item is width-insensitive; the echo reports the width it used",
       eq(narrow.actions, wide.actions) && narrow.sidebarWidth === 250 && wide.sidebarWidth === 400,
       `${narrow.sidebarWidth} vs ${wide.sidebarWidth}`);
+  // Put it back immediately: nothing after this leg needs the width, and an
+  // inline restore cannot be skipped by the `process.exit` below (which does NOT
+  // unwind the `finally` — the m23-bd law).
+  // ⚠️ NO `if (prior !== undefined)` GUARD. The first version had one, the prior
+  // read was undefined for the reason above, and the guard turned a broken restore
+  // into a SILENT no-op that still exited 0 — the failure mode this whole item is
+  // about. An unreadable prior is a real defect and must be loud, not skipped.
+  if (priorSidebarWidth === undefined) {
+    console.error("  ⚠️ could not read prior sidebarWidth — NOT restoring, and this is a BUG");
+  } else {
+    await cmd(ws, "debug.panelLayout", { sidebarWidth: priorSidebarWidth });
+    const back = (await cmd(ws, "debug.panelLayout", {}))?.sidebarWidth;
+    console.log(`  sidebarWidth restored: ${back} (prior was ${priorSidebarWidth})`);
+  }
 
   // ---- LEG 11: the automation input reaches the model. `ui.showAutomation`
   // opens the row; the echo must SEE it (this track has no take groups, so the

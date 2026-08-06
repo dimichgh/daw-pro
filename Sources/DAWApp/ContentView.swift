@@ -811,6 +811,19 @@ struct ContentView: View {
             onRenameMarker: { markerID, name in _ = try? store.renameMarker(id: markerID, name: name) },
             onRemoveMarker: { markerID in try? store.removeMarker(id: markerID) },
             stageRenameMarkerID: model.stagedMarkerRenameID,
+            // m23-ba-1: the staged rename RESOLUTION flows down (commit = Return /
+            // click away, cancel = Escape); which field is really open, and what a
+            // resolution really did, flow back up so the seam echoes ground truth
+            // instead of its own input.
+            stageRenameAction: model.markerRenameStage,
+            onMarkerRenameFieldChange: { id in
+                model.markerRenameFieldID = id
+                model.markerRenameReportSeq &+= 1
+            },
+            onMarkerRenameResolved: { outcome in
+                model.markerRenameOutcome = outcome
+                model.markerRenameReportSeq &+= 1
+            },
             // Pointer affordances (m17-c): the debug-staged pointer event flows
             // down; the live zone/ghost state flows back up so the seam echoes
             // ground truth; a split refusal flows down to the refused block.

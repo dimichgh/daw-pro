@@ -28,7 +28,26 @@ enum OutputDevices {
     /// device that happens to be the default right now". Those are different
     /// states and a picker that conflates them lies to the user.
     static func enumerate(selectedUID: String? = nil) -> [AudioOutputDevice] {
-        HardwareDevices.enumerate(.output).map {
+        stamp(HardwareDevices.enumerate(.output), selectedUID: selectedUID)
+    }
+
+    /// Maps one hardware-enumeration snapshot into `[AudioOutputDevice]`,
+    /// stamping `isSelected` against `selectedUID`. This is the single home of
+    /// the `isSelected` computation — `enumerate(selectedUID:)` above is its
+    /// only caller — split out so the STAMPING RULE can be exercised against a
+    /// fixed, already-captured `[HardwareDevices.Described]` snapshot instead
+    /// of a fresh hardware walk.
+    ///
+    /// Why this exists: two calls to `enumerate(selectedUID:)` are two
+    /// INDEPENDENT live CoreAudio enumerations, and a device appearing or
+    /// vanishing between them changes array length/order, which broke
+    /// `OutputDeviceTests.selectionStamping`'s positional comparison (m23-bo).
+    /// Comparing `stamp(snapshot, ...)` against `stamp(snapshot, ...)` for the
+    /// SAME in-memory `snapshot` can never differ in length, by construction.
+    static func stamp(
+        _ devices: [HardwareDevices.Described], selectedUID: String?
+    ) -> [AudioOutputDevice] {
+        devices.map {
             AudioOutputDevice(
                 uid: $0.uid,
                 name: $0.name,

@@ -255,18 +255,65 @@ public actor WhisperTranscriber {
         // would be a second copy of its tokenizer rule. Nothing about the
         // timings changes — segment bounds come from timestamp TOKENS, not from
         // the decoded string.
+        //
+        // `wordTimestamps: true` is UNCONDITIONAL and stays that way: asking is
+        // free and correct. What m23-n3f adds is that ASKING IS NOT GETTING —
+        // WhisperKit skips the whole word branch, with no else and no error,
+        // when the compiled decoder declares no `alignment_heads_weights`
+        // output. `makeTranscription` below carries the model's answer to that
+        // question out with the result so an empty word list can say why.
         let options = DecodingOptions(
             language: request.language,
             skipSpecialTokens: true,
             wordTimestamps: true)
         let results = try await Self.runTranscription(kit.box, samples: samples, options: options)
 
-        return TranscriptionBeatMapper.map(
+        return Self.makeTranscription(
             results: results,
+            descriptor: kit.descriptor,
             rangeStartSeconds: start,
             anchorBeat: request.anchorBeat,
-            tempoMap: request.tempoMap,
-            modelVariantDirectoryName: kit.descriptor.variantDirectoryName
+            tempoMap: request.tempoMap
+        )
+    }
+
+    /// Everything between "the recogniser answered" and "the caller has a
+    /// `Transcription`", in one `nonisolated static` place.
+    ///
+    /// **Extracted for testability, and the reason is specific (m23-n3f).** The
+    /// live path can only ever exercise the word-timestamps-SUPPORTED direction:
+    /// a synthesized fixture has no loadable weights, and the one real installed
+    /// variant HAS the capability. Without this seam, "a model that cannot do
+    /// word timings gets its teaching message onto the response" would be an
+    /// unreachable expression that no test on this machine could pin — the
+    /// m23-n3b law (exercise the case that is ABSENT) applied to the wiring, not
+    /// just to the check. With it, the only unpinned step left is the
+    /// `runTranscription` call above.
+    nonisolated static func makeTranscription(
+        results: [TranscriptionResult],
+        descriptor: WhisperModelDescriptor,
+        rangeStartSeconds: Double,
+        anchorBeat: Double,
+        tempoMap: TempoMap
+    ) -> Transcription {
+        TranscriptionBeatMapper.map(
+            results: results,
+            rangeStartSeconds: rangeStartSeconds,
+            anchorBeat: anchorBeat,
+            tempoMap: tempoMap,
+            modelVariantDirectoryName: descriptor.variantDirectoryName,
+            // The MODEL's capability, decided when it was resolved — not
+            // `results`-derived. An instrumental clip has no words either, and
+            // conflating the two would blame the model for the audio.
+            //
+            // m23-ef: the THREE-state value travels now, so "the model said
+            // yes" and "the model was never asked" stop looking identical on
+            // the response. The `.unknown` wording rides along unconditionally;
+            // `Transcription.wordTimestampsUnverified` is what gates it, since
+            // only the mapped segments can say whether it matters here.
+            wordTimestampSupport: descriptor.wordTimestampSupport,
+            wordTimestampsUnavailable: descriptor.wordTimestampsUnavailableExplanation,
+            wordTimestampsUnverifiedExplanation: descriptor.wordTimestampsUnverifiedExplanation
         )
     }
 

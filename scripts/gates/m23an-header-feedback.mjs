@@ -138,6 +138,22 @@ console.log(`staging pid ${staging.pid} on :${PORT}`);
 await sleep(4500);
 
 const { ws, req } = await connect();
+
+// m23-bg: PRINT-ONLY — no pin. This gate has no frame pin today and no
+// baseline to detect a pin-induced regression against, so the fix is limited
+// to making the inherited geometry visible in the log. A bare
+// `debug.windowFrame` never mutates (DAWProApp.swift:3617 only writes when
+// width/height are present). Polls briefly since `connect()` can return
+// before the window itself exists.
+{
+  let wf = null;
+  for (let i = 0; i < 20 && !(wf && typeof wf.width === "number"); i++) {
+    wf = await req("debug.windowFrame", {});
+    if (!(wf && typeof wf.width === "number")) await sleep(250);
+  }
+  console.log(`${GATE} m23-bg inherited (NOT pinned): ${JSON.stringify(wf)}`);
+}
+
 const checks = [];
 const check = (name, ok, detail) => {
   checks.push({ name, ok, detail });

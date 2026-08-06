@@ -1,5 +1,8 @@
-// m23-m3 export-dialog gate — capture + on-disk assertions through the LIVE app.
-// Staging: DAW_CONTROL_PORT=17695 ONLY (17600 is the user's live app).
+// m23-m3 export-dialog gate — capture + on-disk assertions against a running app.
+// Staging: the port comes from the harness (`STAGING_PORT` = 17695) and is NOT
+// configurable from the environment — see m23-bi. 17600 is the user's live app;
+// `assertStagingPort` hard-exits on it, so aiming a gate there is structurally
+// impossible rather than merely discouraged.
 // Usage: node m23m3-export-dialog.mjs <ABSOLUTE outdir>
 // m23-ac-3b-2: staging lifecycle from the ONE home. Was "class 3" — it launched
 // nothing and drove whatever sat on the port, so its greens certified a hand-prepared
@@ -9,8 +12,7 @@
 // no retry — fine when a human had the app up already, a race against our own boot now.
 // The harness retries 40x1 s and refuses port 17600 outright.
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
-const PORT = process.env.PORT || "17695";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
 const GATE = "m23m3-export-dialog";   // names the pidfile + out dir = the default OUT
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 const log = (s) => fs.writeSync(1, s + "\n");
@@ -41,12 +43,36 @@ const check = (name, ok, detail = "") => {
 
 buildOrAbort({ label: "building staging binary (m23m3)…" });
 startStaging({ gate: GATE });
-const ws = await connect({ port: Number(PORT) });
+const ws = await connect();   // port from the harness; no env override (m23-bi)
 const cap = async (name, params = {}) => {
   const r = await cmd(ws, "debug.captureUI", { path: `${OUT}/${name}.png`, ...params });
   log(`  captured ${name} ${r?.width}x${r?.height}`);
   return r;
 };
+
+// m23-bg: pin the capture window and CONFIRM it stuck before anything else
+// runs. A pin's own echo is not proof it took — `debug.windowFrame
+// {width:1440,height:640}` returns 640 exactly, then the window drifts to
+// 672 within ~100ms and holds there (WindowFloor is applied to the content
+// area below the titlebar while this command sets a contentRect INCLUDING
+// it, +32 exactly) — {1400,1000} holds perfectly instead. So this settles,
+// then re-reads with a BARE (mutation-free — DAWProApp.swift:3617 only
+// mutates when width/height are present) call and asserts the re-read
+// matches the request. Unpinned, this gate would inherit whatever size the
+// LAST gate run on this machine left in the shared DAWApp autosave domain.
+{
+  let wf = null;
+  for (let i = 0; i < 20 && !(wf && typeof wf.width === "number"); i++) {
+    wf = await cmd(ws, "debug.windowFrame", {});
+    if (!(wf && typeof wf.width === "number")) await sleep(250);
+  }
+  check(`${GATE} m23-bg window exists pre-pin`, wf && typeof wf.width === "number", JSON.stringify(wf));
+  await cmd(ws, "debug.windowFrame", { width: 1400, height: 1000 });
+  await sleep(300);
+  wf = await cmd(ws, "debug.windowFrame", {});
+  log(`${GATE} m23-bg pin: requested 1400x1000, confirmed ${wf?.width}x${wf?.height}`);
+  check(`${GATE} m23-bg pin took (re-read matches request)`, wf?.width === 1400 && wf?.height === 1000, JSON.stringify(wf));
+}
 
 // --- a session with real content -------------------------------------------
 await cmd(ws, "project.new", { discardChanges: true });

@@ -194,7 +194,22 @@ func points(_ lane: [String: Any]?) -> [(beat: Double, value: Int)] {
 
 // MARK: - Session setup
 
-let port = ProcessInfo.processInfo.environment["DAW_CONTROL_PORT"] ?? "17600"
+// m23-eb: this defaulted to "17600" — the USER'S LIVE APP — while the header
+// four lines up already said "the staging laws want a fresh 176xx instance".
+// A comment documenting the safe behaviour beside code doing the opposite is
+// the m23-bi shape exactly. It is not a theoretical exposure: the very next
+// statement is `project.new {discardChanges: true}`, so `swift
+// scripts/e2e-midi-cc.swift` with NOTHING exported DISCARDED THE USER'S
+// UNSAVED WORK and then armed and recorded over the session. Default is now
+// staging, and 17600 is refused outright even when asked for explicitly —
+// mirroring `assertStagingPort` in scripts/gates/_staging.mjs, which is the
+// ONE home of this rule for the .mjs corpus (a Swift script cannot import it).
+let port = ProcessInfo.processInfo.environment["DAW_CONTROL_PORT"] ?? "17695"
+if port == "17600" {
+    FileHandle.standardError.write(Data(
+        "ABORT: 17600 is the user's LIVE app and is never a target for this script\n".utf8))
+    exit(2)
+}
 print("e2e-midi-cc: control port \(port), virtual source \(sourceName)")
 let client = ControlClient(url: URL(string: "ws://127.0.0.1:\(port)")!)
 client.request("project.new", params: ["discardChanges": true])

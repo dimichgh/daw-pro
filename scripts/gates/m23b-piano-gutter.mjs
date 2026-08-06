@@ -97,6 +97,53 @@ await must("clip.setControllerLane", {
   points: [ { beat: 0, value: 20 }, { beat: 4, value: 100 }, { beat: 8, value: 60 } ],
 });
 
+// ── m23-dv-1: this gate leaked `editorFraction` into the shared DAWApp domain ──
+// MEASURED from a seeded app-defaults baseline: after a full green run the domain
+// held `editorFraction=0.55` against a default of 0.45. ⚠️ The gate never writes
+// 0.55 — it asks for 0.9 (step 2) and 0.62 (step 3), and BOTH are outside
+// `PanelLayoutStore.editorFractionRange` (0.30...0.55) and clamp to the ceiling.
+// So the leaked value cannot be found by grepping the gate for it, and a "restore"
+// that wrote back the REQUESTED value would also be wrong. Read the prior and put
+// THAT back.
+//
+// ⚠️ Read BEFORE the `{reset:true}` below — reset is itself a write, and a prior
+// captured after it is the default, not the user's value.
+const priorLayout = await must("debug.panelLayout", {});
+console.log(`prior panelLayout: editorFraction=${priorLayout.editorFraction} `
+  + `pianoRollPPB=${priorLayout.pianoRollPPB} rowHeight=${priorLayout.rowHeight} `
+  + `sidebarWidth=${priorLayout.sidebarWidth}`);
+
+let layoutRestored = false;
+async function restoreLayout(reason) {
+  if (layoutRestored) return;          // idempotent: normal path AND handlers call it
+  layoutRestored = true;
+  try {
+    await cmd(ws, "debug.panelLayout", {
+      editorFraction: priorLayout.editorFraction,
+      pianoRollPPB: priorLayout.pianoRollPPB,
+      rowHeight: priorLayout.rowHeight,
+      sidebarWidth: priorLayout.sidebarWidth,
+    });
+    const back = await cmd(ws, "debug.panelLayout", {});
+    console.log(`  panelLayout restored (${reason}): `
+      + `editorFraction=${back.result?.editorFraction} pianoRollPPB=${back.result?.pianoRollPPB}`);
+  } catch (e) {
+    console.error(`  ⚠️ panelLayout RESTORE FAILED (${reason}) — LEAKED: ${e?.message ?? e}`);
+  }
+}
+for (const sig of ["unhandledRejection", "uncaughtException"]) {
+  process.on(sig, async (err) => {
+    console.error(`\n${sig.toUpperCase()} — restoring panelLayout before exit:`, err);
+    await restoreLayout(sig);
+    stopStaging(GATE);
+    process.exit(3);
+  });
+}
+// ⚠️ NOT restored here and NOT this item's scope: this gate also sets
+// `debug.panelDensity {panel:"pianoRoll", mode:"pro"}` and never puts it back —
+// that is the m23-ej-2 class, which has its own sweep and its own verification
+// plan. Fixing it here would land it outside that item's leg-for-leg comparison.
+
 await must("debug.panelLayout", { reset: true });
 await must("debug.windowFrame", { width: 1440, height: 900 });
 await sleep(400);
@@ -143,6 +190,8 @@ await must("debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
 await sleep(400);
 await cap("pro-floor");
 
+// m23-dv-1: restore BEFORE teardown — after stopStaging there is nobody to ask.
+await restoreLayout("normal exit");
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 log("done");
 ws.close();

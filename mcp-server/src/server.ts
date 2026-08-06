@@ -85,9 +85,13 @@ export const server = new McpServer({
  * schema turns that into a validation error AT THE MCP BOUNDARY instead,
  * closing the loop for the primary audience (an MCP-connected agent), not
  * just raw wire clients. Every MUTATING tool below registers through this
- * instead of `server.registerTool` directly; read-only tools (list/status/
- * describe/snapshot) are unaffected — an extra key on a pure read is not the
- * hazard class this closes (nothing it could silently misconfigure).
+ * instead of `server.registerTool` directly, as do the three Table-B
+ * provider-calling generation tools (`generate_lyrics`, `generate_song_suno`,
+ * `generate_image`, m23-eh) — they have no backing wire command, so the DAW's
+ * `rejectUnknownKeys` never runs for them either, making this wrapper their
+ * ONLY unknown-key guard. Read-only tools (list/status/describe/snapshot)
+ * are unaffected — an extra key on a pure read is not the hazard class this
+ * closes (nothing it could silently misconfigure).
  */
 function registerTool(
   name: string,
@@ -5889,9 +5893,14 @@ server.registerTool(
       "wrapping envelope). `transport` is `{tempoBPM, isPlaying, isRecording, " +
       "positionBeats, loop: {enabled, startBeat, endBeat}, metronome: " +
       "{enabled, countInBars}, punch: {enabled, inBeat, outBeat}}`. `master` " +
-      "is `{volume}` (linear gain, 0-2, 1 = unity). `tracks` is an array of " +
+      "is `{volume, peakDb?, rmsDb?}` (`volume` is linear gain, 0-2, 1 = " +
+      "unity; the two level fields are the MASTER BUS's, with exactly the " +
+      "same meaning, floor and omit-when-never-heard rule as the per-track " +
+      "ones described below — read them as the REFERENCE the track levels sit " +
+      "against, which is what turns \"the kick is -14 dBFS\" into \"the kick " +
+      "is 8 dB under the master\"). `tracks` is an array of " +
       "`{id, name, kind, muted, soloed, armed, volume, pan, output?, " +
-      "instrument?, sends, fx, clips, automation}` — `id` is the FULL uuid " +
+      "instrument?, sends, fx, clips, automation, peakDb?, rmsDb?}` — `id` is the FULL uuid " +
       "(use it verbatim in follow-up commands like track_set_volume or " +
       "clip_move; there is no id-shortening machinery on this path). " +
       "`output` is the destination bus track's id, omitted for master. " +
@@ -5907,7 +5916,20 @@ server.registerTool(
       "actual MIDI notes, and no file paths (fetch a clip's real note data or " +
       "source file via project_snapshot/clip tools when you need it). " +
       "`automation` summarizes every lane as `{target, enabled, pointCount}` " +
-      "— never the breakpoints themselves. Every optional field is simply " +
+      "— never the breakpoints themselves. `peakDb`/`rmsDb` are LEVELS in " +
+      "dBFS (floor -80, always finite; a POSITIVE peakDb means it clipped), " +
+      "carried BOTH per-track and on `master` — this is how you compare " +
+      "loudness between tracks, and against the mix as a whole, without " +
+      "paying for project_snapshot. They report the last frame that track (or " +
+      "the master bus) was actually HEARD producing and are RETAINED after " +
+      "the transport stops, so you can read them between actions; play the " +
+      "session (or a section) once and they stay readable afterwards. The " +
+      "keys are OMITTED wherever nothing has produced sound this " +
+      "session — absent means \"no signal observed\", which is deliberately " +
+      "different from a measured silence, so do not read a missing peakDb as " +
+      "-80. Note they describe what the ENGINE played, not a rendered file: " +
+      "use render_measure_loudness for gated LUFS/dBTP on a bounce. Every " +
+      "optional field is simply " +
       "omitted when it doesn't apply (never emitted as null), which is what " +
       "keeps the payload small.",
   },
@@ -5983,11 +6005,21 @@ registerTool(
   {
     title: "Stop the local ACE-Step song-generation sidecar",
     description:
-      "Stop the local ACE-Step-1.5 sidecar (graceful SIGTERM via its " +
-      "pidfile, escalating to a forced kill if it doesn't exit promptly) " +
-      "to free the memory/GPU its loaded models hold — useful before a " +
-      "demanding DAW session. No params. Succeeds as a no-op (not an " +
-      "error) if it wasn't running. Returns the same `{state, message, " +
+      "Stop the local ACE-Step-1.5 sidecar to free the memory/GPU its " +
+      "loaded models hold (tens of GB — useful before a demanding DAW " +
+      "session). Graceful SIGTERM, escalating to a forced kill if it " +
+      "doesn't exit promptly, and the child process the sidecar spawned " +
+      "is stopped with it — that child is where the loaded models' memory " +
+      "actually lives. The target is resolved from the sidecar's pidfile " +
+      "when that points at a live process, and otherwise from whichever " +
+      "process holds the listening socket on the sidecar's port, so a " +
+      "stale pidfile no longer hides a running sidecar. No params. " +
+      "Succeeds as a no-op (not an error) if it genuinely wasn't running. " +
+      "ERRORS — rather than reporting success — if the sidecar is still " +
+      "answering its health check afterwards, or if the only process " +
+      "found on its port cannot be identified as ACE-Step (it is never " +
+      "signalled in that case); the error message says what is still up " +
+      "and what to run. On success returns the same `{state, message, " +
       "version?, ditModel?, lmModel?, pid?}` shape as ai_sidecar_status " +
       "(state settles to `installedNotRunning`).",
     inputSchema: {},
@@ -6069,13 +6101,20 @@ registerTool(
   {
     title: "Stop the local voice-conversion sidecar",
     description:
-      "Stop the local RVC voice-conversion sidecar (graceful SIGTERM via " +
-      "its pidfile, escalating to a forced kill if it doesn't exit " +
-      "promptly) to free the memory its loaded models hold. No params. " +
-      "Succeeds as a no-op (not an error) if it wasn't running. Returns " +
-      "the same `{state, message, version?, engine?, baseModelPresent?, " +
-      "voiceCount?, pid?}` shape as vc_sidecar_status (state settles to " +
-      "`installedNotRunning`).",
+      "Stop the local RVC voice-conversion sidecar to free the memory its " +
+      "loaded voice models hold. Graceful SIGTERM, escalating to a forced " +
+      "kill if it doesn't exit promptly. The target is resolved from the " +
+      "sidecar's pidfile when that points at a live process, and otherwise " +
+      "from whichever process holds the listening socket on the sidecar's " +
+      "port, so a stale pidfile no longer hides a running sidecar. No " +
+      "params. Succeeds as a no-op (not an error) if it genuinely wasn't " +
+      "running. ERRORS — rather than reporting success — if the sidecar is " +
+      "still answering its health check afterwards, or if the only process " +
+      "found on its port cannot be identified as the RVC facade (it is " +
+      "never signalled in that case); the error message says what is still " +
+      "up and what to run. On success returns the same `{state, message, " +
+      "version?, engine?, baseModelPresent?, voiceCount?, pid?}` shape as " +
+      "vc_sidecar_status (state settles to `installedNotRunning`).",
     inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("vc.sidecarStop"))
@@ -7294,7 +7333,7 @@ registerTool(
 // AI generation
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "generate_lyrics",
   {
     title: "Generate song lyrics",
@@ -7320,7 +7359,7 @@ server.registerTool(
     toToolResult(() => generateLyrics({ theme, style, structure }))
 );
 
-server.registerTool(
+registerTool(
   "generate_song_suno",
   {
     title: "Generate a full song via Suno",
@@ -7343,7 +7382,7 @@ server.registerTool(
     toToolResult(() => generateSongSuno({ prompt, lyrics, instrumental }))
 );
 
-server.registerTool(
+registerTool(
   "generate_image",
   {
     title: "Generate an image",
@@ -7749,12 +7788,32 @@ registerTool(
       "of the source recording equals one second of project time, which a stretch breaks; " +
       "un-stretch the clip first (clip_set_stretch ratio 1) if you need its words on the grid. " +
       "Response: {text, language, modelVariantDirectoryName, rangeStartSeconds, anchorBeat, " +
+      "supportsWordTimestamps, wordTimestampSupport, wordTimestampsUnavailable?, " +
+      "wordTimestampsUnverified?, " +
       "segments: [{text, startSeconds, endSeconds, startBeat, endBeat, words: [{text, " +
       "startSeconds, endSeconds, startBeat, endBeat, confidence}]}]} — seconds are measured from " +
       "the start of the SOURCE FILE (rangeStartSeconds is where the read began), while beats are " +
       "measured on the PROJECT timeline from `anchorBeat` (the clip's own start beat); confidence " +
-      "is 0-1 per word. Errors readably for an unknown `clipId`, a MIDI clip, and a stretched " +
-      "clip; when no speech model is installed the error names the directory it looked in.",
+      "is 0-1 per word. BEFORE TRUSTING AN EMPTY `words` ARRAY, READ " +
+      "`supportsWordTimestamps`: word timings come from a tensor that only SOME compiled " +
+      "Whisper variants expose, and when the installed one does not, every `words` array comes " +
+      "back empty with no error at all. `supportsWordTimestamps: false` means exactly that, and " +
+      "`wordTimestampsUnavailable` (present only then) is a readable explanation naming the " +
+      "variant, the decoder inspected, and what to install instead — say that to the user " +
+      "instead of reporting that the singer sang nothing. FOR THE FULL PICTURE READ " +
+      "`wordTimestampSupport` (\"supported\" | \"unsupported\" | \"unknown\") INSTEAD: the boolean " +
+      "reads TRUE for \"unknown\" deliberately, so it cannot tell a variant that DECLARED the " +
+      "tensor from one whose capability could not be read at all (some variants ship in a " +
+      "layout with no metadata to inspect, and warning about every one of them would be noise). " +
+      "When the state is \"unknown\" AND the run came back with segments but no words, " +
+      "`wordTimestampsUnverified` carries a hedged caution — mention it as a possible cause of " +
+      "the missing words rather than as a verdict about the model. It is ABSENT (not null) " +
+      "whenever it does not apply, including when words DID come back and when the recogniser " +
+      "heard nothing at all; the two message fields are never both present. The text and the " +
+      "SEGMENT beats are " +
+      "correct either way, so the call still succeeds. Errors readably for an unknown `clipId`, " +
+      "a MIDI clip, and a stretched clip; when no speech model is installed the error names the " +
+      "directory it looked in.",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the existing AUDIO clip to transcribe, from project_snapshot."),
       language: z
@@ -7840,8 +7899,18 @@ registerTool(
       "progress callbacks) still reaches a terminal state, so do not treat a missing " +
       "`progress` as a hang. descriptor?: {variantDirectoryName, displayName, modelFolder, " +
       "tokenizerFolder, modelSizeBytes, tokenizerSizeBytes, hasContextPrefill, " +
-      "totalSizeBytes, formattedTotalSize} — present only once `state` is \"succeeded\"; this " +
-      "is the model clip_transcribe will use. errorMessage?: string — present only once " +
+      "supportsWordTimestamps, wordTimestampSupport} — present only once `state` " +
+      "is \"succeeded\"; this is the model clip_transcribe will use. " +
+      "`supportsWordTimestamps: false` means the variant you just installed CANNOT produce " +
+      "word-level timings (its compiled decoder declares no alignment tensor), so " +
+      "clip_transcribe will return segments but every `words` array empty — check it here " +
+      "rather than discovering it after a transcription comes back wordless. " +
+      "`wordTimestampSupport` (\"supported\" | \"unsupported\" | \"unknown\") is the field to " +
+      "branch on: the boolean reads TRUE for \"unknown\", so only this one distinguishes a " +
+      "variant that declared the tensor from one whose capability could not be read. " +
+      "(`totalSizeBytes` / `formattedTotalSize` were listed here until m23-ef and were never " +
+      "actually sent — they are computed app-side; use modelSizeBytes + tokenizerSizeBytes.) " +
+      "errorMessage?: string — present only once " +
       "`state` is \"failed\" (an unrecognised variant name, an already-installed variant " +
       "without overwrite, or a download/tokenizer failure all surface here, readably). " +
       "`state: \"idle\"` means nothing has ever been started on this app instance.",

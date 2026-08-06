@@ -1,7 +1,22 @@
 // m17-d orchestrator gate — space-bar transport (play from seeked beat, double-toggle, modifier/repeat/noWindow
 // pass-throughs, posted spaces type into a focused rename field with transport untouched, record-stop leg).
-// GATE LAW: clear text focus via project.new, never staged clicks (staged pointer acts don't resign the field
-// editor). Staging: DAW_CONTROL_PORT=17695. Promoted from session scratchpad 2026-07-16 (m17-g).
+// GATE LAW: clear text focus via debug.markerRename{clear:true} (or, failing
+// that, project.new), never staged clicks — debug.arrangePointer runs
+// SwiftUI's gesture handlers directly and never produces an NSEvent, so it
+// never touches AppKit's responder chain and cannot resign a field editor by
+// construction (DAWProApp.swift ~633-637, "not injectable on the unbundled
+// staging binary"). markerRename{clear:true} nils stagedMarkerRenameID, which
+// flips the marker flag's `isRenaming` off and removes the TextField (and its
+// @FocusState binding) from the view hierarchy entirely — SwiftUI resigns the
+// field editor as part of that removal, same as project.new's full view-tree
+// replacement does (project.new also works, just needlessly discards the
+// project). MEASURED readback via debug.keySpace, live 2026-08-05: while the
+// field is up, firstResponder:"text-editing" / responderClass:
+// "_SystemTextFieldFieldEditor"; after markerRename{clear:true} + settle,
+// firstResponder:"none" / responderClass:"AppKitWindow" — the window itself,
+// not a SwiftUI-internal flag, so this is a real AppKit-level resignation
+// (m23-ba). Staging: DAW_CONTROL_PORT=17695. Promoted from session scratchpad
+// 2026-07-16 (m17-g).
 // m17-d orchestrator gate — DISJOINT: seeked play at beat 32, rapid double-toggle,
 // option/shift chords, repeat flag, rename-field two-space typing, record-stop leg.
 // m23-ac-3a: was "class 3" — it never launched anything and drove whatever was
@@ -87,8 +102,23 @@ ck("transport untouched while typing", s.isPlaying === false, JSON.stringify(s))
 ck("field text actually gained spaces", typeof s.fieldText === "string" && / /.test(s.fieldText) && s.fieldText !== "Chorus",
   JSON.stringify(s.fieldText));
 
-// clear focus (escape-equivalent: re-read after clicking off via arrangePointer clear + click empty)
-await cmd("debug.arrangePointer", { act: "click", x: 0, y: 25 });
+// clear focus the GATE LAW way: debug.markerRename{clear:true} nils the
+// staged rename id, which removes the TextField (and its @FocusState binding)
+// from the view entirely — never a staged pointer act (those don't resign
+// the field editor; see the header note). Note this bypasses onCommitRename/
+// onCancelRename (real Escape/Return paths), so the "  " draft typed above is
+// discarded rather than committed/trimmed — harmless here since no later leg
+// depends on the marker's name.
+//
+// ⭐ m23-ba-1 MEASURED that "discarded" claim rather than reasoning it (a
+// SwiftUI teardown could plausibly have delivered the focus-loss .onChange,
+// which COMMITS): it holds. Pinned by m23ba1-marker-rename-modes.mjs leg C, so
+// if a future SwiftUI ever changes it, a gate turns red instead of this comment
+// quietly becoming wrong. ⚠️ AND IF YOU NEED THE USER'S OWN FINISHING GESTURES,
+// {clear:true} IS NOT THEM — use debug.markerRename {commit:true} (Return /
+// click away; click-away COMMITS) or {cancel:true} (Escape).
+r = await cmd("debug.markerRename", { clear: true });
+ck("markerRename clear ok", r.ok, r.error ?? "");
 await sleep(300);
 s = await state();
 ck("focus cleared back to none", s.firstResponder === "none", JSON.stringify(s));

@@ -38,6 +38,33 @@ public final class ProjectStore {
     public internal(set) var tracks: [Track]
     public private(set) var transport: TransportState
     public private(set) var masterMeter: MeterFrame = .silence
+    /// Last MASTER meter frame that ACTUALLY CARRIED SIGNAL — retained across
+    /// transport stops, unlike `masterMeter` directly above.
+    ///
+    /// WHY THIS EXISTS, AND WHY IT IS NOT A REDUNDANT COPY OF `masterMeter`
+    /// (m23-dm — the master-bus half of m23-cv's `lastNonSilentTrackMeters`,
+    /// whose doc comment carries the same argument for tracks): `stop()`
+    /// DELIBERATELY zeroes `masterMeter` to `.silence` so the master meter
+    /// reads dark the instant transport stops, and the UI depends on that. But
+    /// an AGENT reads `project.overview` BETWEEN actions — i.e. exactly while
+    /// the transport is stopped — so a master-level projection fed from
+    /// `masterMeter` would report silence on every read: wired, and conveying
+    /// nothing. This is what `ProjectOverview.Master.peakDb`/`rmsDb` are built
+    /// from — "what we last actually heard out of the master bus" — and it
+    /// survives a stop. `stop()` must NOT touch it.
+    ///
+    /// A SINGLE OPTIONAL, not a dictionary like the per-track case: there is
+    /// exactly one master bus and it can never be removed, so there is nothing
+    /// to key by and nothing to prune per entry. `nil` means "no signal has
+    /// ever been observed this session", which is honestly different from "the
+    /// master measured silent"; the overview publishes that difference as an
+    /// ABSENT key rather than as −80. Silent AND non-finite frames both stay
+    /// out — see `MeterFrame.hasSignal`.
+    ///
+    /// Cleared on exactly the session-replacement events that reset
+    /// `lastNonSilentTrackMeters`: new / open / recover. A retained level
+    /// belonging to a replaced project is a bug.
+    public private(set) var lastNonSilentMasterMeter: MeterFrame?
     /// Master output gain 0...2 (1 = unity), applied to the main mix bus.
     public private(set) var masterVolume: Double = 1
     /// The MASTER insert chain (m13-d): project-level effects processing the
@@ -107,6 +134,31 @@ public final class ProjectStore {
     /// Latest per-track meter frame, keyed by track ID. Entries appear when a
     /// track first meters and are dropped when the track is removed.
     public private(set) var trackMeters: [UUID: MeterFrame] = [:]
+    /// Last meter frame per track that ACTUALLY CARRIED SIGNAL — retained
+    /// across transport stops, unlike `trackMeters` directly above.
+    ///
+    /// WHY THIS EXISTS, AND WHY IT IS NOT A REDUNDANT COPY OF `trackMeters`
+    /// (m23-cv — read this before "simplifying" it away): `stop()` DELIBERATELY
+    /// zeroes every `trackMeters` entry to `.silence` ("meters read as dark the
+    /// instant transport stops") and the UI depends on that. But an AGENT reads
+    /// `project.overview` BETWEEN actions — i.e. exactly while the transport is
+    /// stopped — so a level projection fed from `trackMeters` would report
+    /// silence for every track on every read: wired, and conveying nothing.
+    /// This dictionary is what `ProjectOverview.Track.peakDb`/`rmsDb` are built
+    /// from — "what we last actually heard from this track" — and it survives a
+    /// stop. `stop()` must NOT touch it.
+    ///
+    /// Silent (and non-finite) frames never land here — see
+    /// `MeterFrame.hasSignal` — so a MISSING entry honestly means "no signal
+    /// has ever been observed from this track", which is a different fact from
+    /// "this track measured silent", and the overview publishes that difference
+    /// as `nil` rather than as −80.
+    ///
+    /// Dropped on exactly the events that drop `trackMeters` ENTRIES: track
+    /// removal, an undo/redo that vanishes a track, and every session
+    /// replacement (new / open / recover). A retained level belonging to a
+    /// deleted or replaced project is a bug.
+    public private(set) var lastNonSilentTrackMeters: [UUID: MeterFrame] = [:]
     /// Why the last record attempt failed (or why the last take was
     /// discarded); nil after a successful take or a fresh record start.
     public private(set) var lastRecordingError: String?
@@ -243,9 +295,18 @@ public final class ProjectStore {
         didSet {
             engine?.meteringHandler = { [weak self] frame in
                 self?.masterMeter = frame
+                // Retained last-heard master level (m23-dm): ONE comparison and
+                // ONE assignment, on the same main-actor hop the live frame
+                // already takes — nothing added here runs on the render thread.
+                if frame.hasSignal { self?.lastNonSilentMasterMeter = frame }
             }
             engine?.trackMeteringHandler = { [weak self] id, frame in
                 self?.trackMeters[id] = frame
+                // Retained last-heard level (m23-cv): ONE comparison and ONE
+                // dictionary write. Both engine feeds (`PlaybackGraph`'s track
+                // tap and `AudioEngine`'s) hop to the main actor before calling
+                // this handler, so nothing added here runs on the render thread.
+                if frame.hasSignal { self?.lastNonSilentTrackMeters[id] = frame }
             }
             // Engine-derived playhead is the source of truth while playing.
             // This path only assigns display state — it NEVER calls back into
@@ -1963,6 +2024,10 @@ public final class ProjectStore {
                 }
             }
             trackMeters.removeValue(forKey: id)
+            // The retained last-heard level goes with it (m23-cv) — a level
+            // attributed to a track that no longer exists is a lie the
+            // overview would keep telling.
+            lastNonSilentTrackMeters.removeValue(forKey: id)
             engine?.tracksDidChange(tracks)
         }
         return true
@@ -5985,6 +6050,8 @@ public final class ProjectStore {
 
         for id in vanishedTrackIDs {
             trackMeters.removeValue(forKey: id)
+            // Retained last-heard level follows the meter entry (m23-cv).
+            lastNonSilentTrackMeters.removeValue(forKey: id)
         }
 
         if tracksChanged { engine?.tracksDidChange(tracks) }
@@ -6292,6 +6359,10 @@ public final class ProjectStore {
         mapRevision = 0
         masterMeter = .silence
         trackMeters = [:]
+        // Retained last-heard levels describe the OLD session's tracks (m23-cv)
+        // and its master bus (m23-dm).
+        lastNonSilentTrackMeters = [:]
+        lastNonSilentMasterMeter = nil
         lastRecordingError = nil
         // Stale pending fixes point into the old project (M6 v-b).
         pendingClipFixes = [:]
@@ -6366,6 +6437,10 @@ public final class ProjectStore {
 
         masterMeter = .silence
         trackMeters = [:]
+        // Retained last-heard levels describe the PREVIOUS session's tracks
+        // (m23-cv) and its master bus (m23-dm).
+        lastNonSilentTrackMeters = [:]
+        lastNonSilentMasterMeter = nil
         lastRecordingError = nil
         // Stale pending fixes point into the previous project (M6 v-b).
         pendingClipFixes = [:]
@@ -6778,6 +6853,11 @@ public final class ProjectStore {
 
         masterMeter = .silence
         trackMeters = [:]
+        // Retained last-heard levels describe the PREVIOUS session's tracks
+        // (m23-cv) and its master bus (m23-dm) — a recover is a session
+        // replacement like open.
+        lastNonSilentTrackMeters = [:]
+        lastNonSilentMasterMeter = nil
         lastRecordingError = nil
         pendingClipFixes = [:]
         // Engine notices describe the PREVIOUS session's playback (m15-e;

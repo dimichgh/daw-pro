@@ -313,6 +313,748 @@ struct SidecarManagerStopTests {
     }
 }
 
+// MARK: - m23-bb: stop() must agree with status() about what "the sidecar" is
+
+/// Synthetic process tables for the pure planning tests. Command lines are the
+/// REAL ones this machine produces — `uv run --no-sync acestep-api` and
+/// `.../python3 .../acestep-api` (no separator between "ace" and "step"), plus
+/// the `/bin/bash <dir>/run.sh` launcher `SidecarManager.start()` spawns.
+private enum FakeProcessTables {
+    static let acestepDir = "/Users/tester/daw-pro/scripts/ace-step"
+
+    /// The topology m23-bb's own report records: a launcher, the `uv run`
+    /// supervisor under it, and the python child that actually holds the
+    /// listening socket (and the ~75 GB).
+    static let acestepTree = SidecarProcessDiscovery.Snapshot(entries: [
+        .init(pid: 99, ppid: 1, args: "/bin/bash \(acestepDir)/run.sh"),
+        .init(pid: 100, ppid: 99, args: "uv run --no-sync acestep-api"),
+        .init(pid: 101, ppid: 100, args: "/Users/tester/.venv/bin/python3 /Users/tester/.venv/bin/acestep-api"),
+        .init(pid: 4242, ppid: 1, args: "/usr/sbin/cupsd -l"),
+    ])
+
+    /// The same tree, but with THIS process (pid 500) sitting where the
+    /// launcher's parent would be — the shape that would let an ancestor climb
+    /// walk into DAW Pro itself.
+    static let acestepTreeUnderSelf = SidecarProcessDiscovery.Snapshot(entries: [
+        .init(pid: 500, ppid: 1, args: "/Users/tester/ace-step-checkout/.build/debug/DAWApp"),
+        .init(pid: 99, ppid: 500, args: "/bin/bash \(acestepDir)/run.sh"),
+        .init(pid: 100, ppid: 99, args: "uv run --no-sync acestep-api"),
+        .init(pid: 101, ppid: 100, args: "/Users/tester/.venv/bin/python3 /Users/tester/.venv/bin/acestep-api"),
+    ])
+}
+
+/// ACE-Step's identity predicate, spelled the way `SidecarManager` spells it.
+/// The predicate itself lives in `SidecarStop.Identity` (shared with the RVC
+/// sidecar, m23-bb-1); this is only a local shorthand so the assertions below
+/// stay about the RULE rather than about the call syntax.
+private func looksLikeACEStep(args: String, acestepDirPath: String?) -> Bool {
+    SidecarStop.Identity.aceStep(directoryPath: acestepDirPath).matches(args: args)
+}
+
+@Suite("SidecarStop.resolvePlan (ACE-Step) — m23-bb routing (pure/headless)")
+struct SidecarManagerStopPlanTests {
+    // MARK: The floor rule — never route to "not running" while the probe answers
+
+    /// ⭐ THE m23-bb TEST. The exact reported combination: the health probe
+    /// says the sidecar is up, the pidfile holds a dead pid. The old code took
+    /// its stale-pidfile branch, deleted the pidfile, said "was not running",
+    /// and left the sidecar running.
+    ///
+    /// Asserted at the PLAN level on purpose: a message-only test passes
+    /// against the broken code, because ".notRunning"'s wording is legitimate
+    /// — it is the ROUTING that was wrong.
+    @Test("probe healthy + STALE pidfile never resolves to .notRunning (the reported bug)")
+    func healthyProbeWithStalePidfileNeverRoutesToNotRunning() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: 28524, pidfilePidAlive: false,
+            port: 8001, portLookup: .nothingListening,
+            snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: nil)))
+        if case .notRunning = plan {
+            Issue.record("resolved to \(plan) while the health probe says the sidecar is answering")
+        }
+    }
+
+    @Test("probe healthy + NO pidfile at all never resolves to .notRunning")
+    func healthyProbeWithNoPidfileNeverRoutesToNotRunning() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: nil, pidfilePidAlive: false,
+            port: 8001, portLookup: .nothingListening,
+            snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: nil)))
+        if case .notRunning = plan {
+            Issue.record("resolved to \(plan) while the health probe says the sidecar is answering")
+        }
+    }
+
+    @Test("""
+        a port that ANSWERS but doesn't parse as ACE-Step's envelope still counts as answering \
+        — never .notRunning
+        """)
+    func unparsableButRespondingNeverRoutesToNotRunning() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .respondingButUnparsable, pidfilePid: 28524, pidfilePidAlive: false,
+            port: 8001, portLookup: .nothingListening,
+            snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: nil)))
+        if case .notRunning = plan {
+            Issue.record("resolved to \(plan) while something is answering on the sidecar's port")
+        }
+    }
+
+    // MARK: The genuinely-correct existing behaviour, preserved
+
+    @Test("probe unreachable + stale pidfile -> .notRunning(.stalePidfile) (that message IS right here)")
+    func unreachableProbeWithStalePidfileIsNotRunning() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .unreachable, pidfilePid: 28524, pidfilePidAlive: false, port: 8001,
+            identity: .aceStep(directoryPath: nil)))
+        #expect(plan == .notRunning(.stalePidfile(pid: 28524)))
+    }
+
+    @Test("probe unreachable + no pidfile -> .notRunning(.noPidfile)")
+    func unreachableProbeWithNoPidfileIsNotRunning() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .unreachable, pidfilePid: nil, pidfilePidAlive: false, port: 8001,
+            identity: .aceStep(directoryPath: nil)))
+        #expect(plan == .notRunning(.noPidfile))
+    }
+
+    @Test("""
+        live pidfile pid + probe unreachable -> terminate via the pidfile: a sidecar still BOOTING \
+        has bound no port yet and must stay stoppable
+        """)
+    func livePidfileStillWinsWhileBooting() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .unreachable, pidfilePid: 99, pidfilePidAlive: true, port: 8001,
+            snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: FakeProcessTables.acestepDir)))
+        #expect(plan == .terminate(pid: 99, discovery: .pidfile))
+    }
+
+    @Test("live pidfile pid whose command line is UNREADABLE fails OPEN — still terminated")
+    func unreadableArgsOnThePidfilePathFailsOpen() {
+        // Empty snapshot: `ps` gave us nothing, so identity is UNKNOWN. Unknown
+        // must not read as "not ours" on the path that has always worked.
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .unreachable, pidfilePid: 99, pidfilePidAlive: true, port: 8001,
+            snapshot: .init(), selfPid: 500,
+            identity: .aceStep(directoryPath: nil)))
+        #expect(plan == .terminate(pid: 99, discovery: .pidfile))
+    }
+
+    // MARK: Port fallback — the fix
+
+    @Test("""
+        probe healthy + stale pidfile + an ACE-Step process on the port -> terminate it, climbing \
+        from the LISTENING CHILD to the top of its own tree
+        """)
+    func portFallbackClimbsToTheTopOfTheSidecarTree() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: 28524, pidfilePidAlive: false,
+            port: 8001, portLookup: .listeners([101]),
+            snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: FakeProcessTables.acestepDir)))
+        // 101 (python, holds the socket) -> 100 (uv run) -> 99 (run.sh launcher).
+        #expect(plan == .terminate(pid: 99, discovery: .port(8001)))
+    }
+
+    @Test("both parent and child showing up in the port lookup collapse to ONE target")
+    func duplicateListenersCollapseToOneTarget() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: nil, pidfilePidAlive: false,
+            port: 8001, portLookup: .listeners([100, 101]),
+            snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: FakeProcessTables.acestepDir)))
+        #expect(plan == .terminate(pid: 99, discovery: .port(8001)))
+    }
+
+    // MARK: Refusals — a pid from a port is not necessarily ours
+
+    @Test("an unidentifiable process on the port is REFUSED, never signalled")
+    func unidentifiedListenerIsRefused() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: nil, pidfilePidAlive: false,
+            port: 8001, portLookup: .listeners([4242]),
+            snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: FakeProcessTables.acestepDir)))
+        #expect(plan == .refuse(.listenerNotIdentified(
+            port: 8001, pid: 4242, args: "/usr/sbin/cupsd -l")))
+    }
+
+    @Test("a process on the port with NO readable command line is refused (fails CLOSED here)")
+    func unreadableArgsOnThePortPathFailsClosed() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: nil, pidfilePidAlive: false,
+            port: 8001, portLookup: .listeners([7777]),
+            snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: FakeProcessTables.acestepDir)))
+        #expect(plan == .refuse(.listenerNotIdentified(
+            port: 8001, pid: 7777, args: "command line unavailable")))
+    }
+
+    @Test("THIS process holding the port is refused — stop() may never signal DAW Pro itself")
+    func selfOnThePortIsRefused() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: nil, pidfilePidAlive: false,
+            port: 8001, portLookup: .listeners([500]),
+            snapshot: FakeProcessTables.acestepTreeUnderSelf, selfPid: 500,
+            identity: .aceStep(directoryPath: FakeProcessTables.acestepDir)))
+        #expect(plan == .refuse(.listenerIsThisProcess(port: 8001, pid: 500)))
+    }
+
+    @Test("""
+        the ancestor climb STOPS at this process — a checkout path containing 'ace-step' must not \
+        let the climb walk into DAW Pro
+        """)
+    func climbNeverWalksIntoThisProcess() {
+        // pid 500's own command line contains "ace-step" (checkout path), so
+        // the identity predicate alone would happily climb into it.
+        #expect(looksLikeACEStep(
+            args: "/Users/tester/ace-step-checkout/.build/debug/DAWApp",
+            acestepDirPath: FakeProcessTables.acestepDir))
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: nil, pidfilePidAlive: false,
+            port: 8001, portLookup: .listeners([101]),
+            snapshot: FakeProcessTables.acestepTreeUnderSelf, selfPid: 500,
+            identity: .aceStep(directoryPath: FakeProcessTables.acestepDir)))
+        // Climbs 101 -> 100 -> 99, then STOPS: 99's parent is this process.
+        #expect(plan == .terminate(pid: 99, discovery: .port(8001)))
+    }
+
+    @Test("two independent ACE-Step trees on one port -> refuse rather than guess")
+    func multipleCandidatesAreRefused() {
+        let snapshot = SidecarProcessDiscovery.Snapshot(entries: [
+            .init(pid: 100, ppid: 1, args: "uv run --no-sync acestep-api"),
+            .init(pid: 200, ppid: 1, args: "uv run --no-sync acestep-api"),
+        ])
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: nil, pidfilePidAlive: false,
+            port: 8001, portLookup: .listeners([100, 200]),
+            snapshot: snapshot, selfPid: 500,
+            identity: .aceStep(directoryPath: nil)))
+        #expect(plan == .refuse(.multipleCandidates(port: 8001, pids: [100, 200])))
+    }
+
+    @Test("port lookup that could not be RUN is refused distinctly from 'nothing is listening'")
+    func discoveryUnavailableIsItsOwnRefusal() {
+        let unavailable = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: nil, pidfilePidAlive: false,
+            port: 8001, portLookup: .unavailable("lsof is not available"),
+            snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: nil)))
+        #expect(unavailable == .refuse(.discoveryUnavailable(port: 8001, detail: "lsof is not available")))
+
+        let empty = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: nil, pidfilePidAlive: false,
+            port: 8001, portLookup: .nothingListening,
+            snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: nil)))
+        #expect(empty == .refuse(.noListenerFound(port: 8001)))
+    }
+
+    @Test("a base URL with no derivable port is refused, never silently defaulted to 8001")
+    func portUnknownIsRefused() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: nil, pidfilePidAlive: false, port: nil,
+            identity: .aceStep(directoryPath: nil)))
+        #expect(plan == .refuse(.portUnknown))
+    }
+
+    // MARK: A live pidfile pointing at a STRANGER (pid reuse)
+
+    @Test("live pidfile pid that is provably NOT ours + probe answering -> falls through to the port")
+    func foreignLivePidfileFallsThroughToPortDiscovery() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .healthy, pidfilePid: 4242, pidfilePidAlive: true,
+            port: 8001, portLookup: .listeners([101]),
+            snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: FakeProcessTables.acestepDir)))
+        #expect(plan == .terminate(pid: 99, discovery: .port(8001)))
+    }
+
+    @Test("live pidfile pid that is provably NOT ours + probe unreachable -> notRunning, nothing signalled")
+    func foreignLivePidfileWithNoSidecarIsNotRunning() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .unreachable, pidfilePid: 4242, pidfilePidAlive: true,
+            port: 8001, snapshot: FakeProcessTables.acestepTree, selfPid: 500,
+            identity: .aceStep(directoryPath: FakeProcessTables.acestepDir)))
+        #expect(plan == .notRunning(.foreignPidfile(pid: 4242, args: "/usr/sbin/cupsd -l")))
+    }
+
+    @Test("a pidfile holding THIS process's own pid is never signalled")
+    func pidfilePointingAtSelfIsNeverSignalled() {
+        let plan = SidecarStop.resolvePlan(.init(
+            probe: .unreachable, pidfilePid: 500, pidfilePidAlive: true,
+            port: 8001, snapshot: FakeProcessTables.acestepTreeUnderSelf, selfPid: 500,
+            identity: .aceStep(directoryPath: FakeProcessTables.acestepDir)))
+        if case .terminate(let pid, _) = plan {
+            Issue.record("resolved to terminate pid \(pid) — that is this very process")
+        }
+    }
+}
+
+@Suite("SidecarManager.reconfirmationRefusal — pid reuse between planning and signalling (m23-bb)")
+struct SidecarStopReconfirmationTests {
+    private let dir = FakeProcessTables.acestepDir
+
+    @Test("a port-discovered target that still identifies is signalled")
+    func stillIdentifiedProceeds() {
+        #expect(SidecarStop.reconfirmationRefusal(
+            discovery: .port(8001), targetPid: 100, targetAliveNow: true,
+            argsNow: "uv run --no-sync acestep-api", identity: .aceStep(directoryPath: dir)) == nil)
+    }
+
+    @Test("a port-discovered target whose command line CHANGED is refused, not killed")
+    func recycledPortTargetIsRefused() {
+        #expect(SidecarStop.reconfirmationRefusal(
+            discovery: .port(8001), targetPid: 100, targetAliveNow: true,
+            argsNow: "/usr/sbin/cupsd -l", identity: .aceStep(directoryPath: dir))
+            == .listenerNotIdentified(port: 8001, pid: 100, args: "/usr/sbin/cupsd -l"))
+    }
+
+    @Test("a port-discovered target that has become unreadable while ALIVE is refused (fails closed)")
+    func unreadablePortTargetIsRefused() {
+        #expect(SidecarStop.reconfirmationRefusal(
+            discovery: .port(8001), targetPid: 100, targetAliveNow: true,
+            argsNow: nil, identity: .aceStep(directoryPath: dir))
+            == .listenerNotIdentified(port: 8001, pid: 100, args: "command line unavailable"))
+    }
+
+    @Test("a target that already exited needs no re-confirmation — there is nothing to signal")
+    func deadTargetNeedsNoReconfirmation() {
+        #expect(SidecarStop.reconfirmationRefusal(
+            discovery: .port(8001), targetPid: 100, targetAliveNow: false,
+            argsNow: nil, identity: .aceStep(directoryPath: dir)) == nil)
+    }
+
+    /// The pidfile path keeps its fail-OPEN rule here too, for the same reason
+    /// it has it in `resolveStopPlan`: a sidecar still booting has bound no
+    /// port, and must stay stoppable even when `ps` tells us nothing.
+    @Test("the PIDFILE path is never refused by this guard — unknown identity must not block a boot stop")
+    func pidfilePathFailsOpen() {
+        #expect(SidecarStop.reconfirmationRefusal(
+            discovery: .pidfile, targetPid: 100, targetAliveNow: true,
+            argsNow: nil, identity: .aceStep(directoryPath: dir)) == nil)
+        #expect(SidecarStop.reconfirmationRefusal(
+            discovery: .pidfile, targetPid: 100, targetAliveNow: true,
+            argsNow: "/usr/sbin/cupsd -l", identity: .aceStep(directoryPath: dir)) == nil)
+    }
+}
+
+@Suite("SidecarStop.Identity.aceStep — identity before any kill (m23-az separator trap)")
+struct SidecarProcessIdentityTests {
+    /// ⚠️ The regression this test exists for: a pattern requiring a separator
+    /// (`ace[-_]step`) matches NEITHER real command line, so it fails CLOSED
+    /// and refuses to signal a process it correctly found — measured at m23-az
+    /// with a leaked 75 GB sidecar as the price.
+    @Test("the REAL ACE-Step command lines have NO separator and must still match")
+    func realCommandLinesMatchWithoutASeparator() {
+        #expect(looksLikeACEStep(
+            args: "uv run --no-sync acestep-api", acestepDirPath: nil))
+        #expect(looksLikeACEStep(
+            args: "/Users/x/.venv/bin/python3 /Users/x/.venv/bin/acestep-api", acestepDirPath: nil))
+    }
+
+    @Test("hyphenated and underscored spellings match too")
+    func separatedSpellingsMatch() {
+        #expect(looksLikeACEStep(
+            args: "/bin/bash /repo/scripts/ace-step/run.sh", acestepDirPath: nil))
+        #expect(looksLikeACEStep(args: "python -m ACE_Step.api", acestepDirPath: nil))
+    }
+
+    @Test("the configured sidecar directory is a second, independent limb")
+    func configuredDirectoryMatches() {
+        // A launcher living somewhere that never spells "acestep" at all.
+        #expect(looksLikeACEStep(
+            args: "/bin/bash /tmp/sidecar-xyz/run.sh", acestepDirPath: "/tmp/sidecar-xyz"))
+        #expect(!looksLikeACEStep(
+            args: "/bin/bash /tmp/sidecar-xyz/run.sh", acestepDirPath: "/tmp/other"))
+    }
+
+    @Test("unrelated processes never match — an empty configured directory must not match everything")
+    func unrelatedProcessesDoNotMatch() {
+        #expect(!looksLikeACEStep(args: "/usr/sbin/cupsd -l", acestepDirPath: nil))
+        #expect(!looksLikeACEStep(
+            args: "/usr/bin/python3 -m http.server 8001", acestepDirPath: nil))
+        #expect(!looksLikeACEStep(args: "/usr/sbin/cupsd -l", acestepDirPath: ""))
+    }
+}
+
+@Suite("SidecarManager stop messages — the honesty rule (m23-bb, pure)")
+struct SidecarStopMessageTests {
+    private let baseURL = URL(string: "http://127.0.0.1:8001")!
+
+    /// Every refusal, exhaustively. A refusal is emitted only when the health
+    /// probe says the sidecar is answering, so none of them may claim it is
+    /// not running.
+    private var allRefusals: [SidecarStop.Refusal] {
+        [
+            .portUnknown,
+            .discoveryUnavailable(port: 8001, detail: "lsof is not available"),
+            .noListenerFound(port: 8001),
+            .listenerIsThisProcess(port: 8001, pid: 500),
+            .listenerNotIdentified(port: 8001, pid: 4242, args: "/usr/sbin/cupsd -l"),
+            .multipleCandidates(port: 8001, pids: [100, 200]),
+        ]
+    }
+
+    @Test("no refusal message ever claims the sidecar is not running")
+    func refusalsNeverClaimNotRunning() {
+        for refusal in allRefusals {
+            let message = SidecarStop.refusalMessage(
+                refusal, vocabulary: .aceStep, baseURL: baseURL,
+                pidfilePath: "/repo/scripts/ace-step/.ace-step.pid")
+            #expect(!message.localizedCaseInsensitiveContains("not running"),
+                    "refusal \(refusal) emitted a not-running claim: \(message)")
+            #expect(message.localizedCaseInsensitiveContains("still up"),
+                    "refusal \(refusal) does not say the sidecar is still up: \(message)")
+            #expect(message.contains("127.0.0.1:8001"))
+        }
+    }
+
+    /// The INVERSE half — without it the test above could pass by emitting
+    /// nothing at all, and it would stop discriminating if the phrase were
+    /// merely reworded rather than the routing fixed.
+    @Test("the genuinely-down messages DO say 'not running' — that wording is correct there")
+    func notRunningMessagesStillSayIt() {
+        #expect(SidecarStop.notRunningMessage(.noPidfile, vocabulary: .aceStep)
+            .localizedCaseInsensitiveContains("not running"))
+        #expect(SidecarStop.notRunningMessage(.stalePidfile(pid: 28524), vocabulary: .aceStep)
+            .localizedCaseInsensitiveContains("not running"))
+        #expect(SidecarStop.notRunningMessage(.foreignPidfile(pid: 4242, args: "/usr/sbin/cupsd -l"), vocabulary: .aceStep)
+            .localizedCaseInsensitiveContains("not running"))
+        // The two pre-m23-bb messages are preserved verbatim.
+        #expect(SidecarStop.notRunningMessage(.noPidfile, vocabulary: .aceStep)
+            == "ACE-Step sidecar is not running (no pidfile found).")
+        #expect(SidecarStop.notRunningMessage(.stalePidfile(pid: 28524), vocabulary: .aceStep)
+            == "ACE-Step sidecar was not running (stale pidfile removed).")
+    }
+
+    @Test("a stop that signalled but left the port answering never claims 'not running' either")
+    func stillAnsweringMessagesNeverClaimNotRunning() {
+        let outcomes: [SidecarStop.TerminationOutcome] = [
+            .init(targetPid: 100, targetSurvived: true),
+            .init(targetPid: 100, targetRecycled: true),
+            .init(targetPid: 100),
+        ]
+        for outcome in outcomes {
+            let message = SidecarStop.stillAnsweringMessage(outcome: outcome, baseURL: baseURL, vocabulary: .aceStep)
+            #expect(!message.localizedCaseInsensitiveContains("not running"), "\(message)")
+            #expect(message.contains("127.0.0.1:8001"))
+        }
+        // The three cases are genuinely different stories, not one message.
+        #expect(SidecarStop.stillAnsweringMessage(
+            outcome: .init(targetPid: 100, targetSurvived: true), baseURL: baseURL, vocabulary: .aceStep)
+            != SidecarStop.stillAnsweringMessage(outcome: .init(targetPid: 100), baseURL: baseURL, vocabulary: .aceStep))
+    }
+
+    @Test("a successful stop names the child processes it reaped — that is where the 75 GB lives")
+    func stoppedMessageAccountsForDescendants() {
+        let message = SidecarStop.stoppedMessage(
+            outcome: .init(targetPid: 100, descendantsStopped: [101]), discovery: .port(8001), vocabulary: .aceStep)
+        #expect(message.contains("101"))
+        #expect(message.localizedCaseInsensitiveContains("child process"))
+
+        let survivor = SidecarStop.stoppedMessage(
+            outcome: .init(targetPid: 100, descendantsSurvived: [101]), discovery: .pidfile, vocabulary: .aceStep)
+        #expect(survivor.contains("⚠️"))
+        #expect(survivor.contains("101"))
+    }
+}
+
+@Suite("SidecarProcessDiscovery — process-table parsing and tree walks (pure)")
+struct SidecarProcessDiscoveryTests {
+    @Test("`ps -eo pid,ppid,args` output parses, header skipped, args keep their spaces")
+    func parsesRealPsOutput() {
+        let snapshot = SidecarProcessDiscovery.parseSnapshot(psOutput: """
+              PID  PPID ARGS
+                1     0 /sbin/launchd
+            49156 49150 uv run --no-sync acestep-api
+            49160 49156 /Users/x/.venv/bin/python3 /Users/x/.venv/bin/acestep-api
+            """)
+        #expect(snapshot.entries.count == 3)
+        #expect(snapshot.args(of: 49156) == "uv run --no-sync acestep-api")
+        #expect(snapshot.entry(pid: 49160)?.ppid == 49156)
+        #expect(snapshot.args(of: 12345) == nil)
+    }
+
+    @Test("descendants() is transitive and excludes the root")
+    func descendantsAreTransitive() {
+        let pids = FakeProcessTables.acestepTree.descendants(of: 99).map(\.pid)
+        #expect(pids == [100, 101])
+        #expect(FakeProcessTables.acestepTree.descendants(of: 101).isEmpty)
+    }
+
+    @Test("ancestors() walks up and stops before pid 1")
+    func ancestorsStopAtPidOne() {
+        #expect(FakeProcessTables.acestepTree.ancestors(of: 101) == [100, 99])
+        #expect(FakeProcessTables.acestepTree.ancestors(of: 99).isEmpty)
+    }
+
+    @Test("a cyclic ppid chain terminates instead of hanging")
+    func cyclesTerminate() {
+        let cyclic = SidecarProcessDiscovery.Snapshot(entries: [
+            .init(pid: 10, ppid: 11, args: "a"),
+            .init(pid: 11, ppid: 10, args: "b"),
+        ])
+        #expect(cyclic.ancestors(of: 10) == [11])
+        #expect(cyclic.descendants(of: 10).map(\.pid) == [11])
+        #expect(cyclic.climb(from: 10, blocked: []) { _ in true } == 11)
+    }
+
+    @Test("climb() stops at a blocked parent")
+    func climbStopsAtBlocked() {
+        #expect(FakeProcessTables.acestepTree.climb(from: 101, blocked: []) { _ in true } == 99)
+        #expect(FakeProcessTables.acestepTree.climb(from: 101, blocked: [99]) { _ in true } == 100)
+        #expect(FakeProcessTables.acestepTree.climb(from: 101, blocked: []) { $0.pid != 99 } == 100)
+    }
+
+    @Test("lsof -t output parses to unique sorted pids")
+    func parsesLsofOutput() {
+        #expect(SidecarProcessDiscovery.parseListenerPids(lsofOutput: "49160\n49156\n49160\n") == [49156, 49160])
+        #expect(SidecarProcessDiscovery.parseListenerPids(lsofOutput: "").isEmpty)
+        #expect(SidecarProcessDiscovery.parseListenerPids(lsofOutput: "not-a-pid\n").isEmpty)
+    }
+
+    @Test("the port comes from the configured base URL — never hardcoded to 8001")
+    func portComesFromTheBaseURL() {
+        #expect(SidecarProcessDiscovery.port(of: URL(string: "http://127.0.0.1:8001")!) == 8001)
+        #expect(SidecarProcessDiscovery.port(of: URL(string: "http://127.0.0.1:8002")!) == 8002)
+        #expect(SidecarProcessDiscovery.port(of: URL(string: "http://127.0.0.1:54321")!) == 54321)
+        #expect(SidecarProcessDiscovery.port(of: URL(string: "http://example.test")!) == 80)
+        #expect(SidecarProcessDiscovery.port(of: URL(fileURLWithPath: "/tmp/x")) == nil)
+    }
+
+    @Test("captureSnapshot() sees this very process, with its real parent and command line")
+    func captureSnapshotSeesThisProcess() {
+        let snapshot = SidecarProcessDiscovery.captureSnapshot()
+        let ownPid = ProcessInfo.processInfo.processIdentifier
+        #expect(snapshot.entries.count > 1, "ps returned nothing usable")
+        #expect(snapshot.entry(pid: ownPid) != nil, "this process is missing from its own ps snapshot")
+        #expect(SidecarProcessDiscovery.args(ofPid: ownPid) != nil)
+    }
+
+    @Test("listeners() finds a socket this test itself is holding, and none on a freed port")
+    func listenersFindsARealSocket() throws {
+        let server = StubHealthServer(responseData: StubHealthServer.healthyResponse())
+        try server.start()
+        defer { server.stop() }
+
+        // POSITIVE CONTROL: the socket demonstrably exists (we are holding it),
+        // so `.nothingListening` here would be a broken lookup, not an absence.
+        let found = SidecarProcessDiscovery.listeners(onPort: server.port)
+        #expect(found == .listeners([ProcessInfo.processInfo.processIdentifier]),
+                "lsof did not attribute a socket this process is holding: \(found)")
+
+        let freed = try StubHealthServer.unusedLoopbackPort()
+        #expect(SidecarProcessDiscovery.listeners(onPort: freed) == .nothingListening)
+    }
+}
+
+@Suite("SidecarManager.stop() — m23-bb end to end (real probe, real port discovery)")
+struct SidecarManagerStopHonestyTests {
+    private func makeTempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ace-step-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// ⭐ The reported scenario, reproduced with a real health responder and
+    /// real `lsof`/`ps` discovery — no ACE-Step process anywhere.
+    ///
+    /// The listener the probe answers from IS this test process, so the plan
+    /// must resolve to a REFUSAL (we never signal ourselves), `stop()` must
+    /// THROW rather than return a success-shaped status, and — because a
+    /// failed stop must not quietly delete state — the pidfile must survive.
+    @Test("healthy probe + stale pidfile: stop() throws an honest error and removes nothing")
+    func healthyProbeWithStalePidfileThrowsInsteadOfLying() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pidfile = dir.appendingPathComponent(".ace-step.pid")
+        try Data("99999".utf8).write(to: pidfile)
+        try Data("{}".utf8).write(to: dir.appendingPathComponent(".install-state.json"))
+
+        let server = StubHealthServer(responseData: StubHealthServer.healthyResponse())
+        try server.start()
+        defer { server.stop() }
+
+        let manager = SidecarManager(configuration: .init(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!, acestepDir: dir))
+
+        // status() and stop() must now agree about what "the sidecar" is.
+        #expect(await manager.status().state == .healthy)
+
+        // The EXACT resolved plan, not an inference from message text — and
+        // specifically NOT `.noListenerFound`/`.discoveryUnavailable`, either
+        // of which would satisfy every honesty assertion while proving that
+        // discovery is broken.
+        let plan = await manager.resolvedStopPlan()
+        #expect(plan == .refuse(.listenerIsThisProcess(
+            port: server.port, pid: ProcessInfo.processInfo.processIdentifier)))
+
+        do {
+            let status = try await manager.stop()
+            Issue.record("""
+                stop() returned \(status.state): \(status.message) — it must not succeed while \
+                the health probe reports the sidecar healthy
+                """)
+        } catch let error as SidecarError {
+            let message = try #require(error.errorDescription)
+            #expect(!message.localizedCaseInsensitiveContains("not running"), "\(message)")
+            #expect(message.localizedCaseInsensitiveContains("still up"), "\(message)")
+            #expect(message.contains("\(server.port)"), "\(message)")
+        }
+
+        // A refusal changes nothing: the pidfile is still there and the
+        // sidecar is (correctly) still reported healthy.
+        #expect(FileManager.default.fileExists(atPath: pidfile.path))
+        #expect(await manager.status().state == .healthy)
+    }
+
+    @Test("healthy probe + NO pidfile: stop() still refuses to report 'not running'")
+    func healthyProbeWithNoPidfileThrowsInsteadOfLying() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("{}".utf8).write(to: dir.appendingPathComponent(".install-state.json"))
+
+        let server = StubHealthServer(responseData: StubHealthServer.healthyResponse())
+        try server.start()
+        defer { server.stop() }
+
+        let manager = SidecarManager(configuration: .init(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!, acestepDir: dir))
+
+        do {
+            let status = try await manager.stop()
+            Issue.record("stop() returned \(status.state): \(status.message)")
+        } catch let error as SidecarError {
+            let message = try #require(error.errorDescription)
+            #expect(!message.localizedCaseInsensitiveContains("not running"), "\(message)")
+        }
+    }
+
+    /// ⚠️ The regression this catches is a FACT-GATHERING one, not a planning
+    /// one: the planner correctly falls through to port discovery when the
+    /// pidfile holds a live but foreign (recycled) pid — but if `stop()` only
+    /// looks up the port when the pidfile gave it nothing, that fall-through
+    /// can never fire, and the answer degrades to "nothing is listening" while
+    /// the sidecar is plainly answering.
+    @Test("a live but FOREIGN pidfile pid still reaches port discovery, and the stranger is never signalled")
+    func liveForeignPidfileStillReachesPortDiscovery() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // A real, live, harmless process that is plainly NOT ACE-Step: its
+        // command line contains neither "acestep" nor the configured dir.
+        let stranger = Process()
+        stranger.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        stranger.arguments = ["30"]
+        try stranger.run()
+        defer {
+            if stranger.isRunning { kill(stranger.processIdentifier, SIGKILL) }
+        }
+        let strangerPid = stranger.processIdentifier
+        try Data("\(strangerPid)".utf8).write(to: dir.appendingPathComponent(".ace-step.pid"))
+
+        let server = StubHealthServer(responseData: StubHealthServer.healthyResponse())
+        try server.start()
+        defer { server.stop() }
+
+        let manager = SidecarManager(configuration: .init(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!, acestepDir: dir))
+        let plan = await manager.resolvedStopPlan()
+
+        // Port discovery MUST have run: the refusal names the listener we know
+        // is there, not "nothing is listening".
+        #expect(plan == .refuse(.listenerIsThisProcess(
+            port: server.port, pid: ProcessInfo.processInfo.processIdentifier)))
+        // And the stranger in the pidfile is untouched.
+        #expect(kill(strangerPid, 0) == 0, "the foreign process named by the pidfile was signalled")
+
+        kill(strangerPid, SIGKILL)
+    }
+
+    @Test("dry-run against a healthy probe still never claims 'not running', and signals nothing")
+    func dryRunStaysHonestAndInert() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pidfile = dir.appendingPathComponent(".ace-step.pid")
+        try Data("99999".utf8).write(to: pidfile)
+
+        let server = StubHealthServer(responseData: StubHealthServer.healthyResponse())
+        try server.start()
+        defer { server.stop() }
+
+        let manager = SidecarManager(configuration: .init(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!, acestepDir: dir, dryRun: true))
+        let status = try await manager.stop()
+
+        #expect(status.message.contains("[dry-run]"))
+        #expect(!status.message.localizedCaseInsensitiveContains("not running"), "\(status.message)")
+        #expect(FileManager.default.fileExists(atPath: pidfile.path), "dry-run removed the pidfile")
+    }
+}
+
+@Suite("SidecarManager.stop() — the child process is what holds the memory (m23-bb)")
+struct SidecarManagerStopDescendantTests {
+    /// A launcher that spawns a REAL, harmless, longer-lived grandchild, so
+    /// the parent/child topology m23-bb reports (`pid 49156 -> python 49160`)
+    /// is reproduced without ACE-Step: killing only the pidfile's pid leaves
+    /// the child alive and reparented to pid 1 — measured directly, and the
+    /// reason the descendant set must be captured BEFORE signalling.
+    @Test("stop() reaps the child the sidecar spawned, not just the pid in the pidfile")
+    func stopReapsTheSpawnedChild() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ace-step-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("#!/bin/bash\nsleep 45\n".utf8).write(to: dir.appendingPathComponent("run.sh"))
+        let logURL = dir.appendingPathComponent("ace-step.log")
+        let unusedPort = try StubHealthServer.unusedLoopbackPort()
+
+        let manager = SidecarManager(configuration: .init(
+            baseURL: URL(string: "http://127.0.0.1:\(unusedPort)")!,
+            acestepDir: dir,
+            logFileURL: logURL,
+            startupTimeoutSeconds: 0.4,
+            healthPollIntervalSeconds: 0.1,
+            stopTimeoutSeconds: 1.0))
+
+        let started = try await manager.start()
+        let parentPid = try #require(started.pid)
+
+        // POSITIVE CONTROL: the grandchild must actually exist before this
+        // test can claim anything about reaping it.
+        var child: SidecarProcessDiscovery.Entry?
+        for _ in 0..<20 {
+            child = SidecarProcessDiscovery.captureSnapshot().descendants(of: parentPid).first
+            if child != nil { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let childEntry = try #require(child, "the launcher never spawned a child to reap")
+        #expect(childEntry.args.contains("sleep"))
+
+        let stopped = try await manager.stop()
+
+        // THE assertion. Before m23-bb, `stop()` signalled only the pidfile's
+        // pid; this grandchild outlived it, reparented to pid 1.
+        #expect(kill(childEntry.pid, 0) != 0, """
+            the child (pid \(childEntry.pid), \(childEntry.args)) survived stop() — on a real \
+            sidecar that is the process holding ~75 GB
+            """)
+        #expect(stopped.message.contains("\(childEntry.pid)"),
+                "the reaped child is not accounted for in the message: \(stopped.message)")
+        // The launcher is deliberately checked through `ps` rather than
+        // `kill(pid, 0)`: it is a direct child of the TEST process, so it can
+        // linger briefly as a zombie, and `kill -0` succeeds on a zombie.
+        // A zombie's `ps` args read `(bash)`, never the script path.
+        #expect(SidecarProcessDiscovery.args(ofPid: parentPid)?.contains("run.sh") != true,
+                "the launcher (pid \(parentPid)) is still running its script after stop()")
+    }
+}
+
 // MARK: - M10-b: honest `.starting` (the beta "loaded-but-not-started" bug)
 
 /// Real excerpts lifted verbatim from `~/Library/Logs/DAWPro/ace-step.log`

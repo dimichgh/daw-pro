@@ -1,5 +1,257 @@
 # Changelog
 
+## 2026-08-05 — A typo in a song-generation request no longer costs you a generation
+
+The three tools that generate things by calling an outside service — lyrics, a full song, an
+image — took their settings without checking the spelling. A misspelled setting was quietly
+thrown away and the job ran anyway, with that setting simply absent.
+
+Ask for a song and misspell "lyrics" as "lyric", and you got a song generated with no lyrics
+at all. No warning, no error, nothing to indicate the words had been dropped on the floor —
+just a finished generation that wasn't what you asked for, and a real charge for it.
+
+Every other operation in the app already refuses an unrecognized setting and tells you which
+one it didn't recognize. These three were the last that didn't, because they talk to the
+outside service directly and skipped the check everything else goes through. They now do the
+same thing as everything else: the request is refused up front, before anything is generated
+or charged, and the error names the setting it didn't recognize.
+
+## 2026-08-05 — "I can't do word timings" and "I couldn't tell" are now different answers
+
+Speech models come in two shapes on disk. One kind can be inspected: you can read what it
+produces and know whether it can place individual words in time. The other kind cannot be
+inspected at all — the file layout simply doesn't expose it.
+
+Until now those two collapsed into the same optimistic answer. A model that genuinely could
+not do word timings, and a model nobody could ask, both reported "yes, it can" — and if the
+word list came back empty, there was no way to tell which had happened.
+
+Transcriptions now say which of the three it is: the model said yes, the model said no, or
+nothing could be asked. The optimistic default is unchanged on purpose — a model that cannot
+be inspected is still treated as capable, because refusing to try on a guess would nag about
+every model of that shape, capable or not.
+
+The one case that used to be silent now speaks: when a model could not be inspected, produced
+speech, and still returned no words, the transcription explains that this is exactly the
+situation where the missing piece would show up. When there was nothing to transcribe, or the
+words came back fine, it stays quiet — the note appears only when it would actually help.
+
+## 2026-08-05 — Transcription now tells you when a model can't do word timings
+
+Placing lyrics on the beat grid needs word-level timings, and those come from a piece of data
+baked into some downloaded speech models but not others. When it was missing, nothing failed:
+the transcription came back with no words at all, no error, and nothing in the log. For a
+feature whose entire purpose is putting words on beats, that is a total failure wearing the
+costume of an empty result.
+
+The model you have installed does have it, so nothing was broken — the exposure was that
+installing a different variant could silently take the feature away.
+
+Speech models are now inspected when they are found, and each one reports whether it can
+produce word timings. A model that cannot says so in plain language, naming the model, where
+it was found, and what is missing. It stays perfectly usable for plain transcription; the
+limitation is reported, never enforced.
+
+One deliberate choice worth stating: when a model is packaged in a form that does not let us
+ask the question at all, we assume it can. The alternative would warn on every model of that
+kind, including capable ones, which teaches people to ignore the warning. The rule is that we
+only ever say no when the model itself said no — so that shape remains uncovered, and we have
+written it down rather than quietly counting it as handled.
+
+## 2026-08-05 — A test that passed because it had nothing to check
+
+One of our automated display tests watches the playhead — the moving line that shows where
+you are in a song — and confirms it stays on screen while the music plays. It did this by
+taking a burst of screenshots for fifteen seconds and then asserting that the line was
+visible in *every* one of them.
+
+The flaw is in the word "every". If the burst had captured no screenshots at all, then the
+line was visible in every one of them, trivially, and the test passed while checking
+nothing. The number of screenshots taken was printed in the log but never actually checked,
+and how many get taken depends on how busy the machine is — each one is a full-resolution
+capture plus six image crops, racing a fixed fifteen-second budget.
+
+This was never observed happening: on an unloaded machine the burst captures around eight
+screenshots, and it would take a severely overloaded one to starve it. We fixed it anyway,
+because the failure is silent by construction — the test would have reported success, and
+nothing in its output would have hinted that it had stopped looking. It now refuses to
+grade the run at all unless the burst captured enough frames to be meaningful.
+
+We also checked the rest of that test suite for the same shape. Four other places that could
+have had this problem turned out to already guard against it, in one case with the reasoning
+written directly into the test: "an empty scan passes everything." Roughly three dozen
+further candidates remain unexamined and are queued for review; we are not claiming the
+sweep is finished.
+
+## 2026-08-05 — A developer script that erased your session by default
+
+While widening the search described in the entry below, we found a test script in the
+repository that connected to your *live* session unless you explicitly told it otherwise —
+and the first thing it did after connecting was start a new project, discarding whatever you
+had not saved. It then armed a track and recorded over it. This needed no unusual setup: it
+was what running the script as documented did.
+
+The script's own opening comment said it should be run against a scratch copy of the app.
+The code directly beneath it did the opposite. It now defaults to the scratch copy, and it
+refuses to target your live session even if explicitly asked. Both behaviours were checked
+by running it — once with the dangerous setting, confirming it stops before opening any
+connection, and once with nothing set, confirming it goes to the scratch port.
+
+## 2026-08-05 — A test that could fail because you plugged in headphones
+
+One of our audio-device tests asked the system for the list of output devices twice and
+compared the two answers against each other. If a device appeared or vanished in the
+fraction of a second between the two questions — a dock waking up, a headset connecting, a
+call starting — the two lists came back different lengths and the test failed, even though
+nothing was wrong with the app. It now takes a single snapshot of the devices and checks
+that against itself, so a device list that changes underneath it cannot make it fail. A
+second test in the same file had the same shape and got the same treatment.
+
+Checking that fix turned up something more interesting than the flake. The repaired test
+only actually caught the fault it exists to catch because of an accident of this machine:
+it used the *first* output device as its subject, and on this machine the first device is
+not the default one. On a machine where those happen to be the same device, the test would
+have passed while checking nothing at all — a green light that certifies an empty room. It
+now checks every device rather than one, so it no longer depends on what order your
+hardware happens to be listed in.
+
+## 2026-08-05 — Test scripts can no longer be pointed at your live session by accident
+
+> **Correction, same day.** As first written, this entry claimed eighteen further checks
+> were an unguarded route to your live session. **That was wrong — they are guarded, and
+> always were.** Each one hands its port to the shared start-up code, whose second
+> instruction is the very refusal we thought it was bypassing; running one with the
+> dangerous setting stops it dead before it launches or connects anything. We verified that
+> by actually running two of them. The genuine problem described in the entry above this
+> one — a script that erased your session by default — was real and is fixed. The paragraph
+> below has been corrected accordingly.
+
+Our automated checks drive a throwaway copy of the app on a private port, never the session
+you are working in. Three of those checks still carried an old switch that let a setting in
+your shell choose the port instead. That switch could not actually have reached your work —
+the shared connection code refuses your live session's port outright and stops — but it was
+a loaded gun left on the table for whoever edited those files next, and it made searching
+for the real version of this problem return false matches. It is gone.
+
+Eighteen further checks read a *differently named* setting and open their own connection.
+We initially read that as the same fault on a larger scale. It is not: every one of them
+passes that setting through the shared start-up code first, which refuses your live
+session's port before anything is launched or connected. Those checks are not read-only —
+they add tracks, drag clips, select and delete — so we confirmed this by running two of
+them with the dangerous setting rather than reasoning about it, and both stopped
+immediately. Rewriting those eighteen to drop the setting altogether is still worth doing so
+the next person does not lose a day to the same false alarm, but it is tidying, not a repair.
+
+The lesson worth keeping cuts both ways, and we managed to land on both sides of it in two
+days. It is about how the first three were cleared. That earlier check
+asked "does anything here build a connection address out of this value?", found nothing,
+and concluded the code was dead. It wasn't. The value was being handed to a shared helper
+that built the address inside itself, where no search for that pattern could ever see it.
+The conclusion happened to be right, but for a reason the check never tested — so the same
+evidence would have produced the same reassuring answer over a genuine hazard. Follow the
+value, not the shape of the thing you expect to find.
+
+And then we did the mirror image of it. The eighteen were flagged as unguarded on exactly
+the same kind of evidence — a search for the refusal's *name* inside each file, which found
+nothing because the refusal is reached by handing the value onward, one layer down. Same
+mistake, opposite conclusion, one day apart, inside the very item the first one created. A
+rule you have just written down is not a rule you have learned; and a search you have
+already corrected once is the one you stop questioning.
+
+## 2026-08-05 — The voice-conversion engine's Stop had the same fault, and it is fixed too
+
+The fix below, for the song-generation engine, turned out to describe the voice-conversion engine word
+for word: its Stop control also looked only at the small file recording the process ID, and so also
+announced "was not running" about an engine that was running, answering, and holding its models in
+memory. Same fault, different engine.
+
+Rather than repair it twice, both Stop controls now share one implementation — the same rule about
+where to look, the same refusal to signal a process it cannot confirm, the same insistence on
+reporting a failure as a failure. Only two things differ between them: how each recognises its own
+engine, and the wording it speaks to you in. Recognising the voice-conversion engine needed more care
+than the song one: its name is three letters that occur in plenty of unrelated programs, so it is
+identified by the folder it was installed in and, failing that, by a much narrower pattern — never by
+those three letters alone. If something on its port cannot be confirmed, it is named and left running,
+not killed.
+
+## 2026-08-05 — Stopping the song-generation engine actually stops it
+
+The Stop control for the local song-generation engine could fail and tell you it had succeeded. If the
+small file recording the engine's process ID went out of date — which happens after a crash, or when
+the engine is restarted outside the app — Stop looked only at that file, decided nothing was running,
+and reported "was not running". Meanwhile the engine was still there, still answering, still holding
+tens of gigabytes of loaded models. The one screen that could have told you the truth, the status
+readout, was looking somewhere else entirely and correctly showed it as healthy.
+
+Stop now looks where the status readout looks. If the recorded process ID is missing or out of date, it
+finds the process actually answering on the engine's port and stops that one, including the child
+process holding the models. When it genuinely cannot stop something that is demonstrably running, it
+says so and tells you the command to run, instead of claiming success. It will not, under any
+circumstances, signal a process it cannot confirm is the engine — if something else is using that
+port, it says which process and leaves it alone.
+
+## 2026-08-05 — Test runs no longer leave the music model loaded in memory
+
+One of the automated checks starts the local music-generation engine on purpose, to confirm the app
+narrates the startup properly. It never stopped it again. That engine holds around 75 GB of memory
+while the usual tools report it as using about one — so a check that took a few seconds could leave
+your machine short of memory for the rest of the day, and nothing said so.
+
+It now shuts down exactly what it started, and only that: if you had the engine running yourself, the
+check leaves it strictly alone. The same check had also been reporting success no matter what it
+found, so a genuine problem in this area would have been announced as a pass.
+
+## 2026-08-05 — Development runs no longer share a folder with your work
+
+DAW Pro keeps your autosaves, recordings, imported audio and diagnostic reports in one folder under
+Application Support. Every automated test that launched a copy of the app was using **that same folder** —
+your folder. Most of what it left behind was clutter, but one file was not: the small marker the app writes
+while it is running, which is how it knows on the next launch whether it crashed. A test run replaced yours.
+If you had DAW Pro open at the time, it could offer to recover from a crash that never happened, and
+closing the app cleanly afterwards would not undo it.
+
+A copy of the app launched for testing now gets a scratch folder of its own, so it cannot see or touch
+anything of yours. Nothing about your installed app changes: with no test harness involved it reads and
+writes exactly where it always did, and it refuses to start rather than quietly fall back to your folder if
+it is ever pointed somewhere it cannot use. Nothing already in your folder was moved, changed or deleted.
+
+## 2026-08-05 — Exporting audio is in the File menu, where you went looking for it
+
+Rendering your song to a file was reachable from exactly one place: a small chip in the transport bar at
+the bottom of the window. That is not where anyone looks for it, and it is not where any other DAW keeps
+it — and the same bar is already carrying more controls than it comfortably fits.
+
+**File ▸ Export Audio…** now opens the same export dialog. It sits next to Export MIDI…, and it greys out
+when the project has no tracks yet, because there would be nothing to render.
+
+It is the same dialog, opened by the same code path as the transport chip — not a second export that could
+one day drift from the first. And it deliberately has no keyboard shortcut yet: there is an open question
+about how key presses reach this app, and adding another key path before that is understood would make
+both harder to diagnose.
+
+## 2026-08-05 — An assistant can see how loud each track is without reading the whole song
+
+Until now there was no cheap way to ask "how does this mix sit?". The levels existed — the engine has been
+measuring every track all along — but the only place they surfaced was the full project snapshot, which is
+enormous. An assistant orienting itself between edits either paid that cost or worked blind, and in
+practice it worked blind. That is how a song can come back technically correct and musically wrong: the
+master hits its loudness target while the kick sits thirty decibels above the lead, and nothing in the
+loop notices until a person listens.
+
+The lightweight project overview now carries a peak and RMS level for each track, in decibels. It is the
+same reading the meters show, and it costs nothing extra to fetch.
+
+One detail matters more than it looks. Meters go dark the moment you press stop — deliberately, because a
+meter that stays lit when nothing is playing is lying to you. But an assistant reads the project *between*
+actions, which is exactly when the transport is stopped, so the obvious version of this feature would have
+reported silence on every track and looked like it was working. The overview therefore reports the last
+level a track was actually heard at, which survives stopping. A track that has never made a sound reports
+nothing at all, rather than reporting silence — "not measured" and "measured as quiet" are different
+answers, and only one of them should make you reach for the fader.
+
+The master bus reports its level the same way, next to the master volume it already carried. On their own the per-track numbers are just numbers — "the kick peaks at −6" is not a judgement about anything until you know where the song as a whole is sitting. With both, "the lead is at −41" becomes "the lead is thirty decibels under the mix", and the second one tells you to reach for a fader. Both readings come from the same single piece of arithmetic, so the master and the tracks can
+never quietly disagree about what a decibel is.
+
 ## 2026-08-04 — The limiter can now count the peaks that matter for delivery
 
 The limiter's ceiling has always been honest about one thing and silent about another. It guarantees no

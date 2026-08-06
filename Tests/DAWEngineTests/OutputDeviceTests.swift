@@ -61,8 +61,36 @@ struct OutputDeviceTests {
 
         let stamped = OutputDevices.enumerate(selectedUID: target.uid)
         #expect(stamped.filter(\.isSelected).map(\.uid) == [target.uid])
-        // isDefault is untouched by the stamping — the two flags are independent.
-        #expect(stamped.map(\.isDefault) == baseline.map(\.isDefault))
+
+        // isDefault is untouched by the stamping — the two flags are
+        // independent. This used to compare `stamped` against `baseline`,
+        // which are two INDEPENDENT live CoreAudio enumerations: a device
+        // appearing or vanishing in the window between them changes array
+        // length and flakes the positional `==` (m23-bo, observed
+        // `[false,true,false,false] == [false,true,false]`). Instead, stamp
+        // ONE hardware snapshot twice — the two results share the same
+        // length/order by construction, so this cannot flake on a changing
+        // device set.
+        //
+        // It compares against the SNAPSHOT's own isDefault rather than against
+        // a second `stamp(..., selectedUID: nil)`, and it sweeps EVERY uid
+        // rather than just `target`. Both matter, and the second one was
+        // measured rather than assumed: `target` is `baseline.first`, and on
+        // this machine the default output is index 1 (`[false,true,false]`),
+        // so a `selectedUID`-contaminates-`isDefault` mutation reddens here.
+        // On a machine whose FIRST output device is the default, that same
+        // mutation would leave both sides identical and the assertion would
+        // pass without testing anything — discrimination that depends on the
+        // host's device ORDER. Sweeping every candidate removes the
+        // dependency: some uid is guaranteed to be a non-default one whenever
+        // more than one device exists.
+        let snapshot = HardwareDevices.enumerate(.output)
+        let hardwareDefaults = snapshot.map(\.isDefault)
+        for candidate in snapshot {
+            #expect(OutputDevices.stamp(snapshot, selectedUID: candidate.uid).map(\.isDefault)
+                    == hardwareDefaults)
+        }
+        #expect(OutputDevices.stamp(snapshot, selectedUID: nil).map(\.isDefault) == hardwareDefaults)
 
         // A uid that resolves to nothing selects nothing (rather than, say,
         // falling back to the first device).
@@ -85,15 +113,23 @@ struct OutputDeviceTests {
     /// a copy/paste of the wrong scope has to redden something.
     @Test("the input and output enumerations really are scoped differently")
     func scopesAreDistinct() {
-        let outputs = Set(OutputDevices.enumerate().map(\.uid))
-        let inputs = Set(InputDevices.enumerate().map(\.uid))
+        // Same shape as m23-bo: derive both the membership set and the
+        // default's uid from ONE enumeration per direction, not two
+        // independent live CoreAudio calls — a device appearing/vanishing
+        // between two `enumerate()` calls could otherwise make the default
+        // uid captured by the second call absent from the set captured by
+        // the first.
+        let outputDevices = OutputDevices.enumerate()
+        let inputDevices = InputDevices.enumerate()
+        let outputs = Set(outputDevices.map(\.uid))
+        let inputs = Set(inputDevices.map(\.uid))
         #expect(!outputs.isEmpty)
         #expect(!inputs.isEmpty)
         // The system default OUTPUT is an output; the system default INPUT is
         // an input. On a laptop those are different devices (speakers vs mic),
         // which is what makes this discriminating rather than tautological.
-        let defaultOut = OutputDevices.enumerate().first { $0.isDefault }?.uid
-        let defaultIn = InputDevices.enumerate().first { $0.isDefault }?.uid
+        let defaultOut = outputDevices.first { $0.isDefault }?.uid
+        let defaultIn = inputDevices.first { $0.isDefault }?.uid
         if let defaultOut { #expect(outputs.contains(defaultOut)) }
         if let defaultIn { #expect(inputs.contains(defaultIn)) }
     }

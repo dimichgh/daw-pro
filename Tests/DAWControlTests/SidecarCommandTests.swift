@@ -149,6 +149,26 @@ struct SidecarCommandTests {
         #expect(response.error == "could not signal pid 123")
     }
 
+    // m23-bb: a stop that could not stop a still-healthy sidecar is a
+    // FAILURE, not a success-shaped status. It reaches the wire as a control
+    // error carrying the manager's own actionable message — the agent must
+    // not be able to read it as "stopped" or as "it wasn't running".
+    @Test("ai.sidecarStop surfaces a stopFailed refusal verbatim, and never as ok (m23-bb)")
+    func stopFailedSurfacesVerbatim() async throws {
+        let sidecar = FakeSidecarManager()
+        let message = "ACE-Step sidecar is STILL UP — it is answering on http://127.0.0.1:8001 — "
+            + "but it could not be stopped: pid 4242 holds the listening socket on port 8001, but "
+            + "its command line does not identify it as ACE-Step (/usr/sbin/cupsd -l)."
+        await sidecar.setStopResult(.failure(SidecarError.stopFailed(message)))
+        let (router, _) = makeRouter(sidecar: sidecar)
+
+        let response = await router.handle(ControlRequest(id: "1", command: "ai.sidecarStop"))
+
+        #expect(!response.ok)
+        #expect(response.error == message)
+        #expect(response.error?.localizedCaseInsensitiveContains("not running") != true)
+    }
+
     // m23-n2h: `ai.sidecarStatus` used to be one of 26 verbs that never
     // called `rejectUnknownKeys` at all — an unknown extra was silently
     // ignored rather than harmless, contrary to the 135-of-161-command house

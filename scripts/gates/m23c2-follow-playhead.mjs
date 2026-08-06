@@ -48,8 +48,9 @@
 import fs from "fs";
 import { execFileSync, spawn, spawnSync } from "child_process";
 import {
-  ROOT, STAGING_PORT, DEFAULT_BINARY,
+  ROOT, STAGING_PORT, DEFAULT_BINARY, PROFILE_ROOT_ENV,
   buildOrAbort, startStaging, stopStaging, pidfilePath, releaseSessionLock,
+  stagingProfileRoot, stagingSessionLockPath,
 } from "./_staging.mjs";
 
 const GATE = "m23c2";                     // names the pidfile + staging out dir
@@ -214,6 +215,56 @@ async function buildFixture() {
   await req("debug.panelLayout", { pianoRollPPB: PPB, rowHeight: 34 });
   return { trackId, clipId: c1.id ?? c1.clip?.id, clip2Id: c2.id ?? c2.clip?.id };
 }
+// ── m23-ei: this gate is the pianoRollPPB leaker ──────────────────────────────
+// `buildFixture` pins BOTH zoom slots to PPB (100) and the gate restored NEITHER:
+// `debug.arrangeZoom {ppb}` and `debug.panelLayout {pianoRollPPB, rowHeight}` are
+// sticky UserDefaults in the shared `DAWApp` domain, so every run left the corpus
+// at 100 against app defaults of 32 (roll) and 16 (arrange). Measured ambient was
+// exactly 100, which is this constant, not a zoom ladder — the item was filed as
+// "zoom-accumulated" and that was wrong.
+//
+// ⚠️ The pins THEMSELVES are correct and must stay: every ALANE crop y below was
+// measured at these values, and inheriting them would slide the window off the
+// lane while the dimension assertion still passed. The defect is the missing
+// RESTORE, exactly as m23-du(b) found for m22g.
+//
+// ⚠️ Read the priors BEFORE `buildFixture()` writes them — after is too late, and
+// a restore to a value the gate itself set is not a restore.
+const priorRollLayout = await req("debug.panelLayout", {});
+const priorArrange = await req("debug.arrangeZoom", {});
+console.log(`prior zoom slots: pianoRollPPB=${priorRollLayout.pianoRollPPB} `
+  + `rowHeight=${priorRollLayout.rowHeight} arrangePPB=${priorArrange.ppb} `
+  + `arrangeRowStep=${priorArrange.rowStep}`);
+
+let zoomRestored = false;
+async function restoreZoomSlots(reason) {
+  if (zoomRestored) return;            // idempotent: normal path AND handlers call it
+  zoomRestored = true;
+  try {
+    // `req` is a reassigned `let` (rebound at the relaunch below), so this always
+    // speaks to the CURRENT staging process — including the relaunched one.
+    await req("debug.panelLayout", {
+      pianoRollPPB: priorRollLayout.pianoRollPPB, rowHeight: priorRollLayout.rowHeight,
+    });
+    await req("debug.arrangeZoom", { ppb: priorArrange.ppb, rowStep: priorArrange.rowStep });
+    const back = await req("debug.panelLayout", {});
+    const backA = await req("debug.arrangeZoom", {});
+    console.log(`  zoom slots restored (${reason}): pianoRollPPB=${back.pianoRollPPB} `
+      + `rowHeight=${back.rowHeight} arrangePPB=${backA.ppb}`);
+  } catch (e) {
+    // Loud: a failed restore is what poisons the NEXT gate, and it must not hide.
+    console.error(`  ⚠️ ZOOM SLOT RESTORE FAILED (${reason}) — LEAKED: ${e?.message ?? e}`);
+  }
+}
+for (const sig of ["unhandledRejection", "uncaughtException"]) {
+  process.on(sig, async (err) => {
+    console.error(`\n${sig.toUpperCase()} — restoring zoom slots before exit:`, err);
+    await restoreZoomSlots(sig);
+    stopStaging(GATE);
+    process.exit(3);
+  });
+}
+
 const { clipId, clip2Id } = await buildFixture();
 console.log(`fixture: clip1 @0 len ${CLIP_BEATS}, clip2 @${CLIP2_AT} len ${CLIP_BEATS}, ${PPB} pt/beat`);
 
@@ -303,6 +354,16 @@ const on = await playAndSample("on", { enabled: true });
 report("FOLLOW ON", on);
 {
   const s = on.samples;
+  // m23-bj: EVERY leg below is an `s.every(…)`, and `[].every(fn)` is `true`.
+  // `samples` is filled by a WALL-CLOCK race (`while (Date.now() - t0 < 15000)`,
+  // one 2800x2000 capture + 6 crops per turn, and t0 is stamped before both
+  // `transport.play` and a 900 ms settle), so a loaded machine can shorten it
+  // without any signal — the count was only ever `console.log`ged in `report()`.
+  // A short run must REDDEN here, not pass vacuously. L1 was already defended
+  // by accident (the distinct-offsets leg fails on a short set); this makes it
+  // explicit and is the only thing standing between L2 and a vacuous green.
+  check("L1 samples: the run produced enough frames to mean anything",
+        s.length >= 5, `${s.length} samples`);
   check("L1 arrange: the playhead is in frame in EVERY sample (ruler crop)",
         s.every((x) => lineX(x.aRuler) != null),
         s.map((x) => (lineX(x.aRuler) ?? "GONE")).join(" "));
@@ -365,6 +426,14 @@ const off = await playAndSample("off", { enabled: false });
 report("FOLLOW OFF", off);
 {
   const s = off.samples;
+  // m23-bj: THIS is the block that was genuinely undefended. All three legs
+  // below are `s.every(…)` over the same wall-clock-raced collection, and none
+  // of them, nor anything upstream, asserts a count — so on a short run
+  // "the offset never moves off zero" passes because there was nothing to move.
+  // (A FULLY empty run would instead throw at `s[s.length - 1]` further down;
+  // the silent case is the SHORT one, which is also the reachable one.)
+  check("L2 samples: the run produced enough frames to mean anything",
+        s.length >= 5, `${s.length} samples`);
   check("L2 arrange: the offset never moves off zero",
         s.every((x) => x.follow.arrange.offset === 0), [...new Set(s.map((x) => x.follow.arrange.offset))].join(","));
   check("L2 roll: the offset never moves off zero",
@@ -573,11 +642,27 @@ console.log("\n── PERSISTENCE ACROSS A RELAUNCH");
   // We killed A outside the harness, so nothing released A's session.lock. This
   // is a no-op unless the lock is PROVABLY A's (strict typeof + pid equality),
   // so it can never delete a real crash-recovery lock in the user's profile.
-  releaseSessionLock(oldPid);
+  // ⚠️ m23-ay: A's lock is under the STAGING PROFILE ROOT, not in the user's
+  // Autosave directory. Passing the path explicitly is what keeps this call
+  // effective — with the default it would look in the user's profile, find
+  // nothing of A's, and silently leave A's real lock behind in the staging root.
+  releaseSessionLock(oldPid, stagingSessionLockPath(stagingProfileRoot()));
   const log = fs.openSync(`${OUT}/relaunch.log`, "a");
   const child = spawn(BINARY, [], {
     cwd: REPO, detached: true, stdio: ["ignore", log, log],
-    env: { ...process.env, DAW_CONTROL_PORT: String(PORT) },
+    // ⚠️ THE ONE HAND-ROLLED LAUNCH IN THE WHOLE GATE CORPUS (m23-ay). Every
+    // other staging process comes from `startStaging`, which sets this variable
+    // itself; B is spawned here directly, so without this line B — and only B —
+    // would resolve its profile to the USER'S OWN
+    // ~/Library/Application Support/DAWPro/ and write a session.lock there.
+    // `stagingProfileRoot()` is memoised per process, so B inherits exactly A's
+    // root, which is also what makes this leg a real relaunch of the same
+    // session rather than a fresh install.
+    env: {
+      ...process.env,
+      DAW_CONTROL_PORT: String(PORT),
+      [PROFILE_ROOT_ENV]: stagingProfileRoot(),
+    },
   });
   child.unref();
   fs.writeFileSync(PIDFILE, String(child.pid));
@@ -614,6 +699,9 @@ for (const c of checks) {
 }
 fs.writeFileSync(`${OUT}/gate.json`, JSON.stringify({ checks }, null, 2));
 console.log(`\n${checks.length - failed}/${checks.length} checks passed`);
+// m23-ei: put the two sticky zoom slots back before the process we are talking
+// to goes away. MUST precede stopStaging — after it there is nobody to ask.
+await restoreZoomSlots("normal exit");
 // Link 3: re-reads the pidfile, so this SIGTERMs the RELAUNCHED process (B),
 // not the one startStaging launched. Also releases B's session.lock.
 stopStaging(GATE);

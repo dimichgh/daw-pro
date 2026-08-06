@@ -33,15 +33,30 @@ struct ReferenceABToggle: View {
             half(title: "MIX", isOn: !isMonitoring, wantsMonitor: false)
             half(title: "REF", isOn: isMonitoring, wantsMonitor: true)
         }
-        // The chip pins its OWN width — one size, everywhere. Without this the
-        // master strip's HStack proposal split let the row squeeze the chip
-        // whenever the neighbouring match-gain readout grew a glyph (a plain
-        // `-5.8 dB` read `MIX | REF`, a `+11.4 dB` collapsed it to `M… | R…`),
-        // and a truncated label on the app's primary A/B control is unreadable.
-        // Pinned at the OUTER stack, not the inner `Text`: the halves' 8 pt
-        // padding and background would still compress under a narrow proposal
-        // even with the text itself fixed. In the panel this is a no-op — that
-        // cluster already gets its ideal width.
+        // The chip pins its OWN width — one size, everywhere. Historically (the
+        // m22-g P3 regression) the master strip's HStack proposal split let the
+        // row squeeze the chip whenever the neighbouring match-gain readout grew
+        // a glyph (a plain `-5.8 dB` read `MIX | REF`, a `+11.4 dB` collapsed it
+        // to `M… | R…`), and a truncated label on the app's primary A/B control
+        // is unreadable. Pinned at the OUTER stack, not the inner `Text`: the
+        // halves' 8 pt padding and background would still compress under a
+        // narrow proposal even with the text itself fixed. In the panel this is
+        // a no-op — that cluster already gets its ideal width.
+        //
+        // ⚠️ **THAT SQUEEZE DOES NOT HAPPEN AT TODAY'S WIDTHS** (m23-dt). The
+        // sentence above is history, not a live counterfactual: the master row
+        // now has ≈14 pt of slack (chip 69 + 6 spacing + widest readout 43,
+        // inside 132), so the `Spacer(minLength: 0)` absorbs the residual and
+        // removing this pin ALONE moves zero pixels. Measured at m23-be with the
+        // row proven rasterized (`m22g` E0b/E2b), not inferred.
+        //
+        // ⭐ It is still the pin that matters MOST, and the one to restore first
+        // if this row is ever re-laid-out: widen the readout past the slack and
+        // drop THIS pin, and the chip fans out to one width per glyph
+        // (`75d6f3f5` / `d576b9ab`×2 / `91c6c22b` / `1216db16`); put it back with
+        // the readout still outgrown and the chip returns to a single width.
+        // `MixerStripView`'s readout pin is the junior partner. The leg that
+        // notices is `m22g-reference-panel.mjs` **E2c**.
         .fixedSize(horizontal: true, vertical: false)
         .background(DAWTheme.panelRaised)
         .clipShape(RoundedRectangle(cornerRadius: 5))

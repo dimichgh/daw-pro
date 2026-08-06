@@ -11,10 +11,32 @@
 //
 // >>> TIMING GATE, MACHINE-CALIBRATED BANDS <<<
 // Bands (measured on this machine 2026-07-16 under light load):
-//   K40 median in [330, 480] ms; K10 median < 300 ms; delta in [120, 280] ms.
+//   K40 median <= 480 ms; K10 median < 300 ms; delta in [120, 280] ms.
 // This is a load-sensitive, manual orchestrator gate — NOT for CI. If a run
 // misses a band, re-run once on a quiet machine before concluding anything;
 // do not retune the bands to make a noisy run pass.
+//
+// >>> WHY K40 HAS NO PERFORMANCE FLOOR (m23-bh, 2026-08-05) <<<
+// It used to assert `K40 median in [330, 480]`. That floor was the wrong SHAPE,
+// not the wrong value, and this is NOT a retune to make a run pass — nothing was
+// failing. The argument:
+//   (a) A floor on an ABSOLUTE latency cannot catch a regression. Regressions
+//       make things slower. The only thing a floor can catch is the app getting
+//       FASTER — so a future cycle that genuinely sped up `play(at:)` handshakes
+//       or trimmed the ~170 ms core would have been told it broke this gate.
+//       Observed K40 medians ran 337..431 and the minimum cleared 330 by 7 ms,
+//       so that false alarm was roughly one quiet-machine run away.
+//   (b) The model claim this gate exists to test — birth cost is linear in
+//       PLAYERS at ~6.5 ms each — is pinned two-sided by the `delta` band below,
+//       which is the correct home for it. K40's absolute value never carried it.
+//   (c) A floor's one legitimate role here is VACUITY: catching a run where the
+//       births did not really happen and the timings collapsed. That is already
+//       covered twice — `m10 < m40` fails on a total collapse, and delta's 120 ms
+//       floor fails on a proportional one. VACUITY_FLOOR below is a third,
+//       independent tripwire, kept because it is free and states its own job.
+// So: the ceiling is the regression guard, delta is the model assertion, and the
+// floor is a vacuity tripwire that no real improvement can trip. Do NOT raise
+// VACUITY_FLOOR back toward the observed distribution — that re-creates (a).
 //
 // Self-contained: generates its own 10 s / 440 Hz / mono / 16-bit / 48 kHz
 // tone fixture at runtime (same RIFF-writer pattern as m16h-second-cycle.mjs)
@@ -139,7 +161,18 @@ const m10 = await runBlock(10);
 const m40 = await runBlock(40);
 const delta = m40 - m10;
 console.log(`delta (K=40 minus K=10): ${delta} ms`);
-check("model: K=40 median in the filed class (330-480 ms)", m40 >= 330 && m40 <= 480, m40);
+// Split by ROLE so a failure says which claim broke (m23-bh).
+// VACUITY_FLOOR separates "no work happened" from "any work happened" — it is
+// deliberately NOT anchored to how fast a real birth is. If the births collapse,
+// K40 decays to a bare control round-trip (single-digit ms); 50 ms is ~10x that,
+// an order of magnitude of margin. ⚠️ It is anchored to the round-trip and NOT to
+// the core cost on purpose: m23-dz measured core falling ~60 ms below its filed
+// ~140-160 class in one calibration interval, so any justification written
+// against core would expire as the app gets faster — which is the exact failure
+// mode m23-bh removed. Do not re-derive this bound from a drifting quantity.
+const VACUITY_FLOOR = 50;
+check("regression: K=40 median under the 480 ms ceiling", m40 <= 480, m40);
+check(`vacuity: K=40 median above ${VACUITY_FLOOR} ms (the births really happened)`, m40 >= VACUITY_FLOOR, m40);
 check("model: K=10 strictly cheaper AND under old 300 ms budget", m10 < m40 && m10 < 300, m10);
 check("model: delta ~= 30 players x ~6.5 ms (120-280 ms band)", delta >= 120 && delta <= 280, delta);
 

@@ -4,11 +4,17 @@ import UniformTypeIdentifiers
 import DAWCore
 import DAWAppKit
 
-/// File menu for session persistence: New / Open / Save / Save As + Import Audio,
+/// File menu for getting a session in and out of the app: New / Open / Save /
+/// Save As, the two imports (audio, MIDI) and the two exports (audio, MIDI),
 /// wired to `ProjectStore` / `AppModel`. Standard macOS panels and alerts are used
 /// deliberately — they're OS chrome, outside the glass-cockpit main window. Every
 /// failure surfaces the store's message verbatim so the user reads the same
 /// actionable text an agent would.
+///
+/// This target has NO test target, so nothing here may DECIDE anything: the one
+/// item whose title or enabled state varies (Export Audio…, m23-dd) takes both
+/// from `DAWAppKit.ExportMenuPolicy`, which is testable headless. Everything else
+/// here is a fixed title over a store call.
 struct FileCommands: Commands {
     let store: ProjectStore
     /// The app model — owns the shared audio-import execution path (beta m10-k), so
@@ -33,6 +39,43 @@ struct FileCommands: Commands {
             // Standard MIDI Files (m23-k4b) — the first way to reach m23-k3/k4a
             // without an agent on the control port.
             Button("Import MIDI…") { importMIDI() }
+            // Bouncing the song to disk (m23-dd). A user reported this missing
+            // and it was: audio export was reachable ONLY from the transport
+            // bar's EXPORT chip and the onboarding tour's export step — no menu
+            // anywhere — while the MIDI export below has had one since m23-k4b.
+            //
+            // ⚠️⚠️ NO `.keyboardShortcut`, DELIBERATELY, and this is not an
+            // oversight to be tidied up later. m23-g1: an unbundled staging
+            // binary does not route real key events, so a key equivalent cannot
+            // be verified by any gate here — only by `dist/DAWPro.app` and the
+            // user's hands. And m23-cf is still OPEN on an undiagnosed DELETE
+            // key that never reaches its handlers; adding a second key path
+            // before the first is understood makes both harder to diagnose. The
+            // full argument, including why the ITEM carries none of the
+            // SHORTCUT's hazard, is on `ExportMenuPolicy`.
+            //
+            // BEFORE "Export MIDI…" so the menu reads as a 2×2 — Import Audio /
+            // Import MIDI over Export Audio / Export MIDI — and because audio is
+            // the export a song is finished by. Neither export has a key
+            // equivalent, so nothing's muscle memory moves.
+            //
+            // ⚠️ THE ACTION IS `model.exportSong()` AND NOTHING ELSE. That is
+            // the same entry point the transport chip uses; it opens the Export
+            // dialog, and the save panel comes later from the dialog's own
+            // button (`runExportFromDialog`), which is what lets the panel offer
+            // the chosen container. A menu that ran its own `NSSavePanel` — the
+            // idiom every other item in this file uses — would silently re-ship
+            // the pre-m23-m3 hardcoded-`.wav` export beside the real one.
+            //
+            // Title and enabled state both come from `ExportMenuPolicy`
+            // (`DAWAppKit`): this target has no test target, so a `FileCommands`
+            // that DECIDED anything would be untestable by construction. Reading
+            // `store.tracks` here is what keeps the item live — it is
+            // `@Observable`, so the menu re-evaluates when the first track
+            // arrives.
+            let exportAudio = ExportMenuPolicy.fileMenuItem(trackCount: store.tracks.count)
+            Button(exportAudio.title) { model.exportSong() }
+                .disabled(!exportAudio.isEnabled)
             Button("Export MIDI…") { exportMIDI() }
             Divider()
             Button("Save") { save() }
