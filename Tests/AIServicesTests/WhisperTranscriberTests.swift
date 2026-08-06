@@ -625,8 +625,11 @@ struct TranscriptionUnknownCapabilityTests {
         let (unsupported, unsupportedModel) = mapped(.unsupported, wordlessResults())
         #expect(unsupported.wordTimestampsUnverified == nil)
         // It gets the VERDICT wording instead — the two are never both present.
-        #expect(try #require(unsupported.wordTimestampsUnavailable)
-            == unsupportedModel.wordTimestampsUnavailableExplanation)
+        // Unwrapped on its own line: nesting `#require` inside `#expect` compares
+        // its result against an Optional, which makes the unwrap redundant in
+        // context and warns. Split, both assertions survive — present, and equal.
+        let unavailable = try #require(unsupported.wordTimestampsUnavailable)
+        #expect(unavailable == unsupportedModel.wordTimestampsUnavailableExplanation)
     }
 
     /// The capability is read off the MODEL and the caution is gated on the RUN,

@@ -45,7 +45,7 @@ struct MIDIFileExportCommandTests {
     /// command was renamed or reordered and HEAD's list stays an exact PREFIX.
     @Test("both verbs are registered, at the END of the command list")
     func commandsAreRegisteredAtTheEnd() {
-        #expect(CommandRouter.allCommands.count == 171)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2
+        #expect(CommandRouter.allCommands.count == 173)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl
         // m23-n2b appended `clip.transcribe`, m23-n3b appended
         // `ai.installSpeechModel`/`ai.speechModelInstallStatus`, m23-r4
         // appended `fx.spectrum` after THAT, m23-o1 appended
@@ -55,11 +55,13 @@ struct MIDIFileExportCommandTests {
         // `clip.moveManyByTracks`/`clip.moveManyToTrack` after THAT, under
         // the same additive-at-end law — the export pair is now eight rungs
         // up, not the tail itself.
-        #expect(Array(CommandRouter.allCommands.suffix(12).prefix(2))
+        // …and m23-dl appended `ai.modelResidency`/`ai.modelUnload` after
+        // THAT, so both suffix windows widen by two.
+        #expect(Array(CommandRouter.allCommands.suffix(14).prefix(2))
                 == ["project.exportMIDI", "track.exportMIDI"])
         // The k3 pair is still where it was, one rung further up — the
         // exact-prefix claim, asserted rather than assumed.
-        #expect(Array(CommandRouter.allCommands.suffix(14).prefix(2))
+        #expect(Array(CommandRouter.allCommands.suffix(16).prefix(2))
                 == ["project.importMIDI", "clip.importMIDI"])
     }
 

@@ -2645,6 +2645,33 @@ final class AppModel {
                 store?.stopAllAudition()
                 store?.autosaveIfNeeded()
             }
+            // ⭐ m23-dl — UNLOAD THE LOCAL MODEL SIDECARS ON QUIT. ACE-Step holds
+            // ~80 GB; leaving it running after the app is gone is the thing the
+            // user was fixing by hand with `kill`.
+            //
+            // ⚠️⚠️ **SYNCHRONOUS ON PURPOSE — `Task { await … }` HERE IS A SILENT
+            // NO-OP.** This notification fires inside `NSApplication.terminate:`;
+            // the process exits before a detached task gets to run, so the
+            // "cleanup" would never happen and nothing would report that. The
+            // semaphore blocks the main thread until the unload finishes or the
+            // timeout fires, and the whole unload path
+            // (`SidecarStop`/`Process`/`URLSession`) is off the main actor, so
+            // there is nothing for it to deadlock against.
+            //
+            // Bounded, because a wedged sidecar must never be able to hold Cmd-Q
+            // hostage: past the deadline we stop waiting and let the process go.
+            // The alternative shape — an `NSApplicationDelegateAdaptor` with
+            // `applicationShouldTerminate` → `.terminateLater` — is cleaner AppKit
+            // but introduces an app delegate into a SwiftUI entry point that has
+            // never had one, in a module with no test target. Revisit it if this
+            // ever needs to be genuinely async.
+            let shutdownDone = DispatchSemaphore(value: 0)
+            let shutdownTimeout = ModelLifecyclePolicy().shutdownUnloadTimeoutSeconds
+            Task.detached {
+                _ = await ModelLifecycleCoordinator.shared.shutdown()
+                shutdownDone.signal()
+            }
+            _ = shutdownDone.wait(timeout: .now() + shutdownTimeout)
             try? FileManager.default.removeItem(at: lockURL)
         }
 
@@ -2665,6 +2692,44 @@ final class AppModel {
         let voiceConversionClient = VoiceConversionClient()
         self.voiceConversionManager = voiceConversionManager
         self.voiceConversionClient = voiceConversionClient
+
+        // ⭐ m23-dl — THE ONE REGISTRATION SITE for the model lifecycle manager.
+        // Until this runs, `ModelLifecycleCoordinator.shared` knows no models and
+        // is entirely inert: no residency tracking, no single-flight, no
+        // unload-before-load, no idle timer, and not a byte written to disk.
+        // That inertness is deliberate (it is what keeps the shared instance safe
+        // for headless tests), which also means THIS is the only thing that turns
+        // the feature on — deleting it would leave every lifecycle verb answering
+        // truthfully about nothing.
+        //
+        // Descriptors carry each manager's OWN baseURL, so the port is derived
+        // and hardcoded nowhere. The evictors are the managers themselves.
+        //
+        // ⚠️⚠️ **ORDERING TRIPWIRE — DO NOT ADD A LAUNCH-TIME SIDECAR START.**
+        // This is a fire-and-forget `Task`, so it is only guaranteed to have
+        // finished before a `start()` that happens LATER IN WALL-CLOCK TIME, not
+        // merely later in this function. Verified 2026-08-05 that nothing races
+        // it: the only two `sidecarManager.start()` call sites in this file are
+        // both USER-DRIVEN — the `ensureSidecar` closure below (runs on a
+        // Generate action) and `startSketchpadSidecar()` (the banner's Start
+        // button) — so a human click is always many orders of magnitude after
+        // these two awaits.
+        //
+        // If anyone adds an auto-start at launch, MOVE IT INSIDE THIS TASK,
+        // after both `register` calls. A boot that wins this race is admitted
+        // against an EMPTY registry: `commitAdmission` returns nil, no residency
+        // is booked, no idle timer is ever armed, and ACE's ~80 GB then sits
+        // until quit — with `ai.modelResidency` truthfully reporting nothing
+        // resident, because as far as the coordinator knows, nothing is. The
+        // failure is completely silent and lasts the whole launch.
+        Task {
+            await ModelLifecycleCoordinator.shared.register(
+                ModelRegistry.aceStep(baseURL: sidecarManager.config.baseURL),
+                evictor: sidecarManager)
+            await ModelLifecycleCoordinator.shared.register(
+                ModelRegistry.rvc(baseURL: voiceConversionManager.config.baseURL),
+                evictor: voiceConversionManager)
+        }
 
         // The Voice panel model (m10-p-5): datasets under app support
         // (recordings are app-side data; trained MODELS stay facade-owned in

@@ -1918,7 +1918,19 @@ struct CommandRouterTests {
                 // (never-started, on this bare router) coordinator — answers
                 // {state:"idle"} with zero filesystem access — so it stays IN
                 // the loop, like ai.sidecarStatus/vc.sidecarStatus.
-                "ai.installSpeechModel"].contains(command) {
+                "ai.installSpeechModel",
+                // ai.modelUnload (m23-dl) takes exactly one of {modelId} or
+                // {all}; a bare call is a TEACHING ERROR naming the valid ids,
+                // which is the behaviour this loop cannot express (it sends no
+                // params). Excluded rather than fed `{all: true}`, because
+                // `{all: true}` on the process-wide coordinator would try to
+                // stop the user's real sidecars from a unit test. Proven by
+                // ModelLifecycleCommandTests, which drives both the one-model
+                // and the all form against an injected hermetic coordinator.
+                // ⚠️ `ai.modelResidency` is read-only, never throws, touches no
+                // filesystem on an unregistered coordinator, and stays IN the
+                // loop — the ai.sidecarStatus rationale.
+                "ai.modelUnload"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

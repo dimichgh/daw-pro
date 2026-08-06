@@ -34,6 +34,7 @@ struct AppDirectoriesTests {
             .feedback: "Feedback",
             .voiceDatasets: "VoiceDatasets",
             .models: "Models",
+            .modelLifecycle: "ModelLifecycle",
         ]
         // Closed set: a NEW category must be added to the pin above, so it can
         // never be introduced without someone reading this table.

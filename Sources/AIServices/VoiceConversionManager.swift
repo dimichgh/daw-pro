@@ -64,6 +64,14 @@ public actor VoiceConversionManager: VoiceConversionManaging {
     /// `SidecarManager`, even though both may be alive in the same process).
     private var startedAt: Date?
     private var runningProcess: Process?
+    /// See `SidecarManager.lastTerminationOutcome` — identical semantics
+    /// (m23-dl). The pre-kill captured tree, kept so post-stop liveness is
+    /// answered from the capture that did the signalling rather than from a
+    /// second, unreconstructible `ps` snapshot.
+    private var lastTerminationOutcome: SidecarStop.TerminationOutcome?
+    /// See `SidecarManager.flightTicket` — identical semantics and the identical
+    /// F14 rule: the ticket's lifetime is the boot's, never `start()`'s scope.
+    private var flightTicket: ModelLifecycleCoordinator.Ticket?
 
     public init(configuration: Configuration = .resolved()) {
         self.config = configuration
@@ -75,6 +83,7 @@ public actor VoiceConversionManager: VoiceConversionManaging {
         switch await probeHealth() {
         case .healthy(let info):
             startedAt = nil
+            await releaseFlightTicket(healthy: true)   // clearing rule (a)
             return VoiceConversionStatus(
                 state: .healthy,
                 message: "RVC voice-conversion sidecar is running and healthy.",
@@ -102,6 +111,9 @@ public actor VoiceConversionManager: VoiceConversionManaging {
                     startingForSeconds: elapsed
                 )
             case .failedBoot:
+                // Clearing rule (b) — from `status()`, because `bootProgress()`
+                // is synchronous and cannot await the coordinator (F14).
+                await releaseFlightTicket(healthy: false)
                 return VoiceConversionStatus(
                     state: .installedNotRunning,
                     message: "RVC voice-conversion sidecar isn't responding and its process appears "
@@ -180,10 +192,33 @@ public actor VoiceConversionManager: VoiceConversionManaging {
 
         let plan = try config.resolveLaunchPlan()
 
+        // ⚠️⚠️ F15, RULE 1 — RESOLVE BEFORE THE `dryRun` BRANCH, COMMIT AFTER IT.
+        // The `SidecarManager` twin, and the same hazard: `commitAdmission`
+        // SIGTERMs whatever the plan names for unload-before-load, so folding it
+        // in here would let a dry run kill the user's live ACE sidecar.
+        let admission = await config.lifecycle.resolveAdmission(.rvc)
+
         if config.dryRun {
-            return VoiceConversionStatus(state: .starting, message: "[dry-run] would spawn: \(plan.commandLine)")
+            return VoiceConversionStatus(
+                state: admission.isAdmitted ? .starting : .error,
+                message: await config.lifecycle.dryRunDescription(
+                    admission, for: .rvc, launch: plan.commandLine))
         }
 
+        let ticket = try await config.lifecycle.commitAdmission(admission, for: .rvc)
+        flightTicket = ticket
+        do {
+            return try await spawnAndPoll(plan)
+        } catch {
+            // Every throwing exit after the mint gives the ticket back (F14).
+            await releaseFlightTicket(healthy: false)
+            throw error
+        }
+    }
+
+    /// The pre-m23-dl body of `start()`, split out so the admission wiring above
+    /// has one place to catch a throw and hand the flight ticket back.
+    private func spawnAndPoll(_ plan: SidecarLaunchPlan) async throws -> VoiceConversionStatus {
         let process = Process()
         process.executableURL = plan.executableURL
         process.arguments = plan.arguments
@@ -208,6 +243,9 @@ public actor VoiceConversionManager: VoiceConversionManaging {
         let bootStartedAt = Date()
         startedAt = bootStartedAt
         runningProcess = process
+        if let flightTicket {
+            await config.lifecycle.recordBootPid(flightTicket, pid: process.processIdentifier)
+        }
 
         let deadline = bootStartedAt.addingTimeInterval(config.startupTimeoutSeconds)
         while Date() < deadline {
@@ -233,6 +271,14 @@ public actor VoiceConversionManager: VoiceConversionManaging {
             pid: process.processIdentifier,
             startingForSeconds: elapsed
         )
+    }
+
+    /// See `SidecarManager.releaseFlightTicket` — identical, including the rule
+    /// that `stop()` must NOT call it (F7).
+    private func releaseFlightTicket(healthy: Bool) async {
+        guard let ticket = flightTicket else { return }
+        flightTicket = nil
+        await config.lifecycle.admitted(ticket, healthy: healthy)
     }
 
     private static func startupTimeoutMessage(
@@ -312,6 +358,11 @@ public actor VoiceConversionManager: VoiceConversionManaging {
             if reason.removesPidfile { removePidfile() }
             runningProcess = nil
             startedAt = nil
+            // Clearing rule (c) for the flight ticket. LOCAL state only — this
+            // method is reachable from `evictWithoutCoordinator()`, and calling
+            // the coordinator from there is what F7 forbids.
+            flightTicket = nil
+            lastTerminationOutcome = nil   // nothing was signalled, so there is no tree
             return VoiceConversionStatus(
                 state: SidecarStop.notRunningState(reason, isInstalled: isInstalled()),
                 message: SidecarStop.notRunningMessage(reason, vocabulary: Self.stopVocabulary),
@@ -345,6 +396,8 @@ public actor VoiceConversionManager: VoiceConversionManaging {
             removePidfile()
             runningProcess = nil
             startedAt = nil
+            flightTicket = nil   // clearing rule (c), local only (F7)
+            lastTerminationOutcome = outcome
 
             let after = await status()
             if after.state == .healthy || after.state == .error {
@@ -464,6 +517,32 @@ public actor VoiceConversionManager: VoiceConversionManaging {
     }
 }
 
+// MARK: - Model lifecycle (m23-dl)
+
+/// RVC's `ModelEvicting` conformance — the `SidecarManager` twin, line for line.
+///
+/// ⚠️⚠️ **MUST NOT call back into `ModelLifecycleCoordinator`** — see
+/// `ModelEvicting` (F7). This is how the coordinator unloads RVC for the
+/// explicit verb, for unload-before-load, and on app quit; RVC ships with no
+/// idle timer of its own (see `ModelRegistry.rvc`).
+extension VoiceConversionManager: ModelEvicting {
+    public nonisolated var modelID: ModelID { .rvc }
+
+    public func evictWithoutCoordinator() async throws -> ModelStopEvidence {
+        let status = try await stop()
+        let answering: Bool
+        switch await probeHealth() {
+        case .unreachable: answering = false
+        case .healthy, .malformed: answering = true
+        }
+        return ModelStopEvidence.gather(
+            baseURL: config.baseURL,
+            probeAnswering: answering,
+            capturedTreePids: ModelStopEvidence.capturedTreePids(lastTerminationOutcome),
+            detail: status.message)
+    }
+}
+
 extension VoiceConversionManager {
     /// Everything needed to locate/launch the sidecar. Mirrors
     /// `SidecarManager.Configuration`'s shape and role; see this type's own
@@ -479,6 +558,10 @@ extension VoiceConversionManager {
         public var healthProbeTimeoutSeconds: Double
         public var stopTimeoutSeconds: Double
         public var dryRun: Bool
+        /// See `SidecarManager.Configuration.lifecycle` — identical, including
+        /// the "nothing registered ⇒ entirely inert" rule that keeps the shared
+        /// default safe for tests.
+        public var lifecycle: ModelLifecycleCoordinator
 
         public init(
             baseURL: URL = URL(string: "http://127.0.0.1:8002")!,
@@ -487,7 +570,8 @@ extension VoiceConversionManager {
             healthPollIntervalSeconds: Double = 0.5,
             healthProbeTimeoutSeconds: Double = 2.0,
             stopTimeoutSeconds: Double = 5.0,
-            dryRun: Bool = false
+            dryRun: Bool = false,
+            lifecycle: ModelLifecycleCoordinator = .shared
         ) {
             self.baseURL = baseURL
             self.rvcDir = rvcDir
@@ -496,6 +580,7 @@ extension VoiceConversionManager {
             self.healthProbeTimeoutSeconds = healthProbeTimeoutSeconds
             self.stopTimeoutSeconds = stopTimeoutSeconds
             self.dryRun = dryRun
+            self.lifecycle = lifecycle
         }
 
         /// `.rvc.pid` — same filename `scripts/rvc/run.sh` itself writes

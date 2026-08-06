@@ -363,7 +363,18 @@ try {
   //         so the array tail is NOT the chronology and reading the last N entries
   //         gives a confidently wrong answer (measured 2026-08-03). Anyone
   //         re-auditing this number must use git history, not array order.
-  const EXPECTED_VERBS = 171;
+  //   173 — m23-dl, 2026-08-05. `ai.modelResidency` + `ai.modelUnload`, both
+  //         APPENDED at the end of the array (verified: they are the last two
+  //         entries), so for this bump the array tail IS the chronology.
+  //         Confirmed intended. ⚠️ THIS GATE WAS FOUND RED-BY-PENDING-BUMP
+  //         during the m23-dl review: the cycle bumped 17 Swift count pins and
+  //         the MCP tool pin and never grepped `scripts/gates/` for a wire
+  //         count, so this was one unrun gate away from repeating the exact
+  //         m23-w -> m23-ac failure logged three lines up. Cross-checked TWO
+  //         ways before writing it: this gate's own regex over the array body
+  //         gives 173, and a comment-stripped count gives 173, with 173 UNIQUE
+  //         verbs and zero duplicates.
+  const EXPECTED_VERBS = 173;
   ck(`W1 allCommands still holds ${EXPECTED_VERBS} verbs (counted off the ARRAY body, not the case labels)`,
      verbs.length === EXPECTED_VERBS, String(verbs.length));
   ck("W2 the probe added NO wire verb — nothing bar-ops-shaped is in allCommands",

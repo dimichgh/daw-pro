@@ -129,13 +129,15 @@ struct ReferenceCommandTests {
         // `transport.panic` = 14, the old `dropLast` count). m23-aj-2
         // appended `clip.moveManyByTracks` + `clip.moveManyToTrack` after
         // THAT, making the tail SIXTEEN.
-        let tail = Array(CommandRouter.allCommands.dropLast(16).suffix(8))
+        // m23-dl appended `ai.modelResidency` + `ai.modelUnload` after THAT,
+        // making the tail EIGHTEEN.
+        let tail = Array(CommandRouter.allCommands.dropLast(18).suffix(8))
         #expect(tail == ["reference.import", "reference.remove",
                          "reference.status", "reference.analyze",
                          "reference.setMonitor", "reference.setOffset",
                          "reference.setTrim", "reference.compare"])
-        #expect(CommandRouter.allCommands.count == 171)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2
-        #expect(CommandRouter.allCommands.last == "clip.moveManyToTrack")  // m23-aj-2 (transport.panic was last at m23-af)
+        #expect(CommandRouter.allCommands.count == 173)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl
+        #expect(CommandRouter.allCommands.last == "ai.modelUnload")  // m23-dl (clip.moveManyToTrack was last at m23-aj-2)
         // Additive: earlier neighbors untouched.
         #expect(CommandRouter.allCommands.contains("mixer.liveLoudness"))
         #expect(CommandRouter.allCommands.contains("clip.analyzeAudio"))

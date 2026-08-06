@@ -304,8 +304,14 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // an exact integer instead of inferring "nothing re-prepared" from ~18 000
   // note.audition samples) took it 171 -> 172. m23-aj-2's
   // clip_move_many_by_tracks/clip_move_many_to_track (the wire half of
-  // m23-aj-1's cross-track group move) took it 172 -> 174.
-  assert.equal(result.tools.length, 174);
+  // m23-aj-1's cross-track group move) took it 172 -> 174. m23-dl's
+  // ai_model_residency/ai_model_unload (which local models are loaded and what they
+  // hold; unload one or all WITH evidence that it stopped) took it 174 -> 176.
+  // ⚠️ The DECOMPOSITION, because the total on its own has rotted before:
+  // 34 `server.registerTool(` (pure reads, deliberately exempt from `.strict()`
+  // — `ai_model_residency` joined them) + 142 `registerTool(` (the strict-schema
+  // wrappers — `ai_model_unload` joined those) = 176.
+  assert.equal(result.tools.length, 176);
 });
 
 // ---------------------------------------------------------------------------

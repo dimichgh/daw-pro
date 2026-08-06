@@ -49,6 +49,11 @@ public enum AppDirectories {
         case voiceDatasets = "VoiceDatasets"
         /// Speech-model weights installed by the user (m23-n1).
         case models = "Models"
+        /// Local-model lifecycle bookkeeping (m23-dl): the cross-process boot
+        /// lock and the learned-footprint observations. NOT weights — those are
+        /// `.models` (speech) or the sidecar's own checkout (ACE/RVC). Nothing
+        /// here is user content: deleting it costs one relearned measurement.
+        case modelLifecycle = "ModelLifecycle"
 
         /// The on-disk directory name.
         public var directoryName: String { rawValue }

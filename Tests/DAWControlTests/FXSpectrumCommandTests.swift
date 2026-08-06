@@ -238,7 +238,7 @@ struct FXSpectrumCommandTests {
         #expect(refusal.error?.contains("release") == true,
                 "the refusal must teach how to free a slot")
         #expect(engine.taps.count == 8, "the refused arm must not have recorded a 9th tap")
-        #expect(CommandRouter.allCommands.count == 171, "a cap-full refusal must not have touched allCommands")
+        #expect(CommandRouter.allCommands.count == 173, "a cap-full refusal must not have touched allCommands")
     }
 
     // MARK: - L4a/L4b: lease expiry — reporting vs cap-slot, deliberately split
@@ -433,16 +433,19 @@ struct FXSpectrumCommandTests {
         // m23-aj-2's clip.moveManyByTracks/clip.moveManyToTrack are each
         // additive-at-end AFTER it, so fx.spectrum is now sixth-from-last —
         // still contiguous, still unmoved, per the same law it was gated by.
-        #expect(CommandRouter.allCommands.dropLast(6).last == "fx.spectrum")
-        #expect(CommandRouter.allCommands.dropLast(5).last == "frequency.reference")
-        #expect(CommandRouter.allCommands.dropLast(4).last == "clip.removeMany")
-        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.moveMany")
+        #expect(CommandRouter.allCommands.dropLast(8).last == "fx.spectrum")
+        #expect(CommandRouter.allCommands.dropLast(7).last == "frequency.reference")
+        #expect(CommandRouter.allCommands.dropLast(6).last == "clip.removeMany")
+        #expect(CommandRouter.allCommands.dropLast(5).last == "clip.moveMany")
         // m23-af appended `transport.panic` after the m23-w pair.
-        #expect(CommandRouter.allCommands.dropLast(2).last == "transport.panic")
+        #expect(CommandRouter.allCommands.dropLast(4).last == "transport.panic")
         // m23-aj-2 appended clip.moveManyByTracks/clip.moveManyToTrack after that.
-        #expect(CommandRouter.allCommands.dropLast().last == "clip.moveManyByTracks")
-        #expect(CommandRouter.allCommands.last == "clip.moveManyToTrack")
-        #expect(CommandRouter.allCommands.count == 171)   // 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2
+        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.moveManyByTracks")
+        #expect(CommandRouter.allCommands.dropLast(2).last == "clip.moveManyToTrack")
+        // m23-dl appended the model-lifecycle pair after THAT.
+        #expect(CommandRouter.allCommands.dropLast().last == "ai.modelResidency")
+        #expect(CommandRouter.allCommands.last == "ai.modelUnload")
+        #expect(CommandRouter.allCommands.count == 173)   // 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl
     }
 
     // MARK: - L12: headless / no-capability both refuse honestly, never with a cap number

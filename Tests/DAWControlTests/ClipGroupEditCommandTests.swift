@@ -349,10 +349,14 @@ struct ClipGroupEditCommandTests {
         // one rung up — they did not move, they are simply no longer last.
         // m23-aj-2 then appended `clip.moveManyByTracks`/`clip.moveManyToTrack`
         // after THAT, so all three slide one rung further up in turn.
-        #expect(CommandRouter.allCommands.dropLast(4).last == "clip.removeMany")
-        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.moveMany")
-        #expect(CommandRouter.allCommands.dropLast(2).last == "transport.panic")
-        #expect(CommandRouter.allCommands.dropLast().last == "clip.moveManyByTracks")
-        #expect(CommandRouter.allCommands.last == "clip.moveManyToTrack")
+        // …and m23-dl appended `ai.modelResidency`/`ai.modelUnload` after THOSE,
+        // so every entry slides two rungs further up in turn.
+        #expect(CommandRouter.allCommands.dropLast(6).last == "clip.removeMany")
+        #expect(CommandRouter.allCommands.dropLast(5).last == "clip.moveMany")
+        #expect(CommandRouter.allCommands.dropLast(4).last == "transport.panic")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.moveManyByTracks")
+        #expect(CommandRouter.allCommands.dropLast(2).last == "clip.moveManyToTrack")
+        #expect(CommandRouter.allCommands.dropLast().last == "ai.modelResidency")
+        #expect(CommandRouter.allCommands.last == "ai.modelUnload")
     }
 }

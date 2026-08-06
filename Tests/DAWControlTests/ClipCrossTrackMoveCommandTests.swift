@@ -356,7 +356,13 @@ struct ClipCrossTrackMoveCommandTests {
 
     @Test("clip.moveManyByTracks and clip.moveManyToTrack are registered at the END of allCommands")
     func registeredAtEndOfAllCommands() {
-        #expect(CommandRouter.allCommands.dropLast().last == "clip.moveManyByTracks")
-        #expect(CommandRouter.allCommands.last == "clip.moveManyToTrack")
+        // m23-dl appended `ai.modelResidency`/`ai.modelUnload` after this pair,
+        // so both slide two rungs up — they did not move, they are simply no
+        // longer last. The additive-at-end law is intact; what this test pins is
+        // the ORDER, not the index.
+        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.moveManyByTracks")
+        #expect(CommandRouter.allCommands.dropLast(2).last == "clip.moveManyToTrack")
+        #expect(CommandRouter.allCommands.dropLast().last == "ai.modelResidency")
+        #expect(CommandRouter.allCommands.last == "ai.modelUnload")
     }
 }

@@ -96,6 +96,15 @@ public final class CommandRouter {
     /// sidecar process.
     private let songGenerator: SongGenerating
 
+    /// The model-lifecycle coordinator (m23-dl): residency bookkeeping, the
+    /// global single-flight, unload-before-load, and the ten-minute idle unload.
+    ///
+    /// ⚠️ A coordinator with **nothing registered is entirely inert** — it writes
+    /// no files and books nothing — so the shared default is safe for the many
+    /// tests that construct a router without a model lifecycle in mind.
+    /// Registration happens once, in `DAWProApp`.
+    private let modelLifecycle: ModelLifecycleCoordinator
+
     /// On-device speech-to-text (m23-n2b) — `clip.transcribe`'s engine,
     /// held ONE PER ROUTER (not constructed per call), exactly why
     /// `WhisperTranscriber`'s own doc comment holds one for the whole
@@ -399,6 +408,15 @@ public final class CommandRouter {
         // the additive-at-end law.
         "clip.moveManyByTracks",
         "clip.moveManyToTrack",
+        // m23-dl model lifecycle. STRICTLY ADDITIVE, appended at the end per the
+        // additive-at-end law. NOTE what is deliberately NOT here: no `force` on
+        // `ai.sidecarStart`/`vc.sidecarStart`, because the memory admission gate
+        // those would have overridden was cut by the user on 2026-08-05. Adding
+        // `force` to a start verb later would also collide with
+        // `WireHardeningM16ETests`, which uses `force` as its stray-param probe
+        // against `ai.sidecarStop`.
+        "ai.modelResidency",
+        "ai.modelUnload",
     ]
 
     public init(
@@ -414,7 +432,8 @@ public final class CommandRouter {
         keyEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         connectionInfo: ControlConnectionInfo = ControlConnectionInfo(),
         lyricsWriter: (@MainActor () throws -> any LyricsGenerating)? = nil,
-        importGenerator: SongGenerating? = nil
+        importGenerator: SongGenerating? = nil,
+        modelLifecycle: ModelLifecycleCoordinator = .shared
     ) {
         self.store = store
         self.sidecarManager = sidecarManager
@@ -427,6 +446,7 @@ public final class CommandRouter {
         self.keyStore = keyStore
         self.keyEnvironment = keyEnvironment
         self.connectionInfo = connectionInfo
+        self.modelLifecycle = modelLifecycle
         // Default: resolve a writer from the shared key chain on each call.
         // `ai.writeLyrics` uses the APP's keys + live project context — the MCP
         // server's own legacy `generate_lyrics` calls a provider directly with its
@@ -3215,7 +3235,124 @@ public final class CommandRouter {
             // installedNotRunning/notInstalled).
             try params.rejectUnknownKeys([], verb: "ai.sidecarStop")
             let stoppedStatus = try await sidecarManager.stop()
+            // Reconcile the lifecycle bookkeeping AFTER a stop that succeeded
+            // (a failed one throws above and the model is still up, so residency
+            // must stay). Deliberately NOT re-routed through
+            // `modelLifecycle.unload`, which the design suggested: that would
+            // change this verb's response type and its m23-bb stop-honesty
+            // error. Called from the ROUTER, never from the manager — a
+            // manager-side call would arrive from inside the coordinator's own
+            // eviction and violate F7.
+            await modelLifecycle.noteStoppedExternally(.aceStep)
             return .success(request.id, try JSONValue(encoding: stoppedStatus))
+
+        case "ai.modelResidency":
+            // m23-dl. WHICH LOCAL MODELS ARE LOADED RIGHT NOW, what each is
+            // holding, and what would happen if you booted one. This is the read
+            // that makes every other lifecycle verb checkable.
+            //
+            // params: includeProcessDetail (optional bool, default false).
+            // ⚠️ It defaults FALSE on purpose: the per-process figures come from
+            // a `/bin/ps` fork and `portBusy` from an `lsof` fork — tens of
+            // milliseconds each. The obvious next feature is "show the resident
+            // model in the status bar", and a 1 Hz poll with this true would fork
+            // two helpers every second forever. With it false those fields are
+            // served from the last cached snapshot and carry
+            // processDetailAgeSeconds; `memory` is always fresh (one mach trap).
+            //
+            // Response: {generation, sampledAt, memory {physicalBytes, usedBytes
+            // (= Activity Monitor "Memory Used"), availableBytes, freeBytes,
+            // externalBytes, compressorBytes, wiredBytes, vmStatFreeBytes, …},
+            // policy, inFlight?, processDetailAgeSeconds?, models: [{modelId,
+            // displayName, port?, resident, holdBytes, holdConfidence,
+            // holdProvenance, estimatedHoldBytes, activeJobs, admittedAt?,
+            // idleForSeconds?, idleUnloadSeconds?, idleUnloadAt?,
+            // nextBootWouldUnload, nextBootProtectedByJobs, nextBootPlan,
+            // treeFootprintBytes?, treeResidentBytes?, pids?, portBusy?}]}.
+            //
+            // ⚠️ `generation` is the m23-ah nonce: two reads with the same value
+            // describe the same world, and an unload that did not bump it did not
+            // happen. ⚠️ `holdBytes` is CORROBORATION, never a gate — DAW Pro
+            // does not check memory before loading a model (user decision
+            // 2026-08-05), so this figure only ever grades whether an unload
+            // actually returned what it was supposed to. ⚠️ `resident` means
+            // "booted and tracked by this app"; a sidecar you started by hand
+            // reads resident:false while holding its memory, which is what
+            // `portBusy` is for.
+            try params.rejectUnknownKeys(["includeProcessDetail"], verb: "ai.modelResidency")
+            let residencyIncludeDetail = params["includeProcessDetail"]?.boolValue ?? false
+            let residencyReport = await modelLifecycle.residency(
+                includeProcessDetail: residencyIncludeDetail)
+            return .success(request.id, try JSONValue(encoding: residencyReport))
+
+        case "ai.modelUnload":
+            // m23-dl. Unloads a local model sidecar and REPORTS EVIDENCE that it
+            // actually stopped. params: exactly ONE of modelId (e.g. "ace-step",
+            // "rvc") or all (bool true). Both or neither is a teaching error
+            // naming the valid ids.
+            //
+            // "Unloaded" has three AUTHORITY limbs, and any one of them false
+            // means the unload FAILED: the model's port is free, its health probe
+            // is unreachable, and no pid from the PRE-KILL captured process tree
+            // is still alive. (The tree is captured before signalling because a
+            // child whose parent exits is reparented to pid 1 and the linkage is
+            // gone. Checking the pidfile pid alone is wrong for ACE-Step: run.sh
+            // ends in `exec uv run …`, so the pidfile pid is the `uv` supervisor
+            // while the python child holds the ~80 GB.)
+            //
+            // memoryReturnedBytes/memoryVerdict are CORROBORATION and never fail
+            // the verb: system-available memory is a shared, noisy counter and a
+            // memory-gated verdict reports failed unloads that did not fail.
+            //
+            // Response: {generation, models: [EvictionReport {modelId, reason,
+            // stopped, detail, evidence {portFree, portLookupDetail?,
+            // probeUnreachable, treePidsAliveAfter, availableBeforeBytes,
+            // availableAfterBytes, memoryReturnedBytes, memoryVerdict,
+            // expectedHoldBytes?, generationBefore, generationAfter}}]}. `ok` is
+            // false when any model failed to stop.
+            try params.rejectUnknownKeys(["modelId", "all"], verb: "ai.modelUnload")
+            let unloadAll = params["all"]?.boolValue ?? false
+            let unloadModelID = params["modelId"]?.stringValue
+            let unloadValidIDs = await modelLifecycle.registeredModelIDs()
+            if unloadAll && unloadModelID != nil {
+                throw ControlError(
+                    "ai.modelUnload takes exactly one of 'modelId' or 'all', not both. Send "
+                        + "{\"all\": true} to unload every local model, or {\"modelId\": \"<id>\"} "
+                        + "for one of: "
+                        + unloadValidIDs.map(\.rawValue).joined(separator: ", ") + ".")
+            }
+            var unloadReports: [EvictionReport]
+            if unloadAll {
+                unloadReports = await modelLifecycle.unloadAll(reason: .explicit)
+            } else if let unloadModelID {
+                let id = ModelID(rawValue: unloadModelID)
+                guard await modelLifecycle.isRegistered(id) else {
+                    throw ControlError(await ModelAdmission.unknownModelMessage(
+                        unloadModelID, valid: unloadValidIDs,
+                        generation: modelLifecycle.currentGeneration()))
+                }
+                unloadReports = [await modelLifecycle.unload(id, reason: .explicit)]
+            } else {
+                throw ControlError(
+                    "ai.modelUnload needs exactly one of 'modelId' or 'all'. Send {\"all\": true} "
+                        + "to unload every local model, or {\"modelId\": \"<id>\"} for one of: "
+                        + unloadValidIDs.map(\.rawValue).joined(separator: ", ") + ".")
+            }
+            let unloadGeneration = await modelLifecycle.currentGeneration()
+            let unloadFailures = unloadReports.filter { !$0.stopped }
+            guard unloadFailures.isEmpty else {
+                // Never a success-shaped response to a stop that did not stop
+                // (m23-bb / m23-ah). The evidence is still reachable through
+                // ai.modelResidency, whose generation has moved either way.
+                throw ControlError(
+                    "Unload FAILED for "
+                        + unloadFailures.map(\.modelID.rawValue).joined(separator: ", ")
+                        + " — " + unloadFailures.map(\.detail).joined(separator: " | ")
+                        + " Poll ai.modelResidency (generation \(unloadGeneration)) to see what is "
+                        + "still holding a port.")
+            }
+            return .success(request.id, try JSONValue(encoding: ModelUnloadResponse(
+                generation: unloadGeneration, models: unloadReports)))
 
         case "ai.providerStatus":
             // No params. Reports, per key-backed provider (anthropic/openai/
@@ -3312,6 +3449,7 @@ public final class CommandRouter {
             }
             do {
                 let submission = try await songGenerator.generateSong(genRequest)
+                await noteACEJobStarted(submission.jobID)
                 return .success(request.id, try JSONValue(encoding: submission))
             } catch {
                 throw await translateSongGeneratorError(error)
@@ -3334,8 +3472,36 @@ public final class CommandRouter {
             let statusJobID = try params.require("jobId", \.stringValue)
             do {
                 let status = try await songGenerator.generationStatus(jobID: statusJobID)
+                // The ONE place a job is closed (m23-dl). Idempotent by job id,
+                // which matters because this verb is polled in a loop and every
+                // poll after the first sees the same terminal state.
+                if status.state == .succeeded || status.state == .failed {
+                    await modelLifecycle.noteJobEnded(.aceStep, jobID: statusJobID)
+                }
                 return .success(request.id, try JSONValue(encoding: status))
             } catch {
+                // A job that failed upstream surfaces here as a thrown error
+                // rather than a `.failed` state, so this is the only place that
+                // kind of failure can close the job.
+                //
+                // ⚠️⚠️ **BUT ONLY FOR ERRORS THAT PROVE THE JOB IS OVER.** This
+                // used to close the job on ANY thrown error, which inverted F8:
+                // the success path is careful (terminal states only, `.running`
+                // keeps the job open) while "I could not ask" — one dropped
+                // connection or one HTTP timeout mid-render — dropped
+                // `activeJobs` to 0 and let the next boot SIGTERM ACE in the
+                // middle of the render it was protecting. That is precisely the
+                // failure mode F8 exists to prevent, introduced by the hook
+                // written to enforce it.
+                //
+                // A transient error now leaves the job OPEN and lets
+                // `jobLeaseSeconds` self-heal it. That is the deliberate
+                // trade: the lease exists for a job nobody closed, so leaking
+                // protection for an hour is the cheap side and evicting a live
+                // render is the expensive one.
+                if Self.errorProvesJobIsOver(error) {
+                    await modelLifecycle.noteJobEnded(.aceStep, jobID: statusJobID)
+                }
                 throw await translateSongGeneratorError(error)
             }
 
@@ -3419,6 +3585,7 @@ public final class CommandRouter {
             do {
                 let submission = try await songGenerator.extractStems(StemExtractionRequest(
                     sourceAudioPath: extractSourceAudioPath, trackNames: extractTrackNames, model: extractModel))
+                await noteACEJobStarted(submission.jobID)
                 return .success(request.id, try JSONValue(encoding: submission))
             } catch {
                 throw await translateSongGeneratorError(error)
@@ -3448,6 +3615,7 @@ public final class CommandRouter {
                 let submission = try await songGenerator.generateLegoTracks(LegoGenerationRequest(
                     sourceAudioPath: legoSourceAudioPath, globalCaption: legoGlobalCaption,
                     tracks: legoTracks, model: legoModel))
+                await noteACEJobStarted(submission.jobID)
                 return .success(request.id, try JSONValue(encoding: submission))
             } catch {
                 throw await translateSongGeneratorError(error)
@@ -3565,6 +3733,7 @@ public final class CommandRouter {
             repaintRequest.model = params["model"]?.stringValue
             do {
                 let submission = try await songGenerator.repaintAudio(repaintRequest)
+                await noteACEJobStarted(submission.jobID)
                 return .success(request.id, try JSONValue(encoding: submission))
             } catch {
                 throw await translateSongGeneratorError(error)
@@ -3630,6 +3799,7 @@ public final class CommandRouter {
                     mode: fixMode, strength: fixStrength, seed: fixSeed,
                     contextSeconds: fixContextSeconds,
                     model: params["model"]?.stringValue)
+                await noteACEJobStarted(submission.jobID)
                 return .success(request.id, try JSONValue(encoding: submission))
             } catch {
                 throw await translateSongGeneratorError(error)
@@ -4520,6 +4690,7 @@ public final class CommandRouter {
             // settles to installedNotRunning/notInstalled).
             try params.rejectUnknownKeys([], verb: "vc.sidecarStop")
             let stoppedVCStatus = try await voiceConversionManager.stop()
+            await modelLifecycle.noteStoppedExternally(.rvc)   // see ai.sidecarStop
             return .success(request.id, try JSONValue(encoding: stoppedVCStatus))
 
         case "vc.convertVocals":
@@ -5207,6 +5378,51 @@ public final class CommandRouter {
             throw ControlError(
                 "unknown command '\(request.command)' — known: \(Self.allCommands.joined(separator: ", "))"
             )
+        }
+    }
+
+    /// Opens an ACE-Step job against the model-lifecycle coordinator (m23-dl).
+    ///
+    /// ⚠️⚠️ **This is what makes F8 real in production.** `activeJobs > 0` is an
+    /// absolute veto on eviction, and unload-before-load is now unconditional —
+    /// so without these hooks, starting RVC while ACE is rendering would SIGTERM
+    /// ACE mid-generation, and the idle timer would fire ten minutes into a long
+    /// render. The job is closed by `ai.generationStatus` on a terminal state,
+    /// and by `policy.jobLeaseSeconds` if nobody ever polls.
+    ///
+    /// Inert when the coordinator has no ACE descriptor registered, which is
+    /// every headless test.
+    private func noteACEJobStarted(_ jobID: String) async {
+        await modelLifecycle.noteJobStarted(.aceStep, jobID: jobID)
+    }
+
+    /// Does this `ai.generationStatus` failure PROVE the job is over, or does it
+    /// only prove we could not ask?
+    ///
+    /// Only the first kind may close a job (F8). The split is deliberately
+    /// asymmetric — an error has to earn its way into the "close it" list:
+    ///
+    /// - `.jobFailed` — the sidecar itself reported this job terminal. Over.
+    /// - `.jobNotFound` — the sidecar has no such job. Over (and re-protecting
+    ///   a job the sidecar has forgotten would pin the model for a full lease
+    ///   with nothing rendering).
+    /// - everything else — `.sidecarUnreachable` (dropped connection),
+    ///   `.requestFailed` (any HTTP status, including a proxy 504 during a long
+    ///   render), `.malformedResponse`, `.modelSlotUnavailable`, and any
+    ///   non-`ACEStepError` thrown by a different provider — say nothing about
+    ///   the job. Leave it open; the lease self-heals.
+    ///
+    /// ⚠️ The `default` deliberately returns false, so a NEW error case added to
+    /// `ACEStepError` later is treated as transient until someone decides
+    /// otherwise. The safe direction for an unknown error is to keep protecting
+    /// the render.
+    static func errorProvesJobIsOver(_ error: Error) -> Bool {
+        guard let aceError = error as? ACEStepError else { return false }
+        switch aceError {
+        case .jobFailed, .jobNotFound:
+            return true
+        case .sidecarUnreachable, .requestFailed, .malformedResponse, .modelSlotUnavailable:
+            return false
         }
     }
 

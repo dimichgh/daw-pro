@@ -46122,10 +46122,49 @@ registerTool(
   "ai_sidecar_stop",
   {
     title: "Stop the local ACE-Step song-generation sidecar",
-    description: "Stop the local ACE-Step-1.5 sidecar (graceful SIGTERM via its pidfile, escalating to a forced kill if it doesn't exit promptly) to free the memory/GPU its loaded models hold \u2014 useful before a demanding DAW session. No params. Succeeds as a no-op (not an error) if it wasn't running. Returns the same `{state, message, version?, ditModel?, lmModel?, pid?}` shape as ai_sidecar_status (state settles to `installedNotRunning`).",
+    description: "Stop the local ACE-Step-1.5 sidecar to free the memory/GPU its loaded models hold (tens of GB \u2014 useful before a demanding DAW session). Graceful SIGTERM, escalating to a forced kill if it doesn't exit promptly, and the child process the sidecar spawned is stopped with it \u2014 that child is where the loaded models' memory actually lives. The target is resolved from the sidecar's pidfile when that points at a live process, and otherwise from whichever process holds the listening socket on the sidecar's port, so a stale pidfile no longer hides a running sidecar. No params. Succeeds as a no-op (not an error) if it genuinely wasn't running. ERRORS \u2014 rather than reporting success \u2014 if the sidecar is still answering its health check afterwards, or if the only process found on its port cannot be identified as ACE-Step (it is never signalled in that case); the error message says what is still up and what to run. On success returns the same `{state, message, version?, ditModel?, lmModel?, pid?}` shape as ai_sidecar_status (state settles to `installedNotRunning`).",
     inputSchema: {}
   },
   async () => toToolResult(() => bridge.send("ai.sidecarStop"))
+);
+server.registerTool(
+  "ai_model_residency",
+  {
+    title: "See which local AI models are loaded and what they hold",
+    description: "Which local model sidecars are loaded right now, how much memory each is holding, and what would happen if you started one. Use this before and after any load/unload \u2014 it is the read that makes the others checkable.\n\n\u26A0\uFE0F READ THIS BEFORE BUILDING A POLICY ON THE NUMBERS: **DAW Pro does not check memory before loading a model.** Every byte figure here is reporting, never a gate \u2014 nothing will refuse a load because it would not fit, and there is no `force` flag anywhere to override such a refusal. If a model does not fit, the load fails. What DOES happen automatically: starting one model unloads the other first, ACE-Step unloads itself ten idle minutes after its last generation job finishes, and quitting DAW Pro unloads everything.\n\nReturns `{generation, sampledAt, memory, policy, inFlight?, models[]}`. `generation` is a counter that moves on EVERY residency change: two reads with the same value describe the same world, and an unload that did not move it did not happen. `memory.availableBytes` is what Activity Monitor calls free (total minus \"Memory Used\"), for the whole machine, in BYTES.\n\nPer model: `resident` (true = DAW Pro booted it and is tracking it), `holdBytes` + `holdConfidence` (`measured` = observed on this machine, `estimated` = derived from on-disk size and could be wrong in either direction), `activeJobs` (a model with a job running is NEVER unloaded automatically), `idleUnloadSeconds` (600 for ACE-Step, null for the voice-conversion sidecar, which has no idle timer), `idleUnloadAt` (when the idle unload will fire, or null if none is armed), and `nextBootWouldUnload` \u2014 what starting THIS model would unload first.\n\n\u26A0\uFE0F The response key is `modelID` (capital ID, the model's own field name); the PARAMETER on ai_model_unload is `modelId`. Both are live and neither is a typo.\n\n\u26A0\uFE0F `resident: false` does NOT mean nothing is loaded: a sidecar someone started outside DAW Pro still holds its memory. Pass `includeProcessDetail: true` to also get `portBusy` (something really is listening on that model's port), `pids`, `treeResidentBytes` and `treeFootprintBytes`. That flag costs two helper-process spawns per model, so leave it off when polling.",
+    inputSchema: {
+      includeProcessDetail: external_exports.boolean().optional().describe(
+        "Also inspect the real processes: portBusy, pids and per-tree memory. Costs a `ps` and an `lsof` spawn per model \u2014 off by default, and you should keep it off if you are polling."
+      )
+    }
+  },
+  async ({ includeProcessDetail }) => toToolResult(
+    () => bridge.send(
+      "ai.modelResidency",
+      includeProcessDetail === void 0 ? {} : { includeProcessDetail }
+    )
+  )
+);
+registerTool(
+  "ai_model_unload",
+  {
+    title: "Unload a local AI model and prove it actually stopped",
+    description: 'Unload one local model sidecar, or all of them, and get EVIDENCE that it stopped rather than a bare success. Use it to hand back the memory a loaded model holds \u2014 ACE-Step\'s song-generation models measure about 80 GB on the machine this was built on, which is why the sidecar is worth unloading between sessions.\n\nPass exactly ONE of `modelId` ("ace-step" or "rvc") or `all: true`. Both, or neither, is an error that lists the valid ids.\n\n"Unloaded" means three things had to be true, and if any one of them is false this tool ERRORS instead of reporting success: the model\'s port is free, its health check no longer answers, and no process from the tree captured before the signal is still alive. `memoryReturnedBytes` and `memoryVerdict` (`returned`/`partial`/`inconclusive`/`notAHold`) are reported alongside, but they never decide the outcome \u2014 system memory is a shared, noisy number and gating on it would report failures that did not happen.\n\nYou usually do NOT need this: starting the other model unloads this one, ACE-Step unloads itself ten idle minutes after its last job finishes, and quitting DAW Pro unloads everything. A model with a generation job running is never unloaded automatically \u2014 but this tool WILL stop it, so check `activeJobs` in ai_model_residency first. Returns `{generation, models: [{modelID, reason, stopped, detail, evidence}]}` \u2014 note the response key is `modelID` with a capital ID while the parameter is `modelId`.',
+    inputSchema: {
+      modelId: external_exports.string().min(1).optional().describe(
+        'Which model to unload: "ace-step" (song generation) or "rvc" (voice conversion). Mutually exclusive with `all`.'
+      ),
+      all: external_exports.boolean().optional().describe(
+        "Unload every local model sidecar. Mutually exclusive with `modelId`."
+      )
+    }
+  },
+  async ({ modelId, all }) => toToolResult(() => {
+    const params = {};
+    if (modelId !== void 0) params.modelId = modelId;
+    if (all !== void 0) params.all = all;
+    return bridge.send("ai.modelUnload", params);
+  })
 );
 server.registerTool(
   "vc_sidecar_status",
@@ -46148,7 +46187,7 @@ registerTool(
   "vc_sidecar_stop",
   {
     title: "Stop the local voice-conversion sidecar",
-    description: "Stop the local RVC voice-conversion sidecar (graceful SIGTERM via its pidfile, escalating to a forced kill if it doesn't exit promptly) to free the memory its loaded models hold. No params. Succeeds as a no-op (not an error) if it wasn't running. Returns the same `{state, message, version?, engine?, baseModelPresent?, voiceCount?, pid?}` shape as vc_sidecar_status (state settles to `installedNotRunning`).",
+    description: "Stop the local RVC voice-conversion sidecar to free the memory its loaded voice models hold. Graceful SIGTERM, escalating to a forced kill if it doesn't exit promptly. The target is resolved from the sidecar's pidfile when that points at a live process, and otherwise from whichever process holds the listening socket on the sidecar's port, so a stale pidfile no longer hides a running sidecar. No params. Succeeds as a no-op (not an error) if it genuinely wasn't running. ERRORS \u2014 rather than reporting success \u2014 if the sidecar is still answering its health check afterwards, or if the only process found on its port cannot be identified as the RVC facade (it is never signalled in that case); the error message says what is still up and what to run. On success returns the same `{state, message, version?, engine?, baseModelPresent?, voiceCount?, pid?}` shape as vc_sidecar_status (state settles to `installedNotRunning`).",
     inputSchema: {}
   },
   async () => toToolResult(() => bridge.send("vc.sidecarStop"))
@@ -46568,7 +46607,7 @@ registerTool(
   },
   async ({ chatId, title }) => toToolResult(() => bridge.send("ai.copilotRenameChat", { chatId, title }))
 );
-server.registerTool(
+registerTool(
   "generate_lyrics",
   {
     title: "Generate song lyrics",
@@ -46581,7 +46620,7 @@ server.registerTool(
   },
   async ({ theme, style, structure }) => toToolResult(() => generateLyrics({ theme, style, structure }))
 );
-server.registerTool(
+registerTool(
   "generate_song_suno",
   {
     title: "Generate a full song via Suno",
@@ -46594,7 +46633,7 @@ server.registerTool(
   },
   async ({ prompt, lyrics, instrumental }) => toToolResult(() => generateSongSuno({ prompt, lyrics, instrumental }))
 );
-server.registerTool(
+registerTool(
   "generate_image",
   {
     title: "Generate an image",
@@ -46714,7 +46753,7 @@ registerTool(
   "clip_transcribe",
   {
     title: "Transcribe an audio clip to text with word/segment timings on its beats",
-    description: "Run on-device speech-to-text (WhisperKit, Apple Neural Engine) over an AUDIO clip's backing recording and return the text plus every segment and WORD placed on the PROJECT's beat grid, not just in seconds \u2014 read `startBeat`/`endBeat` to place lyrics or align edits without doing any seconds-to-beats math yourself. Nothing leaves the machine. BLOCKS until finished (like render_bounce/render_mixdown, not a pollable job \u2014 there is no job registry for it): the FIRST call on a given Mac pays a one-time ~90 second model-compile cost that the OS then caches, so expect the very first transcription on a fresh install to take a minute or two and every one after that to be close to real time. `clipId` (required) must name an existing AUDIO clip \u2014 a MIDI clip has no backing recording and is refused (read its notes directly instead). `language` (optional, a BCP-47-ish code like \"en\") forces a spoken language; omit it to let the recogniser detect one automatically. A TIME-STRETCHED clip (stretchRatio != 1, from clip_set_stretch) is REFUSED rather than transcribed with wrong timings \u2014 word placement assumes one second of the source recording equals one second of project time, which a stretch breaks; un-stretch the clip first (clip_set_stretch ratio 1) if you need its words on the grid. Response: {text, language, modelVariantDirectoryName, rangeStartSeconds, anchorBeat, segments: [{text, startSeconds, endSeconds, startBeat, endBeat, words: [{text, startSeconds, endSeconds, startBeat, endBeat, confidence}]}]} \u2014 seconds are measured from the start of the SOURCE FILE (rangeStartSeconds is where the read began), while beats are measured on the PROJECT timeline from `anchorBeat` (the clip's own start beat); confidence is 0-1 per word. Errors readably for an unknown `clipId`, a MIDI clip, and a stretched clip; when no speech model is installed the error names the directory it looked in.",
+    description: 'Run on-device speech-to-text (WhisperKit, Apple Neural Engine) over an AUDIO clip\'s backing recording and return the text plus every segment and WORD placed on the PROJECT\'s beat grid, not just in seconds \u2014 read `startBeat`/`endBeat` to place lyrics or align edits without doing any seconds-to-beats math yourself. Nothing leaves the machine. BLOCKS until finished (like render_bounce/render_mixdown, not a pollable job \u2014 there is no job registry for it): the FIRST call on a given Mac pays a one-time ~90 second model-compile cost that the OS then caches, so expect the very first transcription on a fresh install to take a minute or two and every one after that to be close to real time. `clipId` (required) must name an existing AUDIO clip \u2014 a MIDI clip has no backing recording and is refused (read its notes directly instead). `language` (optional, a BCP-47-ish code like "en") forces a spoken language; omit it to let the recogniser detect one automatically. A TIME-STRETCHED clip (stretchRatio != 1, from clip_set_stretch) is REFUSED rather than transcribed with wrong timings \u2014 word placement assumes one second of the source recording equals one second of project time, which a stretch breaks; un-stretch the clip first (clip_set_stretch ratio 1) if you need its words on the grid. Response: {text, language, modelVariantDirectoryName, rangeStartSeconds, anchorBeat, supportsWordTimestamps, wordTimestampSupport, wordTimestampsUnavailable?, wordTimestampsUnverified?, segments: [{text, startSeconds, endSeconds, startBeat, endBeat, words: [{text, startSeconds, endSeconds, startBeat, endBeat, confidence}]}]} \u2014 seconds are measured from the start of the SOURCE FILE (rangeStartSeconds is where the read began), while beats are measured on the PROJECT timeline from `anchorBeat` (the clip\'s own start beat); confidence is 0-1 per word. BEFORE TRUSTING AN EMPTY `words` ARRAY, READ `supportsWordTimestamps`: word timings come from a tensor that only SOME compiled Whisper variants expose, and when the installed one does not, every `words` array comes back empty with no error at all. `supportsWordTimestamps: false` means exactly that, and `wordTimestampsUnavailable` (present only then) is a readable explanation naming the variant, the decoder inspected, and what to install instead \u2014 say that to the user instead of reporting that the singer sang nothing. FOR THE FULL PICTURE READ `wordTimestampSupport` ("supported" | "unsupported" | "unknown") INSTEAD: the boolean reads TRUE for "unknown" deliberately, so it cannot tell a variant that DECLARED the tensor from one whose capability could not be read at all (some variants ship in a layout with no metadata to inspect, and warning about every one of them would be noise). When the state is "unknown" AND the run came back with segments but no words, `wordTimestampsUnverified` carries a hedged caution \u2014 mention it as a possible cause of the missing words rather than as a verdict about the model. It is ABSENT (not null) whenever it does not apply, including when words DID come back and when the recogniser heard nothing at all; the two message fields are never both present. The text and the SEGMENT beats are correct either way, so the call still succeeds. Errors readably for an unknown `clipId`, a MIDI clip, and a stretched clip; when no speech model is installed the error names the directory it looked in.',
     inputSchema: {
       clipId: external_exports.string().uuid().describe("Id of the existing AUDIO clip to transcribe, from project_snapshot."),
       language: external_exports.string().optional().describe(
@@ -46744,7 +46783,7 @@ registerTool(
   "ai_speech_model_install_status",
   {
     title: "Poll the current or most recently finished speech-model install",
-    description: 'Poll the status of the speech-model install started by `ai_install_speech_model`. There is exactly ONE install slot for the whole app (in flight, or the most recently finished one) \u2014 nothing to name, so this tool takes no parameters. Response: {state: "idle"|"installing"|"succeeded"|"failed", variantDirectoryNameRequested?: string (what was passed to ai_install_speech_model \u2014 NOT necessarily the canonical on-disk directory name; that only exists once `descriptor` does), progress?: {phase: "preparing"|"downloadingModel"|"downloadingTokenizer"|"installing"|"finished", variantDirectoryName, phaseFraction (0-1 WITHIN the current phase, not overall progress of the whole install), completedUnitCount, totalUnitCount} \u2014 may be ABSENT even while `state` is "installing" if nothing has ticked yet, and a silent download (zero progress callbacks) still reaches a terminal state, so do not treat a missing `progress` as a hang. descriptor?: {variantDirectoryName, displayName, modelFolder, tokenizerFolder, modelSizeBytes, tokenizerSizeBytes, hasContextPrefill, totalSizeBytes, formattedTotalSize} \u2014 present only once `state` is "succeeded"; this is the model clip_transcribe will use. errorMessage?: string \u2014 present only once `state` is "failed" (an unrecognised variant name, an already-installed variant without overwrite, or a download/tokenizer failure all surface here, readably). `state: "idle"` means nothing has ever been started on this app instance.',
+    description: 'Poll the status of the speech-model install started by `ai_install_speech_model`. There is exactly ONE install slot for the whole app (in flight, or the most recently finished one) \u2014 nothing to name, so this tool takes no parameters. Response: {state: "idle"|"installing"|"succeeded"|"failed", variantDirectoryNameRequested?: string (what was passed to ai_install_speech_model \u2014 NOT necessarily the canonical on-disk directory name; that only exists once `descriptor` does), progress?: {phase: "preparing"|"downloadingModel"|"downloadingTokenizer"|"installing"|"finished", variantDirectoryName, phaseFraction (0-1 WITHIN the current phase, not overall progress of the whole install), completedUnitCount, totalUnitCount} \u2014 may be ABSENT even while `state` is "installing" if nothing has ticked yet, and a silent download (zero progress callbacks) still reaches a terminal state, so do not treat a missing `progress` as a hang. descriptor?: {variantDirectoryName, displayName, modelFolder, tokenizerFolder, modelSizeBytes, tokenizerSizeBytes, hasContextPrefill, supportsWordTimestamps, wordTimestampSupport} \u2014 present only once `state` is "succeeded"; this is the model clip_transcribe will use. `supportsWordTimestamps: false` means the variant you just installed CANNOT produce word-level timings (its compiled decoder declares no alignment tensor), so clip_transcribe will return segments but every `words` array empty \u2014 check it here rather than discovering it after a transcription comes back wordless. `wordTimestampSupport` ("supported" | "unsupported" | "unknown") is the field to branch on: the boolean reads TRUE for "unknown", so only this one distinguishes a variant that declared the tensor from one whose capability could not be read. (`totalSizeBytes` / `formattedTotalSize` were listed here until m23-ef and were never actually sent \u2014 they are computed app-side; use modelSizeBytes + tokenizerSizeBytes.) errorMessage?: string \u2014 present only once `state` is "failed" (an unrecognised variant name, an already-installed variant without overwrite, or a download/tokenizer failure all surface here, readably). `state: "idle"` means nothing has ever been started on this app instance.',
     inputSchema: {}
   },
   async () => toToolResult(() => bridge.send("ai.speechModelInstallStatus"))

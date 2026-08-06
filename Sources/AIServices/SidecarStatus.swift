@@ -98,10 +98,25 @@ public enum SidecarError: Error, LocalizedError, Equatable {
     /// elsewhere. The message always names what is still up, why nothing was
     /// signalled, and what the user can run themselves.
     case stopFailed(String)
+    /// The model-lifecycle manager refused to boot this sidecar because the
+    /// machine does not have the memory for it (m23-dl).
+    ///
+    /// Deliberately an ERROR and not a `SidecarStatus(state: .error)`, for the
+    /// same reason as `stopFailed`: the wire must answer `ok: false` with the
+    /// reason, and a success-shaped response to a boot that did not happen is
+    /// the defect family m23-ah closed. The message always names the measured
+    /// requirement, what is available, **the shortfall**, and `force: true`.
+    ///
+    /// ⚠️ Two of the five `start()` call sites are app-side auto-start paths
+    /// that swallow throws with `try?`, so a thrown refusal alone is not enough
+    /// for them — §15 of the design is how the refusal also becomes readable
+    /// from `status()`. That is Phase 3/3b work and is NOT wired yet.
+    case admissionRefused(String)
 
     public var errorDescription: String? {
         switch self {
-        case .notInstalled(let message), .launchFailed(let message), .stopFailed(let message):
+        case .notInstalled(let message), .launchFailed(let message), .stopFailed(let message),
+             .admissionRefused(let message):
             return message
         }
     }

@@ -33,6 +33,30 @@ public actor SidecarManager: SidecarManaging {
     /// check backing `startedAt`'s clearing rule (b) above; also how `stop()`
     /// avoids re-reading the pidfile for a process this actor spawned.
     private var runningProcess: Process?
+    /// The outcome of the most recent `stop()` that actually signalled
+    /// something (m23-dl).
+    ///
+    /// Recorded so `evictWithoutCoordinator()` can answer *"is any pid from the
+    /// PRE-KILL captured tree still alive?"* from the **same** capture that did
+    /// the signalling. A second `ps` snapshot taken afterwards cannot answer it:
+    /// once the parent exits its children are reparented to pid 1 and the
+    /// linkage is gone (measured at m23-az-1). Purely observational — nothing
+    /// reads it to decide what to signal.
+    private var lastTerminationOutcome: SidecarStop.TerminationOutcome?
+
+    /// The model-lifecycle flight ticket for a boot **this actor** started
+    /// (m23-dl), or nil when no boot of ours is in flight.
+    ///
+    /// ⚠️⚠️ **ITS LIFETIME IS NOT `start()`'s SCOPE (F14).** `start()` returns
+    /// `.starting` when its ~30 s poll window expires, and a cold model load runs
+    /// on well past that; a `defer { release }` would hand the flight slot back
+    /// mid-boot and let the next start land on top of an 80 GB load in progress —
+    /// precisely the double-load this item exists to prevent. The ticket takes
+    /// `startedAt`'s own three clearing rules instead: (a) a healthy probe,
+    /// (b) the tracked process found dead, (c) `stop()`. Plus the coordinator's
+    /// stale-ticket backstop, which only ever reclaims a ticket whose pid is
+    /// dead.
+    private var flightTicket: ModelLifecycleCoordinator.Ticket?
 
     public init(configuration: Configuration = .resolved()) {
         self.config = configuration
@@ -47,6 +71,7 @@ public actor SidecarManager: SidecarManaging {
             // whether it was this actor's own `start()` or a fallback picked
             // up from a pidfile after a relaunch.
             startedAt = nil
+            await releaseFlightTicket(healthy: true)
             return SidecarStatus(
                 state: .healthy,
                 message: "ACE-Step sidecar is running and healthy.",
@@ -74,6 +99,12 @@ public actor SidecarManager: SidecarManaging {
                     startingForSeconds: elapsed
                 )
             case .failedBoot:
+                // Clearing rule (b), for the ticket as well as `startedAt`.
+                // ⚠️ Notified from HERE and not from `bootProgress()`, which is a
+                // synchronous `private func` that cannot await the coordinator —
+                // and `Task { await … }` inside it would be fire-and-forget,
+                // unordered against everything else (F14).
+                await releaseFlightTicket(healthy: false)
                 return SidecarStatus(
                     state: .installedNotRunning,
                     message: "ACE-Step sidecar isn't responding and its process appears to have "
@@ -180,10 +211,45 @@ public actor SidecarManager: SidecarManaging {
 
         let plan = try config.resolveLaunchPlan()
 
+        // ⚠️⚠️ F15, RULE 1 — RESOLVE BEFORE THE `dryRun` BRANCH, COMMIT AFTER IT.
+        // `resolveAdmission` is read-only: it signals nothing, mints nothing and
+        // takes no memory sample. `commitAdmission` ACTS — it mints the flight
+        // ticket and SIGTERMs the models the plan names for unload-before-load.
+        // Folding the two into one call placed here would let `dryRun: true`, a
+        // mode whose entire contract is "spawn nothing, signal nothing", kill the
+        // user's live RVC sidecar. That is MORE dangerous since the scope cut,
+        // not less: eviction used to happen only when memory was short, and it is
+        // now the normal plan whenever a second model is resident.
+        let admission = await config.lifecycle.resolveAdmission(.aceStep)
+
         if config.dryRun {
-            return SidecarStatus(state: .starting, message: "[dry-run] would spawn: \(plan.commandLine)")
+            return SidecarStatus(
+                state: admission.isAdmitted ? .starting : .error,
+                message: await config.lifecycle.dryRunDescription(
+                    admission, for: .aceStep, launch: plan.commandLine))
         }
 
+        // ACTS. Throws `admissionRefused` only for single-flight — there is no
+        // memory gate and nothing here can refuse a boot for memory.
+        let ticket = try await config.lifecycle.commitAdmission(admission, for: .aceStep)
+        flightTicket = ticket
+        do {
+            return try await spawnAndPoll(plan)
+        } catch {
+            // ⚠️ Every throwing exit AFTER the mint gives the ticket back. A
+            // leaked ticket refuses every later boot with `bootInFlight` until
+            // the stale-ticket rule reclaims it, and the app-side auto-start
+            // callers swallow that with `try?` — so the symptom would be "Start
+            // does nothing" for two minutes, with no error anywhere (F14).
+            await releaseFlightTicket(healthy: false)
+            throw error
+        }
+    }
+
+    /// The pre-m23-dl body of `start()`, verbatim apart from recording the boot
+    /// pid. Split out only so the admission wiring above has one place to catch a
+    /// throw and hand the flight ticket back.
+    private func spawnAndPoll(_ plan: SidecarLaunchPlan) async throws -> SidecarStatus {
         let logDirectory = config.logFileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: config.logFileURL.path) {
@@ -220,6 +286,12 @@ public actor SidecarManager: SidecarManaging {
         startedAt = bootStartedAt
         runningProcess = process
         writePidfile(process.processIdentifier)
+        // So the coordinator's stale-ticket rule can tell a slow boot from a dead
+        // one: a ticket whose pid is ALIVE is never reclaimed on a timer, however
+        // old (the `kill -0`-on-a-zombie trap in a different costume).
+        if let flightTicket {
+            await config.lifecycle.recordBootPid(flightTicket, pid: process.processIdentifier)
+        }
 
         let deadline = bootStartedAt.addingTimeInterval(config.startupTimeoutSeconds)
         while Date() < deadline {
@@ -257,6 +329,24 @@ public actor SidecarManager: SidecarManaging {
             phase: phase,
             startingForSeconds: elapsed
         )
+    }
+
+    /// The ONE place this actor hands its flight ticket back (m23-dl).
+    ///
+    /// `healthy: true` books the model as resident and starts its idle clock;
+    /// `healthy: false` just releases the slot. Both are no-ops when no ticket is
+    /// held, which is every test that never registered a model with the shared
+    /// coordinator.
+    ///
+    /// ⚠️ **NOT called from `stop()`** — `stop()` is reachable from
+    /// `evictWithoutCoordinator()`, and calling back into the coordinator from
+    /// there is exactly what F7 forbids. Clearing rule (c) is applied by the
+    /// coordinator's own `performEviction`, and by `noteStoppedExternally` for
+    /// the direct `ai.sidecarStop` path.
+    private func releaseFlightTicket(healthy: Bool) async {
+        guard let ticket = flightTicket else { return }
+        flightTicket = nil
+        await config.lifecycle.admitted(ticket, healthy: healthy)
     }
 
     private static func startupTimeoutMessage(
@@ -316,6 +406,11 @@ public actor SidecarManager: SidecarManaging {
             if reason.removesPidfile { removePidfile() }
             runningProcess = nil
             startedAt = nil   // clearing rule (c), even on this "nothing to stop" path
+            // Clearing rule (c) for the flight ticket too. LOCAL state only —
+            // `stop()` is reachable from `evictWithoutCoordinator()`, and calling
+            // the coordinator from there is what F7 forbids.
+            flightTicket = nil
+            lastTerminationOutcome = nil   // nothing was signalled, so there is no tree
             return SidecarStatus(
                 state: SidecarStop.notRunningState(reason, isInstalled: isInstalled()),
                 message: SidecarStop.notRunningMessage(reason, vocabulary: Self.stopVocabulary),
@@ -349,6 +444,11 @@ public actor SidecarManager: SidecarManaging {
             removePidfile()
             runningProcess = nil
             startedAt = nil   // clearing rule (c): stop() always ends a tracked boot
+            // Clearing rule (c) for the flight ticket too. LOCAL state only —
+            // `stop()` is reachable from `evictWithoutCoordinator()`, and calling
+            // the coordinator from there is what F7 forbids.
+            flightTicket = nil
+            lastTerminationOutcome = outcome
 
             let after = await status()
             if after.state == .healthy || after.state == .error {
@@ -501,6 +601,39 @@ public actor SidecarManager: SidecarManaging {
     }
 }
 
+// MARK: - Model lifecycle (m23-dl)
+
+/// ACE-Step's `ModelEvicting` conformance.
+///
+/// ⚠️⚠️ **This method MUST NOT call back into `ModelLifecycleCoordinator`** — see
+/// `ModelEvicting` (F7). It performs the raw stop through the existing, unchanged
+/// `stop()` and reports evidence; the coordinator mutates residency afterwards.
+/// That is also why `stop()` clears `flightTicket` locally instead of telling the
+/// coordinator: the call would arrive from inside the coordinator's own eviction.
+///
+/// This is how the coordinator unloads ACE for all four reasons — the explicit
+/// `ai.modelUnload`, unload-before-load, the ten-minute idle timer, and app quit.
+extension SidecarManager: ModelEvicting {
+    public nonisolated var modelID: ModelID { .aceStep }
+
+    public func evictWithoutCoordinator() async throws -> ModelStopEvidence {
+        // The existing stop path, unchanged. It throws `stopFailed` when the
+        // sidecar is demonstrably still answering, and the coordinator turns a
+        // thrown stop into evidence with every authority limb false.
+        let status = try await stop()
+        let answering: Bool
+        switch await probeHealth() {
+        case .unreachable: answering = false
+        case .healthy, .malformed: answering = true
+        }
+        return ModelStopEvidence.gather(
+            baseURL: config.baseURL,
+            probeAnswering: answering,
+            capturedTreePids: ModelStopEvidence.capturedTreePids(lastTerminationOutcome),
+            detail: status.message)
+    }
+}
+
 extension SidecarManager {
     /// Everything needed to locate/launch the sidecar. A plain (non-actor)
     /// value type so path resolution (`resolveLaunchPlan()`) is directly
@@ -520,6 +653,16 @@ extension SidecarManager {
         /// Test/dry-run seam: `start()`/`stop()` resolve paths and report
         /// what they WOULD do without spawning/signaling a real process.
         public var dryRun: Bool
+        /// The model-lifecycle coordinator this manager books its boots with
+        /// (m23-dl). Defaults to the process-wide instance.
+        ///
+        /// ⚠️ A coordinator with **nothing registered is entirely inert** —
+        /// `resolveAdmission` admits with an empty plan, `commitAdmission`
+        /// returns no ticket, and no file is written. That is what keeps the
+        /// shared default safe for the many tests that construct a manager
+        /// without ever registering a model (F2): registration happens once, in
+        /// the app.
+        public var lifecycle: ModelLifecycleCoordinator
 
         public init(
             baseURL: URL = URL(string: "http://127.0.0.1:8001")!,
@@ -529,7 +672,8 @@ extension SidecarManager {
             healthPollIntervalSeconds: Double = 0.5,
             healthProbeTimeoutSeconds: Double = 2.0,
             stopTimeoutSeconds: Double = 5.0,
-            dryRun: Bool = false
+            dryRun: Bool = false,
+            lifecycle: ModelLifecycleCoordinator = .shared
         ) {
             self.baseURL = baseURL
             self.acestepDir = acestepDir
@@ -539,6 +683,7 @@ extension SidecarManager {
             self.healthProbeTimeoutSeconds = healthProbeTimeoutSeconds
             self.stopTimeoutSeconds = stopTimeoutSeconds
             self.dryRun = dryRun
+            self.lifecycle = lifecycle
         }
 
         public var pidfileURL: URL? { acestepDir?.appendingPathComponent(".ace-step.pid") }

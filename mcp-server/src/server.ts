@@ -6028,6 +6028,134 @@ registerTool(
 );
 
 // ---------------------------------------------------------------------------
+// Model lifecycle (m23-dl)
+// ---------------------------------------------------------------------------
+//
+// One read and one verb over BOTH local sidecars at once. ⚠️ Read this before
+// writing an agent policy around them: **DAW Pro does not check memory before
+// loading a model.** An earlier design gated boots on available RAM and refused
+// when a model would not fit; the user removed that on 2026-08-05 — if a model
+// does not fit, the load fails the way it always did. So there is no `force`
+// flag anywhere, and nothing below will ever say "not enough memory". What DOES
+// happen automatically: booting one model unloads the other first, a model whose
+// last job finished ten minutes ago is unloaded, and everything is unloaded when
+// DAW Pro quits.
+
+server.registerTool(
+  "ai_model_residency",
+  {
+    title: "See which local AI models are loaded and what they hold",
+    description:
+      "Which local model sidecars are loaded right now, how much memory each " +
+      "is holding, and what would happen if you started one. Use this before " +
+      "and after any load/unload — it is the read that makes the others " +
+      "checkable.\n\n" +
+      "⚠️ READ THIS BEFORE BUILDING A POLICY ON THE NUMBERS: **DAW Pro does " +
+      "not check memory before loading a model.** Every byte figure here is " +
+      "reporting, never a gate — nothing will refuse a load because it would " +
+      "not fit, and there is no `force` flag anywhere to override such a " +
+      "refusal. If a model does not fit, the load fails. What DOES happen " +
+      "automatically: starting one model unloads the other first, ACE-Step " +
+      "unloads itself ten idle minutes after its last generation job finishes, " +
+      "and quitting DAW Pro unloads everything.\n\n" +
+      "Returns `{generation, sampledAt, memory, policy, inFlight?, models[]}`. " +
+      "`generation` is a counter that moves on EVERY residency change: two " +
+      "reads with the same value describe the same world, and an unload that " +
+      "did not move it did not happen. `memory.availableBytes` is what " +
+      "Activity Monitor calls free (total minus \"Memory Used\"), for the whole " +
+      "machine, in BYTES.\n\n" +
+      "Per model: `resident` (true = DAW Pro booted it and is tracking it), " +
+      "`holdBytes` + `holdConfidence` (`measured` = observed on this machine, " +
+      "`estimated` = derived from on-disk size and could be wrong in either " +
+      "direction), `activeJobs` (a model with a job running is NEVER unloaded " +
+      "automatically), `idleUnloadSeconds` (600 for ACE-Step, null for the " +
+      "voice-conversion sidecar, which has no idle timer), `idleUnloadAt` (when " +
+      "the idle unload will fire, or null if none is armed), and " +
+      "`nextBootWouldUnload` — what starting THIS model would unload first.\n\n" +
+      "⚠️ The response key is `modelID` (capital ID, the model's own field " +
+      "name); the PARAMETER on ai_model_unload is `modelId`. Both are live and " +
+      "neither is a typo.\n\n" +
+      "⚠️ `resident: false` does NOT mean nothing is loaded: a sidecar someone " +
+      "started outside DAW Pro still holds its memory. Pass " +
+      "`includeProcessDetail: true` to also get `portBusy` (something really is " +
+      "listening on that model's port), `pids`, `treeResidentBytes` and " +
+      "`treeFootprintBytes`. That flag costs two helper-process spawns per " +
+      "model, so leave it off when polling.",
+    inputSchema: {
+      includeProcessDetail: z
+        .boolean()
+        .optional()
+        .describe(
+          "Also inspect the real processes: portBusy, pids and per-tree memory. " +
+            "Costs a `ps` and an `lsof` spawn per model — off by default, and " +
+            "you should keep it off if you are polling."
+        ),
+    },
+  },
+  async ({ includeProcessDetail }) =>
+    toToolResult(() =>
+      bridge.send(
+        "ai.modelResidency",
+        includeProcessDetail === undefined ? {} : { includeProcessDetail }
+      )
+    )
+);
+
+registerTool(
+  "ai_model_unload",
+  {
+    title: "Unload a local AI model and prove it actually stopped",
+    description:
+      "Unload one local model sidecar, or all of them, and get EVIDENCE that " +
+      "it stopped rather than a bare success. Use it to hand back the memory a " +
+      "loaded model holds — ACE-Step's song-generation models measure about " +
+      "80 GB on the machine this was built on, which is why the sidecar is " +
+      "worth unloading between sessions.\n\n" +
+      "Pass exactly ONE of `modelId` (\"ace-step\" or \"rvc\") or `all: true`. " +
+      "Both, or neither, is an error that lists the valid ids.\n\n" +
+      "\"Unloaded\" means three things had to be true, and if any one of them " +
+      "is false this tool ERRORS instead of reporting success: the model's " +
+      "port is free, its health check no longer answers, and no process from " +
+      "the tree captured before the signal is still alive. `memoryReturnedBytes` " +
+      "and `memoryVerdict` (`returned`/`partial`/`inconclusive`/`notAHold`) are " +
+      "reported alongside, but they never decide the outcome — system memory is " +
+      "a shared, noisy number and gating on it would report failures that did " +
+      "not happen.\n\n" +
+      "You usually do NOT need this: starting the other model unloads this one, " +
+      "ACE-Step unloads itself ten idle minutes after its last job finishes, and " +
+      "quitting DAW Pro unloads everything. A model with a generation job " +
+      "running is never unloaded automatically — but this tool WILL stop it, so " +
+      "check `activeJobs` in ai_model_residency first. Returns `{generation, " +
+      "models: [{modelID, reason, stopped, detail, evidence}]}` — note the " +
+      "response key is `modelID` with a capital ID while the parameter is " +
+      "`modelId`.",
+    inputSchema: {
+      modelId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Which model to unload: \"ace-step\" (song generation) or \"rvc\" " +
+            "(voice conversion). Mutually exclusive with `all`."
+        ),
+      all: z
+        .boolean()
+        .optional()
+        .describe(
+          "Unload every local model sidecar. Mutually exclusive with `modelId`."
+        ),
+    },
+  },
+  async ({ modelId, all }) =>
+    toToolResult(() => {
+      const params: Record<string, unknown> = {};
+      if (modelId !== undefined) params.modelId = modelId;
+      if (all !== undefined) params.all = all;
+      return bridge.send("ai.modelUnload", params);
+    })
+);
+
+// ---------------------------------------------------------------------------
 // Voice-conversion sidecar (m10-p-3)
 // ---------------------------------------------------------------------------
 //
