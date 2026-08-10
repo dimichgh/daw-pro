@@ -219,6 +219,19 @@ under a different name and confirms it notices that copy's writes. The tempting 
 the protection off and check that something breaks — was rejected: when that test worked, it would do
 so by writing into your real settings, which is the thing being protected.
 
+
+Then we ran the whole suite and compared it against the last full run from before any of this, one test
+at a time rather than just comparing totals. Seventy-one tests, and your own settings file came out of
+it byte-for-byte identical — which is the thing we actually wanted to prove, and which would not have
+been true a day ago.
+
+The comparison earned its keep immediately: it found one test we had broken. Giving the tests their own
+name meant one of them could no longer find the app it was trying to drive, because it had the old name
+written into it. Everything else about that test looked fine, and it would have kept looking fine — it
+only surfaced because we compared the full before and after picture rather than checking that things
+still broadly passed. It is fixed, and the name is now derived in one place instead of written down in
+two.
+
 ## 2026-08-10 — Voice conversion no longer degrades the more you use it
 
 Converting the same vocal a few times in a row used to get progressively louder and more distorted,

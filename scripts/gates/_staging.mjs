@@ -58,6 +58,26 @@ export const DEFAULT_BINARY = ".build/debug/DAWApp";
  */
 export const STAGING_DEFAULTS_DOMAIN = "DAWProStaging";
 
+/**
+ * The staging process's name as the KERNEL and ACCESSIBILITY APIs see it.
+ *
+ * ⭐ THE SAME STRING AS THE DEFAULTS DOMAIN, AND NOT BY COINCIDENCE — that
+ * identity IS the mechanism m23-gf relies on: a bundle-less executable's
+ * preferences domain is derived from its executable path's last component, so
+ * naming the alias `DAWProStaging` moves the domain to `DAWProStaging`. One
+ * string, two consequences.
+ *
+ * ⚠️ EXPORTED SEPARATELY BECAUSE THE CONSUMERS ARE UNRELATED, AND m23-gf-c-2
+ * PAID FOR THIS: `m23do-menubar` drives the app through System Events
+ * (`tell process "…"`) and hardcoded `"DAWApp"`. When the alias landed, its AX
+ * query started failing with `Can't get process "DAWApp" (-1728)` — a REAL
+ * regression the corpus comparison caught. The m23-gf design's coverage
+ * analysis had checked `processName` consumers **in `Sources/`** and concluded
+ * there was only one; it never asked about consumers in the GATES. A gate
+ * asking "what is the app called?" should import this, never spell it.
+ */
+export const STAGING_PROCESS_NAME = STAGING_DEFAULTS_DOMAIN;
+
 /** The two REAL preferences domains this corpus must never write into. */
 export const REAL_DEFAULTS_DOMAINS = ["DAWApp", "dev.dawpro.app"];
 
