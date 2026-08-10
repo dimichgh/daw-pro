@@ -429,4 +429,176 @@ struct PianoRollModelTests {
         m.moveSelection(deltaBeats: 5, deltaPitch: 0, resolution: .beat)
         #expect(PianoRollModel.playableEndBeat(of: m.draft[0], clipLengthBeats: 8) == nil)
     }
+
+    // MARK: - m23-ek-2: a GROUP drag is RIGID
+
+    // The m23-g2 defect, on both axes. Before ek-2 `moveSelection` clamped
+    // pitch, floored the beat AND snapped PER NOTE off each note's own base, so
+    // a multi-note drag DEFORMED the selection. Each leg below carries the
+    // rejected per-note expression as its validity half — a test that cannot
+    // tell the two rules apart proves nothing when it passes.
+
+    // 24. A chord dragged into the 127 ceiling keeps its intervals.
+    @Test("m23-ek-2 a chord dragged into the pitch ceiling stops as a UNIT, intervals intact")
+    func groupPitchClampIsRigid() {
+        let root = MIDINote(pitch: 120, startBeat: 0, lengthBeats: 1)
+        let third = MIDINote(pitch: 124, startBeat: 0, lengthBeats: 1)
+        let fifth = MIDINote(pitch: 127 - 0, startBeat: 0, lengthBeats: 1)   // already AT the ceiling
+        let m = makeModel(notes: [root, third, fifth])
+        m.selection = [root.id, third.id, fifth.id]
+        m.beginMove(anchorID: root.id)
+        // Ask for +10: the top note cannot move at all, so nothing may.
+        m.moveSelection(deltaBeats: 0, deltaPitch: 10, resolution: .beat)
+        let pitches = m.draft.map(\.pitch)
+        #expect(pitches == [120, 124, 127], "the group stopped at the wall as a unit")
+        // VALIDITY: the OLD per-note expression gives a different, deformed
+        // answer for the same ask — the chord collapses into a cluster.
+        let perNote = [120, 124, 127].map { ($0 + 10).clamped(to: MIDINote.pitchRange) }
+        #expect(perNote == [127, 127, 127])
+        #expect(pitches != perNote)
+        // A move that FITS still moves the whole group.
+        m.moveSelection(deltaBeats: 0, deltaPitch: -20, resolution: .beat)
+        #expect(m.draft.map(\.pitch) == [100, 104, 107])
+        // …and downward, the floor binds on the LOWEST note, again as a unit.
+        m.moveSelection(deltaBeats: 0, deltaPitch: -500, resolution: .beat)
+        #expect(m.draft.map(\.pitch) == [0, 4, 7])
+    }
+
+    // 25. A group dragged left past 0 keeps its gaps.
+    @Test("m23-ek-2 a group dragged past beat 0 stops as a UNIT, rhythm intact")
+    func groupBeatFloorIsRigid() {
+        let a = MIDINote(pitch: 60, startBeat: 2, lengthBeats: 1)
+        let b = MIDINote(pitch: 62, startBeat: 5, lengthBeats: 1)
+        let c = MIDINote(pitch: 64, startBeat: 6, lengthBeats: 1)
+        let m = makeModel(notes: [a, b, c], length: 16)
+        m.selection = [a.id, b.id, c.id]
+        m.beginMove(anchorID: b.id)
+        m.moveSelection(deltaBeats: -50, deltaPitch: 0, resolution: .beat)
+        #expect(m.draft.map(\.startBeat) == [0, 3, 4], "gaps 3 and 1 survive the wall")
+        // VALIDITY: per-note flooring piles every note onto 0.
+        let perNote = [2.0, 5.0, 6.0].map { max(0, $0 - 50) }
+        #expect(perNote == [0, 0, 0])
+        #expect(m.draft.map(\.startBeat) != perNote)
+    }
+
+    // 26. Sub-grid phases survive a snapped group drag — the welding defect.
+    @Test("m23-ek-2 two notes at different sub-grid phases keep their gap through a snapped drag")
+    func groupSnapDoesNotWeld() {
+        let onGrid = MIDINote(pitch: 60, startBeat: 0, lengthBeats: 0.25)
+        let offGrid = MIDINote(pitch: 62, startBeat: 0.5, lengthBeats: 0.25)
+        let m = makeModel(notes: [onGrid, offGrid], length: 16)
+        m.selection = [onGrid.id, offGrid.id]
+        m.beginMove(anchorID: onGrid.id)
+        m.moveSelection(deltaBeats: 0.1, deltaPitch: 0, resolution: .beat)
+        let starts = m.draft.map(\.startBeat)
+        #expect(starts == [0, 0.5], "the anchor snapped to 0; the gap is still 0.5")
+        #expect(starts[1] - starts[0] == 0.5)
+        // VALIDITY: the OLD per-note snap welds them a full beat apart — the
+        // m23-g2 defect verbatim, on the beat axis.
+        let perNote = [0.0, 0.5].map { m.snap(beat: max(0, $0 + 0.1), resolution: .beat) }
+        #expect(perNote == [0, 1])
+        #expect(perNote[1] - perNote[0] == 1.0)
+        #expect(starts != perNote)
+        // The anchor decides the snap: grabbing the OFF-grid note instead moves
+        // the pair by a different (still rigid) delta.
+        m.beginMove(anchorID: offGrid.id)
+        m.moveSelection(deltaBeats: 0.1, deltaPitch: 0, resolution: .beat)
+        #expect(m.draft.map(\.startBeat) == [0.5, 1.0], "anchor 0.5+0.1 snaps to 1; delta +0.5")
+        #expect(m.draft[1].startBeat - m.draft[0].startBeat == 0.5)
+    }
+
+    // 27. ⚠️ The case the design's three legs miss: a snap can round the anchor
+    //    DOWN past the group floor that was just applied.
+    @Test("m23-ek-2 a snap that rounds the anchor down cannot push a note below beat 0")
+    func groupSnapCannotUndershootZero() {
+        // ⚠️ FIXTURE LAW: every value here is a dyadic rational (0.25, 2.5,
+        // 0.125), so every arithmetic step is EXACT in binary floating point and
+        // an `==` failure can only mean the rule is wrong — never that the
+        // fixture drifted by an ulp.
+        let low = MIDINote(pitch: 60, startBeat: 0.25, lengthBeats: 0.25)
+        let anchor = MIDINote(pitch: 62, startBeat: 2.5, lengthBeats: 0.25)
+        let m = makeModel(notes: [low, anchor], length: 16)
+        m.selection = [low.id, anchor.id]
+        m.beginMove(anchorID: anchor.id)
+        // The group floor gives −0.125; the anchor's 2.375 then SNAPS DOWN to 2,
+        // an applied −0.5 that would land `low` at −0.25 if the floor were only
+        // applied to the ASK.
+        m.moveSelection(deltaBeats: -0.125, deltaPitch: 0, resolution: .beat)
+        #expect(m.draft[0].startBeat == 0, "the group stopped at the wall")
+        #expect(m.draft[1].startBeat == 2.25, "…rigidly, with the anchor left off-grid")
+        #expect(m.draft.allSatisfy { $0.startBeat >= 0 })
+        // And nothing was welded: the 2.25-beat gap is preserved exactly.
+        #expect(m.draft[1].startBeat - m.draft[0].startBeat == 2.25)
+    }
+
+    // 28. ⭐ THE SAFETY PROPERTY: single-note drags are byte-identical.
+    @Test("m23-ek-2 a SINGLE-note drag is byte-identical to the pre-ek-2 expression",
+          arguments: [SnapResolution.off, .bar, .beat, .eighth, .eighthTriplet,
+                      .sixteenth, .sixteenthTriplet, .thirtySecond, .sixtyFourth])
+    func singleNoteDragUnchanged(resolution: SnapResolution) {
+        // The whole snap ladder × a spread of bases and deltas, compared against
+        // the EXACT expression `moveSelection` used to run per note. Byte, not
+        // "close": `==` on Double, deliberately.
+        for base in [0.0, 0.2, 2.0, 2.4, 7.75, 100.0] {
+            for delta in [-1000.0, -3.3, -0.1, 0.0, 0.1, 0.7, 3.0, 96.4] {
+                let note = MIDINote(pitch: 60, startBeat: base, lengthBeats: 1)
+                let m = makeModel(notes: [note], length: 128)
+                m.selectOnly(note.id)
+                m.beginMove(anchorID: note.id)
+                m.moveSelection(deltaBeats: delta, deltaPitch: 3, resolution: resolution)
+                let old = m.snap(beat: max(0, base + delta), resolution: resolution)
+                #expect(m.draft[0].startBeat == old,
+                        "base \(base) delta \(delta) \(resolution): \(m.draft[0].startBeat) != \(old)")
+                #expect(m.draft[0].pitch == (60 + 3).clamped(to: MIDINote.pitchRange))
+                #expect(m.draft[0].lengthBeats == 1)
+            }
+        }
+    }
+
+    // 29. …and byte-identical WITHOUT an anchor id, which is what the six
+    //    pre-ek-2 call sites (deliberately not rewritten) exercise.
+    @Test("m23-ek-2 the anchor defaults deterministically — an anchorless drag is still rigid")
+    func anchorlessDragIsDeterministicAndRigid() {
+        let late = MIDINote(pitch: 60, startBeat: 4, lengthBeats: 1)
+        let early = MIDINote(pitch: 72, startBeat: 1.5, lengthBeats: 1)
+        let m = makeModel(notes: [late, early], length: 16)
+        m.selection = [late.id, early.id]
+        // No anchor: the EARLIEST note (startBeat, then pitch, then id) — never
+        // Set iteration order, which is unstable run to run.
+        m.beginMove()
+        m.moveSelection(deltaBeats: 0.6, deltaPitch: 0, resolution: .beat)
+        // early 1.5 + 0.6 = 2.1 snaps to 2 → delta +0.5, applied to both.
+        #expect(m.draft.map(\.startBeat) == [4.5, 2.0])
+        #expect(m.draft[0].startBeat - m.draft[1].startBeat == 2.5, "the gap is unchanged")
+        // Repeating the whole gesture gives the SAME answer (determinism, not
+        // a lucky hash order): re-seed a fresh model with the notes swapped.
+        let m2 = makeModel(notes: [early, late], length: 16)
+        m2.selection = [late.id, early.id]
+        m2.beginMove()
+        m2.moveSelection(deltaBeats: 0.6, deltaPitch: 0, resolution: .beat)
+        #expect(m2.draft.first { $0.id == early.id }?.startBeat == 2.0)
+        #expect(m2.draft.first { $0.id == late.id }?.startBeat == 4.5)
+    }
+
+    // MARK: - m23-ek-1: ONE producer of the note rect
+
+    // 30. The static, `rect(for:)` and `noteRects()` are the same arithmetic —
+    //     the property the rubber band's agreement with a click rests on.
+    @Test("m23-ek-1 noteRect is the ONE producer: rect(for:), noteRects() and hitTest all agree")
+    func noteRectIsTheOneProducer() {
+        let short = MIDINote(pitch: 64, startBeat: 2, lengthBeats: 0.0625)
+        let long = MIDINote(pitch: 60, startBeat: 0, lengthBeats: 4)
+        let m = PianoRollModel(notes: [short, long], clipLengthBeats: 8, pixelsPerBeat: 8)
+        for note in [short, long] {
+            let viaStatic = PianoRollModel.noteRect(
+                note, rowHeight: m.rowHeight, pixelsPerBeat: m.pixelsPerBeat)
+            #expect(m.rect(for: note) == viaStatic)
+            #expect(m.noteRects().first { $0.id == note.id }?.rect == viaStatic)
+            // hitTest resolves against the same rect, including the 3 pt floor.
+            #expect(m.hitTest(CGPoint(x: viaStatic.midX, y: viaStatic.midY))?.id == note.id)
+        }
+        // The floor is the reason this matters at all.
+        #expect(m.rect(for: short).width == 3)
+        #expect(CGFloat(short.lengthBeats) * m.pixelsPerBeat < 3)
+    }
 }

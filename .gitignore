@@ -33,3 +33,11 @@ __pycache__/
 # `scripts/gates/m20d-bhrate.swift`; the gate rebuilds it on demand and aborts
 # with the swiftc line if it is missing.
 /scripts/gates/m20d-bhrate
+
+# Per-gate coverage baseline (m23-ep-3). LOCAL RUN STATE, not a shared artifact:
+# it records that a gate ran *on this machine* (`ranAt`) alongside the gate
+# file's content hash. Checking it in would report CURRENT on a fresh checkout
+# for gates that never ran there — a false green, which is the exact defect
+# class this milestone exists to remove. It also rewrites on every single gate
+# invocation, so tracking it would churn the diff constantly.
+/scripts/gate-corpus-baseline.json

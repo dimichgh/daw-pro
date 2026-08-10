@@ -71,7 +71,7 @@ import net from "node:net";
 import {
   LIVE_PORT, STAGING_PORT, REAL_PROFILE_BASE,
   launchStaging, stopStaging, profileCategoryDir, stagingSessionLockPath,
-  stagingProfileRoot, sleep,
+  stagingProfileRoot, sleep, verdict,
 } from "./_staging.mjs";
 
 const GATE = "m23ay";
@@ -471,4 +471,4 @@ clearTimeout(killer);
 fs.writeFileSync(`${OUT}/results.json`, JSON.stringify(checks, null, 2));
 const pass = checks.filter((c) => c.ok).length;
 console.log(`\nM23AY ${pass}/${checks.length}`);
-process.exit(pass === checks.length ? 0 : 1);
+verdict({ ran: checks.length, failed: checks.length - pass });

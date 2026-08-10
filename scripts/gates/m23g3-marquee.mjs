@@ -60,7 +60,7 @@
 // as evidence the gate built first. `buildOrAbort()` below does the real thing.
 import fs from "fs";
 import crypto from "crypto";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23g3";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -70,7 +70,12 @@ const BINARY = process.env.M23G3_BINARY || ".build/debug/DAWApp";
 const REPO = process.env.M23G3_REPO || process.cwd();
 fs.mkdirSync(OUT, { recursive: true });
 
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
+let guard = null;   // m23-ej-2: `let` — assigned after connect, read by the killer below
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 600_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SETTLE_MS = 250;
 
@@ -114,6 +119,7 @@ console.log(`staging pid ${stagingPid} on :${PORT}`);
 await sleep(4500);
 
 const { ws, req } = await connect();
+guard = panelDensityGuard(req);   // req already unwraps to .result ?? whole msg
 const checks = [];
 const check = (name, ok, detail) => {
   checks.push({ name, ok, detail });
@@ -162,7 +168,7 @@ try {
   // ══ FIXTURE ══════════════════════════════════════════════════════════════
   await req("project.new", { discardChanges: true });
   await req("debug.windowFrame", { width: 1400, height: 1000 });
-  await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+  await guard.set("arrange", "pro");
   await req("debug.arrangeZoom", { reset: true });
   const T = [];
   for (const n of ["G3a", "G3b", "G3c", "G3d"]) {
@@ -520,13 +526,18 @@ try {
   if (bad.length) { for (const b of bad) console.log(`  FAIL ${b.name}: ${b.detail}`); }
   fs.writeFileSync(`${OUT}/result.json`, JSON.stringify({ checks, skips }, null, 2));
   clearTimeout(killer);
+  // ⚠️ m23-ej-2: guard.restore() round-trips over `req`/`ws` — it MUST run
+  // before ws.close(), never after (measured live on m23k4b's identical bug:
+  // closing first strands the restore write until the guard's own timeout).
+  await guard.restore("normal exit");
   ws.close();
   stopStaging(GATE, PIDFILE);   // m23-ac-2a: same pidfile-exact kill, one home
-  process.exit(bad.length ? 1 : 0);
+  verdict({ ran: checks.length, failed: bad.length });
 } catch (e) {
   console.error("GATE ERROR", e);
   fs.writeFileSync(`${OUT}/result.json`, JSON.stringify({ checks, skips, error: String(e) }, null, 2));
   clearTimeout(killer);
+  await guard.restore("catch");
   try { ws.close(); } catch {}
   stopStaging(GATE, PIDFILE);   // m23-ac-2a: same pidfile-exact kill, one home
   process.exit(2);

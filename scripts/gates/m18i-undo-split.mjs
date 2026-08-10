@@ -71,7 +71,7 @@
 // longer be pointed at 17600 even by an env var.
 import fs from "fs";
 import crypto from "node:crypto";
-import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, verdict } from "./_staging.mjs";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
 const GATE = "m18i-undo-split";   // names the pidfile + out dir = the default OUT below
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
@@ -119,11 +119,15 @@ function check(name, ok, detail = "") {
 }
 
 // m23-bg: pin the capture window and CONFIRM it stuck before anything else
-// runs. A pin's own echo is not proof it took — `debug.windowFrame
-// {width:1440,height:640}` returns 640 exactly, then the window drifts to
-// 672 within ~100ms and holds there (WindowFloor is applied to the content
-// area below the titlebar while this command sets a contentRect INCLUDING
-// it, +32 exactly) — {1400,1000} holds perfectly instead. So this settles,
+// runs. A pin's own echo is not proof it took — until m23-dw fixed it,
+// `debug.windowFrame {width:1440,height:640}` used to return 640 exactly, then
+// the window silently drifted to 672 within ~100ms and held there (WindowFloor
+// is applied to the content area below the titlebar while this command sets a
+// contentRect INCLUDING it, +32 exactly). m23-dw fixed the drift itself: that
+// same request now lands on 672 immediately and stays (`WindowFloor.
+// minWindowContentHeight`) — but this gate pins {1400,1000} anyway, which
+// held perfectly even before the fix, and keeps the re-read-confirm pattern
+// as a general defense, not one specific to the old bug. So this settles,
 // then re-reads with a BARE (mutation-free — DAWProApp.swift:3617 only
 // mutates when width/height are present) call and asserts the re-read
 // matches the request. Unpinned, this gate would inherit whatever size the
@@ -220,4 +224,4 @@ console.log(`M18I_UNDO_SPLIT pass=${pass} fail=${fail}`);
 clearTimeout(killer);
 ws.close();
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

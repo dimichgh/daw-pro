@@ -141,6 +141,20 @@ export class DawBridge {
     });
   }
 
+  /**
+   * True if a WebSocket connection to the DAW app is currently OPEN.
+   *
+   * A pure state read — NEVER initiates a connection. Used by call logging
+   * (m23-ca, src/mcp-log.ts) to decide whether an opportunistic before-state
+   * read (`project.overview`) is safe to attempt without paying — or, worse,
+   * forcing every caller to pay — a fresh connection's cost just to produce a
+   * log line. When this is false, logging records an honest
+   * `beforeCaptured: false` instead of connecting on the log's behalf.
+   */
+  isConnected(): boolean {
+    return this.socket !== undefined && this.socket.readyState === WebSocket.OPEN;
+  }
+
   /** Close the socket, if any. Pending requests are rejected. */
   close(): void {
     this.socket?.close();

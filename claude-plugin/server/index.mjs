@@ -12481,10 +12481,10 @@ async function setupSkills(ctx) {
     try {
       const versionId = await resolveSkillVersion(client, skill.skill_id, skill.version);
       const version2 = await client.beta.skills.versions.retrieve(versionId, { skill_id: skill.skill_id });
-      let dirname5 = path3.basename(version2.name.trim());
-      if (dirname5 === "" || dirname5 === "." || dirname5 === "..")
-        dirname5 = skill.skill_id;
-      const dest = path3.resolve(skillsRoot, dirname5);
+      let dirname6 = path3.basename(version2.name.trim());
+      if (dirname6 === "" || dirname6 === "." || dirname6 === "..")
+        dirname6 = skill.skill_id;
+      const dest = path3.resolve(skillsRoot, dirname6);
       if (dest !== skillsRoot && !dest.startsWith(skillsRoot + path3.sep)) {
         log.warn("skill name escapes the skills dir; skipping", {
           component: "agent-tool-context",
@@ -33296,6 +33296,19 @@ var DawBridge = class {
       }
     });
   }
+  /**
+   * True if a WebSocket connection to the DAW app is currently OPEN.
+   *
+   * A pure state read — NEVER initiates a connection. Used by call logging
+   * (m23-ca, src/mcp-log.ts) to decide whether an opportunistic before-state
+   * read (`project.overview`) is safe to attempt without paying — or, worse,
+   * forcing every caller to pay — a fresh connection's cost just to produce a
+   * log line. When this is false, logging records an honest
+   * `beforeCaptured: false` instead of connecting on the log's behalf.
+   */
+  isConnected() {
+    return this.socket !== void 0 && this.socket.readyState === WebSocket.OPEN;
+  }
   /** Close the socket, if any. Pending requests are rejected. */
   close() {
     this.socket?.close();
@@ -43886,6 +43899,271 @@ async function generateImage(input) {
   return { filePath };
 }
 
+// src/mcp-log.ts
+import { appendFileSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { dirname as dirname5, join as join4 } from "node:path";
+var currentRegistrationIsMutating = false;
+function withMutatingRegistration(fn) {
+  currentRegistrationIsMutating = true;
+  try {
+    return fn();
+  } finally {
+    currentRegistrationIsMutating = false;
+  }
+}
+var NO_WIRE_COMMAND_TOOLS = /* @__PURE__ */ new Set([
+  "generate_lyrics",
+  "generate_song_suno",
+  "generate_image"
+]);
+var GLOBAL_SCOPE_TOOLS = /* @__PURE__ */ new Set([
+  "transport_play",
+  "transport_stop",
+  "transport_panic",
+  "transport_seek",
+  "transport_record",
+  "transport_set_tempo",
+  "tempo_set_map",
+  "transport_set_loop",
+  "transport_set_punch",
+  "transport_set_metronome",
+  "mixer_set_master_volume"
+]);
+var SECRET_KEY_PATTERN = /key|token|secret|password|credential|authorization/i;
+var SECRET_VALUE_PATTERNS = [
+  /sk-ant-[A-Za-z0-9_-]{8,}/g,
+  /sk-proj-[A-Za-z0-9_-]{8,}/g,
+  /sk-[A-Za-z0-9]{16,}/g,
+  /Bearer\s+[A-Za-z0-9._-]{8,}/gi
+];
+var LARGE_BLOB_THRESHOLD_CHARS = 2e3;
+var OVERALL_VALUE_CAP_CHARS = 2e4;
+function sha256Hex(input) {
+  return createHash("sha256").update(input, "utf8").digest("hex");
+}
+function redactSecretPatterns(value) {
+  let out = value;
+  for (const pattern of SECRET_VALUE_PATTERNS) {
+    out = out.replace(pattern, "[REDACTED]");
+  }
+  return out;
+}
+function redactValue(key, value) {
+  if (SECRET_KEY_PATTERN.test(key)) {
+    return "[REDACTED]";
+  }
+  if (value === null || value === void 0 || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    if (value.length > LARGE_BLOB_THRESHOLD_CHARS) {
+      return { __truncated: true, sha256: sha256Hex(value), length: value.length };
+    }
+    return redactSecretPatterns(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => redactValue("", v));
+  }
+  if (typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = redactValue(k, v);
+    }
+    return out;
+  }
+  return String(value);
+}
+function capOverallSize(value, label) {
+  let str2;
+  try {
+    str2 = JSON.stringify(value) ?? "";
+  } catch {
+    return value;
+  }
+  if (str2.length > OVERALL_VALUE_CAP_CHARS) {
+    return { __truncated: true, sha256: sha256Hex(str2), length: str2.length, reason: `${label} exceeded ${OVERALL_VALUE_CAP_CHARS} chars` };
+  }
+  return value;
+}
+function redactAndCap(label, value) {
+  if (value === void 0) return void 0;
+  return capOverallSize(redactValue(label, value), label);
+}
+var resolvedLogPath;
+var logDirEnsured = false;
+var loggingDegraded = false;
+function defaultLogDir() {
+  return join4(homedir(), "Library", "Logs", "DAWPro", "mcp");
+}
+function mcpLogFilePath() {
+  if (resolvedLogPath) return resolvedLogPath;
+  const dir = process.env["DAWPRO_MCP_LOG_DIR"] || defaultLogDir();
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  resolvedLogPath = join4(dir, `mcp-session-${stamp}-${process.pid}.jsonl`);
+  return resolvedLogPath;
+}
+function writeLogLineSafely(entry) {
+  let line;
+  try {
+    line = JSON.stringify(entry) + "\n";
+  } catch (err) {
+    if (!loggingDegraded) {
+      loggingDegraded = true;
+      console.error(
+        `[daw-pro-mcp] call logging degraded: could not serialize a log entry (${err instanceof Error ? err.message : String(err)}). Continuing without call logs.`
+      );
+    }
+    return;
+  }
+  try {
+    const filePath = mcpLogFilePath();
+    if (!logDirEnsured) {
+      mkdirSync(dirname5(filePath), { recursive: true });
+      logDirEnsured = true;
+    }
+    appendFileSync(filePath, line, "utf8");
+  } catch (err) {
+    if (!loggingDegraded) {
+      loggingDegraded = true;
+      console.error(
+        `[daw-pro-mcp] call logging degraded: could not write to "${mcpLogFilePath()}" (${err instanceof Error ? err.message : String(err)}). Continuing without call logs.`
+      );
+    }
+  }
+}
+function beforeCaptureEnabled() {
+  return process.env["DAWPRO_MCP_LOG_BEFORE"] !== "0";
+}
+function extractNarrow(name, params, overview) {
+  const p = params && typeof params === "object" ? params : {};
+  const ov = overview && typeof overview === "object" ? overview : {};
+  const trackId = p["trackId"];
+  if (typeof trackId === "string") {
+    if (trackId === "master") {
+      return { scope: "master", value: ov["master"] };
+    }
+    const tracks = Array.isArray(ov["tracks"]) ? ov["tracks"] : [];
+    const track = tracks.find((t) => t && t["id"] === trackId);
+    return track ? { scope: "track", value: track } : { scope: "track-not-found", value: void 0 };
+  }
+  const clipId = p["clipId"];
+  if (typeof clipId === "string") {
+    const tracks = Array.isArray(ov["tracks"]) ? ov["tracks"] : [];
+    for (const t of tracks) {
+      const clips = Array.isArray(t["clips"]) ? t["clips"] : [];
+      const clip = clips.find((c) => c && c["id"] === clipId);
+      if (clip) return { scope: "clip", value: clip };
+    }
+    return { scope: "clip-not-found", value: void 0 };
+  }
+  if (GLOBAL_SCOPE_TOOLS.has(name)) {
+    return { scope: "transport+master", value: { transport: ov["transport"], master: ov["master"] } };
+  }
+  return void 0;
+}
+async function captureBefore(name, isMutating, params, bridge2) {
+  if (!isMutating) return { captured: false, reason: "read-only tool" };
+  if (NO_WIRE_COMMAND_TOOLS.has(name)) {
+    return { captured: false, reason: "no backing wire command (direct AI-provider call)" };
+  }
+  if (!beforeCaptureEnabled()) return { captured: false, reason: "disabled via DAWPRO_MCP_LOG_BEFORE=0" };
+  if (!bridge2.isConnected()) return { captured: false, reason: "bridge not connected" };
+  const startedAt = performance.now();
+  try {
+    const overview = await bridge2.send("project.overview");
+    const overviewStr = JSON.stringify(overview) ?? "null";
+    const narrow = extractNarrow(name, params, overview);
+    return {
+      captured: true,
+      source: "project.overview",
+      fullHash: sha256Hex(overviewStr),
+      fullBytes: Buffer.byteLength(overviewStr, "utf8"),
+      narrowScope: narrow ? narrow.scope : "none",
+      narrow: narrow ? redactAndCap("before.narrow", narrow.value) : null,
+      captureMs: Math.round((performance.now() - startedAt) * 1e3) / 1e3
+    };
+  } catch (err) {
+    return {
+      captured: false,
+      reason: `project.overview read failed: ${err instanceof Error ? err.message : String(err)}`
+    };
+  }
+}
+function extractResultForLog(result) {
+  if (result && typeof result === "object" && "content" in result) {
+    const r = result;
+    const first = Array.isArray(r.content) ? r.content[0] : void 0;
+    const text = first && first.type === "text" ? first.text : void 0;
+    let body = text;
+    if (typeof text === "string") {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = text;
+      }
+    }
+    return { ok: !r.isError, body };
+  }
+  return { ok: true, body: result };
+}
+function round(ms) {
+  return Math.round(ms * 1e3) / 1e3;
+}
+function wrapHandler(name, hasInputSchema, isMutating, original, bridge2) {
+  return async (...callArgs) => {
+    const startedAt = performance.now();
+    const params = hasInputSchema ? callArgs[0] : void 0;
+    const before = await captureBefore(name, isMutating, params, bridge2);
+    let threw = false;
+    let rawError;
+    let rawResult;
+    try {
+      rawResult = await original(...callArgs);
+    } catch (err) {
+      threw = true;
+      rawError = err;
+    }
+    const durationMs = round(performance.now() - startedAt);
+    const { ok, body } = threw ? { ok: false, body: rawError instanceof Error ? rawError.message : String(rawError) } : extractResultForLog(rawResult);
+    writeLogLineSafely({
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      tool: name,
+      mutating: isMutating,
+      params: redactAndCap("params", params),
+      before,
+      ok,
+      ...ok ? { result: redactAndCap("result", body) } : { error: typeof body === "string" ? redactSecretPatterns(body) : redactAndCap("error", body) },
+      durationMs
+    });
+    if (threw) throw rawError;
+    return rawResult;
+  };
+}
+var instrumentedNames = [];
+var instrumentedMeta = [];
+var installed = false;
+function installMcpLogging(server2, bridge2) {
+  if (installed) {
+    console.error("[daw-pro-mcp] call logging: installMcpLogging called twice \u2014 ignoring the second call.");
+    return;
+  }
+  installed = true;
+  console.error(
+    `[daw-pro-mcp] call logging: writing to "${mcpLogFilePath()}"; before-snapshot capture is ${beforeCaptureEnabled() ? "ON (set DAWPRO_MCP_LOG_BEFORE=0 to disable)" : "OFF (DAWPRO_MCP_LOG_BEFORE=0)"}.`
+  );
+  const target = server2;
+  const original = target.registerTool.bind(target);
+  target.registerTool = (name, config2, cb) => {
+    const isMutating = currentRegistrationIsMutating;
+    const hasInputSchema = Boolean(config2 && config2.inputSchema);
+    instrumentedNames.push(name);
+    instrumentedMeta.push({ name, mutating: isMutating });
+    return original(name, config2, wrapHandler(name, hasInputSchema, isMutating, cb, bridge2));
+  };
+}
+
 // src/server.ts
 function textResult(value) {
   const text = value === void 0 ? "ok" : typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -43907,9 +44185,12 @@ var server = new McpServer({
   name: "daw-pro",
   version: "0.1.0"
 });
+installMcpLogging(server, bridge);
 function registerTool(name, config2, handler) {
   const strictConfig = config2.inputSchema ? { ...config2, inputSchema: external_exports.object(config2.inputSchema).strict() } : config2;
-  server.registerTool(name, strictConfig, handler);
+  withMutatingRegistration(() => {
+    server.registerTool(name, strictConfig, handler);
+  });
 }
 registerTool(
   "transport_play",
@@ -44585,7 +44866,7 @@ var fxKindSchema = external_exports.enum([
   "bassEnhancer",
   "audioUnit"
 ]).describe(
-  "Effect kind. `gain` is a simple linear gain stage. `eq` is a parametric equalizer (low shelf, two peaking/bell bands, high shelf, plus optional high-pass and low-pass filters at 12 or 24 dB/oct, shelf Q, and per-band bypass) \u2014 call fx_describe to see its exact parameter names and each one's teaching `note`, e.g. `peak1Freq`/`peak1GainDb`/`peak1Q` for the first peaking band (the second peaking band follows the same naming pattern), `highPassFreq`/`highPassSlopeDbPerOct`/`highPassEnabled` for the high-pass (off until you set its frequency or enable it). `compressor` is a soft-knee, stereo-linked dynamics processor: `thresholdDb`, `ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`. `limiter` is a lookahead brick-wall limiter: `ceilingDb`, `releaseMs`, `truePeak` \u2014 it adds 5 ms of processing latency, reported per-effect as `latencySamples` in project_snapshot's `effects` array. MIND WHICH PEAK THE CEILING COUNTS (m23-ch): with `truePeak: 0` (the default) `ceilingDb` is a hard dBFS SAMPLE-peak limit, and a true-peak meter \u2014 ffmpeg ebur128, render_measure_loudness's `truePeakDbtp`, any delivery QC \u2014 will read roughly 0.4-1 dB ABOVE it on dense material. That is arithmetic (the meter reconstructs the waveform between samples), not a bug and not run-to-run nondeterminism; do NOT chase it by walking the ceiling down over repeated renders. Set `truePeak: 1` instead and `ceilingDb` becomes a dBTP TRUE-peak limit via 4x oversampled detection, so a -1 dBTP delivery spec is met on the first render. It limits ~0.3-1 dB harder \u2014 that reduction IS the inter-sample overshoot it removes. The dynamics kinds (compressor/limiter/gate) also report a live `gainReductionDb` meter there (positive dB, held-peak, \u221220 dB/s release) \u2014 poll project_snapshot during playback to verify a compressor is actually working. `reverb` is a Freeverb-style room simulation: `roomSize`, `damping`, `mix`, `preDelayMs`, `width`. `delay` is a stereo echo: `timeMs`, `feedback`, `mix`, `pingPong` (0 or 1 \u2014 1 alternates repeats left/right), `highCutHz`, plus tempo sync \u2014 `sync` (0 or 1; 1 derives the effective time from the project tempo, tracking tempo changes, while `timeMs` stays stored as the unsync fallback) and `division` (the synced note length as its duration in BEATS, snapped to the nearest of 1/1\u20261/32 straight/dotted/triplet \u2014 e.g. 1 = 1/4, 0.75 = 1/8 dotted, 0.333 = 1/8 triplet; the snapshot echoes a human `divisionLabel` like \"1/8d\"). `saturator` is a tanh-based drive/color stage: `driveDb`, `mix`, `outputDb`. `gate` is a noise gate: `thresholdDb`, `attackMs`, `holdMs`, `releaseMs`. `chorus` is a 2-voice modulated thickener: `rateHz`, `depthMs`, `mix`. `bassEnhancer` is a psychoacoustic bass enhancer (RBass class): `crossoverHz`, `amount`, `mix`. It low-passes the signal at `crossoverHz`, synthesizes the 2nd/3rd/4th harmonics OF THAT LOW BAND ONLY, high-passes them back at the same corner, and ADDS them to an untouched dry path \u2014 so a speaker that cannot reproduce a 50 Hz fundamental still hears its harmonic series and the ear infers the missing fundamental. Reach for it when a mix has no low end on laptops or phones. It is NOT the `saturator`: the shaper only ever sees the low band and the series stops at the 4th partial. Be honest with users that it ADDS harmonics that were not in the recording. `amount` 0 or `mix` 0 is bit-exact bypass. `audioUnit` hosts an installed Audio Unit EFFECT plugin \u2014 third-party or Apple effects registered with the system \u2014 selected via fx_add's `audioUnit` param (REQUIRED when this kind is used); call fx_list_audio_units first to discover what's installed."
+  "Effect kind. `gain` is a simple linear gain stage. `eq` is a parametric equalizer (low shelf, two peaking/bell bands, high shelf, plus optional high-pass and low-pass filters at 12 or 24 dB/oct, shelf Q, and per-band bypass) \u2014 call fx_describe to see its exact parameter names and each one's teaching `note`, e.g. `peak1Freq`/`peak1GainDb`/`peak1Q` for the first peaking band (the second peaking band follows the same naming pattern), `highPassFreq`/`highPassSlopeDbPerOct`/`highPassEnabled` for the high-pass (off until you set its frequency or enable it). `compressor` is a soft-knee, stereo-linked dynamics processor: `thresholdDb`, `ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`, and `mix` \u2014 the parallel (New-York) compression blend, 0 = untouched dry signal, 1 = fully compressed (the default, so an existing project is unchanged). Crush hard and blend a little back with `mix` rather than duplicating the track. `limiter` is a lookahead brick-wall limiter: `ceilingDb`, `releaseMs`, `truePeak` \u2014 it adds 5 ms of processing latency, reported per-effect as `latencySamples` in project_snapshot's `effects` array. MIND WHICH PEAK THE CEILING COUNTS (m23-ch): with `truePeak: 0` (the default) `ceilingDb` is a hard dBFS SAMPLE-peak limit, and a true-peak meter \u2014 ffmpeg ebur128, render_measure_loudness's `truePeakDbtp`, any delivery QC \u2014 will read roughly 0.4-1 dB ABOVE it on dense material. That is arithmetic (the meter reconstructs the waveform between samples), not a bug and not run-to-run nondeterminism; do NOT chase it by walking the ceiling down over repeated renders. Set `truePeak: 1` instead and `ceilingDb` becomes a dBTP TRUE-peak limit via 4x oversampled detection, so a -1 dBTP delivery spec is met on the first render. It limits ~0.3-1 dB harder \u2014 that reduction IS the inter-sample overshoot it removes. The dynamics kinds (compressor/limiter/gate) also report a live `gainReductionDb` meter there (positive dB, held-peak, \u221220 dB/s release) \u2014 poll project_snapshot during playback to verify a compressor is actually working. `reverb` is a Freeverb-style room simulation: `roomSize`, `damping`, `mix`, `preDelayMs`, `width`. `delay` is a stereo echo: `timeMs`, `feedback`, `mix`, `pingPong` (0 or 1 \u2014 1 alternates repeats left/right), `highCutHz`, plus tempo sync \u2014 `sync` (0 or 1; 1 derives the effective time from the project tempo, tracking tempo changes, while `timeMs` stays stored as the unsync fallback) and `division` (the synced note length as its duration in BEATS, snapped to the nearest of 1/1\u20261/32 straight/dotted/triplet \u2014 e.g. 1 = 1/4, 0.75 = 1/8 dotted, 0.333 = 1/8 triplet; the snapshot echoes a human `divisionLabel` like \"1/8d\"). `saturator` is a tanh-based drive/color stage: `driveDb`, `mix`, `outputDb`. `gate` is a noise gate: `thresholdDb`, `attackMs`, `holdMs`, `releaseMs`. `chorus` is a 2-voice modulated thickener: `rateHz`, `depthMs`, `mix`. `bassEnhancer` is a psychoacoustic bass enhancer (RBass class): `crossoverHz`, `amount`, `mix`. It low-passes the signal at `crossoverHz`, synthesizes the 2nd/3rd/4th harmonics OF THAT LOW BAND ONLY, high-passes them back at the same corner, and ADDS them to an untouched dry path \u2014 so a speaker that cannot reproduce a 50 Hz fundamental still hears its harmonic series and the ear infers the missing fundamental. Reach for it when a mix has no low end on laptops or phones. It is NOT the `saturator`: the shaper only ever sees the low band and the series stops at the 4th partial. Be honest with users that it ADDS harmonics that were not in the recording. `amount` 0 or `mix` 0 is bit-exact bypass. `audioUnit` hosts an installed Audio Unit EFFECT plugin \u2014 third-party or Apple effects registered with the system \u2014 selected via fx_add's `audioUnit` param (REQUIRED when this kind is used); call fx_list_audio_units first to discover what's installed."
 );
 var fxAudioUnitSchema = external_exports.object({
   type: external_exports.string().length(4).optional().describe(
@@ -46245,6 +46526,31 @@ registerTool(
   },
   async () => toToolResult(() => bridge.send("vc.listVoices"))
 );
+registerTool(
+  "vc_import_voice_model",
+  {
+    title: "Import a third-party RVC voice model",
+    description: "Import a user-supplied third-party RVC voice-conversion model (a `.pth` checkpoint, optionally with its companion `.index`) so it appears in vc_list_voices as a real voice, ready for `voiceId` on vc_convert_vocals. A PURE LOCAL FILE COPY into the app's own voice store \u2014 no sidecar call, so it works even while vc_sidecar_status isn't healthy. `modelPath` (required) is the absolute or `~`-expanded path to the `.pth` file on the user's disk. `indexPath` (optional) is the absolute or `~`-expanded path to a companion FAISS `.index` file, which raises conversion quality when present. `voiceId` (optional) sets the id this voice is listed under; omit to derive one from `name` (or the model file's own name) sanitised to letters/digits/`-`/`_` \u2014 the reserved smoke-test id \"base\" is refused. `name` (optional) is the display name; omit to reuse the same text `voiceId` is derived from. `overwrite` (optional, default false) replaces an existing voice at that id instead of refusing. IMPORTANT \u2014 THIS DOES NOT MAKE THE VOICE IMMEDIATELY USABLE: the RVC engine needs an MLX-converted `.npz`, which this tool does not produce (no conversion step exists yet), so the imported voice lands honestly in `needsConversion` state \u2014 the SAME state vc_list_voices already reports for a voice with a `.pth` but no `.npz`. Calling vc_convert_vocals with this voiceId before that conversion exists will fail; check vc_list_voices' `state` field, and tell the user conversion support is coming rather than implying the voice is ready now. Returns `{voiceId, name, hasIndex, state, directoryPath}`. RIGHTS-RESPONSIBILITY POLICY: third-party voice models are supported; the user is responsible for having the rights to whatever model they import \u2014 this tool implies no ownership or compatibility claim of its own.",
+    inputSchema: {
+      modelPath: external_exports.string().min(1).describe(
+        "Absolute or ~-expanded local path to the third-party RVC .pth checkpoint to import."
+      ),
+      indexPath: external_exports.string().optional().describe(
+        "Absolute or ~-expanded local path to the model's companion FAISS .index file, if the user has one. Omit if there isn't one \u2014 the voice still imports, just without the quality boost an index gives."
+      ),
+      voiceId: external_exports.string().optional().describe(
+        `The store id this voice is listed under (what vc_convert_vocals's voiceId will name). Omit to derive one from name/the model file's own name. The reserved id "base" is refused (it names the built-in smoke-test target).`
+      ),
+      name: external_exports.string().optional().describe("Display name for the voice. Omit to reuse the text voiceId is derived from."),
+      overwrite: external_exports.boolean().optional().describe(
+        "true: replace an existing voice already at this id. Omit or false (default): refuse instead, naming the conflicting id."
+      )
+    }
+  },
+  async ({ modelPath, indexPath, voiceId, name, overwrite }) => toToolResult(
+    () => bridge.send("vc.importVoiceModel", { modelPath, indexPath, voiceId, name, overwrite })
+  )
+);
 server.registerTool(
   "ai_provider_status",
   {
@@ -46649,7 +46955,7 @@ registerTool(
   "project_import_midi",
   {
     title: "Import a Standard MIDI File as new tracks",
-    description: 'Import a Standard MIDI File (.mid/.midi) as new INSTRUMENT tracks, one MIDI clip per imported part, in ONE journaled "Import MIDI File" edit \u2014 undo removes every created track and reverts any tempo/meter adoption together. RECOMMENDED WORKFLOW: call once with `dryRun: true` first \u2014 it parses the file and returns the full report, including the `parts` array (every part in the file, even ones that would be skipped, so an index means the same thing on the dry run and the real one) and the RESOLVED tempo policy, WITHOUT touching the project or creating an undo entry; inspect it, then call again for real, narrowing `parts` to just what you want \u2014 a call with no `parts` filter imports every part as its own track, which can be dozens for a full arrangement. `atBeat` (default 0) is the TIMELINE beat that file tick 0 lands on; every created clip starts there and notes stay clip-relative regardless. `tempoPolicy` controls the project\'s tempo and time-signature maps: `"auto"` (default) adopts the file\'s tempo/meter maps ONLY when the project has no clips yet, so a first import sets the grid and a later one never silently retimes existing material; `"adopt"` always replaces the project\'s maps with the file\'s (refused when combined with a non-zero `atBeat` \u2014 the maps are absolute, so there\'s no honest offset adoption); `"ignore"` never touches them. Note positions land on the same beats under every policy \u2014 a MIDI file\'s beats come from its ticks, not its tempo. `instruments` is `"none"` (default: new tracks keep the default instrument) or `"gm"` (assigns General MIDI sound-bank programs from the file\'s program changes, channel 10 as the standard drum kit) \u2014 the program each part asks for is reported either way. `force` (default false) overrides the 32-track import-count refusal. The returned report is where every fidelity loss surfaces, never applied silently: clamped out-of-range tempos, dropped or conflicting tempo/meter events, controller lanes dropped or decimated past their cap, dropped release velocities and program changes, plus a plain-English `degradations` list. Response `{report: <MIDIImportReport>, applied}`, where `applied` is true only when `dryRun` was false. Errors readably for a non-.mid/.midi extension, a missing file, any SMF decode problem, a recording in progress, the `"adopt"` + non-zero `atBeat` combination, the 32-track limit (raise it with `force`), and a file whose import would do literally nothing.',
+    description: 'Import a Standard MIDI File (.mid/.midi) as new INSTRUMENT tracks, one MIDI clip per imported part, in ONE journaled "Import MIDI File" edit \u2014 undo removes every created track and reverts any tempo/meter adoption together. RECOMMENDED WORKFLOW: call once with `dryRun: true` first \u2014 it parses the file and returns the full report, including the `parts` array (every part in the file, even ones that would be skipped, so an index means the same thing on the dry run and the real one) and the RESOLVED tempo policy, WITHOUT touching the project or creating an undo entry; inspect it, then call again for real, narrowing `parts` to just what you want \u2014 a call with no `parts` filter imports every part as its own track, which can be dozens for a full arrangement. `atBeat` (default 0) is the TIMELINE beat that file tick 0 lands on; every created clip starts there and notes stay clip-relative regardless. `tempoPolicy` controls the project\'s tempo and time-signature maps: `"auto"` (default) adopts the file\'s tempo/meter maps ONLY when the project has no clips yet, so a first import sets the grid and a later one never silently retimes existing material; `"adopt"` always replaces the project\'s maps with the file\'s (refused when combined with a non-zero `atBeat` \u2014 the maps are absolute, so there\'s no honest offset adoption); `"ignore"` never touches them. Note positions land on the same beats under every policy \u2014 a MIDI file\'s beats come from its ticks, not its tempo. `instruments` is `"gm"` (THE DEFAULT: assigns General MIDI sound-bank programs from the file\'s program changes, channel 10 as the standard drum kit, so the import sounds like the instruments the file names) or `"none"` (the explicit opt-out, leaving new tracks on the default instrument) \u2014 the program each part asks for is reported either way. EACH PART REPORTS TWO NAMES: `name` is the file\'s LITERAL name and `trackName` is what the track was actually called. They differ whenever the file\'s own name does not distinguish the parts \u2014 a format-0 file carries ONE chunk name for every channel, so `name` can be the song title 13 times while `trackName` reads "Acoustic Grand Piano", "Standard Drum Kit", "Distortion Guitar (ch 9)"\u2026 Read `trackName` when you need to find or describe a track you just imported. `force` (default false) overrides the 32-track import-count refusal. The returned report is where every fidelity loss surfaces, never applied silently: clamped out-of-range tempos, dropped or conflicting tempo/meter events, controller lanes dropped or decimated past their cap, dropped release velocities and program changes, plus a plain-English `degradations` list. Response `{report: <MIDIImportReport>, applied}`, where `applied` is true only when `dryRun` was false. Errors readably for a non-.mid/.midi extension, a missing file, any SMF decode problem, a recording in progress, the `"adopt"` + non-zero `atBeat` combination, the 32-track limit (raise it with `force`), and a file whose import would do literally nothing.',
     inputSchema: {
       path: external_exports.string().min(1).describe(
         "Absolute (or ~-prefixed) path to the .mid/.midi Standard MIDI File to import on this Mac. A relative path or wrong extension is rejected."
@@ -46661,7 +46967,7 @@ registerTool(
         `What to do with the file's tempo/time-signature maps. "auto" (default) adopts them only when the project has no clips yet. "adopt" always replaces the project's maps with the file's (refused with a non-zero atBeat). "ignore" never touches them. Note positions are the same under every policy \u2014 only playback speed and the grid are affected.`
       ),
       instruments: external_exports.enum(["none", "gm"]).optional().describe(
-        `"none" (default) leaves new tracks on the default instrument. "gm" assigns General MIDI sound-bank programs from the file's program changes (channel 10 = the standard drum kit). The requested program is reported either way.`
+        `"gm" (DEFAULT) assigns General MIDI sound-bank programs from the file's program changes (channel 10 = the standard drum kit), so the imported tracks sound like the instruments the file names. "none" is the opt-out and leaves new tracks on the default instrument. The requested program is reported either way. Omitting this gets "gm".`
       ),
       parts: external_exports.array(external_exports.number().int()).optional().describe(
         "Which of the file's parts to import, as indices into the report's `parts` array (run with dryRun: true first to see them \u2014 the array lists every part, including ones that would be skipped, so an index means the same thing on a dry run and a real import). Omit to import every part; an explicit empty array imports nothing. An out-of-range index (including negative) is passed through and rejected by the app with a message naming the file's actual part count \u2014 not clamped or pre-validated here."

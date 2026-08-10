@@ -43,6 +43,14 @@ private let quantumFrames = 512
 /// quantization cannot masquerade as continuity.
 private let cycleFrames = 6_000
 
+/// Module-visible mirrors of the two constants above, so the m23-el signature
+/// arithmetic in `SpliceArtefactSignatureTests.swift` pins THIS geometry rather
+/// than hand-copied literals that could silently drift out of sync. Aliases
+/// (not `internal` on the originals) keep these generic names file-private —
+/// twelve function-local `cycleFrames` live in the sibling loop suites.
+let spikeQuantumFrames = quantumFrames
+let spikeCycleFrames = cycleFrames
+
 /// Cycle-N content: strictly positive, unique per frame at Float precision
 /// over the test lengths (ulp at 0.25 ≈ 3e-8 ≪ 1e-6 step).
 private func cycleN(_ frame: Int) -> Float { 0.25 + Float(frame) * 1e-6 }
@@ -261,9 +269,26 @@ struct GaplessLoopSpikeTests {
         try rig.render(quanta: 6, into: &output)  // 3072 of 6000 frames rendered
 
         // The top-up: cycle N+1 queued on the CONTROL thread while cycle N is
-        // mid-flight — margin 6000 − 3072 = 2928 frames (61 ms at 48 kHz),
-        // the wrap-minus-margin discipline. (Production precedent for
-        // enqueue-while-rolling: Metronome.topUp from the playhead task.)
+        // mid-flight — margin 6000 − 3072 = 2928 frames, the wrap-minus-margin
+        // discipline. (Production precedent for enqueue-while-rolling:
+        // Metronome.topUp from the playhead task.)
+        //
+        // ⚠️ THAT MARGIN IS AUDIO TIME ONLY. 2928 frames is 61 ms of AUDIO at
+        // 48 kHz, but this engine is in `.offline` manual rendering: those
+        // frames are pulled in on the order of MICROSECONDS of wall clock, so
+        // the real margin between this call and the pull that straddles the
+        // splice is ~100 µs, not 61 ms. The leg is therefore exposed to
+        // control-thread scheduling latency in a way real-time playback (where
+        // 61 ms of audio costs 61 ms of wall clock) is not, and it is the only
+        // leg that schedules while the player rolls forward across the newly
+        // scheduled anchor — the others schedule before `engine.start()`.
+        //
+        // See docs/ROADMAP.md m23-el: ONE observed failure under parallel
+        // suite load, `second.count → 288`, exactly the straddling-quantum
+        // tail (5632..<6144 straddles the splice at 6000 → 144 frames × 2 ch).
+        // Cause NOT confirmed and NOT reproduced (0 failures in 53 targeted
+        // attempts). The assertions below stay at 0; `spliceMismatchVerdict`
+        // only makes a recurrence self-classifying.
         rig.player.scheduleBuffer(bufferB, at: rig.anchor(cycleFrames),
                                   options: [], completionHandler: nil)
         try rig.render(quanta: 18, into: &output)  // through 12 288
@@ -272,14 +297,17 @@ struct GaplessLoopSpikeTests {
         let first = mismatches(output, range: 0..<cycleFrames, against: cycleN)
         let second = mismatches(output, range: cycleFrames..<2 * cycleFrames,
                                 against: cycleN1)
+        let verdict = spliceMismatchVerdict(count: second.count, splice: cycleFrames,
+                                            quantum: quantumFrames, channels: 2)
         print("[measured] L-0 queue-while-playing (queued at frame 3072, "
-              + "margin 2928): cycle-N mismatches \(first.count) "
+              + "margin 2928 frames of AUDIO — ~µs of wall clock offline): "
+              + "cycle-N mismatches \(first.count) "
               + "(first \(first.first)); cycle-N+1 mismatches \(second.count) "
-              + "(first \(second.first)); "
+              + "(first \(second.first)); \(verdict); "
               + "splice \(output[0][cycleFrames - 1]) → \(output[0][cycleFrames]); "
               + "NaNs \(nanCount(output))")
         #expect(first.count == 0)
-        #expect(second.count == 0)
+        #expect(second.count == 0, "\(verdict)")
         #expect(output[0][cycleFrames] == cycleN1(0))
         #expect(nanCount(output) == 0)
     }

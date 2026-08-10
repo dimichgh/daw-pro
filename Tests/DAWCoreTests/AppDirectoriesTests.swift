@@ -35,6 +35,8 @@ struct AppDirectoriesTests {
             .voiceDatasets: "VoiceDatasets",
             .models: "Models",
             .modelLifecycle: "ModelLifecycle",
+            // m23-di-2a: the RVC voice-conversion model store.
+            .voiceModels: "VoiceModels",
         ]
         // Closed set: a NEW category must be added to the pin above, so it can
         // never be introduced without someone reading this table.

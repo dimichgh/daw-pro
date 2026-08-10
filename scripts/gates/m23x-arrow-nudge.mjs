@@ -26,6 +26,14 @@
 //
 //   Does NOT prove: that SwiftUI delivers a real ←/→ `KeyPress` with
 //   `.modifiers` populated. g1 MEASURED that an unbundled staging binary does
+// ⚠️ CORRECTED 2026-08-10 (m23-fh, at the m23-cf close). THE CLAIM BELOW IS WRONG.
+// `keyDelete -> delivered:false` was NEVER a staging/tooling limitation. It was the
+// app HONESTLY REPORTING THAT NOTHING HANDLED THE KEY: `firstResponder` read `none`
+// with a clip selected, so no SwiftUI focus existed for `.onKeyPress` to attach to.
+// A REAL APP DEFECT wearing the costume of a harness limit — m23-cf fixed it with a
+// window-level NSEvent monitor and its gate now passes 27/27 with redden legs, so
+// key-event gating on staging is DEMONSTRABLY POSSIBLE. Do not quote the text below
+// as a reason not to write one. Root cause still open as m23-fi.
 //   not route real key events (`keyDelete` -> `delivered:false`), so no seam
 //   here can reach that link. Recorded as a SKIP below, never as a pass. This is
 //   also why the whole modifier POLICY lives in `ArrangeNudge.step` and the seam
@@ -50,7 +58,7 @@
 //
 //   node scripts/gates/m23x-arrow-nudge.mjs
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23x";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -60,7 +68,12 @@ const BINARY = process.env.M23X_BINARY || ".build/debug/DAWApp";
 const REPO = process.env.M23X_REPO || process.cwd();
 fs.mkdirSync(OUT, { recursive: true });
 
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
+let guard = null;   // m23-ej-2: `let` — assigned after connect, read by the killer below
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 600_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const LEN = 2;             // clip length in beats
@@ -115,6 +128,7 @@ console.log(`staging pid ${staging.pid} on :${PORT}`);
 await sleep(4500);
 
 const { ws, req } = await connect();
+guard = panelDensityGuard(req);   // req already unwraps to .result ?? whole msg
 const checks = [];
 const check = (name, ok, detail) => {
   checks.push({ name, ok, detail });
@@ -159,9 +173,10 @@ async function expectError(command, params) {
 }
 
 let teardownDone = false;
-function teardown() {
+async function teardown() {
   if (teardownDone) return;
   teardownDone = true;
+  await guard?.restore("teardown");
   // PIDFILE-EXACT, our OWN child only. Never pkill/pgrep — 17600 is the user's
   // live app and must survive this script by construction. `stopStaging` reads
   // the pid back from this exact pidfile and removes it (m23-ac-1).
@@ -175,7 +190,7 @@ try {
   // Pro density, or `ClipSnap.effective` locks the grid to `.bar` and every
   // modifier leg below (which needs a `sixteenth` grid to discriminate) sweeps
   // a table the app never applied.
-  await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+  await guard.set("arrange", "pro");
   const trackIDs = [];
   for (const n of ["X1", "X2", "X3"]) {
     trackIDs.push((await req("track.add", { kind: "instrument", name: n })).id);
@@ -695,13 +710,16 @@ try {
   for (const c of failed) console.log(`  FAILED: ${c.name} — ${c.detail}`);
   fs.writeFileSync(`${OUT}/result.json`, JSON.stringify({ checks, skips }, null, 2));
   clearTimeout(killer);
+  // ⚠️ m23-ej-2: teardown()'s guard.restore() round-trips over `req`/`ws` — it
+  // MUST run before ws.close(), never after (measured live on m23k4b's
+  // identical bug: closing first strands the restore write).
+  await teardown();
   ws.close();
-  teardown();
-  process.exit(failed.length ? 1 : 0);
+  verdict({ ran: checks.length, failed: failed.length });
 } catch (err) {
   console.error("GATE ERROR:", err);
   clearTimeout(killer);
+  await teardown();
   try { ws.close(); } catch {}
-  teardown();
   process.exit(2);
 }

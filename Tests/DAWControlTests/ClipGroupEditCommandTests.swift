@@ -350,13 +350,15 @@ struct ClipGroupEditCommandTests {
         // m23-aj-2 then appended `clip.moveManyByTracks`/`clip.moveManyToTrack`
         // after THAT, so all three slide one rung further up in turn.
         // …and m23-dl appended `ai.modelResidency`/`ai.modelUnload` after THOSE,
-        // so every entry slides two rungs further up in turn.
-        #expect(CommandRouter.allCommands.dropLast(6).last == "clip.removeMany")
-        #expect(CommandRouter.allCommands.dropLast(5).last == "clip.moveMany")
-        #expect(CommandRouter.allCommands.dropLast(4).last == "transport.panic")
-        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.moveManyByTracks")
-        #expect(CommandRouter.allCommands.dropLast(2).last == "clip.moveManyToTrack")
-        #expect(CommandRouter.allCommands.dropLast().last == "ai.modelResidency")
-        #expect(CommandRouter.allCommands.last == "ai.modelUnload")
+        // so every entry slides two rungs further up in turn. m23-di-2a then
+        // appended `vc.importVoiceModel` after THAT, one rung further still.
+        #expect(CommandRouter.allCommands.dropLast(7).last == "clip.removeMany")
+        #expect(CommandRouter.allCommands.dropLast(6).last == "clip.moveMany")
+        #expect(CommandRouter.allCommands.dropLast(5).last == "transport.panic")
+        #expect(CommandRouter.allCommands.dropLast(4).last == "clip.moveManyByTracks")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.moveManyToTrack")
+        #expect(CommandRouter.allCommands.dropLast(2).last == "ai.modelResidency")
+        #expect(CommandRouter.allCommands.dropLast().last == "ai.modelUnload")
+        #expect(CommandRouter.allCommands.last == "vc.importVoiceModel")
     }
 }

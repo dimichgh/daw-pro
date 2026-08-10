@@ -182,7 +182,7 @@
 //
 // Staging: DAW_CONTROL_PORT=17695. The user's live app on 17600 is never a
 // target — `startStaging`/`connect` assert this.
-import { sleep, buildOrAbort, startStaging, stopStaging, connect, ROOT } from "./_staging.mjs";
+import { sleep, buildOrAbort, startStaging, stopStaging, connect, ROOT, verdict } from "./_staging.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -843,7 +843,14 @@ try {
   // just an inference from "we only ever called output.setDevice with the
   // loopback uid" — a silent failure elsewhere could have changed it.
   r = await cmd("output.setDevice", {});
-  ck("L-final pin released", r.ok && devicesOf(r).every(d => !d.isSelected), JSON.stringify(r.error));
+  // m23-ee-2a: see m20d:261. This leg's own comment above says it "must be an
+  // asserted leg, not just an inference" — but `devicesOf` is `?? []` and
+  // `[].every(f)` is `true`, so with no device list it asserted nothing at all,
+  // which is the same failure the comment was written to prevent.
+  const releasedDevices = devicesOf(r);
+  ck("L-final pin released",
+     r.ok && releasedDevices.length >= 1 && releasedDevices.every(d => !d.isSelected),
+     `${releasedDevices.length} devices, selected=[${releasedDevices.filter(d => d.isSelected).map(d => d.uid).join(",")}] ${JSON.stringify(r.error)}`);
   r = await cmd("output.listDevices");
   ck("L-final SYSTEM DEFAULT UNMOVED across the whole gate",
      defaultUID(devicesOf(r)) === systemDefault, `${systemDefault} -> ${defaultUID(devicesOf(r))}`);
@@ -884,4 +891,4 @@ console.log(fail
   : "ALL GREEN, as expected on a fixed tree. If you are running this against a tree WITHOUT "
     + "m23-bp/m23-bp-1 (RescheduleCause) applied, this all-green result means the gate is not "
     + "reproducing the defect and needs re-diagnosis before it can be trusted either way.");
-process.exit(fail ? 1 : 0);
+verdict({ ran: pass + fail, failed: fail });

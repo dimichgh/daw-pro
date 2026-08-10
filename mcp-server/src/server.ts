@@ -28,6 +28,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { DawBridge } from "./bridge.js";
 import { generateImage, generateLyrics, generateSongSuno } from "./ai.js";
+import { installMcpLogging, withMutatingRegistration } from "./mcp-log.js";
 
 interface ToolTextContent {
   type: "text";
@@ -71,6 +72,12 @@ export const server = new McpServer({
   version: "0.1.0",
 });
 
+// Append-only call logging (m23-ca, src/mcp-log.ts) — MUST install before the
+// first `registerTool(`/`server.registerTool(` call below, so every one of
+// the 177 registrations (both paths) is instrumented. See that file's header
+// for the full design (before-snapshot source/cost, redaction, seam choice).
+installMcpLogging(server, bridge);
+
 /**
  * Registers a MUTATING tool with a STRICT input schema (m16-e, audit F5's
  * MCP-side half). `server.registerTool` builds a permissive `z.object(shape)`
@@ -105,7 +112,13 @@ function registerTool(
   const strictConfig = config.inputSchema
     ? { ...config, inputSchema: z.object(config.inputSchema).strict() }
     : config;
-  server.registerTool(name, strictConfig as any, handler as any);
+  // Marks this registration as MUTATING for mcp-log.ts's before-capture
+  // decision (see that file's header) — the flag it reads is invisible at
+  // the `server.registerTool` seam otherwise, since both this wrapper and
+  // the 34 direct read-only registrations call the same patched method.
+  withMutatingRegistration(() => {
+    server.registerTool(name, strictConfig as any, handler as any);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1740,7 +1753,10 @@ const fxKindSchema = z
       "band follows the same naming pattern), `highPassFreq`/`highPassSlopeDbPerOct`/" +
       "`highPassEnabled` for the high-pass (off until you set its frequency or enable it). " +
       "`compressor` is a soft-knee, stereo-linked dynamics processor: `thresholdDb`, " +
-      "`ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`. `limiter` is a lookahead " +
+      "`ratio`, `attackMs`, `releaseMs`, `kneeDb`, `makeupDb`, and `mix` — the parallel " +
+      "(New-York) compression blend, 0 = untouched dry signal, 1 = fully compressed " +
+      "(the default, so an existing project is unchanged). Crush hard and blend a little " +
+      "back with `mix` rather than duplicating the track. `limiter` is a lookahead " +
       "brick-wall limiter: `ceilingDb`, `releaseMs`, `truePeak` — it adds 5 ms of processing " +
       "latency, reported per-effect as `latencySamples` in project_snapshot's `effects` array. " +
       "MIND WHICH PEAK THE CEILING COUNTS (m23-ch): with `truePeak: 0` (the default) " +
@@ -6426,6 +6442,81 @@ registerTool(
   async () => toToolResult(() => bridge.send("vc.listVoices"))
 );
 
+registerTool(
+  "vc_import_voice_model",
+  {
+    title: "Import a third-party RVC voice model",
+    description:
+      "Import a user-supplied third-party RVC voice-conversion model (a " +
+      "`.pth` checkpoint, optionally with its companion `.index`) so it " +
+      "appears in vc_list_voices as a real voice, ready for `voiceId` on " +
+      "vc_convert_vocals. A PURE LOCAL FILE COPY into the app's own voice " +
+      "store — no sidecar call, so it works even while vc_sidecar_status " +
+      "isn't healthy. `modelPath` (required) is the absolute or `~`-expanded " +
+      "path to the `.pth` file on the user's disk. `indexPath` (optional) is " +
+      "the absolute or `~`-expanded path to a companion FAISS `.index` file, " +
+      "which raises conversion quality when present. `voiceId` (optional) " +
+      "sets the id this voice is listed under; omit to derive one from " +
+      "`name` (or the model file's own name) sanitised to letters/digits/" +
+      "`-`/`_` — the reserved smoke-test id \"base\" is refused. `name` " +
+      "(optional) is the display name; omit to reuse the same text `voiceId` " +
+      "is derived from. `overwrite` (optional, default false) replaces an " +
+      "existing voice at that id instead of refusing. IMPORTANT — THIS DOES " +
+      "NOT MAKE THE VOICE IMMEDIATELY USABLE: the RVC engine needs an MLX-" +
+      "converted `.npz`, which this tool does not produce (no conversion " +
+      "step exists yet), so the imported voice lands honestly in " +
+      "`needsConversion` state — the SAME state vc_list_voices already " +
+      "reports for a voice with a `.pth` but no `.npz`. Calling " +
+      "vc_convert_vocals with this voiceId before that conversion exists " +
+      "will fail; check vc_list_voices' `state` field, and tell the user " +
+      "conversion support is coming rather than implying the voice is ready " +
+      "now. Returns `{voiceId, name, hasIndex, state, directoryPath}`. " +
+      "RIGHTS-RESPONSIBILITY POLICY: third-party voice models are " +
+      "supported; the user is responsible for having the rights to " +
+      "whatever model they import — this tool implies no ownership or " +
+      "compatibility claim of its own.",
+    inputSchema: {
+      modelPath: z
+        .string()
+        .min(1)
+        .describe(
+          "Absolute or ~-expanded local path to the third-party RVC .pth checkpoint to import."
+        ),
+      indexPath: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute or ~-expanded local path to the model's companion FAISS .index file, if " +
+            "the user has one. Omit if there isn't one — the voice still imports, just " +
+            "without the quality boost an index gives."
+        ),
+      voiceId: z
+        .string()
+        .optional()
+        .describe(
+          "The store id this voice is listed under (what vc_convert_vocals's voiceId will " +
+            "name). Omit to derive one from name/the model file's own name. The reserved id " +
+            "\"base\" is refused (it names the built-in smoke-test target)."
+        ),
+      name: z
+        .string()
+        .optional()
+        .describe("Display name for the voice. Omit to reuse the text voiceId is derived from."),
+      overwrite: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: replace an existing voice already at this id. Omit or false (default): " +
+            "refuse instead, naming the conflicting id."
+        ),
+    },
+  },
+  async ({ modelPath, indexPath, voiceId, name, overwrite }) =>
+    toToolResult(() =>
+      bridge.send("vc.importVoiceModel", { modelPath, indexPath, voiceId, name, overwrite })
+    )
+);
+
 server.registerTool(
   "ai_provider_status",
   {
@@ -7556,10 +7647,17 @@ registerTool(
       "maps with the file's (refused when combined with a non-zero `atBeat` — the maps are " +
       "absolute, so there's no honest offset adoption); `\"ignore\"` never touches them. Note " +
       "positions land on the same beats under every policy — a MIDI file's beats come from its " +
-      "ticks, not its tempo. `instruments` is `\"none\"` (default: new tracks keep the default " +
-      "instrument) or `\"gm\"` (assigns General MIDI sound-bank programs from the file's " +
-      "program changes, channel 10 as the standard drum kit) — the program each part asks for " +
-      "is reported either way. `force` (default false) overrides the 32-track import-count " +
+      "ticks, not its tempo. `instruments` is `\"gm\"` (THE DEFAULT: assigns General MIDI " +
+      "sound-bank programs from the file's program changes, channel 10 as the standard drum " +
+      "kit, so the import sounds like the instruments the file names) or `\"none\"` (the " +
+      "explicit opt-out, leaving new tracks on the default instrument) — the program each part " +
+      "asks for is reported either way. EACH PART REPORTS TWO NAMES: `name` is the file's " +
+      "LITERAL name and `trackName` is what the track was actually called. They differ whenever " +
+      "the file's own name does not distinguish the parts — a format-0 file carries ONE chunk " +
+      "name for every channel, so `name` can be the song title 13 times while `trackName` reads " +
+      "\"Acoustic Grand Piano\", \"Standard Drum Kit\", \"Distortion Guitar (ch 9)\"… Read " +
+      "`trackName` when you need to find or describe a track you just imported. `force` " +
+      "(default false) overrides the 32-track import-count " +
       "refusal. The returned report is where every fidelity loss surfaces, never applied " +
       "silently: clamped out-of-range tempos, dropped or conflicting tempo/meter events, " +
       "controller lanes dropped or decimated past their cap, dropped release velocities and " +
@@ -7598,9 +7696,11 @@ registerTool(
         .enum(["none", "gm"])
         .optional()
         .describe(
-          "\"none\" (default) leaves new tracks on the default instrument. \"gm\" assigns " +
-            "General MIDI sound-bank programs from the file's program changes (channel 10 = " +
-            "the standard drum kit). The requested program is reported either way."
+          "\"gm\" (DEFAULT) assigns General MIDI sound-bank programs from the file's program " +
+            "changes (channel 10 = the standard drum kit), so the imported tracks sound like " +
+            "the instruments the file names. \"none\" is the opt-out and leaves new tracks on " +
+            "the default instrument. The requested program is reported either way. Omitting " +
+            "this gets \"gm\"."
         ),
       parts: z
         .array(z.number().int())

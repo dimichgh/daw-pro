@@ -33,7 +33,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node
 
 // The build/launch/pidfile-kill lifecycle lives in ONE place (m23-ac-1) —
 // `_staging.mjs`. It used to be copy-pasted into every gate that had it at all.
-import { launchStaging, stopStaging, sleep, STAGING_PORT } from "./_staging.mjs";
+import { launchStaging, stopStaging, sleep, STAGING_PORT, verdict } from "./_staging.mjs";
 
 const GATE = "m23y";
 const OUT = "/tmp/daw-gate-out/m23y";
@@ -414,6 +414,14 @@ try {
   // longer reachable by widening the selection at all; it needs a fixture that
   // leaves the selection at ONE clip. Nothing here is wrong, it just proves less
   // than its original wording implied. Not rebuilt in this item: the branch is
+  // ⚠️ CORRECTED 2026-08-10 (m23-fh, at the m23-cf close). THE CLAIM BELOW IS WRONG.
+  // `keyDelete -> delivered:false` was NEVER a staging/tooling limitation. It was the
+  // app HONESTLY REPORTING THAT NOTHING HANDLED THE KEY: `firstResponder` read `none`
+  // with a clip selected, so no SwiftUI focus existed for `.onKeyPress` to attach to.
+  // A REAL APP DEFECT wearing the costume of a harness limit — m23-cf fixed it with a
+  // window-level NSEvent monitor and its gate now passes 27/27 with redden legs, so
+  // key-event gating on staging is DEMONSTRABLY POSSIBLE. Do not quote the text below
+  // as a reason not to write one. Root cause still open as m23-fi.
   // unreachable on staging either way (delivered=false, m23-g1).
   await sel({ act: "clear" });
   await sel({ act: "click", clipId: a4 });
@@ -557,4 +565,4 @@ console.log(`\nM23Y ${pass}/${pass + fail}  (${skips.length} honest skips)`);
 if (failures.length) console.log("failed legs:\n  " + failures.join("\n  "));
 writeFileSync(`${OUT}/result.json`,
   JSON.stringify({ pass, fail, failures, skips }, null, 2));
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

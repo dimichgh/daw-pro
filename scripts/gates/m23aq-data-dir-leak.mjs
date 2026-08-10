@@ -120,6 +120,12 @@ import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
+// m23-fa-1: the ONE-home verdict primitive. This gate is one of only 2 in the
+// corpus that do NOT import `_staging.mjs` (pure static/filesystem analysis,
+// no app, no port) — importing 700+ lines of staging lifecycle just for a
+// pass/fail decision would be exactly backwards, so it comes from its own
+// tiny module instead. See `_verdict.mjs`'s header for the full contract.
+import { verdict } from "./_verdict.mjs";
 
 const HOME = os.homedir();
 const REAL_AUTOSAVE = path.join(HOME, "Library/Application Support/DAWPro/Autosave");
@@ -298,11 +304,11 @@ async function main() {
   }
 
   console.log(`\n${legsPassed}/${legsTotal} legs passed.`);
-  if (legsPassed !== legsTotal) {
-    console.log("GATE FAILED.");
-    process.exit(1);
-  }
-  console.log("GATE PASSED.");
+  // m23-fa-1: was `if (legsPassed !== legsTotal) { …exit(1) } … exit 0` off the
+  // end of main() — vacuous on legsTotal===0 (0 !== 0 is false, so a run that
+  // recorded no legs at all fell through to the implicit exit 0). `verdict()`
+  // is the one-home fix: it exits 2, loudly, on ran===0 instead.
+  verdict({ ran: legsTotal, failed: legsTotal - legsPassed });
 }
 
 main();

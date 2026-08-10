@@ -511,7 +511,7 @@
 //
 // Staging: DAW_CONTROL_PORT=17695. The user's live app on 17600 is never a
 // target — `startStaging` asserts this.
-import { sleep, buildOrAbort, startStaging, stopStaging, connect, ROOT } from "./_staging.mjs";
+import { sleep, buildOrAbort, startStaging, stopStaging, connect, ROOT, verdict } from "./_staging.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync, statSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -1248,7 +1248,14 @@ try {
      `plateau=${stopped.plateauMs}ms censored=${stopped.censored} of 1000ms window`);
 
   r = await cmd("output.setDevice", {});
-  ck("L9 pin released", r.ok && devicesOf(r).every(d => !d.isSelected), r.error);
+  // m23-ee-2a: see m20d:261 — `devicesOf` is `?? []` and `[].every(f)` is `true`,
+  // so an absent device list makes this ABSENCE assertion ("pin released") pass
+  // vacuously. Pinned on the RESPONSE (`output.setDevice` returns the list), not
+  // on the hardware.
+  const releasedDevices = devicesOf(r);
+  ck("L9 pin released",
+     r.ok && releasedDevices.length >= 1 && releasedDevices.every(d => !d.isSelected),
+     `${releasedDevices.length} devices, selected=[${releasedDevices.filter(d => d.isSelected).map(d => d.uid).join(",")}] ${r.error ?? ""}`);
 } catch (e) {
   fail++;
   console.log("FAIL gate threw :: " + (e?.stack ?? e?.message ?? e));
@@ -1411,4 +1418,4 @@ if (skipped) {
     + "SKIP lines above), or L13 found no Apple-manufactured effect installed. A skip is neither "
     + "pass nor fail; it must be investigated, not read as a pass (m23-bl/m23-bu-2).");
 }
-process.exit(fail ? 1 : 0);
+verdict({ ran: pass + fail, failed: fail });

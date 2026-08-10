@@ -43,7 +43,7 @@
 //
 //   M23F_PIDFILE=<scratch>/staging.pid M23F_FIXTURES=<dir> node scripts/gates/m23f-arrange-drop.mjs
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23f";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -53,7 +53,12 @@ const BINARY = process.env.M23F_BINARY || ".build/debug/DAWApp";
 const REPO = process.env.M23F_REPO || process.cwd();
 const FIXTURES = process.env.M23F_FIXTURES || `${OUT}/fixtures`;
 fs.mkdirSync(OUT, { recursive: true });
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
+let guard = null;   // m23-ej-2: `let` — assigned after connect, read by the killer below
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 600_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const PPB = 40;
@@ -125,6 +130,7 @@ console.log(`staging pid ${stagingPid} on :${PORT}`);
 await sleep(4000);
 
 const { ws, req } = await connect();
+guard = panelDensityGuard(req);   // req already unwraps to .result ?? whole msg
 const checks = [];
 const check = (name, ok, detail) => {
   checks.push({ name, ok, detail });
@@ -148,7 +154,7 @@ try {
   await req("debug.arrangeZoom", { reset: true });
   const zoom = await req("debug.arrangeZoom", { ppb: PPB });
   await req("debug.arrangeZoom", { rowStep: "large" });
-  await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+  await guard.set("arrange", "pro");
   await req("transport.seek", { beats: 0 });
   await sleep(SETTLE_MS);
 
@@ -232,7 +238,7 @@ try {
     await req("debug.arrangeZoom", { reset: true });
     await req("debug.arrangeZoom", { ppb: PPB });
     await req("debug.arrangeZoom", { rowStep: "large" });
-    await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+    await guard.set("arrange", "pro");
     await drop({ snap });
     await sleep(SETTLE_MS);
     const hov = await drop({ act: "enter", x: X(9.4), y: Y_AUDIO, fileCount: 1 });
@@ -258,7 +264,7 @@ try {
   await req("debug.arrangeZoom", { reset: true });
   await req("debug.arrangeZoom", { ppb: PPB });
   await req("debug.arrangeZoom", { rowStep: "large" });
-  await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+  await guard.set("arrange", "pro");
   await drop({ snap: "bar" });
   // A resident clip whose edges are deliberately OFF the bar grid: 5.3 -> 7.3.
   await req("clip.addAudio", { trackId: magId, path: `${FIXTURES}/tone1s.wav`, atBeat: 5.3 });
@@ -318,7 +324,7 @@ try {
   const zeroId = (z.track ?? z).id;
   await req("debug.arrangeZoom", { reset: true });
   await req("debug.arrangeZoom", { ppb: PPB });
-  await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+  await guard.set("arrange", "pro");
   await sleep(SETTLE_MS);
   await drop({ act: "enter", x: X(4), y: Y_AUDIO, fileCount: 1 });
   e = await drop({ act: "drop", x: X(4), y: Y_AUDIO, paths: [`${FIXTURES}/empty.wav`] });
@@ -344,10 +350,15 @@ try {
   clearTimeout(killer);
   const pass = checks.filter((c) => c.ok).length;
   console.log(`\nORCH_M23F pass=${pass} fail=${checks.length - pass} of ${checks.length}`);
+  await guard.restore("finally");
   ws.close();
   await sleep(200);
   // ⚠️ m23-ac-2a: this gate LEAKED — detached + unref, then exit with no
   // teardown. Its orphan is adopted by whatever gate runs next.
   stopStaging(GATE, PIDFILE);
-  process.exit(checks.every((c) => c.ok) ? 0 : 1);
+  // m23-ee-2c-3: `[].every()` is TRUE, so a run that recorded NO checks used to
+  // exit 0 — a gate that asserted nothing reporting green. The length conjunct is
+  // the whole fix: it cannot change the verdict of any run that did record checks.
+  // m23-fa-2: now routed through the verdict() primitive.
+  verdict({ ran: checks.length, failed: checks.filter((c) => !c.ok).length });
 }

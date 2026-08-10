@@ -82,7 +82,7 @@
 //   node scripts/gates/m23do-menubar.mjs
 import fs from "fs";
 import { execFileSync } from "node:child_process";
-import { launchStaging, stopStaging } from "./_staging.mjs";
+import { launchStaging, stopStaging, verdict } from "./_staging.mjs";
 
 const GATE = "m23do";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -315,4 +315,4 @@ try {
 fs.writeFileSync(`${OUT}/results.json`, JSON.stringify(checks, null, 2));
 const pass = checks.filter((c) => c.ok).length;
 console.log(`\nM23DO ${pass}/${checks.length}`);
-process.exit(pass === checks.length ? 0 : 1);
+verdict({ ran: checks.length, failed: checks.length - pass });

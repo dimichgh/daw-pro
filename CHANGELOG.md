@@ -1,5 +1,314 @@
 # Changelog
 
+## 2026-08-10 — Closed a hole that let an automated check pass without checking anything
+
+Nothing in the app itself changed today. This is about the checks that guard it.
+
+Every one of our automated checks ended by asking a question shaped like "did anything fail?" and
+reporting success when the answer was no. That sounds right, and it is wrong in one specific way: if
+a check had quietly stopped running its tests altogether, nothing had failed — so it reported
+success. A check that tested nothing and a check that tested everything and found no problems
+produced the same green result. There was no way to tell them apart from the outside.
+
+Sixty checks across fifty-nine files now report through a single shared piece of code that asks two
+questions instead of one: how many tests ran, and how many failed. Zero tests run is no longer a
+pass. It is now its own distinct outcome that says so in plain words — "this check asserted nothing"
+— because staying silent about having done no work is exactly the failure we were trying to catch.
+
+To be sure this changed nothing else, we ran all sixty-eight checks start to finish before the
+change and again after, and compared them one by one rather than just comparing the totals: every
+single check produced the identical result both times. Two of them are known to be failing for
+reasons already being tracked, and since a failing check looks the same before and after, those two
+were confirmed a second way — by checking that the individual tests inside them still came out
+exactly as before.
+
+Along the way we found three checks with a subtler version of the same problem. Each had a path
+where, if the check itself crashed partway through, the crash was counted in a way the final tally
+couldn't see. Depending on which way we had resolved it, that would either have made the check
+report an impossible result, or — worse — swallowed the crash and turned a failing check green. All
+three now record the crash as a failed test like any other.
+
+
+
+The app has 73 automated checks that drive a real copy of it and inspect what happens. Each one
+normally runs only when someone touches the area it covers, which means a check can quietly stop
+working and nobody notices. One of them records having gone through exactly that before, and says it
+plainly in its own notes: a check nobody runs is indistinguishable from one that passes. How long
+each of the three had been failing this time, we can't say — nothing was watching, which is the
+whole point.
+
+So we ran 69 of them back to back, start to finish. 65 passed. Three failed, and each failure was
+re-run on its own afterwards to make sure it was real and not just interference from the checks
+running before it. All three were real.
+
+**The one that looked like it affected you — and turned out not to.** A check about renaming failed:
+when you type in a rename field and press Delete, the app is supposed to notice you are editing text
+and leave your selected clip alone. The check reported that something in the deletion path was still
+running when it shouldn't be, and our first reading was that this might destroy clips.
+
+It doesn't. We went and measured it rather than guessing. The check had a blind spot — at the moment
+it looked, there were no clips left to lose, so its safety test was comparing nothing to nothing. We
+fixed that blind spot first, put a real clip there, selected it, and pressed Delete with the rename
+field focused. **The clip survives.** The app guards this in two independent places, and the second
+one does its job even when the first has already stepped aside.
+
+So the fault was in the test, not the app — the test was watching a counter that only records "a
+keystroke arrived here", and treating it as if it recorded "something was deleted". Those became
+different numbers when a separate keyboard fix landed recently, and nothing re-ran this check
+afterwards to notice. Your clips were never at risk, and no change to the app was needed.
+
+The check has now been corrected, and it gained a new part that records the true behaviour — that the
+keystroke does reach the app and is then turned away — so nobody re-reads the old number as a fault
+again. It also caught a stale note elsewhere in the code still claiming the keyboard never worked this
+way; that is tracked separately. The full suite of 5338 automated tests passes.
+
+**The other two were bookkeeping, not bugs.** One check counts the app's remote-control commands and
+expects 173; there are now 174, because recently added voice-model importing added one. The count is
+right about the last saved version of the code and only disagrees with work that hasn't been saved
+yet, so we deliberately left it alone rather than editing it to match. The other tracks which checks
+adjust panel sizing, and had drifted by one.
+
+Four further checks were deliberately left out of this run: two of them load a 54 GB audio model, and
+they contradict each other — each needs that model switched off when it starts, and each switches it
+on. They cannot both work in a single pass, so they are run by hand. That is now tracked too.
+
+**And then the tool we use to measure all of this declared itself untrustworthy — correctly.** It
+works by reading every check's source code and sorting each one into a category. To prove it can
+still tell those categories apart, it had been pointed at three real checks known to be in a
+particular state, and it refused to report anything at all if it got them wrong. The trouble is that
+this week's work moved all three out of that state on purpose. The tool was checking itself against a
+condition the project had just finished eliminating, so it failed — not because it was broken, but
+because it had succeeded.
+
+It now proves itself against small examples written for that purpose, one per category, which cannot
+go stale when the real checks change. But swapping in self-written examples introduces a subtler
+danger, and guarding against it is the more important half of this fix: a tool that proves itself
+only against its own examples would still pass every one of them while reading none of the real
+checks — reporting a clean result about nothing at all. That is precisely the flaw described at the
+top of this entry, reappearing inside the instrument built to find it. So it now also insists it
+actually read something real before it will report anything, and it says which of the two situations
+it is in rather than failing the same way for both.
+
+**A check can also pass while quietly declining to test part of what it covers.** Some of our checks
+need a person — whether a menu item looks right, whether a real key press travels the way a simulated
+one does. Rather than guess, those parts announce themselves as skipped and the check carries on. That
+is the honest behaviour and we want to keep it. The problem was on the reporting side: a skipped part
+is neither a pass nor a failure, so it left no trace in the result, and a run that skipped work
+reported the same clean line as one that did all of it.
+
+Runs now report skipped work alongside the result — currently 28 skipped parts across 11 checks. The
+count is deliberately reported with its denominator, because the more useful finding was how few
+checks say anything about this at all: 13 of 73. The other 60 are not known to be skip-free; they are
+simply silent, and a number that quietly leaves them out would imply otherwise. Skipped work still
+does not count as failure, and nothing about whether a check passes has changed.
+
+The count is assembled two independent ways — from what each check reports about itself, and from the
+individual announcements — which are then compared. That comparison is the point rather than a
+finishing touch: this exact figure was previously measured as 38, and the error surfaced only because
+one check's own total disagreed with the tally taken from its output.
+
+**Finally, the rule from the top of this entry is now enforced automatically, and enforcing it turned
+up one more check with the original flaw.** Fixing sixty checks by hand fixes them once; nothing
+stopped the next new check from being written the old way, which is how sixty accumulated in the first
+place. A new check now reads every other check and fails if any of them decides its own result without
+going through the shared code.
+
+Writing it surfaced a check that had been missed. It reported its result indirectly — handing the
+outcome to a shared cleanup routine that exited on its behalf — so the earlier survey, which looked
+for the decision being made in place, could not see it. It had the exact flaw described above: had it
+somehow tested nothing, it would have reported success. It has been corrected, and its result now
+comes out the same way every other check's does.
+
+Seven checks are formally excused. Four need a large model loaded to run at all; two are waiting on
+work already scheduled; one already refuses to pass without testing anything, by its own separate
+route. Each exemption names the task that will remove it, and the enforcing check fails if an excused
+check is later fixed without its exemption being deleted — so the list cannot quietly outlive the
+problem it was written for.
+
+
+We also looked at making the whole suite of checks run on a schedule, so nobody has to remember to
+start it. We are not going to do that, and the reason is worth writing down: seventy-three of our
+seventy-four checks work by launching the actual app, and there is no way to run it invisibly. A
+scheduled run would open the app seventy-three times, on its own, on the machine you make music on.
+That is not a setting anyone would want us to pick a good default for, so we did not build it at
+all — not even switched off, because a switched-off feature reads as a finished one.
+
+What we built instead answers the question the schedule was meant to answer, and it answers it
+faster. There is now a check that takes about a second and tells you which checks have never been
+run, and which ones have been edited since they last ran — the second group being the ones whose
+last green result no longer describes the code that is in the file today. It names them, one by one,
+rather than just counting them, because a number is easy to skim past and a list of names is not. It
+runs as part of the normal development routine, which is a thing that already happens, rather than
+waiting on a timer that nobody set.
+
+Each check now records that it ran, at the moment it reports its result, so this stays accurate by
+itself as work goes on. That bookkeeping is deliberately unable to affect anything: we tested it
+against a full disk, a read-only folder and a path that was not writable at all, and in every case
+the check still reported exactly what it would have reported otherwise, down to the byte. A note
+about the bookkeeping failing goes to the error log and nowhere else. It would be a poor trade to
+gain a coverage report and lose the ability to trust a green result, so the recording is wired to
+lose that argument every time.
+
+The record is kept per check rather than per run. That matters because running a single check used
+to overwrite the record of everything else, which had already destroyed one set of results earlier
+this week. Now running one check updates one line and leaves the rest untouched — which is a
+property of how it is stored, not a rule someone has to remember.
+
+One limitation, stated plainly: seven checks still cannot report their own coverage, because they are
+the seven that were formally excused above and never reach the shared reporting code. They will show
+as never-run no matter how often they are run. The two tasks already scheduled to fix those
+exemptions will fix this at the same time; it is not a separate problem, and it is not a new one.
+
+
+Separately: some of our test commands quietly changed a setting nobody asked them to change. Opening
+the effects editor from a test also switched the mixer panel to its detailed view — and left it that
+way. That setting is one you own; the app remembers it between launches. So a test run could change
+how your mixer looked, and nothing in the test said it had.
+
+Both of the safeguards we already had were blind to this by construction. One only remembers panels a
+test explicitly says it is going to change; the other only looks at tests that ask for a density
+change in the first place. A panel changed sideways, through some other command, is invisible to
+both. The fix records every panel setting before a test runs and puts them all back afterwards,
+including removing ones the test invented — so a setting you never had does not survive the test that
+created it.
+
+We proved it the honest way, by running two tests and comparing. The unprotected one changed the
+mixer setting and left it changed. The protected one, doing the same thing twenty-two times over, left
+it exactly as it found it. The protection also refuses to guess: if it cannot read the current
+settings properly, it stops rather than assuming there were none — assuming none would have meant
+erasing all of them, which would be a far worse bug than the one it was written to fix.
+
+Two related things we found and wrote down rather than quietly fixing. The same problem affects two
+more tests we have not protected yet, and we confirmed that by measurement rather than assuming it.
+And more broadly, our tests share their saved settings with the copy of the app you actually use —
+we noticed a test run had moved where the app's window opens. We put it back, and that wider issue is
+now written down as its own piece of work rather than patched setting by setting.
+
+
+Follow-up: two more of our tests had the same problem, and we checked rather than assumed. One we had
+already suspected; the other we had written down as unconfirmed, and it turned out to be leaking too.
+A third we had assumed was fine genuinely is fine — we ran it to be sure instead of taking our own
+earlier word for it. Both leaking tests now restore your panel settings the way the others do, and
+both still pass.
+
+## 2026-08-10 — Voice conversion no longer degrades the more you use it
+
+Converting the same vocal a few times in a row used to get progressively louder and more distorted,
+until by the fourth or fifth conversion the output was pinned against the ceiling and audibly
+crushed. Nothing you did caused it — the audio engine was reusing graphics-card memory it hadn't
+finished writing, so each conversion inherited a little more garbage from the last.
+
+Measured, before and after, on twelve conversions in a row: the level used to climb by a factor of
+twelve and peak at 0.99 (with true peak actually past full scale); it now stays flat, varying by
+0.03%. The engine clears that memory before every conversion. Conversions cost about 0.03 s more
+each, and the engine now takes about half a second longer to start — but it loads faster on the
+first conversion, so in practice you get that back.
+
+**One thing to know.** The fix is applied when the app starts the voice engine. If you started the
+engine yourself from a terminal, the app can't apply it, and conversions will still degrade. The
+app now detects exactly that case — but only an AI assistant asking about engine status currently
+sees the warning; it isn't shown in the Voice panel yet. Stopping and restarting the engine from
+the app applies the fix.
+
+**A separate problem found along the way, not yet fixed.** The voice engine names its output files
+using a timestamp accurate only to the second, so conversions finishing within the same second
+overwrite each other — twenty-four conversions produced seven files in testing. A single vocal take
+takes longer than a second to convert, so ordinary use is unaffected; the risk is batch conversion.
+It's tracked and will be fixed separately. Until then, if you convert several short clips in rapid
+succession, check you got every file.
+
+## 2026-08-10 — Half the voice-conversion model was random noise (found, corrected, not yet shipped)
+
+The voice model has four "normalising flow" layers that shape the converted voice. Two of them —
+the 2nd and the 4th — were never actually loaded from the trained model file. They were filled with
+fresh random numbers every single time the model loaded, which means voice conversion produced a
+slightly different result on every run and none of them used the weights that had been trained.
+
+The cause was a one-line disagreement between two pieces of the vendored engine: the file that
+converts models and the file that loads them number the layers differently, and only the loader
+runs. Layer 0 is the one place the two agree, which is why every smoke test looked fine.
+
+There is now a corrector that fixes a model file's layer names without touching a single byte of
+the actual weights, plus a gate that proves it: the broken model fails 6 checks and produces a
+different fingerprint on every load; the corrected one passes all of them and produces the same
+fingerprint every time, in separate processes.
+
+**This is not in your hands yet, and it is worth being plain about that.** The corrected model has
+to actually reach the app, and the one voice currently available takes a code path that our own
+settings cannot redirect. Which of three routes to take is a decision waiting on you. There is also
+a loudness caveat: the corrected model runs about 10 dB hotter, leaving roughly 1.2 dB of headroom.
+It did not clip in testing, but that was one test signal, not a library — so a listening check comes
+before this ships.
+
+## 2026-08-09 — The Delete key works the same way every time
+
+Pressing Delete used to be a coin flip. Three different parts of the app each claimed the key —
+the piano roll, the arrange area and the automation lane — and which one actually got it depended
+on where the keyboard focus happened to have landed. Focus moved every time you selected a clip,
+so the same keystroke could do different things on consecutive presses: sometimes it deleted the
+notes you had selected, sometimes it appeared to do nothing at all, and in one case it deleted the
+whole clip out from under the notes you were actually pointing at.
+
+All three now ask the same question the Edit menu already asked — what are you pointing at? — and
+act on that answer. Notes when the piano roll is open with a selection, automation points when a
+lane holds one, clips otherwise. Where focus sits no longer changes the outcome, and Delete can no
+longer remove a clip when what you had selected was the notes inside it.
+
+## 2026-08-09 — Copy and paste for clips and notes
+
+There was no way to copy anything. Not a clip, not a note, not a phrase you wanted twice.
+
+Now the Edit menu and the right-click menus carry Cut, Copy and Paste, and they know what you are
+pointing at: notes when the piano roll is open with a selection, clips otherwise. Paste lands at the
+playhead, keeps the internal timing of whatever you copied, and puts clips back on the tracks they
+came from where those still exist. Pasting a phrase that would start before the beginning slides the
+whole group forward together rather than stacking its first notes on top of each other.
+
+Each paste is its own undo step, even one made immediately after an edit.
+
+There are deliberately no keyboard shortcuts yet. A menu shortcut outranks text fields on macOS, and
+this app still has an unexplained keyboard bug open, so the shortcuts wait until that is understood
+rather than shipping on top of it.
+
+## 2026-08-09 — Drag a box around notes in the piano roll
+
+Selecting several notes meant clicking each one with shift held. There was no way to sweep a box
+over a phrase and grab it, the way you already can over clips in the arrange view.
+
+Now you can. Press on empty grid and drag: a band follows the pointer and selects every note it
+touches, additively if you hold shift or command. A plain click still deselects, exactly as before —
+the band only arms once the pointer has actually travelled, so nothing you already do has changed.
+
+Dragging the selection also got fixed, and it needed to. Moving several notes at once used to snap
+each note to the grid independently, so notes sitting slightly off the beat relative to each other
+were quietly welded onto the same line — a groove flattened by moving it. The group now translates
+rigidly: a phrase keeps its internal timing wherever you drop it. This was always broken; it was
+just hard to notice while selections were built one click at a time.
+
+## 2026-08-09 — Imported MIDI files keep their instruments, and drums get a step grid
+
+Load a multi-part MIDI file and every track used to arrive on the same default poly synth, all
+sharing the song's title as their name. A 13-part orchestration imported as thirteen tracks called
+"Bohemian Rhapsody", none of which sounded like what the file said they were.
+
+The file had been read correctly the whole time — the piano, the fingered bass, the string ensemble,
+the drum kit, both distortion guitars were all sitting in the import report. They were just thrown
+away before they reached your tracks. Instrument assignment was switched off by default, from a time
+when nobody had measured what turning it on would cost, and the code that gives two parts distinct
+names could never fire on the single-track file format that needs it most.
+
+Both are fixed. An imported file now arrives with the General MIDI instrument each part asked for,
+and tracks are named for what they play — "Alto Sax", "Timpani", "Standard Drum Kit", and where two
+parts share an instrument, "Distortion Guitar (ch 9)" and "Distortion Guitar (ch 12)". Loading all
+thirteen instruments takes 161 ms. Pass `instruments: "none"` if you want the old behaviour.
+
+Separately, the clip editor has a second mode. Select a clip on a drum track and it opens as a step
+grid instead of a piano roll: one row per drum, named for the drum ("Closed Hi Hat", "Acoustic
+Snare"), one column per step. Click a box to place a hit, click it again to remove it — the same
+gesture for both, so it is also a way to delete notes that does not depend on the keyboard. Any MIDI
+clip can be switched to it by hand. It edits the same notes the piano roll does, through the same
+undo history.
+
 ## 2026-08-05 — A typo in a song-generation request no longer costs you a generation
 
 The three tools that generate things by calling an outside service — lyrics, a full song, an
@@ -1693,6 +2002,29 @@ nothing.
 **Two of the four were already failing before anything was touched.** That is the
 finding, and it is why the probe was worth doing:
 
+- **m23-fl / m23-fj — three tests that always said "pass" now say what they actually do, and a soak test can no longer pass without running.** Three of our checks are really screenshot tools: they capture frames for a human to look at and assert nothing. Their own notes said so, but only in prose, so an automated run counted them as passing tests indistinguishable from ones that checked something. They now declare it in a form the tooling reads — still succeeding, but recorded separately and required to state a reason. **Deliberately, no assertions were invented for them: the real check is someone's eyes.** Separately, a soak test that repeats an operation could be told to repeat it zero times, whereupon it printed PASS — measured directly, not theorised. It now refuses, and a sweep confirmed only two tests in the whole suite have a setting like that, both now handled.
+- **m23-fk — the delete shortcuts now respond to the key you actually press, and fixing it nearly introduced something worse.** Three delete shortcuts were listening for the wrong character and had never fired. The obvious one-line fix turned out to be destructive: with the shortcuts re-armed, *holding* Delete deleted the selected notes and then, on the very next auto-repeat, deleted the clip containing them — because once the notes were gone the same keystroke was interpreted as targeting the clip. The repeat protection that should have caught this had been bypassed. The shipped fix declares explicitly that these shortcuts respond only to a key going down, never to a repeat, which was measured to hold the clip safe. **Also fixed: Delete now works on automation points in the Mix console** — three of the four links are measured, and the last one needs a real click, so it wants a human check. Two behaviour changes are flagged for you rather than decided quietly: Shift/Option/Command+Delete now delete where they previously did nothing, and the protection that stops Delete eating a clip while you're renaming something is now the only thing standing there.
+- **m23-bn — a test that had been failing since the day it was written now passes.** One check sent a parameter by the wrong name, which the app correctly rejected, so that check had never once succeeded. Rather than fix it, previous notes recorded it as a known harmless failure — which is how a documented artifact outlives the bug it describes. Fixed and verified: the gate is now 20 for 20.
+- **m23-fi — the Delete key's real explanation turned out to be a single character, and it wasn't what we'd said.** We had blamed keyboard focus. Measuring it directly showed focus was fine all along: the shortcut constant SwiftUI calls "delete" is actually the *backspace* character, while the Delete key on your keyboard sends a different one. They could never match, so three delete shortcuts had never once fired — no amount of focus work would have helped. The proof is that arrow-key shortcuts sitting on the very same view, with the very same focus, work perfectly. **One genuine bug surfaced that nobody had reported: in the Mix console, pressing Delete on a selected master-volume automation point does nothing** — the only way to remove one is to double-click it. That has never worked, and it's the one case the current Delete fix structurally cannot reach.
+- **m23-fg / m23-fl — a suspected problem in our test suite turned out to be 111 false alarms and one real one.** A count of 116 suspicious exit points had been filed as a second class of tests-that-pass-without-testing. Classifying every one of them: 111 are ordinary failure exits, which fail in the *safe* direction. One is real — a test that prints "PASS" after running zero iterations when a setting is turned down to zero. And three others report success unconditionally: they take screenshots and exit, and nothing anywhere — no comparison step, no stored reference, no script — ever looks at the images.
+- **m23-di-2a — you can now import someone else's voice model.** Point the app at an RVC `.pth` file (and its companion index, if you have one) and it becomes a real voice in your library, named and listed. The sidecar was always built to accept a voice folder dropped in from outside — its own code comment says so — but nothing in the app could put one there. Imports land in your Application Support folder, never inside the read-only engine checkout. **An imported model arrives honestly marked "needs prep": it can't be used for conversion until it's converted to the engine's format, and that step is a separate question waiting on you.** Verified end to end against a running app, including that the files genuinely land on disk rather than the command merely claiming success.
+- **m23-fc — we nearly built a feature that the app is deliberately incapable of hosting.** Live voice conversion while you sing was on the roadmap as a large-but-doable job, and a first look suggested most of it already existed upstream. Measuring it changed the answer twice. The existing code turned out never to have run at all — it produces exactly silence, for a specific and provable reason. And even a perfect implementation would not have helped: converting a block of audio costs about 26 ms **no matter how small the block is**, so a round trip lands near 120–185 ms where singers need under 15, and that floor stays above the target even at an impossible zero processing cost. The decisive point came from our own code: DAW Pro has no path from a live input back to the speakers, and a comment written long ago says that's deliberate. So the feature was never a latency problem. **Recorded rather than attempted, with the measurements, so nobody re-opens it on optimism.**
+- **m23-er / m23-fh — two pieces of our own record corrected.** A survey of which settings each debug command can quietly change had been done by asking which commands *mention* the setting by name; rebuilt around what the code actually calls, it found two more commands than the previous list named. And nine test files carried a claim that a certain kind of keyboard test was impossible in our harness — it never was; the failure they were describing was the real Delete bug. Seven were corrected and **two were left alone, because they had stated it accurately all along.**
+- **m23-fa-1 — we found a test that passes by not testing anything, and it wasn't hypothetical.** An audit had established that most of our automated checks would report success if they somehow ran zero checks, but the expectation on record was that this was a theoretical hole nobody would ever fall into. The first real measurement disproved that: one existing check, entirely unmodified, reports **"PASS: 0/0 cycles audible"** and exits successfully when a documented setting is turned down to zero. It has presumably been doing that whenever anyone used that setting. **The fix is a single shared piece of code that every check will report its result through** — it refuses to call a run successful if nothing was actually checked, and distinguishes "nothing ran" from "something failed" so the two can't be confused. Three checks are migrated onto it as a pilot. **The proof that matters isn't that they still pass — it's that they now go red when their assertions are removed, while the old code stays green under exactly the same conditions.** A survey tool went with it, so migrating the remaining sixty-one is measurable rather than eyeballed. It also found a flaw in our own tally of the problem, and a third way the same failure can happen that nobody had named.
+- **m23-cf — the Delete key does nothing, and the reason turned out to be that nothing was listening.** You reported that selecting a note or a clip and pressing Delete did nothing, while Delete inside a rename field correctly deleted text. That third result was the one that cracked it: the key was arriving at the app perfectly well, so the problem was never delivery. A probe over twelve consecutive selections settled which of the two remaining explanations it was — the delete handler was entered **zero times out of twelve** with the new routing disabled and **twelve out of twelve** with it live. It was never being asked, rather than being asked and declining. The underlying cause is that the arrange surface holds no keyboard focus at all for the modern key-handling path to attach to. **The fix takes the same route the space bar has always used** — a window-level key monitor that doesn't depend on that focus, feeding the existing, unchanged decision about what Delete should remove. An earlier attempt this week made all three delete handlers agree with each other, which was a real fix for a real inconsistency but could not have helped here: agreement between handlers is worth nothing when none of them is ever consulted. **Held-back note: this is verified by synthesized key events against a running app and by 27 checks that were each proven to go red when their guard is removed — but not yet by a human finger on a key.**
+- **m23-ez — we were about to price a piece of work as an engine migration, and it turned out we already run that engine.** A note in the roadmap held some voice-conversion work out of scope on the grounds that the Apple-MLX voice-conversion project we'd want to build on was *a different backend* from the one our voice sidecar runs — a swap, with all the risk that implies. Reading our own installer settled it in three commands: it clones that exact project, at a pinned commit, and the sidecar reports it by name as its own engine. The confusion had a real source — the engine comes from one project and the neural assets it loads come from a different one, so the two names sit side by side in the same file. **Consequence: the live-conversion and voice-blending spikes are work on the stack we already run, not a migration, which is a materially lower cost than recorded.** No code changed; the whole finding was read-only.
+- **m23-ee — the audit of our own test suite is finished, after about ten rounds.** The question it started from: how many of our automated checks can pass without actually checking anything? All 71 gate scripts were swept by a purpose-built tool, all 130 candidate sites were judged individually and in writing, and the tool itself was corrected four times along the way — including once where it had been quietly declaring a check "safe" on the strength of a stale measurement. Real faults found and fixed across the arc: nine, plus one in the auditing tool. **The two lessons are a matched pair and both were expensive:** a checker that can only see one function at a time mostly flags *careful* code, so a noisy report meant the tool was weak rather than the tests sloppy — twelve of fifteen flags in the final round were false alarms. And a checker that recognises only one way of writing a mistake will miss the same mistake written any other way: it found two instances of a problem that turned out to affect 57 of 71 files. Five sites remain flagged and all five are deliberate — three are the tool honestly reporting what it cannot see, which is how it was designed.
+- **m23-ee-2c-3 — went to fix two lines, found that 4 out of 5 of our automated checks can report success without having checked anything.** The two lines were real: a gate that recorded no results exited with a success code, because "every item in an empty list passes" is true. Both are fixed, and the fix provably changes the outcome of exactly one situation — the empty one — so no existing result moves. **Then the same question asked of the whole suite: 57 of 71 gates have the same hole**, written eight different ways (counting failures, comparing a pass count to a total, and so on) — every one of which reads as "success" when nothing ran. That is now its own tracked item, with a note against fixing 57 files by hand. **The uncomfortable part is the detection rate:** the tool built to find this class found 2 of 58, because it only recognised one of the nine ways of writing it — and the 56 it missed are invisible precisely because they are written the idiomatic way.
+- **m23-ck — the compressor gets a Mix knob, so parallel compression stops costing you a duplicate track.** New-York compression — blending the squashed signal back under the untouched one — is a daily move, and until now doing it here meant duplicating the track and balancing a send. There is now a Mix control on the built-in compressor: fully wet by default, so **every existing project renders bit-for-bit identically**, which was tested rather than assumed. At Mix 0 the compressor is a provable bypass. One note for later: the gain-reduction meter still shows movement at Mix 0, because it reports what the detector measured rather than what you hear — that is how other DAWs behave, but say the word and it can follow the blend instead. **(Follow-up, m23-ev: the AI-facing description of the compressor now names the Mix control and explains it, so an agent asked to set up parallel compression can discover it — previously the knob existed but nothing told an agent it was there.)**
+- **m23-di-3 — we compared ourselves to VocalNet before building anything, and it changed the plan.** You asked for a plugin like VocalNet for RVC models. Most of it turned out to already ship here, and the obvious next step looked like adding model import. The comparison says otherwise: **import is real but it is the cheapest of three gaps, not the only one.** VocalNet also does live real-time conversion — the thing its relaunch was built around, and arguably what you actually asked for — and blending several voices together. Neither exists here. The report separates what was confirmed from a primary source, what rests on a single user's report, and what simply could not be checked, and it throws out two claims that turned up only in search-engine summaries with no traceable source.
+- **m23-eu — the test-auditing tool was quietly declaring some checks "safe" on the strength of a measurement taken 130 lines earlier, of a value that had since been overwritten ten times.** Fixed, and the count of unexplained checks correctly went UP rather than down. Two more of the same family are now filed rather than silently carried.
+- **m23-ca — the DAW now keeps a record of what AI agents actually did to your project.** You asked for this after a session where an agent rebalanced your mix and the only account of it was the agent's own written summary — which claimed the master fader had been at 1.0097 before it started, a statement about the past that nothing could confirm or deny. Every tool call an agent makes is now written to an append-only log in `~/Library/Logs/DAWPro/mcp/`: what was called, what was passed, **what came back**, how long it took, and — for anything that changes the project — **a snapshot of the relevant state beforehand**, which is the part that answers the master-fader question. API keys are stripped by two independent rules, and anything large is reduced to a fingerprint rather than dumped in. **Honest about its own limits:** roughly 57% of changing operations capture a genuinely useful before-value; the rest record that they could not, and why, rather than leaving a blank that reads like nothing happened. Logging can never slow down, break, or interfere with a call — if it fails, it gets out of the way.
+- **m23-ee-2c-2b — taught the checker four more patterns it had been misreading, and the useful part is the one it refused to agree with me about.** The tool that has been auditing our tests kept flagging checks that were actually fine, because it could only look at one function at a time. Four of those blind spots are now closed, and the list of unexplained checks drops from ten to six. **The fifth was my mistake, not the tool's:** I had read one flagged check, satisfied myself it was properly defended, and then assumed the tool could be taught to see the same thing. It cannot — the defence lives inside a helper function, and reading across function boundaries is precisely what this tool deliberately does not do. Being able to see that something is fine and being able to prove it mechanically are different problems, and I had quietly treated them as one. **It also found a genuine fault in the tool that predates this work, and left it alone rather than fixing it on the way past:** in one test file the checker credits a check as "defended" by pointing at a measurement taken 130 lines earlier, of a value that has since been overwritten ten times. That is the dangerous direction of error — a false alarm gets investigated and dismissed, while a wrongly-cleared check is one nobody ever looks at again. Filed as its own item, and fixing it will make the number go UP, not down.
+- **m23-ee-2c-2a — the one real one, and it was broken in two places rather than one.** After clearing twelve false alarms, this is the single genuine case in the batch. When you drag a MIDI file onto the arrangement, a check confirms every imported clip landed on the beat you dropped it at. It could report success in two different situations where it had checked nothing: if the import created no tracks at all, and — separately — if it created the tracks but put no clips on them. Either way the check found no beats to compare, and finding no problems in an empty list reads as "no problems". The audit tool only knew about the first of those two; fixing that alone would have looked complete while leaving the second open. Both are now pinned to what a correct import actually produces (two tracks, at least one clip each), cross-checked against a *second*, independent reading of the project rather than against the importer's own report of what it did. Proven both directions: the check now rejects all four broken situations, the old one accepted all four, and — the control that matters — a genuine wrong-beat error is still caught, so the fix hardened the check rather than watering it down. The gate runs 18/18 before and after.
+- **m23-ee-2c-1 — we went to fix seven flagged checks and found nothing wrong with any of them.** The scanner that has been driving this audit reports a list of checks that *could* pass without testing anything. Seven of them were queued for repair. Reading the actual code, all seven turned out to be defended already — five cannot encounter the problem at all (the thing they inspect is built by a loop that always produces the same fixed number of items), and two are guarded by a neighbouring check that goes red first, so the situation could never pass unnoticed. In one case the person who wrote the check had anticipated exactly this and said so in the check's own title: *"asked first… otherwise every check below would be vacuous."* The scanner flagged the very line that sentence defends. Nothing in the gates was changed; the scanner was fixed instead, and it now understands three of the four patterns it was missing. The fourth needs it to read across function boundaries, which it deliberately does not attempt — instead it now says "a human should read this one function" rather than guessing. **Continuing through the rest of the list the same way: 12 of the 15 outstanding items are false alarms, roughly 2–3 are real, and the full reasoning per item is written down in `docs/research/2026-08-09-vacuity-tail-adjudication.md`.** The useful lesson is uncomfortable and worth keeping: a checker that can only see one function at a time will mostly flag *careful* code, because careful code puts its defences in the setup, one line up, or one function over. A noisy report meant the tool was weak, not that the tests were. **Now landed and re-checked against the finished tool: the list of unexplained checks drops from 16 to 10, and the three cases deliberately picked as "must NOT be cleared" are all still flagged.** One detail earned its own warning — the total read the same before and after the final correction to the tool, but it was not the same ten; only comparing the two lists item by item showed that anything had moved.
+- **m23-ee-2b — the last three `?? []` vacuity sites hardened, and one of them had been failing for three weeks over its own fixture name** (`m17b:125→133`, `m23a2:360→359`, `m23k4a:176→181`). The filed plan offered two fixes for `m17b` as alternatives — pin the count, or pin the field's presence — and said to decide by reading the gate. Reading it answered *both*: the gate really does perform undoable edits before that point, and the reply really must carry the list. The separate discovery is the interesting one. That check asks "did zooming add anything to the undo history?" by searching the history for the words *zoom*, *ppb* or *row*. The track it creates for itself was named **`ZoomOrch`**, so the entry `Add Track 'ZoomOrch'` matched its own search and the check failed — every run, for the life of the gate, while the app was behaving correctly the whole time. It had been diagnosed correctly weeks ago and then written into the file's header as an accepted quirk rather than fixed, which cost one word to put right (`OrchA`). The same leg also printed nothing at all when it failed, so there was no way to see any of this without adding a diagnostic first. Both are now fixed: the check is green and a failure would say why. Verified in both directions — all three new conditions reject all four broken-response shapes, all three old ones accepted all four, and live runs give 19/1 (the single remaining failure is a separate known bug), 31/0 and 45/0.
+- **m23-ee-2a — the three `devicesOf` vacuity sites hardened** (`m20d:262`, `m20e:1251`, `m23bp:846`). Each read `r.result?.devices ?? []` off `output.setDevice` and asserted an ABSENCE ("pin released"), so a renamed or missing `devices` field made the leg pass having checked nothing. Pinned on the response (`length >= 1`), not on the hardware. Verified both ways: the old condition passes on all four degenerate response shapes while the new one rejects them, and a live staging round-trip confirms the pin passes on a healthy run (3 devices, none selected, system default unmoved).
+- **m23-ee-1 — the `every()`-vacuity census.** `[].every(f)` is `true`, so an assertion over a runtime-derived collection passes vacuously when that collection is empty. Swept all 71 non-harness staging gates with an acorn AST (`scripts/every-vacuity-census.mjs`) rather than a grep, because the filed scope counted comment prose: **130 code sites, 108 cleared, 21 actionable candidates across 16 gates**, tabulated per-site in `docs/research/2026-08-09-every-vacuity-census.md`. Polarity halves the axis — `some(…)` and `!every(…)` redden on empty and need no guard. The instrument was licensed against four known answers before any new result was believed; three failed first and each taught it a missing rule.
 - One check **could never have reported a failure at all.** It always signalled
   success when it finished, no matter how many of its own tests had failed. It
   has been quietly failing two tests for some time while reporting a clean pass

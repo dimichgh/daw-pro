@@ -65,6 +65,30 @@ public struct VoiceConversionStatus: Codable, Sendable, Equatable {
     /// boot attempt began. Mirrors `SidecarStatus.startingForSeconds`
     /// exactly, including the M10-b "tracked across the whole boot" behavior.
     public var startingForSeconds: Int?
+    /// m23-fo — is this facade protected against the repeated-conversion
+    /// saturation defect? ⚠️ **TRI-STATE, AND THE THIRD STATE IS THE POINT.**
+    ///
+    /// * `true`  — the mitigation route answered AND reports the engine
+    ///   patched: `mx.clear_cache()` runs before every inference.
+    /// * `false` — **a POSITIVE answer that this facade is NOT protected.**
+    ///   Two ways to get here, distinguished by `mitigationDetail`: the
+    ///   server answered and the route 404'd (no hook at all — e.g. a
+    ///   `run.sh` started by hand, which never gets our `PYTHONPATH`), or the
+    ///   hook loaded but its engine patch failed (`enginePatched: false`;
+    ///   the hook is deliberately fail-safe and never fails the boot, so this
+    ///   is reachable — `scripts/rvc-model/gate_m23fo_mechanism.py` phase G
+    ///   exercises it).
+    /// * `nil`   — the PROBE ITSELF failed (timeout, transport error, a
+    ///   non-404 error status, or an unparseable body). We do not know.
+    ///
+    /// Never collapse `false` into `nil`: "we know you are unprotected" and
+    /// "we could not find out" are different things to tell a user, and only
+    /// the first one justifies the warning in `message`.
+    public var mitigationActive: Bool?
+    /// Human-readable companion to `mitigationActive` — which of the two
+    /// `false` paths was taken, or why the probe failed. Never the only
+    /// signal: `message` carries the actionable sentence.
+    public var mitigationDetail: String?
 
     public init(
         state: SidecarState,
@@ -75,7 +99,9 @@ public struct VoiceConversionStatus: Codable, Sendable, Equatable {
         voiceCount: Int? = nil,
         pid: Int32? = nil,
         phase: String? = nil,
-        startingForSeconds: Int? = nil
+        startingForSeconds: Int? = nil,
+        mitigationActive: Bool? = nil,
+        mitigationDetail: String? = nil
     ) {
         self.state = state
         self.message = message
@@ -86,6 +112,8 @@ public struct VoiceConversionStatus: Codable, Sendable, Equatable {
         self.pid = pid
         self.phase = phase
         self.startingForSeconds = startingForSeconds
+        self.mitigationActive = mitigationActive
+        self.mitigationDetail = mitigationDetail
     }
 }
 

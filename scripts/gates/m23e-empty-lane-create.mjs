@@ -36,7 +36,7 @@
 //
 //   M23E_PIDFILE=<scratch>/staging.pid node scripts/gates/m23e-empty-lane-create.mjs
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23e";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -45,7 +45,12 @@ const PIDFILE = process.env.M23E_PIDFILE || "/tmp/m23e-staging.pid";
 const BINARY = process.env.M23E_BINARY || ".build/debug/DAWApp";
 const REPO = process.env.M23E_REPO || process.cwd();
 fs.mkdirSync(OUT, { recursive: true });
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
+let guard = null;   // m23-ej-2: `let` — assigned after connect, read by the killer below
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 600_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const PPB = 80;
@@ -98,6 +103,7 @@ console.log(`staging pid ${stagingPid} on :${PORT}`);
 await sleep(3500);
 
 const { ws, req } = await connect();
+guard = panelDensityGuard(req);   // req already unwraps to .result ?? whole msg
 const checks = [];
 const check = (name, ok, detail) => {
   checks.push({ name, ok, detail });
@@ -141,7 +147,7 @@ try {
   // SIMPLE density for legs 1-8: this is the beginner's path, and the density is
   // set explicitly rather than inherited so a persisted preference from an
   // earlier run cannot decide what this gate measures.
-  await req("debug.panelDensity", { panel: "arrange", mode: "simple" });
+  await guard.set("arrange", "simple");
   await sleep(SETTLE_MS);
 
   // PRECONDITIONS — without these the whole gate can pass vacuously.
@@ -304,7 +310,7 @@ try {
   }
 
   // ── 9. the SPLIT path over a clip still works (m17-c regression) ──────
-  await req("debug.panelDensity", { panel: "arrange", mode: "pro" });
+  await guard.set("arrange", "pro");
   await sleep(SETTLE_MS);
   const beforeSplit = await overview();
   e = await dblClick(X(8), Y_INST);          // inside the resident [6, 10)
@@ -454,7 +460,7 @@ try {
 
   // ── normalize ─────────────────────────────────────────────────────────
   await req("debug.arrangePointer", { act: "clear" });
-  await req("debug.panelDensity", { panel: "arrange", mode: "simple" });
+  await guard.set("arrange", "simple");
   await req("debug.arrangeZoom", { reset: true });
   await req("project.new", { discardChanges: true });
 } catch (err) {
@@ -464,7 +470,8 @@ try {
 const pass = checks.filter((c) => c.ok).length;
 console.log(`\nM23E ${pass}/${checks.length}`);
 fs.writeFileSync(`${OUT}/results.json`, JSON.stringify(checks, null, 2));
+await guard.restore("normal exit");
 try { ws.close(); } catch {}
 stopStaging(GATE, PIDFILE);   // m23-ac-2a: same pidfile-exact kill, one home
 clearTimeout(killer);
-process.exit(pass === checks.length ? 0 : 1);
+verdict({ ran: checks.length, failed: checks.length - pass });

@@ -64,8 +64,12 @@ struct EffectEditorModelTests {
         let store = ProjectStore()
         let track = store.addTrack(kind: .audio)
         let model = Self.makeStoreBacked(store)
-        // ≥3 kinds explicitly, then the full sweep (eq = 10 legacy + 12 m22-a).
-        for (kind, count) in [(EffectDescriptor.Kind.eq, 22), (.compressor, 6), (.limiter, 3)] {
+        // ≥3 kinds explicitly, then the full sweep (eq = 10 legacy + 12 m22-a;
+        // compressor = 6 legacy + m23-ck's mix; limiter = 2 + m23-ch's
+        // truePeak). These counts are DELIBERATELY literal — the sweep below
+        // proves rows follow the schema, and only a literal catches a schema
+        // row that vanished.
+        for (kind, count) in [(EffectDescriptor.Kind.eq, 22), (.compressor, 7), (.limiter, 3)] {
             let fx = try! store.addEffect(toTrack: track.id, kind: kind)
             model.prepare(trackID: track.id, effectID: fx.id, targetLabel: "on Test")
             #expect(model.specs.count == count, "\(kind) row count")
@@ -369,7 +373,8 @@ struct EffectEditorModelTests {
         #expect(matches(layout(.compressor), [
             ("TRIGGER", ["thresholdDb", "ratio", "kneeDb"]),
             ("TIME", ["attackMs", "releaseMs"]),
-            ("OUTPUT", ["makeupDb"]),
+            // m23-ck: the parallel dry/wet blend joins OUTPUT after makeup.
+            ("OUTPUT", ["makeupDb", "mix"]),
         ]))
         #expect(matches(layout(.limiter), [
             ("TIME", ["releaseMs"]),

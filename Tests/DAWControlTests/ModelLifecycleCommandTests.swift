@@ -141,12 +141,13 @@ struct ModelLifecycleCommandTests {
 
     // MARK: - Wire law
 
-    @Test("both verbs are registered at the END of allCommands; count 171 -> 173")
+    @Test("both verbs are registered at the END of allCommands; count 171 -> 173 -> 174")
     func commandsRegisteredAtTheEnd() {
         let all = CommandRouter.allCommands
-        #expect(all.count == 173)
-        #expect(all.dropLast().last == "ai.modelResidency")
-        #expect(all.last == "ai.modelUnload")
+        #expect(all.count == 174)   // 173 at m23-dl -> 174 at m23-di-2a (vc.importVoiceModel appended after)
+        #expect(all.dropLast(2).last == "ai.modelResidency")
+        #expect(all.dropLast().last == "ai.modelUnload")
+        #expect(all.last == "vc.importVoiceModel")
         // Additive: every neighbouring lifecycle verb is untouched, in place.
         for name in ["ai.sidecarStatus", "ai.sidecarStart", "ai.sidecarStop",
                      "vc.sidecarStatus", "vc.sidecarStart", "vc.sidecarStop"] {

@@ -61,6 +61,13 @@ public enum CursorAffordance: String, CaseIterable, Sendable {
     // Place / paint.
     case automationField   // empty automation lane (click adds a point)
     case takeLanePaint     // take lane comp paint / select
+    /// A step-sequencer cell (m23-cq-1) — click to toggle a note on or off.
+    /// Place/paint rather than a movable body: you are authoring content BY
+    /// POSITION, and nothing here can be picked up and carried. The same
+    /// crosshair covers a filled cell, which the same click removes: the
+    /// vocabulary has one shape for "act at this position", and inventing a
+    /// per-state cursor is exactly what this catalog exists to stop.
+    case stepCell
 
     /// Pointer shown while merely hovering the surface.
     public var restCursor: CursorKind {
@@ -71,7 +78,7 @@ public enum CursorAffordance: String, CaseIterable, Sendable {
             return .resizeLeftRight
         case .clipBody, .noteBody, .automationPoint, .playhead, .trackHeader:
             return .grab
-        case .automationField, .takeLanePaint:
+        case .automationField, .takeLanePaint, .stepCell:
             return .crosshair
         }
     }

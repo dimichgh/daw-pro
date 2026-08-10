@@ -1205,7 +1205,19 @@ struct MasterAutomationSection: View {
                 // usually clear it, but "usually" is exactly the latch hazard
                 // the bridge's doc comment warns about. Nothing to guard, so
                 // nothing is reported.
-                pointSelection: nil
+                pointSelection: nil,
+                // ⭐ m23-cf (second pass): DELIBERATELY nil, and for a STRONGER
+                // reason than `pointSelection` above — this one would not merely
+                // be inert, it would REMOVE a working operation. `handleDeleteKey`
+                // opens with `workspaceMode == .arrange`, so routing this mount
+                // would make the master lane's DELETE key refuse outright in the
+                // only workspace the lane exists in. There is also nothing to
+                // arbitrate here: in the Mix console this editor is the ONLY
+                // claimant of DELETE (`ArrangeDeleteKey` and `PianoRollView` are
+                // in the other, mutually exclusive `switch model.workspaceMode`
+                // branch), and the whole item is about making N claimants agree.
+                // `nil` keeps this editor's own `deleteSelection()`, unchanged.
+                onDeleteKey: nil
             )
             // Re-seed the editor's draft if the lane identity changes (create/remove).
             .id(lane.id)

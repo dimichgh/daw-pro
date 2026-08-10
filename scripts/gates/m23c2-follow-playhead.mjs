@@ -50,7 +50,8 @@ import { execFileSync, spawn, spawnSync } from "child_process";
 import {
   ROOT, STAGING_PORT, DEFAULT_BINARY, PROFILE_ROOT_ENV,
   buildOrAbort, startStaging, stopStaging, pidfilePath, releaseSessionLock,
-  stagingProfileRoot, stagingSessionLockPath,
+  stagingProfileRoot, stagingSessionLockPath, panelDensityGuard, verdict,
+  stagingBinaryAlias,
 } from "./_staging.mjs";
 
 const GATE = "m23c2";                     // names the pidfile + staging out dir
@@ -63,7 +64,12 @@ const PIDFILE = pidfilePath(GATE);
 const BINARY = DEFAULT_BINARY;
 const REPO = ROOT;
 fs.mkdirSync(OUT, { recursive: true });
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 900_000);
+let guard = null;   // m23-ej-2: `let` — assigned after connect, read by the killer below
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 900_000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── crop windows, in CAPTURE pixels (window 1400x1000 logical @2x = 2800x2000)
@@ -179,6 +185,13 @@ if (staged.pidfile !== PIDFILE) {
 console.log(`# staging pid ${firstPid} (pidfile ${PIDFILE})`);
 
 let { ws, req } = await connect();
+// m23-ej-2: NOT `panelDensityGuard(req)` — `req` is a reassigned `let` (rebound
+// at Leg 6's relaunch below, same hazard `restoreZoomSlots` already documents),
+// so the guard must read it through a wrapper that resolves `req` at CALL time,
+// not the function value `req` happened to hold when this line ran. A guard
+// bound to the pre-relaunch closure would try to restore over the OLD (by then
+// closed) socket and silently never reach the relaunched process B.
+guard = panelDensityGuard((command, params) => req(command, params));
 const checks = [];
 const check = (name, ok, detail) => { checks.push({ name, ok, detail }); if (!ok) console.log(`   !! ${name} — ${detail}`); };
 
@@ -187,7 +200,7 @@ const PPB = 100, CLIP_BEATS = 128, CLIP2_AT = 200;
 async function buildFixture() {
   await req("project.new", { discardChanges: true });
   await req("debug.windowFrame", { width: 1400, height: 1000 });
-  await req("debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
+  await guard.set("pianoRoll", "pro");
   const tr = await req("track.add", { name: "Follow Probe", kind: "instrument" });
   const trackId = tr.id ?? tr.track?.id;
   // Notes on every 4th beat at ONE pitch: leaves note-free pitch bands where the
@@ -258,8 +271,9 @@ async function restoreZoomSlots(reason) {
 }
 for (const sig of ["unhandledRejection", "uncaughtException"]) {
   process.on(sig, async (err) => {
-    console.error(`\n${sig.toUpperCase()} — restoring zoom slots before exit:`, err);
+    console.error(`\n${sig.toUpperCase()} — restoring zoom slots + panel density before exit:`, err);
     await restoreZoomSlots(sig);
+    await guard?.restore(sig);
     stopStaging(GATE);
     process.exit(3);
   });
@@ -648,7 +662,13 @@ console.log("\n── PERSISTENCE ACROSS A RELAUNCH");
   // nothing of A's, and silently leave A's real lock behind in the staging root.
   releaseSessionLock(oldPid, stagingSessionLockPath(stagingProfileRoot()));
   const log = fs.openSync(`${OUT}/relaunch.log`, "a");
-  const child = spawn(BINARY, [], {
+  // m23-gf-b: B must come up through the SAME DAWProStaging alias A did, or B
+  // runs bare-binary-named and its UserDefaults land back in the user's real
+  // DAWApp domain — the good failure mode (design F4: fails LOUD, because L6
+  // below then reads a DIFFERENT domain and followPlayhead comes back false).
+  // `stagingBinaryAlias` is idempotent/re-verifying, so calling it a second
+  // time here (A's own `startStaging` already created it) is safe and cheap.
+  const child = spawn(stagingBinaryAlias(BINARY, REPO), [], {
     cwd: REPO, detached: true, stdio: ["ignore", log, log],
     // ⚠️ THE ONE HAND-ROLLED LAUNCH IN THE WHOLE GATE CORPUS (m23-ay). Every
     // other staging process comes from `startStaging`, which sets this variable
@@ -658,6 +678,18 @@ console.log("\n── PERSISTENCE ACROSS A RELAUNCH");
     // `stagingProfileRoot()` is memoised per process, so B inherits exactly A's
     // root, which is also what makes this leg a real relaunch of the same
     // session rather than a fresh install.
+    //
+    // ⛔⛔ F9 PROHIBITION (m23-gf-b, design §6 F9) — DO NOT "clean up" this hand
+    // rolled spawn by refactoring Leg 6 to call `startStaging` instead. That
+    // function's `resetStagingDefaultsDomain()` would CLEAR the very
+    // `followPlayhead` value this leg exists to prove survived a relaunch —
+    // it is memoised ONCE PER NODE PROCESS, so A's own earlier `startStaging`
+    // call already consumed that memo and a naive read of the code makes the
+    // reset look like a no-op here. It is not a no-op if this call is ever
+    // changed to route through `startStaging`: on a FRESH process (this gate
+    // run alone, or a future refactor that resets the memo between legs) it
+    // would wipe L6's assertion for the wrong reason, or turn a real
+    // regression into a green run. Keep this launch hand-rolled.
     env: {
       ...process.env,
       DAW_CONTROL_PORT: String(PORT),
@@ -702,7 +734,8 @@ console.log(`\n${checks.length - failed}/${checks.length} checks passed`);
 // m23-ei: put the two sticky zoom slots back before the process we are talking
 // to goes away. MUST precede stopStaging — after it there is nobody to ask.
 await restoreZoomSlots("normal exit");
+await guard.restore("normal exit");   // m23-ej-2: same rule, pianoRoll density
 // Link 3: re-reads the pidfile, so this SIGTERMs the RELAUNCHED process (B),
 // not the one startStaging launched. Also releases B's session.lock.
 stopStaging(GATE);
-clearTimeout(killer); ws.close(); process.exit(failed === 0 ? 0 : 1);
+clearTimeout(killer); ws.close(); verdict({ ran: checks.length, failed });

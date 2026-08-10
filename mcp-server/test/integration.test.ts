@@ -191,7 +191,16 @@ before(async () => {
       command: process.execPath,
       args: [join(mcpServerRoot, "dist", "index.js")],
       cwd: mcpServerRoot,
-      env: { DAW_CONTROL_PORT: TEST_PORT },
+      env: {
+        DAW_CONTROL_PORT: TEST_PORT,
+        // This spawn gets a REPLACED env (not merged with process.env), so
+        // without this the spawned server falls back to the real
+        // ~/Library/Logs/DAWPro/mcp/ (m23-ca call logging, src/mcp-log.ts) —
+        // a real file in a developer's home directory on every `npm test`.
+        // Reuse whatever the npm `test` script pointed at (see package.json),
+        // falling back to the same mcp-server/.test-logs/ location if unset.
+        DAWPRO_MCP_LOG_DIR: process.env["DAWPRO_MCP_LOG_DIR"] || join(mcpServerRoot, ".test-logs"),
+      },
     });
     client = new Client({ name: "integration-test-client", version: "0.0.0" });
     await client.connect(transport);
@@ -307,11 +316,14 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // m23-aj-1's cross-track group move) took it 172 -> 174. m23-dl's
   // ai_model_residency/ai_model_unload (which local models are loaded and what they
   // hold; unload one or all WITH evidence that it stopped) took it 174 -> 176.
+  // m23-di-2a's vc_import_voice_model (third-party RVC voice-model import —
+  // a mutating tool, so it joined the strict-schema wrapper count) took it
+  // 176 -> 177.
   // ⚠️ The DECOMPOSITION, because the total on its own has rotted before:
-  // 34 `server.registerTool(` (pure reads, deliberately exempt from `.strict()`
-  // — `ai_model_residency` joined them) + 142 `registerTool(` (the strict-schema
-  // wrappers — `ai_model_unload` joined those) = 176.
-  assert.equal(result.tools.length, 176);
+  // 34 `server.registerTool(` (pure reads, deliberately exempt from `.strict()`)
+  // + 143 `registerTool(` (the strict-schema wrappers — `vc_import_voice_model`
+  // joined those) = 177.
+  assert.equal(result.tools.length, 177);
 });
 
 // ---------------------------------------------------------------------------

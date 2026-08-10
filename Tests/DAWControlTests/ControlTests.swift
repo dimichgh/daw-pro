@@ -1930,7 +1930,17 @@ struct CommandRouterTests {
                 // ⚠️ `ai.modelResidency` is read-only, never throws, touches no
                 // filesystem on an unregistered coordinator, and stays IN the
                 // loop — the ai.sidecarStatus rationale.
-                "ai.modelUnload"].contains(command) {
+                "ai.modelUnload",
+                // vc.importVoiceModel (m23-di-2a) copies a real file into the
+                // app-owned voice store (~/Library/Application Support/DAWPro/
+                // VoiceModels on this bare router's default
+                // voiceModelImportDirectory) — the instrument.importSoundBank/
+                // reference.import real-FS-side-effect exclusion, verbatim.
+                // It also needs a real modelPath file on disk, a fixture this
+                // bare loop doesn't stage. Proven with injected temp dirs by
+                // VoiceModelImportCommandTests and AIServicesTests/
+                // VoiceModelImportTests.
+                "vc.importVoiceModel"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

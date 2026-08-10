@@ -1,0 +1,5 @@
+# Call-log output (m23-ca, src/mcp-log.ts). `npm test` points
+# DAWPRO_MCP_LOG_DIR here so the suite never writes into a developer's real
+# ~/Library/Logs/DAWPro/mcp/. Individual test files (test/mcp-log.test.ts)
+# further override this to their own throwaway OS temp directory.
+.test-logs/

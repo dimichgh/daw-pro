@@ -27,10 +27,13 @@ extension ProjectStore {
     ///     predicate. `.adopt` always replaces them; `.ignore` never does.
     ///     Adoption is folded into the SAME edit as the tracks, so one undo
     ///     restores the tempo AND removes the tracks.
-    ///   - instruments: `.none` (default) leaves the new tracks on the default
-    ///     instrument; `.gm` assigns General MIDI sound-bank programs from the
-    ///     file's program changes. The program a part asks for is REPORTED
-    ///     either way.
+    ///   - instruments: `.gm` (default) assigns General MIDI sound-bank programs
+    ///     from the file's program changes, so an imported file sounds like the
+    ///     instruments it names; `.none` leaves the new tracks on the default
+    ///     instrument. The program a part asks for is REPORTED either way.
+    ///     The default was flipped at m23-k5 on a MEASUREMENT, not a guess — see
+    ///     `MIDIImportInstruments` for the numbers (13 banks ready 161 ms after a
+    ///     cold import, no main-actor cost above the `none` control).
     ///   - parts: which parts to import, indexing the report's `parts` array
     ///     (which lists every part, including skipped ones). nil = all.
     ///   - dryRun: computes the full report and touches NOTHING — no edit, no
@@ -42,7 +45,7 @@ extension ProjectStore {
     public func importMIDIFile(path: String,
                                atBeat: Double = 0,
                                tempoPolicy: MIDITempoPolicy = .auto,
-                               instruments: MIDIImportInstruments = .none,
+                               instruments: MIDIImportInstruments = .gm,
                                parts: [Int]? = nil,
                                dryRun: Bool = false,
                                force: Bool = false) throws -> MIDIImportReport {
@@ -172,6 +175,18 @@ extension ProjectStore {
                                         // A clip import never moves the grid, so
                                         // there is no policy to resolve.
                                         tempoPolicy: .ignore,
+                                        // EXPLICITLY `.none`, and it stays that
+                                        // way now the project path defaults to
+                                        // `.gm` (m23-k5): this verb creates NO
+                                        // track — it replaces an existing clip's
+                                        // content — so there is nothing to
+                                        // assign an instrument to, and the
+                                        // mapper's throwaway `Track` is
+                                        // discarded below. Silently re-pointing
+                                        // the host track's instrument from a
+                                        // clip-content import would be a hidden
+                                        // side effect on a verb documented as
+                                        // deliberately narrow.
                                         instruments: .none,
                                         parts: [selected])
         let plan = try SMFProjectMapper.map(

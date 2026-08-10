@@ -124,6 +124,18 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// chip — one card summarizes the whole affordance (its ⌘ shortcuts and the
     /// pinch gesture included, the `arrangeZoom` honest-scope precedent).
     case pianoRollZoom
+    /// The NOTES | STEPS chip pair (m23-cq-1) — which editor the pane shows for
+    /// this clip. One card for the whole pair (the `referenceABToggle` shared-
+    /// control rule): the two halves are one control, not two.
+    case stepSequencerMode
+    /// The step grid itself (m23-cq-1) — a Canvas; one card summarizes its whole
+    /// gesture vocabulary, which is a single click (the `pianoRollGrid`
+    /// honest-scope precedent).
+    case stepSequencerGrid
+    /// The Pro STEP chip (m23-cq-1) — how finely the bar is divided into boxes.
+    /// Distinct from `pianoRollSnap`, which loosens or tightens where a DRAGGED
+    /// note lands; this one decides how many boxes exist at all.
+    case stepSequencerStep
 
     // MARK: Arrange (timeline + sidebar)
     case arrangeSnap
@@ -464,6 +476,15 @@ public enum ExplainCatalog {
         .pianoRollZoom: ExplainEntry(
             title: "Editor Zoom",
             body: "Zooms the note grid in for detailed edits or out to see the whole part. Use the magnifier buttons, pinch on the grid, or press the zoom keys while the editor is focused; your zoom is remembered."),
+        .stepSequencerMode: ExplainEntry(
+            title: "Notes / Steps",
+            body: "Two ways to edit the same part. Notes is the piano roll for melodies; Steps is a drum-machine grid of boxes, which is far quicker for a kick, snare and hats pattern. Drum parts open in Steps."),
+        .stepSequencerGrid: ExplainEntry(
+            title: "Step Grid",
+            body: "One row per sound and one box per step. Click an empty box to place a hit, click a lit box to take it away — that is the whole surface, no keys needed. Rows are named for you on a drum kit."),
+        .stepSequencerStep: ExplainEntry(
+            title: "Step Size",
+            body: "How finely each bar is chopped into boxes: 1/16 is the usual drum grid, 1/8 is half as many boxes and twice as wide, and the triplet sizes give a swung, rolling feel. Simple mode keeps it at 1/16."),
 
         // MARK: Arrange (timeline + sidebar)
         .arrangeSnap: ExplainEntry(

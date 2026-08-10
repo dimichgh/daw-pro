@@ -29,7 +29,7 @@
 //                gap sampled from slot 0-1 (the arrange's trick) reads it.
 //   I            [C0, C1, B0(bus)] — the divider gap sits directly BEHIND the
 //                dragged strip while the drag goes the other way.
-import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep, verdict } from "./_staging.mjs";
 
 const GATE = "m23z";                        // also names the pidfile + out dir
 
@@ -301,4 +301,4 @@ ck("I2 …and it lands", eq(iS.names, ["C1", "C0", "B0"]), JSON.stringify(iS.nam
 console.log(`\nm23-z gate: ${pass} pass / ${fail} fail`);
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 ws.close();
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

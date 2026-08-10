@@ -23,7 +23,7 @@
 // Exit: 0 all checks pass, 1 a check failed, 2 could not set up.
 import { spawn, spawnSync } from "child_process";
 import {
-  ROOT, sleep, launchStaging, stopStaging,
+  ROOT, sleep, launchStaging, stopStaging, verdict,
 } from "./_staging.mjs";
 
 const GATE = "m23ae";
@@ -262,10 +262,15 @@ try {
 } catch (e) {
   console.log(`FAIL: gate threw — ${e && e.message}`);
   failed++;
+  // m23-fa-2: orphan counter bump (no matching results.push) — same trap
+  // proven in m23ad. Recording it here keeps counter and collection in
+  // agreement instead of silently losing this failure when deriving from
+  // `results` alone.
+  results.push({ name: "EXCEPTION: gate threw", ok: false });
 }
 
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} checks passed`);
 clearTimeout(killer);
 stopStaging(GATE);
 try { ws.close(); } catch { /* ignore */ }
-process.exit(failed === 0 ? 0 : 1);
+verdict({ ran: results.length, failed: results.filter((r) => !r.ok).length });

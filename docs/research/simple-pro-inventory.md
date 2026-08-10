@@ -173,7 +173,7 @@ m11-a added the sixth: the Quantize panel — see below.)
 
 | Surface | Panel ID | Status | Rationale |
 |---|---|---|---|
-| Piano roll | `pianoRoll` | **LIVE CHIP** | Simple locks snap to Beat and hides the velocity lane, snap picker, and resize handles; Pro adds all three (sp-a, the reference refit). |
+| Piano roll | `pianoRoll` | **LIVE CHIP** | Simple locks snap to Beat and hides the velocity lane, snap picker, and resize handles; Pro adds all three (sp-a, the reference refit). In STEPS mode the same chip locks the step grid to 1/16 and hides the STEP picker; Pro adds it — the pick is remembered, not discarded, so flipping back to Pro restores it (m23-cq-1). |
 | Mixer console | `mixer` | **LIVE CHIP** | Simple = name/kind + pan + fader/meter/dB + M-S-A; Pro adds inserts, sends, and output routing (sp-b). |
 | Arrange timeline | `arrange` | **LIVE CHIP** | Simple = move + play on a Bar grid; Pro adds trim/fade/split/gain/stretch + the snap-resolution picker (sp-c). |
 | Transport bar | `transport` | **LIVE CHIP** | Simple = transport + LOOP/CLICK + Position/Time + tempo + master; Pro adds PUNCH and the test-tone verify affordance (sp-d). |

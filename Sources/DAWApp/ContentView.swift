@@ -629,6 +629,38 @@ struct ContentView: View {
                 onCommitControllerLane: { type, points in
                     try? store.setControllerLane(clipID: clip.id, type: type, points: points)
                 },
+                // m23-ek-3 — the clipboard. COPY has no domain effect at all,
+                // which is exactly why it is not a wire verb.
+                onCopyNotes: { notes in
+                    model.clipboard.put(.notes(ClipboardNotes(notes: notes,
+                                                              sourceClipID: clip.id)))
+                },
+                // ⚠️ CUT WRITES THE CLIPBOARD ONLY AFTER THE STORE ACCEPTS THE
+                // REMOVAL. `setClipNotes` can refuse (a take-comp member), and a
+                // clipboard left loaded while nothing was removed is a lie about
+                // what happened. The refusal surfaces VERBATIM as the amber
+                // bubble, the m17-c/m23-e convention.
+                onCutNotes: { copied, remaining in
+                    do { _ = try store.setClipNotes(clipID: clip.id, notes: remaining) }
+                    catch {
+                        model.presentArrangeSplitRefusal(error, clipID: clip.id)
+                        return false
+                    }
+                    return model.clipboard.put(.notes(ClipboardNotes(notes: copied,
+                                                                     sourceClipID: clip.id)))
+                },
+                // ⚠️⚠️ `pasteNotes`, NOT `setClipNotes` — the UNCOALESCED entry
+                // point. `setClipNotes` journals under `clip.notes:<id>` and the
+                // undo journal folds same-key edits inside 800 ms, so a paste
+                // routed through `onCommit` within 800 ms of a note drag would
+                // fold into it and ONE ⌘Z would undo BOTH.
+                onPasteNotes: { notes in
+                    _ = try? store.pasteNotes(clipID: clip.id, notes: notes)
+                },
+                // The live clipboard's notes, so the roll's own context-menu
+                // Paste is titled and enabled from what is ACTUALLY on the
+                // clipboard rather than from a staged request.
+                clipboardNotes: model.clipboardNotes,
                 onClose: { selectedClipID = nil },
                 // m23-d: hear the pitch you drag, and the key you press in the
                 // gutter. The defeat switch is checked HERE rather than in the
@@ -651,6 +683,19 @@ struct ContentView: View {
                 // the one closure behind its eight gesture funnels. THIS is what
                 // ⌘+/⌘−/⌘0 route on, via `EditorSurfaceRouter`.
                 onEngage: { model.editorEngagement.engage(.pianoRoll) },
+                // ⭐ m23-cf (second pass): the roll's DELETE key asks the APP who
+                // owns the keystroke — the SAME `handleDeleteKey` the arrange
+                // mount below and the expanded automation lanes call. Three
+                // focus-gated claimants, one decision, so SwiftUI's
+                // (measurably non-deterministic) focus arbitration stops changing
+                // what DELETE does.
+                onDeleteKey: { model.handleDeleteKey() },
+                // m23-cq-1: the step sequencer's session state + staging seam.
+                // App-held so the chosen editor survives a clip switch (the
+                // drum workflow is several clips in a row) and so
+                // `debug.stepSequencer` drives the SAME path the chips do.
+                stepSequencer: model.stepSequencer,
+                isDrumKit: isDrumKitTrack(ofClip: clip.id),
                 // m23-x: the roll publishes whether it holds a NOTE selection,
                 // which is what the arrange's arrow-key nudge refuses on (with
                 // focus). Same object carries the debug seam's staged selection
@@ -696,6 +741,9 @@ struct ContentView: View {
             // selection into it, so ← / → with a point selected edits the point
             // rather than sliding the whole clip underneath the open lane.
             automationPointSelection: model.automationPointSelection,
+            // m23-cf (second pass): the same routing decision the piano roll and
+            // `ArrangeDeleteKey` ask, handed to the expanded automation lanes.
+            onDeleteKey: { model.handleDeleteKey() },
             snap: model.clipSnap,
             // m12-d: route the waveform seconds-per-beat through the tempo-map API.
             // Base-tempo scalar (segment 0); clips crossing a non-trivial boundary
@@ -743,6 +791,13 @@ struct ContentView: View {
             // title by `DeleteMenuPolicy.clipContextCommand`, and travels here in
             // the command so the action cannot act on a different set.
             onDeleteClip: { clip, command in model.deleteClipFromContextMenu(clip, command: command) },
+            // m23-ek-3: the clip context menu's Cut / Copy. Same shape as Delete
+            // above — the blast radius was decided and SHOWN in the title by
+            // `ClipboardMenuPolicy.clipContextCommand` and travels here in the
+            // command, so the action cannot act on a different set.
+            onClipboardClipMenu: { clip, verb, command in
+                model.clipboardClipFromContextMenu(clip, verb: verb, command: command)
+            },
             onSplitClip: { trackID, clip, atBeat in
                 // m17-c: refusals (comp member, outside-span) surface VERBATIM
                 // as an amber bubble on the clip — the same message the wire's
@@ -1280,6 +1335,19 @@ struct ContentView: View {
         store.tracks.first { $0.clips.contains { $0.id == clipID } }?.id
     }
 
+    /// Does the track owning this clip address a GM drum kit (m23-cq-1)?
+    ///
+    /// Asks `SMFProjectExporter.isDrumKit`, the app's ONE home for the question
+    /// (made `public` for this call rather than re-expressed here — a second
+    /// predicate would agree today and drift tomorrow). Resolved HERE because
+    /// `PianoRollView` is deliberately store-free: it takes plain value inputs so
+    /// a preview can mount it without a project.
+    private func isDrumKitTrack(ofClip clipID: UUID) -> Bool {
+        guard let track = store.tracks.first(where: { $0.clips.contains { $0.id == clipID } })
+        else { return false }
+        return SMFProjectExporter.isDrumKit(track)
+    }
+
     /// The selected clip when it's a plain AUDIO clip, paired with its track id —
     /// the fixable target for FIX WITH AI (MIDI clips open the piano roll instead).
     private var selectedAudioClip: (trackID: UUID, clip: Clip)? {
@@ -1660,7 +1728,67 @@ private struct ArrangeDeleteKey: ViewModifier {
             // No focus ring on the workspace root — the selected clips ARE the
             // cue (docs/DESIGN-LANGUAGE.md: one accent per meaning).
             .focusEffectDisabled()
-            .onKeyPress(.delete) { model.handleArrangeDeleteKey() ? .handled : .ignored }
+            // ⭐ m23-cf (second pass): `handleDeleteKey`, NOT `handleArrangeDeleteKey`.
+            // This mount is one of THREE focus-gated claimants for DELETE (the
+            // piano roll and each expanded automation lane own the other two),
+            // and which one is eligible flips on every clip selection — measured,
+            // 6 true / 6 false over 12 consecutive selections. Asking the app's
+            // one routing decision here is what makes the outcome identical
+            // whichever claimant SwiftUI happened to focus. The arrange branch of
+            // that decision still lands in `handleArrangeDeleteKey`, guards and
+            // all, so nothing this file's banner promises has been given up.
+            // ⚠️ m23-fi: THIS MOUNT'S EXACT SPELLING IS PINNED by
+            // `DeleteKeySiteTests.arrangeRoutes`, so it cannot carry a probe
+            // counter the way the arrow mounts below do. The substitute
+            // discriminator is `deleteKeyFunnelSeq` measured under a ⇧ CHORD:
+            // the m23-cf-3 monitor refuses `.chord` and RETURNS the event, so
+            // with a modifier held the funnel can only move if this SwiftUI
+            // mount fired. See `KeyPressProbe`.
+            //
+            // ⭐⭐ m23-fk — `KeyEquivalent("\u{7F}")` IS THE WHOLE FIX, AND IT IS
+            // A MEASUREMENT RATHER THAN A PREFERENCE. `KeyEquivalent.delete` is
+            // **0x08** (BACKSPACE — read out of SwiftUI itself, see
+            // `KeyPressProbe.echo`'s `keyEquivalentScalars`), while
+            // `NSEvent.characters` for `kVK_Delete` (51) is **0x7F** (DELETE),
+            // and `.onKeyPress` matches on the event's CHARACTERS. So the old
+            // `.onKeyPress(.delete)` spelling could not fire for the ⌫ key under
+            // any amount of focus repair. MEASURED ON THIS MOUNT, before the
+            // change: an event carrying 0x7F entered nothing, and the SAME event
+            // carrying 0x08 entered it and deleted the clip — same view, same
+            // focus, one character apart. That is also why focus was never the
+            // bug (the ←/→ mount below was reached throughout).
+            //   • `.delete` is KEPT: it costs nothing and covers a future SwiftUI
+            //     that normalises ⌫ to the backspace character.
+            //   • `.deleteForward` (0xF728) is ADDED: ⌦ genuinely sends it —
+            //     measured through the system's own HID→NSEvent translation —
+            //     and no mount in this app spelled it before.
+            //
+            // ⚠️ RE-ARMING THIS MOUNT CANNOT DOUBLE-FIRE, and that is measured,
+            // not argued: `handleKeyDownEvent` asks `handleDeleteKey()` FIRST and
+            // returns nil (swallows) when some surface owned the key, so a press
+            // that deletes anything never reaches SwiftUI at all. In the states
+            // where the monitor passes the event on — nobody owned it, or a chord
+            // — this closure asks the SAME one decision and gets the same answer.
+            // ⚠️⚠️ `phases: [.down]` IS LOAD-BEARING AND IS NOT THE DEFAULT IN
+            // PRACTICE — MEASURED, and it is the difference between this change
+            // and a clip-destroying one. Written without it, this mount receives
+            // `KeyPress.phase == .repeat` presses (read out of SwiftUI at this
+            // very closure), and the m23-cf-3 monitor REFUSES an auto-repeat and
+            // RETURNS the event — so a held ⌫ arrived here. Measured sequence
+            // before the argument was added, roll open with 3 notes selected:
+            //   1. key-down       → monitor owned it, notes 3 → 0, swallowed
+            //   2. auto-repeat    → monitor refused `.key-repeat`, passed it on,
+            //                       THIS mount fired, selection was now empty so
+            //                       the routing said `.arrangeClips` — CLIP GONE
+            // i.e. exactly the loss `DeleteKeyMonitorRouting`'s `keyRepeat` doc
+            // calls "the ONE guard with teeth". With `[.down]`: funnel +0, notes
+            // 3 → 0 → 0, clip alive. The mount CANNOT re-derive repeat-ness for
+            // itself — the monitor swallowed the initial key-down, so SwiftUI's
+            // own key-state tracking never saw it.
+            .onKeyPress(keys: [KeyEquivalent("\u{7F}"), .delete, .deleteForward],
+                        phases: [.down]) { _ in
+                model.handleDeleteKey() ? .handled : .ignored
+            }
             // ←/→ NUDGE the arrange selection (m23-x). Three things here are
             // decisions, not defaults:
             //
@@ -1683,6 +1811,7 @@ private struct ArrangeDeleteKey: ViewModifier {
             //     the chord EXPLICITLY, because a synthesized press carries none
             //     — exercises the SAME rule the real key does.
             .onKeyPress(keys: [.leftArrow, .rightArrow], phases: [.down, .repeat]) { press in
+                KeyPressProbe.arrangeHorizontalArrow += 1   // m23-fi probe, first statement
                 let character = press.key.character
                 let direction: ArrangeNudgeDirection
                 if character == KeyEquivalent.leftArrow.character {
@@ -1712,6 +1841,7 @@ private struct ArrangeDeleteKey: ViewModifier {
             //     guards — see `AppModel.ArrangeNudgeOutcome`. That is the one
             //     place the two axes deliberately differ.
             .onKeyPress(keys: [.upArrow, .downArrow], phases: [.down, .repeat]) { press in
+                KeyPressProbe.arrangeVerticalArrow += 1     // m23-fi probe, first statement
                 let character = press.key.character
                 let direction: ArrangeVerticalNudgeDirection
                 if character == KeyEquivalent.upArrow.character {
@@ -1727,5 +1857,12 @@ private struct ArrangeDeleteKey: ViewModifier {
                 return outcome.handled ? .handled : .ignored
             }
             .onChange(of: model.arrangeKeyFocusNonce) { _, _ in focused = true }
+            // ⭐ m23-fi PROBE — the `@FocusState` VALUE, not the assertion above.
+            // Whether `focused = true` STICKS is the whole question, and it is
+            // invisible from outside this view. `initial: true` so a mount that
+            // was never focused reports `false` rather than never reporting.
+            .onChange(of: focused, initial: true) { _, isFocused in
+                KeyPressProbe.arrangeWorkspaceFocused = isFocused
+            }
     }
 }

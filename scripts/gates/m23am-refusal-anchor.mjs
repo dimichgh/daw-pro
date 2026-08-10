@@ -79,7 +79,7 @@
 //   node scripts/gates/m23am-refusal-anchor.mjs
 import fs from "fs";
 import path from "path";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, verdict } from "./_staging.mjs";
 
 const GATE = "m23am";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -372,6 +372,14 @@ try {
   // ══ Recorded as SKIP, never as a pass ══════════════════════════════════════
   skip("that a REAL DELETE key (rather than the seam) reaches this handler",
        "m23-g1 MEASURED that an unbundled staging binary does not route real key "
+       // ⚠️ CORRECTED 2026-08-10 (m23-fh, at the m23-cf close). THE CLAIM BELOW IS WRONG.
+       // `keyDelete -> delivered:false` was NEVER a staging/tooling limitation. It was the
+       // app HONESTLY REPORTING THAT NOTHING HANDLED THE KEY: `firstResponder` read `none`
+       // with a clip selected, so no SwiftUI focus existed for `.onKeyPress` to attach to.
+       // A REAL APP DEFECT wearing the costume of a harness limit — m23-cf fixed it with a
+       // window-level NSEvent monitor and its gate now passes 27/27 with redden legs, so
+       // key-event gating on staging is DEMONSTRABLY POSSIBLE. Do not quote the text below
+       // as a reason not to write one. Root cause still open as m23-fi.
        + "events (`act:\"keyDelete\"` -> delivered:false: the window is not key, so "
        + "nothing reaches SwiftUI's focus arbitration). The seam calls the SAME "
        + "`AppModel.deleteArrangeSelection` the key handler calls — that is the "
@@ -394,7 +402,7 @@ try {
   clearTimeout(killer);
   ws.close();
   teardown();
-  process.exit(failed.length ? 1 : 0);
+  verdict({ ran: checks.length, failed: failed.length });
 } catch (err) {
   console.error("GATE ERROR:", err);
   clearTimeout(killer);

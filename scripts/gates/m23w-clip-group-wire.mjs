@@ -15,7 +15,7 @@
 // Kill by EXACT pid from the pidfile — never pkill/pgrep.
 // The build/launch/pidfile-kill lifecycle lives in ONE place (m23-ac-1) —
 // `_staging.mjs`. It used to be copy-pasted into every gate that had it at all.
-import { launchStaging, stopStaging, STAGING_PORT } from "./_staging.mjs";
+import { launchStaging, stopStaging, STAGING_PORT, verdict } from "./_staging.mjs";
 
 const GATE = "m23w";
 let ws, seq = 0, pass = 0, fail = 0;
@@ -158,4 +158,4 @@ try {
 
 console.log(`\nM23W ${pass}/${pass + fail}`);
 if (failures.length) console.log("failed legs:\n  " + failures.join("\n  "));
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

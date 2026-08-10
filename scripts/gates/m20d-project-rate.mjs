@@ -55,7 +55,7 @@
 //
 // Staging: DAW_CONTROL_PORT=17695. The user's live app on 17600 is never a
 // target — `startStaging` asserts this.
-import { sleep, buildOrAbort, startStaging, stopStaging, connect, ROOT } from "./_staging.mjs";
+import { sleep, buildOrAbort, startStaging, stopStaging, connect, ROOT, verdict } from "./_staging.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -259,7 +259,18 @@ try {
      `${systemDefault} -> ${defaultUID(devicesOf(r))}`);
 
   r = await cmd("output.setDevice", {});
-  ck("L5 pin released", r.ok && devicesOf(r).every(d => !d.isSelected), r.error);
+  // m23-ee-2a: `devicesOf` is `r.result?.devices ?? []`, and `[].every(f)` is
+  // `true` — so without the count pin this leg reports "pin released" whenever
+  // the response carries NO device list at all (renamed field, changed shape, an
+  // error result). It asserts an ABSENCE, so the vacuous case is the passing one.
+  // The pin is justified by the RESPONSE, not the hardware: `output.setDevice`
+  // returns `outputDeviceList()` (`Commands.swift:5494`), so the list it is being
+  // read for must be there. "A Mac always has an output device" would be the
+  // wrong reason — that justification survives the exact wire rename this catches.
+  const releasedDevices = devicesOf(r);
+  ck("L5 pin released",
+     r.ok && releasedDevices.length >= 1 && releasedDevices.every(d => !d.isSelected),
+     `${releasedDevices.length} devices, selected=[${releasedDevices.filter(d => d.isSelected).map(d => d.uid).join(",")}] ${r.error ?? ""}`);
 } catch (e) {
   fail++;
   console.log("FAIL gate threw :: " + (e?.stack ?? e?.message ?? e));
@@ -276,4 +287,4 @@ try {
 }
 
 console.log(`ORCH_M20D pass=${pass} fail=${fail}`);
-process.exit(fail ? 1 : 0);
+verdict({ ran: pass + fail, failed: fail });

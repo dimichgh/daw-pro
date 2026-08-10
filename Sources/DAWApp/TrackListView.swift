@@ -860,11 +860,20 @@ struct TrackRow: View {
             .onSubmit { commitRename() }
             // Escape cancels (drops the draft) BEFORE the focus-loss commit runs —
             // `isEditingName` is cleared first, so the onChange below no-ops.
-            .onKeyPress(.escape) { cancelRename(); return .handled }
+            .onKeyPress(.escape) {
+                KeyPressProbe.trackRenameEscape += 1   // m23-fi probe, first statement
+                cancelRename()
+                return .handled
+            }
             // Focus loss (click elsewhere) commits; guarded so a Return/Escape that
             // already tore down the field can't commit a second time.
             .onChange(of: nameFieldFocused) { _, focused in
                 if !focused && isEditingName { commitRename() }
+            }
+            // m23-fi PROBE — the field's `@FocusState` value, so a probe can tell
+            // "escape was not delivered" from "the field never had focus".
+            .onChange(of: nameFieldFocused, initial: true) { _, focused in
+                KeyPressProbe.trackRenameFieldFocused = focused
             }
     }
 

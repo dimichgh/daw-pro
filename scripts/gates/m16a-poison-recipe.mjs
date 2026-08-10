@@ -190,6 +190,23 @@ log(`done: ${clean}/${ITERS} iterations clean; clip-unplayable seen in ${sawUnpl
 // armTeardown, which is the case that matters most: those fire precisely when
 // the app is misbehaving and most likely to be left behind.
 stopStaging(GATE);
+// m23-fj: `clean === ITERS` is TRUE at ITERS=0 (0 === 0), so this printed "C1 PASS"
+// and exited 0 after running ZERO iterations. MEASURED LIVE 2026-08-10, not inferred:
+// `ITERS=0 node scripts/gates/m16a-poison-recipe.mjs` -> exit 0, "done: 0/0 iterations
+// clean", "C1 PASS". ITERS is a documented tuning knob, so this was a false green one
+// env var away, with no code defect required.
+//
+// ⚠️ DELIBERATELY NOT MIGRATED TO `_verdict.mjs`, AND THE REASON IS A FINDING (m23-fm):
+// the primitive exits 2 for "asserted nothing", but THIS GATE ALREADY USES 2 FOR "app
+// dead" (and 3 for "wedged"). Routing through it would make exit 2 ambiguous WITHIN ONE
+// GATE — a reader could not tell a dead app from an empty run. So the guard is inline
+// and uses code 5, which is free in this gate's scheme (0 pass / 2 dead / 3 wedged /
+// 4 verdict-fail / 5 nothing-ran).
+if (ITERS < 1) {
+  log(`C1 ASSERTED NOTHING: ITERS=${ITERS} ran zero iterations, so the soak proved nothing.`);
+  log("  This is NOT a pass. Re-run with ITERS>=1 (default 10).");
+  process.exit(5);
+}
 if (clean === ITERS) {
   log("C1 PASS");
   process.exit(0);

@@ -18,7 +18,7 @@ One full iteration of autonomous development. Repeatable and safe to run under `
    - custom UI/design → `ui-design-engineer`
    - MCP/control/AI clients → `mcp-integration-engineer`
    Give the agent: the roadmap item, the plan, relevant file paths, and the conventions (control command + MCP tool + test required).
-5. **Verify independently.** Run `swift build && ./scripts/test.sh` (and `npm run build` in mcp-server/ if touched). Then exercise the feature itself: offline render for audio, control-port round-trip for commands (`/mcp-verify`), app launch for UI. For nontrivial changes spawn `qa-test-engineer` to attack it.
+5. **Verify independently.** Run `swift build && ./scripts/test.sh` (and `npm run build` in mcp-server/ if touched). Then exercise the feature itself: offline render for audio, control-port round-trip for commands (`/mcp-verify`), app launch for UI. For nontrivial changes spawn `qa-test-engineer` to attack it. Also run `node scripts/gate-corpus-staleness.mjs` and read the report — which gates are NEVER-RUN or DRIFTED; it's advisory, not a pass/fail condition for this cycle.
 6. **Close out.** Check the roadmap box (only if verified), append a line to `CHANGELOG.md` (create if missing), and update the ARCHITECTURE.md command table if the control surface changed. Commit ONLY if the user has authorized commits.
 7. **Report.** One short summary: item completed (or blocker hit), evidence of verification, what the next cycle will pick up.
 

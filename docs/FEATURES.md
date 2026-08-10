@@ -73,6 +73,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Mixer console** | ✅ Shipped | Horizontal rack of channel strips: audio/instrument in order, buses grouped, master pinned right. Each strip: name, kind badge, inserts, sends, output, pan, fader, meter, M/S/A buttons. Simple/Pro density modes. |
 | **Bus routing** | ✅ Shipped | `track.setOutput` command — route audio/instrument to master or to a bus. Buses receive, mix, and send their output to master (default) or another bus. |
 | **Sends (pre/post)** | ✅ Shipped | `track.addSend`, `track.setSend`, `track.removeSend` commands. UI mini-faders in mixer (post-fader by default). Pre-fader option on the wire. |
+| **Sidechain routing** | ✅ Shipped | Route a compressor or gate to listen to a different track's signal (key source) instead of its own input. `fx.setSidechain` command. Constraints (`ProjectStore.setSidechain`): the keyed effect must be a compressor or gate; the strip carrying it must be an **audio or bus track** — an instrument strip cannot host a sidechained effect, because it walks its chain inside the source node and has no input bus for a key edge; the key **source** may be any non-bus track (audio *or* instrument) — bus sources, master included, are deferred to v1; one key per strip; and a key edge that would close a feedback loop is rejected before it commits, naming the full cycle path. |
 | **Master volume** | ✅ Shipped | Long-throw fader on master strip. `mixer.setMasterVolume` command. Range: −72…+24 dB. |
 | **Master meter** | ✅ Shipped | Stereo peak + RMS per channel, glowing glow-meter style. Driven from live engine taps. |
 | **Track metering** | ✅ Shipped | Peak + RMS per track, live in mixer. `store.trackMeters` snapshot on every update. |
@@ -80,7 +81,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 
 ## Effects & Signal Processing
 
-### Built-in Effects (9 total)
+### Built-in Effects (10 total)
 
 | Effect | Type | Key Controls | Status |
 |--------|------|---------------|--------|
@@ -93,6 +94,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Saturator** | Tone | Drive (−driveDb/2 dB compensation), tanh nonlinearity | ✅ Shipped |
 | **Gate** | Dynamics | Threshold, attack, hold, release (true zeros when closed) | ✅ Shipped |
 | **Chorus** | Modulation | 2-voice, stereo/inter-voice LFO phase, depth, rate | ✅ Shipped |
+| **Bass Enhancer** | Tone | Crossover frequency (Hz), harmonic amount (0–1), dry/wet mix. Generates 2nd/3rd/4th partials of sub-crossover content and injects them above the crossover (the "missing fundamental" effect). Unlike the saturator, it only shapes the low band and is purely additive. | ✅ Shipped |
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -112,6 +114,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | **Automation curves** | ✅ Shipped | Linear (straight ramp) default. Bezier curves deferred to v1. |
 | **Volume automation** | ✅ Shipped | Cyan glowing lane (matches fader color). Per-sample linear ramps in engine. Fader override when pinned in mixer (lane supplies, fader reads). |
 | **Pan automation** | ✅ Shipped | Neutral white lane (pan claims no semantic accent). Per-sample linear ramps, center bit-exact null. |
+| **Gain envelope** | ✅ Shipped | Per-clip volume automation via breakpoint editor. `clip.setGainEnvelope` command. Independent of fader position; applied after clip gain. Linear curves only in v0. |
 | **Master volume automation** | ✅ Shipped | Master fade lane (m15-c). Applies pre-chain (under the limiter, the pro-standard order). Stems pass fade-free. |
 | **Effect param automation** | ✅ Shipped (partial) | Built-in effect parameters automatable (per-quantum render-thread eval). AU effect automation NOT YET (deferred). |
 | **Write/touch/latch** | ❌ Not yet | Automation currently read-only on playback (no recording arm). Touch/latch/write modes deferred to v1. |
@@ -135,6 +138,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 | Feature | Status | Notes |
 |---------|--------|-------|
 | **Bounce/mixdown** | ✅ Shipped | Render the stereo mix to a WAV file. Offline (full project rendered at once). Bit depth: 16/24/32-bit float. Sample rate: project rate. `render.mixdown` command. Determinism: bit-exact same output every time. |
+| **Bounce-in-place** | ✅ Shipped | Render a track to a new audio clip within the project. Useful for converting synth/instrument tracks to audio, or flattening a track's effects stack. `track.bounceInPlace` command. Options: beat range, mute source after bounce, custom clip name. |
 | **Stems export** | ✅ Shipped | `render.stems` command — render each track as its own mono/stereo WAV, with or without effects. Useful for sending to remixers or mastering. |
 | **Loudness measurement** | ✅ Shipped | `render.measureLoudness` command — integrate and report loudness in LUFS + short-term + momentary. Follows ITU-R BS.1770-4 spec. Useful for streaming loudness normalization. |
 | **Audio format support** | ✅ Shipped | Export to WAV (lossless). MP3/M4A/FLAC export not yet (WIP). |
@@ -205,9 +209,9 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| **Control protocol** | ✅ Shipped | WebSocket JSON on `ws://127.0.0.1:17600` (loopback, local network off). Default port configurable via `DAW_CONTROL_PORT` env var or Settings → Agent Connection. Request: `{id, command, params}`. Response: `{id, ok, result?, error?}`. 126 commands across namespaces (transport, track, clip, arrange, mixer, fx, automation, ai, render, plugin, project, input, midi, edit, engine, macro, groove, take, marker, tempo, instrument, app). `project.snapshot` includes live peak/RMS meters for master and every track (`meters.master` / `meters.tracks`), enabling agents to confirm audio is rendering. |
+| **Control protocol** | ✅ Shipped | WebSocket JSON on `ws://127.0.0.1:17600` (loopback, local network off). Default port configurable via `DAW_CONTROL_PORT` env var or Settings → Agent Connection. Request: `{id, command, params}`. Response: `{id, ok, result?, error?}`. 173 commands across namespaces (transport, track, clip, arrange, mixer, fx, automation, ai, render, plugin, project, input, midi, edit, engine, macro, groove, take, marker, tempo, instrument, app). `project.snapshot` includes live peak/RMS meters for master and every track (`meters.master` / `meters.tracks`), enabling agents to confirm audio is rendering. |
 | **Command parity** | ✅ Shipped | Every control-protocol command maps 1:1 to an MCP tool (bijection, enforced by test). `audit-tools.test.ts` verifies the mapping on every build. |
-| **MCP server** | ✅ Shipped | TypeScript, stdio transport. 129 tools (126 commands + 3 provider-direct generation tools). Runs as a subprocess of an MCP client (Claude Code, Claude Desktop, etc.). Bridges `control.WebSocket` ← → app. Build: `npm install && npm run build`. Run: `node dist/index.js`. |
+| **MCP server** | ✅ Shipped | TypeScript, stdio transport. 176 tools (173 commands + 3 provider-direct generation tools). Runs as a subprocess of an MCP client (Claude Code, Claude Desktop, etc.). Bridges `control.WebSocket` ← → app. Build: `npm install && npm run build`. Run: `node dist/index.js`. |
 | **Tool descriptions** | ✅ Shipped | Every MCP tool has a human-readable title (≤60 chars) and description (≥40 chars, beginner language per Rule 6). Input schema properties all documented recursively. Schema enforced by headless tests. |
 | **Error surface** | ✅ Shipped | Commands return structured errors (ControlError subclasses — `invalidParameter`, `noTrack`, `invalidClip`, etc.). Agents see the specific error and can retry intelligently. |
 | **Async handling** | ✅ Shipped | Render commands (`render.bounce`, `render.mixdown`, `render.stems`, `render.measureLoudness`) support long-running work (180s timeout vs. 5s default). Async AI job commands (`ai.generateSong`, `ai.fixClipRegion`) return immediately with jobId, poll with status commands. |
@@ -231,7 +235,7 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 |---------|--------|-------|
 | **Track rename UI** | ✅ Shipped | Double-click the track header name or use the context menu (m10-i); `track.rename` on the wire. |
 | **Loop region UI** | ✅ Shipped | Interactive loop ruler in the arrange (m10-g); `transport.setLoop` on the wire. |
-| **MIDI CC / learn** | ❌ Not yet | MIDI control-change messages and learning (mapping hardware knobs to DAW parameters) not yet shipped. |
+| **MIDI learn** | ❌ Not yet | Mapping hardware knobs to DAW parameters not yet available. MIDI control-change messages themselves ship as controller lanes in clips (see MIDI & Instruments section). |
 | **Touch/latch/write modes** | ❌ Not yet | Automation is read-only on playback. Recording arm for automation deferred to v1. |
 | **Bezier curves** | ❌ Not yet | Automation lanes use linear interpolation only. Bezier curves deferred to v1 polish. |
 | **AU effect param automation** | ❌ Not yet | Built-in effect params are automatable; AU plugin params are not (per-quantum eval not exposed to hosted AUs yet). |
@@ -244,11 +248,11 @@ A comprehensive matrix of capabilities, state, and roadmap status. Everything be
 
 ## Command & Tool Counts
 
-- **Wire commands**: 126 (verified against `Sources/DAWControl/Commands.swift` `allCommands` array; +3 from m15-d arrange ergonomics; +2 from m16-b2 controller-lane verbs; +1 from m16-e recovery-bundles read)
-- **MCP tools**: 129 (126 commands + 3 provider-direct tools: `generate_lyrics`, `generate_image`, `generate_song_suno`)
-- **Built-in effects**: 9 (Gain, EQ, Compressor, Limiter, Reverb, Delay, Saturator, Gate, Chorus)
-- **Copilot catalog entries**: 56 (m15-d adds 3 arrangement verbs; m16-b2 adds 1 controller-lane entry)
-- **Explain catalog entries**: 74 (transport, mixer, piano roll, arrange, AI panels, settings, instrument picker coverage; +1 for master automation in m15-c; +1 for controller strip in m16-b4; +4 in M17 — insert-effect editor, arrange zoom, playhead gestures, generation progress card)
+- **Wire commands**: 173 (verified against `Sources/DAWControl/Commands.swift` `allCommands` array)
+- **MCP tools**: 176 (173 commands + 3 provider-direct tools: `generate_lyrics`, `generate_image`, `generate_song_suno`)
+- **Built-in effects**: 10 (Gain, EQ, Compressor, Limiter, Reverb, Delay, Saturator, Gate, Chorus, Bass Enhancer)
+- **Copilot catalog entries**: 74 (decomposed from `CopilotTool(` in `Sources/DAWControl/CopilotCatalog.swift`)
+- **Explain catalog entries**: 92 (transport, mixer, piano roll, arrange, AI panels, settings, instrument picker coverage; decomposed two ways in `Sources/DAWAppKit/ExplainModel.swift` — `ExplainEntry(` call sites and `ExplainID` enum cases, which agree at 92)
 
 ---
 

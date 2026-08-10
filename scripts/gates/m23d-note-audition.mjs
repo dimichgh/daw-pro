@@ -32,7 +32,7 @@
 //
 //   M23D_PIDFILE=<scratch>/staging.pid node scripts/gates/m23d-note-audition.mjs
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, verdict } from "./_staging.mjs";
 
 const GATE = "m23d";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -381,4 +381,4 @@ clearTimeout(killer); ws.close();
 // was silently adopted by the eight gates that ran after it, producing five
 // false greens and three false reds. The teardown is not tidiness.
 stopStaging(GATE, PIDFILE);
-process.exit(failed === 0 ? 0 : 1);
+verdict({ ran: checks.length, failed });

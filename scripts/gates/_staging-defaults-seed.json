@@ -1,0 +1,90 @@
+{
+  "_note": "m23-gf-b Phase B seed. A READ-ONLY snapshot of ~/Library/Preferences/DAWApp.plist's ambient values, captured 2026-08-10 via `defaults read DAWApp <key>` / `defaults read-type DAWApp <key>` on this machine, right before the staging domain moved to DAWProStaging. This makes the isolation change BEHAVIOUR-NEUTRAL: a staging launch inherits exactly what it inherited before the domain moved, so the gate-corpus fail set can be compared before/after and any red is a real break, not an artifact of a virgin domain. Phase E (m23-gf-e, a SEPARATE item with its own attribution) shrinks this to `{\"onboarding.state\": \"completed\"}` only, pinning the corpus to SHIPPED defaults instead. `type` selects the `defaults write -string`/`-float` flag `resetStagingDefaultsDomain()` uses; each was cross-checked against `defaults read-type DAWApp <key>` before being written here — do not guess a type. NEVER add an NS* key (NSWindow Frame …, NSSplitView …, NSToolbar …) — those must be left to regenerate in the staging domain; seeding one would defeat the whole point of the isolation seam (design §3.7, §7.2).",
+  "keys": {
+    "panelDensity.arrange": {
+      "type": "string",
+      "value": "pro",
+      "why": "Shipped default is .simple (PanelDensityModel.swift:96-97). Without this, a virgin staging domain flips the arrange panel to simple mid-corpus — a Phase-E-shaped behaviour change landing inside a Phase-B-labelled isolation-only change."
+    },
+    "panelDensity.effectEditor": {
+      "type": "string",
+      "value": "simple",
+      "why": "Already matches the shipped default (.simple); seeded anyway for behaviour-neutral completeness — a gate reading this key must see the same value pre/post isolation."
+    },
+    "panelDensity.instrumentPicker": {
+      "type": "string",
+      "value": "pro",
+      "why": "Shipped default is .simple. Same risk as panelDensity.arrange: a virgin domain would flip this mid-corpus."
+    },
+    "panelDensity.mixer": {
+      "type": "string",
+      "value": "pro",
+      "why": "Shipped default is .simple. m17a-insert-editors and m23p2-bass-enhancer (m23-ge) both assert against this panel; an unseeded flip to simple would redden them for a reason unrelated to this item."
+    },
+    "panelDensity.pianoRoll": {
+      "type": "string",
+      "value": "pro",
+      "why": "Shipped default is .simple. Same risk class as the other panelDensity keys."
+    },
+    "panelDensity.quantize": {
+      "type": "string",
+      "value": "pro",
+      "why": "Shipped default is .simple. Same risk class as the other panelDensity keys."
+    },
+    "panelDensity.transport": {
+      "type": "string",
+      "value": "pro",
+      "why": "Shipped default is .simple. Same risk class as the other panelDensity keys."
+    },
+    "panelLayout.arrangePPB": {
+      "type": "float",
+      "value": 16,
+      "why": "Ambient pixels-per-beat for the arrange view. Design §7.3 flags this as needing a key-by-key shipped-default comparison before Phase E; for Phase B it is seeded as-is so geometry/pixel gates (m18i, m23al, m23an, m23s) see an unchanged value."
+    },
+    "panelLayout.auditionEnabled": {
+      "type": "float",
+      "value": 1,
+      "why": "Stored as a Double (0/1), not a CFBoolean — confirmed via `defaults read-type`. Flagged in design §7.3 as needing its own shipped-default comparison before Phase E; seeded as-is for Phase B behaviour-neutrality."
+    },
+    "panelLayout.editorFraction": {
+      "type": "float",
+      "value": 0.45,
+      "why": "Matches PanelLayoutStore.defaultEditorFraction already (design §7.3); seeded anyway so the isolation change touches nothing."
+    },
+    "panelLayout.followPlayhead": {
+      "type": "float",
+      "value": 0,
+      "why": "Default is OFF. m23c2-follow-playhead's Leg 6 flips this ON, asserts persistence across a relaunch, then explicitly restores it to false before exiting (m23c2:701) — this seed value is what every OTHER gate should see undisturbed."
+    },
+    "panelLayout.mixerInsertsCollapsed": {
+      "type": "float",
+      "value": 0,
+      "why": "m23s-insert-labels drives this key directly and restores it via debug.panelLayout on exit; flagged in design §7.3 as needing a shipped-default comparison before Phase E."
+    },
+    "panelLayout.pianoRollPPB": {
+      "type": "float",
+      "value": 32,
+      "why": "Ambient pixels-per-beat for the piano roll, read by m23c2's own pixel-crop math (ROLL_X0 + b*PPB - offset). Must not silently change under the gate that most depends on it."
+    },
+    "panelLayout.rowHeight": {
+      "type": "float",
+      "value": 34,
+      "why": "Ambient piano-roll note row height. Design §7.3 flags this as needing a shipped-default comparison before Phase E; seeded as-is for Phase B."
+    },
+    "panelLayout.sidebarWidth": {
+      "type": "float",
+      "value": 260,
+      "why": "Matches PanelLayoutStore.defaultSidebarWidth already (design §7.3); seeded anyway so the isolation change touches nothing."
+    },
+    "copilot.model": {
+      "type": "string",
+      "value": "claude-sonnet-5",
+      "why": "Absent means the AnthropicModelCatalog default applies instead (design §7.3) — any COPILOT gate asserting a model name by string would silently start comparing against a different value. Phase E revisits whether this belongs in the shrunk seed."
+    },
+    "onboarding.state": {
+      "type": "string",
+      "value": "completed",
+      "why": "THE LOAD-BEARING KEY. With this absent, OnboardingModel.shouldOfferTour (OnboardingModel.swift:282) is `state == .inactive` == true, and offerTourIfEligible() (DAWProApp.swift:3714-3716) starts the guided tour on every ContentView appear — an overlay in front of every UI gate in the corpus. Must land in the SAME reset that clears the domain, never as a follow-up write (design §3.7 / brief trap 4)."
+    }
+  }
+}

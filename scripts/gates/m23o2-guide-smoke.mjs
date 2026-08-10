@@ -12,7 +12,8 @@
 // already on disk — and it is the smoke test for the very cycle (m23-o2) where
 // that stale-binary trap was hit twice. `buildOrAbort` closes it at the source.
 import {
-  sleep, buildOrAbort, startStaging, stopStaging, connect,
+  sleep, buildOrAbort, startStaging, stopStaging, connect, panelDensityGuard,
+  panelDensityDomainGuard, verdict,
 } from "./_staging.mjs";
 
 const GATE = "m23o2-smoke";   // names the pidfile + out dir, as before
@@ -38,11 +39,21 @@ function ck(label, cond, detail = "") {
 
 buildOrAbort({ label: "building staging binary (m23o2-smoke)…" });
 startStaging({ gate: GATE });
+let guard, domainGuard;
 try {
   ws = await connect();
+  guard = panelDensityGuard(cmd);   // raw cmd — envelope shape, normalized inside
+  // m23-en: `debug.effectEditor { open }` writes panelDensity.mixer
+  // unconditionally (DAWProApp.swift, effectEditorDebug) — a side effect the
+  // per-panel guard above never sees, since it only ever `set()`s the
+  // "effectEditor" panel. Snapshot the WHOLE domain now, before the first
+  // debug.effectEditor call below, so restore() in `finally` can put back
+  // anything else that verb writes on the side.
+  domainGuard = panelDensityDomainGuard(cmd);
+  await domainGuard.snapshot();
   let r = await cmd("project.new", { discardChanges: true });
   ck("S1 project.new", r.ok, r.error);
-  r = await cmd("debug.panelDensity", { panel: "effectEditor", mode: "simple" });
+  r = await guard.set("effectEditor", "simple");
   ck("S2 effect editor density = simple (the curve surface)", r.ok, r.error);
 
   // --- A: AUDIO track -> the honest EMPTY STATE (the common case) ---
@@ -186,9 +197,17 @@ try {
   fail++; failures.push(`EXCEPTION ${e.message}`);
   console.log("EXCEPTION", e.stack);
 } finally {
+  await guard?.restore("finally");
+  // m23-en: domain restore runs SECOND, deliberately — see the matching
+  // comment in m23r3-insert-spectrum.mjs. The domain snapshot predates every
+  // panelDensity write this gate makes, so "effectEditor" sits in it at the
+  // same pre-gate value panelDensityGuard captured on its own first touch;
+  // restoring the domain after guard.restore() makes their shared handling
+  // of that one panel a consistent no-op rather than a clobber.
+  await domainGuard?.restore("finally");
   try { ws?.close(); } catch { /* ignore */ }
   stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 }
 console.log(`\n=== m23-o2 probe smoke: ${pass} pass / ${fail} fail ===`);
 if (failures.length) console.log(failures.join("\n"));
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

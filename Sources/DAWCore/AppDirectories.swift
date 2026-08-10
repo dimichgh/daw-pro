@@ -54,6 +54,17 @@ public enum AppDirectories {
         /// `.models` (speech) or the sidecar's own checkout (ACE/RVC). Nothing
         /// here is user content: deleting it costs one relearned measurement.
         case modelLifecycle = "ModelLifecycle"
+        /// The RVC voice-conversion STORE (m23-di-2a): `<voiceId>/model.pth`
+        /// (imported third-party), `model.npz` (MLX-runnable, once trained or
+        /// converted), optional `model.index`/`voice.json` — the same shape
+        /// `scripts/rvc/server.py`'s `_scan_voices()` reads off disk. This is
+        /// the ONE app-owned home for that store; `RVC_VOICES_DIR` is set to
+        /// it at every sidecar spawn (`VoiceConversionManager.spawnAndPoll`)
+        /// so the facade's own directory scan and an import here always agree.
+        /// Deliberately NOT inside the read-only `scripts/rvc/` checkout —
+        /// see `VoiceModelImport`'s doc for why. Distinct from
+        /// `.voiceDatasets` (raw training AUDIO, not model artifacts).
+        case voiceModels = "VoiceModels"
 
         /// The on-disk directory name.
         public var directoryName: String { rawValue }
@@ -127,10 +138,31 @@ public enum AppDirectories {
     /// state is corrupted, with no teardown that can undo it (measured at m23-ay:
     /// pid 37057's lock was replaced by a gate's).
     ///
-    /// **Why an env var and not a temp `HOME`.** Redirecting `HOME` moves
-    /// `UserDefaults` too, so preference-persistence gates (`m23c2`) would stop
-    /// testing the thing they exist to test. This moves ONE rule and leaves
-    /// everything else about the process production-shaped.
+    /// **Why an env var and not a temp `HOME`.** Because a temp `HOME` would
+    /// isolate NOTHING. This moves ONE rule and leaves everything else about the
+    /// process production-shaped.
+    ///
+    /// ⚠️ **CORRECTED 2026-08-10 (m23-gf-a) — the reason recorded here until now
+    /// was FALSE, though the decision it justified was right.** It used to read
+    /// "redirecting `HOME` moves `UserDefaults` too, so preference-persistence
+    /// gates (`m23c2`) would stop testing the thing they exist to test."
+    /// **Measured, with a positive control:** setting `HOME` moves neither
+    /// `UserDefaults` nor Application Support — Foundation resolves the home
+    /// directory through CoreFoundation (`CFFIXED_USER_HOME`, then the passwd
+    /// database) and ignores `$HOME`; and `CFFIXED_USER_HOME` moves Application
+    /// Support but still NOT `UserDefaults`, because the preferences domain is
+    /// resolved daemon-side by `cfprefsd`. A bundle-less executable's domain
+    /// follows its EXECUTABLE PATH, which is why `.build/debug/DAWApp` writes to
+    /// `~/Library/Preferences/DAWApp.plist`.
+    ///
+    /// Two consequences worth keeping in view. **(1)** This rule deliberately
+    /// does NOT isolate `UserDefaults`, so every staging launch shares the user's
+    /// real preferences domain — see `m23-gf` and
+    /// `docs/research/design-m23gf-defaults-isolation.md` for the fix (a symlink
+    /// that renames the process, and therefore the domain). **(2)** The
+    /// `m23c2` objection does not transfer to that fix: Leg 6 needs a domain that
+    /// is persistent and stable ACROSS ITS RELAUNCH WITHIN A RUN, not the user's
+    /// domain specifically.
     public static let profileRootEnvironmentKey = "DAWPRO_PROFILE_ROOT"
 
     /// The result of reading `DAWPRO_PROFILE_ROOT`.

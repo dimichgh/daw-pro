@@ -43,7 +43,7 @@
 // Staging :17695 ONLY — port 17600 is the user's live app and is never touched.
 
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, verdict } from "./_staging.mjs";
 
 const GATE = "m23ai";
 const PORT = 17695;
@@ -319,4 +319,4 @@ clearTimeout(killer);
 // ⚠️ An explicit exit is mandatory: a detached child plus a pending timer keep
 // node's event loop alive, and a gate that finished its work then hung is
 // indistinguishable from a hung measurement (m23-ah paid 10 minutes for this).
-process.exit(pass === results.length ? 0 : 1);
+verdict({ ran: results.length, failed: results.length - pass });

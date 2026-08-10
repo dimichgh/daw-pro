@@ -3,8 +3,8 @@ import SwiftUI
 import DAWCore
 import DAWAppKit
 
-/// Edit-menu Undo / Redo / Delete, wired to `ProjectStore`'s undo journal and the
-/// app's three deletable surfaces. The item
+/// Edit-menu Undo / Redo / Cut / Copy / Paste / Delete, wired to `ProjectStore`'s
+/// undo journal, the app's `EditClipboard` and its deletable surfaces. The item
 /// titles fold in the next operation's label ("Undo Add Track 'Vox'") and the
 /// items enable/disable live — `ProjectStore.journal` is observed, so reading
 /// `canUndo`/`undoLabel` here re-evaluates the menu when history changes.
@@ -12,8 +12,9 @@ import DAWAppKit
 /// as `FileCommands` (standard OS chrome, outside the glass-cockpit window).
 struct EditCommands: Commands {
     let store: ProjectStore
-    /// Read for the Delete item only (m23-cf) — its title, its enabled state and
-    /// its action all come from `AppModel.deleteMenuItem` / `performMenuDelete`.
+    /// Read for the Delete item (m23-cf) and the three clipboard items
+    /// (m23-ek-3) — every title, enabled state and action comes from an
+    /// `AppModel` property backed by a DAWAppKit policy, never decided here.
     let model: AppModel
 
     var body: some Commands {
@@ -47,6 +48,68 @@ struct EditCommands: Commands {
         // menu-bar items by role; it is kept for the convention, and because the
         // TITLE is what actually carries the warning here ("Delete 3 Clips").
         CommandGroup(after: .pasteboard) {
+            // ═══ CUT / COPY / PASTE (m23-ek-3) ═══
+            //
+            // ⚠️⚠️ THESE MUST NEVER GET `.keyboardShortcut("c"/"x"/"v", modifiers:
+            // .command)`, AND THAT IS THE USER'S OWN RULING, asked and answered.
+            // They were shown both arguments and chose the verifiable option; do
+            // not add one "for convenience" without re-asking them.
+            //
+            //  (a) THE m17-d TRAP, TRANSPOSED. A `CommandGroup` item's key
+            //      equivalent is checked BEFORE the responder chain, so ⌘C typed
+            //      in a rename field would fire CLIP-COPY instead of copying the
+            //      text — the mirror image of the Delete banner below, where the
+            //      hazard runs the other way. ⭐ The hazard belongs to the
+            //      SHORTCUT, not to the ITEM; with no key equivalent these carry
+            //      none of it, and macOS's own ⌘C/⌘X/⌘V keep working on text
+            //      exactly as they do today, natively, with no code here.
+            //  (b) THE DECISIVE ONE — A KEY EQUIVALENT IS INVISIBLE TO EVERY GATE
+            //      IN THIS TREE (the m23-g1 law, on `ExportMenuPolicy.swift:17-33`
+            //      and `FileCommands.swift:47-55`): an unbundled staging binary
+            //      does not route real key events, so ⌘C could only ever be
+            //      verified by a `dist/DAWPro.app` rebuild plus hands, every time,
+            //      forever. A menu item with no key equivalent is fully testable.
+            //
+            // The macOS-correct way to add the keystrokes is `copy:`/`cut:`/
+            // `paste:` on the RESPONDER CHAIN, which lights up the NATIVE items
+            // per surface and creates no outranking key equivalent at all. That
+            // is a separate item, and its precondition is m23-cf's undiagnosed
+            // DELETE key being diagnosed first.
+            //
+            // ORDERED CUT / COPY / PASTE, BEFORE DELETE — where macOS puts them,
+            // so the group reads as a standard Edit menu (Cut / Copy / Paste /
+            // Delete) and a user's eye lands where it already expects to.
+            //
+            // ⚠️ SHOWN-BUT-DISABLED on an empty selection or an empty clipboard,
+            // never hidden: a menu that does not appear teaches nothing, and
+            // "the operation exists and it wants a selection" is exactly what
+            // m23-cf's reported bug denied users.
+            //
+            // ⚠️ UNMEASURED, AND HANDED BACK DELIBERATELY — THE INERT-TITLE
+            // COLLISION. `after: .pasteboard` inserts this whole group AFTER
+            // macOS's native Cut/Copy/Paste block, so with nothing selected and
+            // an empty clipboard the menu reads: native Cut, Copy, Paste, then
+            // OUR greyed "Cut", "Copy", "Paste" — six near-identical titles in a
+            // row. `DeleteMenuPolicy.swift:32-38` hit the two-item version of
+            // this, MEASURED IT by enumerating the live menu on staging, and
+            // fixed it by renaming the inert title ("Delete Selection"). ⭐ THAT
+            // MEASUREMENT HAS NOT BEEN REPEATED HERE and cannot be: menu
+            // enumeration is not reachable from this seam (see the gate's SKIP
+            // for the same reason). Do NOT cite the Delete precedent as if it
+            // covered this. THE ONE-LINE REMEDY IF A HUMAN LOOKS AND DISLIKES
+            // IT: give `ClipboardVerb.inertTitle` "Cut Selection" / "Copy
+            // Selection" — the field already exists and is already the only
+            // producer of these titles.
+            let cut = model.cutMenuItem
+            Button(cut.title) { model.performMenuCut() }
+                .disabled(!cut.isEnabled)
+            let copy = model.copyMenuItem
+            Button(copy.title) { model.performMenuCopy() }
+                .disabled(!copy.isEnabled)
+            let paste = model.pasteMenuItem
+            Button(paste.title) { model.performMenuPaste() }
+                .disabled(!paste.isEnabled)
+
             let item = model.deleteMenuItem
             Button(item.title, role: .destructive) { model.performMenuDelete() }
                 .disabled(!item.isEnabled)

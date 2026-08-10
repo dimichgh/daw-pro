@@ -74,6 +74,17 @@ struct TimelineLanesView: View {
     /// must therefore state its answer (`waveformStore` above sets the same
     /// precedent for a dependency that must not be defaulted away).
     var automationPointSelection: AutomationPointSelectionBridge?
+    /// ⭐ m23-cf (second pass): the app's ONE "who owns this DELETE keystroke?"
+    /// decision, handed down to every automation lane editor below — each of
+    /// which owns `.onKeyPress(.delete)` behind its own `@FocusState` and is
+    /// therefore a third claimant beside the piano roll and the arrange mount.
+    /// Returns true when SOME surface owned the key, not "a point was removed"
+    /// (`AppModel.handleDeleteKey`).
+    ///
+    /// Optional and WITHOUT a default, for `automationPointSelection`'s reason:
+    /// a `nil` slipped in by omission would silently return one claimant to
+    /// deciding for itself, which is precisely the divergence this item closed.
+    var onDeleteKey: (() -> Bool)?
 
     // MARK: Clip editing (M5 i-d)
 
@@ -146,6 +157,10 @@ struct TimelineLanesView: View {
     /// `AppModel.deleteClipFromContextMenu`, which routes to the SAME
     /// `ProjectStore.removeClips` the DELETE key uses.
     var onDeleteClip: (_ clip: Clip, _ command: ClipDeleteCommand) -> Void = { _, _ in }
+    /// m23-ek-3 — the clip context menu's Cut / Copy, carrying the blast radius
+    /// the menu's own title already named.
+    var onClipboardClipMenu: (_ clip: Clip, _ verb: ClipboardVerb,
+                              _ command: ClipboardContextCommand) -> Void = { _, _, _ in }
     var onSplitClip: (_ trackID: UUID, _ clip: Clip, _ atBeat: Double) -> Void = { _, _, _ in }
     var onSetClipFades: (_ trackID: UUID, _ clip: Clip, _ fadeIn: Double, _ fadeOut: Double,
                          _ inCurve: FadeCurve, _ outCurve: FadeCurve) -> Void = { _, _, _, _, _, _ in }
@@ -1127,6 +1142,7 @@ struct TimelineLanesView: View {
                     onTrim: { onTrimClip(track.id, clip, $0, $1) },
                     onFitToContent: { onFitClipToContent(track.id, clip) },
                     onDelete: { onDeleteClip(clip, $0) },
+                    onClipboardClip: { onClipboardClipMenu(clip, $0, $1) },
                     onSplit: { onSplitClip(track.id, clip, $0) },
                     onSetFades: { onSetClipFades(track.id, clip, $0, $1, $2, $3) },
                     onSetGain: { onSetClipGain(track.id, clip, $0) },
@@ -1281,7 +1297,14 @@ struct TimelineLanesView: View {
                 // breakpoint selection, don't nudge the clip out from under me".
                 // Keyed by lane id inside the bridge, which is why N of them can
                 // report at once without clobbering each other.
-                pointSelection: automationPointSelection
+                pointSelection: automationPointSelection,
+                // m23-cf (second pass): these editors are the THIRD focus-gated
+                // claimant of DELETE, so they route it through the same
+                // `handleDeleteKey` the roll and the arrange mount use rather
+                // than each deciding for itself. The MIXER's master-lane mount
+                // deliberately passes `nil` here — it lives in the Mix workspace,
+                // which `handleDeleteKey` refuses by design.
+                onDeleteKey: onDeleteKey
             )
             // Re-init the editor's draft when the selected lane (target) changes.
             .id(lane.id)
@@ -2373,7 +2396,19 @@ private struct MarkerFlag: View {
             .focused($fieldFocused)
             .onAppear { draft = name; renameResolved = false; fieldFocused = true }
             .onSubmit { commit() }
-            .onKeyPress(.escape) { cancelRename(); return .handled }
+            .onKeyPress(.escape) {
+                KeyPressProbe.markerRenameEscape += 1   // m23-fi probe, first statement
+                cancelRename()
+                return .handled
+            }
+            // m23-fi PROBE — the field's `@FocusState` value. This is the ONE
+            // mount a probe can arm headlessly (`debug.markerRename {markerId}`),
+            // so it is the delivery CONTROL for the whole census: if ESC fires
+            // here, the synthesis and the counters are proven live and the arrow
+            // mounts' zeros are a real negative rather than a dead instrument.
+            .onChange(of: fieldFocused, initial: true) { _, focused in
+                KeyPressProbe.markerRenameFieldFocused = focused
+            }
             // ⚠️ FOCUS LOSS COMMITS — clicking away is NOT escape-equivalent, and
             // m17-d's original "clear focus with a staged click" comment said
             // otherwise. Anything standing in for that gesture must call
@@ -2474,6 +2509,9 @@ private struct ClipBlock: View {
     /// user was shown, so the handler cannot act on a different blast radius from
     /// the one the menu named. Defaulted to a no-op so previews stay one-liners.
     var onDelete: (ClipDeleteCommand) -> Void = { _ in }
+    /// m23-ek-3 — the clip context menu's Cut / Copy. One closure for both, so
+    /// the two entries cannot drift into two handlers with two blast radii.
+    var onClipboardClip: (ClipboardVerb, ClipboardContextCommand) -> Void = { _, _ in }
     var onSplit: (_ atBeat: Double) -> Void
     var onSetFades: (_ fadeIn: Double, _ fadeOut: Double, _ inCurve: FadeCurve, _ outCurve: FadeCurve) -> Void
     var onSetGain: (_ gainDb: Double) -> Void
@@ -3361,6 +3399,25 @@ private struct ClipBlock: View {
         // fade/quantize/crossfade items is not discoverable, and in Simple it is
         // the only entry there is.
         Button(deleteCommand.title, role: .destructive) { onDelete(deleteCommand) }
+        // ═══ CUT / COPY (m23-ek-3) — BESIDE DELETE, IN BOTH DENSITIES ═══
+        //
+        // Same argument as Delete's above, and it is not a weaker one: with NO
+        // ⌘C/⌘X in v1 (the user's ruling — see `ClipboardMenuPolicy`), the
+        // context menu is the FAST path, not a convenience. An operation
+        // reachable by only one route is an operation that goes missing, which
+        // is m23-cf's whole lesson.
+        //
+        // The blast radius is decided ONCE by `ClipboardMenuPolicy` and shown in
+        // the title, and the SAME value is handed back to the action so the menu
+        // cannot act on a different set from the one it named.
+        //
+        // PASTE IS DELIBERATELY NOT HERE. This menu only exists because the
+        // pointer is over a CLIP, whereas a paste's destination is a beat and a
+        // track — pasting "onto" a clip has no meaning the user could predict,
+        // and the anchor is the playhead in every route. Edit ▸ Paste is the one
+        // home for it.
+        Button(cutCommand.title) { onClipboardClip(.cut, cutCommand) }
+        Button(copyCommand.title) { onClipboardClip(.copy, copyCommand) }
         // The separator is CONDITIONAL because in SIMPLE density on a NON-TAKE
         // clip both blocks below are empty, so an unconditional one would be a
         // trailing rule with nothing under it — in the beginner density, on the
@@ -3467,6 +3524,19 @@ private struct ClipBlock: View {
     private var deleteCommand: ClipDeleteCommand {
         DeleteMenuPolicy.clipContextCommand(clickedClipIsSelected: isSelected,
                                             arrangeSelectionCount: arrangeSelectionCount)
+    }
+
+    /// What this block's Cut / Copy entries say and target (m23-ek-3) — the
+    /// `deleteCommand` twin, resolved by the SAME rule (right-click inside the
+    /// selection acts on all of it; outside, on the one you pointed at).
+    private var cutCommand: ClipboardContextCommand {
+        ClipboardMenuPolicy.clipContextCommand(verb: .cut, clickedClipIsSelected: isSelected,
+                                               arrangeSelectionCount: arrangeSelectionCount)
+    }
+
+    private var copyCommand: ClipboardContextCommand {
+        ClipboardMenuPolicy.clipContextCommand(verb: .copy, clickedClipIsSelected: isSelected,
+                                               arrangeSelectionCount: arrangeSelectionCount)
     }
 
     /// Compact beat readout for the drag bubble (2 decimals, trailing zeros trimmed).

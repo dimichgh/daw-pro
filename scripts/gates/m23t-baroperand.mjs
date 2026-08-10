@@ -57,7 +57,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node
 
 // The build/launch/pidfile-kill lifecycle lives in ONE place (m23-ac-1) —
 // `_staging.mjs`. It used to be copy-pasted into every gate that had it at all.
-import { launchStaging, stopStaging, sleep, ROOT, STAGING_PORT } from "./_staging.mjs";
+import { launchStaging, stopStaging, sleep, ROOT, STAGING_PORT, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23t";
 const OUT = process.env.M23T_OUT || "/tmp/daw-gate-out/m23t";
@@ -92,6 +92,7 @@ function ck(label, cond, detail = "") {
   if (cond) { pass++; console.log(`PASS ${label}`); }
   else { fail++; failures.push(label); console.log(`FAIL ${label} :: ${detail}`); }
 }
+const guard = panelDensityGuard(cmd);   // raw cmd — envelope shape, normalized inside
 
 // ---- crop geometry and cyan thresholds --------------------------------------
 // ⚠️ RECOVERED BY MEASUREMENT 2026-07-30 (m23-ac-1), not re-derived from taste.
@@ -155,7 +156,7 @@ try {
      layout.editorFraction === 0.45 && typeof layout.rowHeight === "number",
      JSON.stringify(layout));
 
-  r = await cmd("debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
+  r = await guard.set("pianoRoll", "pro");
   ck("F4 piano roll staged to Pro", r.result?.mode === "pro", JSON.stringify(r.result));
 
   r = await cmd("track.add", { name: "Bar Ops Probe", kind: "instrument" });
@@ -193,7 +194,7 @@ try {
   ];
   const seen = {};
   for (const st of STATES) {
-    r = await cmd("debug.panelDensity", { panel: "pianoRoll", mode: st.density });
+    r = await guard.set("pianoRoll", st.density);
     ck(`${st.tag}.0 density staged to ${st.density}`, r.result?.mode === st.density,
        JSON.stringify(r.result));
     await cmd("transport.seek", { beats: st.beat });
@@ -410,6 +411,7 @@ try {
   fail++; failures.push(`EXCEPTION ${err.message}`);
   console.log(`FAIL EXCEPTION :: ${err.stack}`);
 } finally {
+  await guard.restore("finally");
   try { ws?.close(); } catch { /* closed */ }
   stopStaging(GATE);
 }
@@ -417,4 +419,4 @@ try {
 console.log(`\n=== GATE === ${pass}/${pass + fail} checks passed`);
 if (failures.length) console.log(failures.map((f) => `  FAILED: ${f}`).join("\n"));
 writeFileSync(`${OUT}/gate.json`, JSON.stringify({ pass, fail, failures }, null, 2));
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

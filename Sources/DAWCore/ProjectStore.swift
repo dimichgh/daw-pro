@@ -2749,6 +2749,9 @@ public final class ProjectStore {
             case "releaseMs": params.releaseMs = value
             case "kneeDb": params.kneeDb = value
             case "makeupDb": params.makeupDb = value
+            // m23-ck parallel compression: 1 fully wet (the default), 0 a
+            // bit-exact bypass. Already clamped to 0…1 by the spec range.
+            case "mix": params.mix = value
             default: return
             }
             effect.compressor = params

@@ -77,7 +77,7 @@
 import fs from "fs";
 import zlib from "zlib";
 import { execFileSync } from "child_process";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, verdict } from "./_staging.mjs";
 
 const GATE = "m23an";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -699,7 +699,7 @@ try {
   clearTimeout(killer);
   ws.close();
   teardown();
-  process.exit(failed.length ? 1 : 0);
+  verdict({ ran: checks.length, failed: failed.length });
 } catch (err) {
   console.error("GATE ERROR:", err);
   clearTimeout(killer);

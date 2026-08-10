@@ -22,7 +22,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, verdict } from "./_staging.mjs";
 
 const GATE = "m23k4a-midi-export";   // names the pidfile + out dir
 const outDir = process.argv[2] ?? mkdtempSync(join(tmpdir(), "m23k4a-"));
@@ -172,9 +172,16 @@ ck("D6 the on-grid notes are untouched", beatOf(48) === 0 && beatOf(50) === 2,
    `${beatOf(48)}/${beatOf(50)}`);
 ck("D7 clip length survived (trailing silence is written into endTick)",
    leadTrack?.clips?.[0]?.lengthBeats === 4, leadTrack?.clips?.[0]?.lengthBeats);
+// m23-ee-2b: an ABSENCE assertion over `?? []` is the vacuous shape — `[].every(f)`
+// is true, so "Vox is not here" also passed when NOTHING was here, including when
+// the snapshot failed outright. Pinned on the list being present and carrying the
+// two tracks C4 measured (`tracksExported === 2`); D3's 3-part ledger is conductor
+// + those same two. Now the leg can only pass by actually looking at track names.
+const backTracks = snap.tracks ?? [];
 ck("D8 the AUDIO track did not come back as a MIDI part",
-   (snap.tracks ?? []).every(t => t.name !== "Vox"),
-   JSON.stringify((snap.tracks ?? []).map(t => t.name)));
+   Array.isArray(snap.tracks) && backTracks.length >= 2
+     && backTracks.every(t => t.name !== "Vox"),
+   JSON.stringify(backTracks.map(t => t.name)));
 
 // ---------------------------------------------------------------- E: per-track
 r = await cmd("project.new", { discardChanges: true });
@@ -271,4 +278,4 @@ console.log(`\n${pass} pass / ${fail} fail`);
 console.log(`exported files for the Apple-loader leg (G8) are in: ${outDir}`);
 ws.close();
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
-process.exit(fail === 0 ? 0 : 1);
+verdict({ ran: pass + fail, failed: fail });

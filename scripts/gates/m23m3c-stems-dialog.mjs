@@ -29,7 +29,7 @@
 // now STRUCTURAL: every run gets a process that has never seen the sheet.
 import fs from "fs";
 import path from "path";
-import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep, verdict } from "./_staging.mjs";
 const GATE = "m23m3c-stems-dialog";   // names the pidfile + out dir = the default OUT
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 const log = (s) => fs.writeSync(1, s + "\n");
@@ -275,4 +275,4 @@ check("sheet closes", st.visible === false);
 log(`\n${PASS} passed, ${FAIL} failed`);
 ws.close();
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
-process.exit(FAIL ? 1 : 0);
+verdict({ ran: PASS + FAIL, failed: FAIL });

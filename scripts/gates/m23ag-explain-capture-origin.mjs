@@ -74,7 +74,12 @@
 //          box-placement machinery entirely, not of window size.
 //
 // Everything above runs at TWO content sizes: 1400x1000 and 1320x880 (both above
-// the 1208x640 WindowFloor). The second size is the should-stay-green arm for the
+// the 1208x672 WindowFloor — m23-dw: the content-rect floor is
+// `minWindowContentHeight` 672, NOT the SwiftUI layout floor `minHeight` 640; this
+// comment said 640 while the window could never go below 672). The 32 pt gap is
+// the same titlebar inset this gate measures as `captureOrigin.y`, which is why
+// this file is where the discrepancy was most visible and least noticed.
+// The second size is the should-stay-green arm for the
 // BOTTOM-anchored legs (L7/L8); the top-anchored legs (L1-L4, L9/L9b) re-run there
 // too but, correctly, measure the same thing twice.
 //
@@ -104,7 +109,7 @@
 // tests the PREVIOUS build).
 import fs from "fs";
 import { execFileSync } from "child_process";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23ag";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -122,7 +127,14 @@ const ARRANGE_BLOCK_GAP = 6;   // ContentView.swift:40 — ditto.
 const SETTLE = 500;
 fs.mkdirSync(OUT, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const killer = setTimeout(() => { console.error("TIMEOUT"); process.exit(2); }, 600_000);
+// m23-ej-2: `let`, not `const` — the killer's callback closes over `guard`
+// but only runs long after it is assigned (right after connect, below).
+let guard = null;
+const killer = setTimeout(async () => {
+  console.error("TIMEOUT");
+  await guard?.restore("timeout");
+  process.exit(2);
+}, 600_000);
 
 // ── build, so the gate cannot test the previous build ─────────────────────
 buildOrAbort({ root: REPO, skip: !!process.env.M23AG_SKIP_BUILD });
@@ -164,6 +176,7 @@ async function connect() {
   throw new Error("no connect");
 }
 const { ws, req } = await connect();
+guard = panelDensityGuard(req);   // req already unwraps to .result ?? whole msg
 
 const results = [];
 const check = (n, ok, d) => { results.push({ n, ok, d }); console.log(`  ${ok ? "ok  " : "!!  "} ${n}\n        ${d}`); };
@@ -432,7 +445,7 @@ try {
   const t0 = (await req("track.add", { kind: "instrument", name: "Lead" })).id;
   const t1 = (await req("track.add", { kind: "instrument", name: "Keys" })).id;
   const t2 = (await req("track.add", { kind: "instrument", name: "Pad" })).id;
-  await req("debug.panelDensity", { panel: "arrange", mode: "simple" });
+  await guard.set("arrange", "simple");
   await sleep(SETTLE);
   const tracks = [t0, t1, t2];
 
@@ -453,8 +466,14 @@ try {
   results.push({ n: "gate ran to completion", ok: false, d: String(err && err.stack ? err.stack : err) });
   console.log(`\nM23AG ${results.filter((r) => r.ok).length}/${results.length}`);
 } finally {
+  await guard.restore("finally");
   try { ws.close(); } catch {}
   stopStaging(GATE, PIDFILE);
   clearTimeout(killer);
 }
-process.exit(results.every((r) => r.ok) ? 0 : 1);
+// m23-ee-2c-3: `[].every()` is TRUE, so a run that recorded NO results used to
+// exit 0 — a gate that asserted nothing reporting green. The length conjunct is
+// the whole fix: it cannot change the verdict of any run that did record results.
+// m23-fa-2: routed through the verdict() primitive — same behaviour for any
+// run with results.length > 0, but now the ran===0 case is a distinct exit 2.
+verdict({ ran: results.length, failed: results.filter((r) => !r.ok).length });

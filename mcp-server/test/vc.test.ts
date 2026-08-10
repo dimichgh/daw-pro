@@ -288,6 +288,123 @@ test("the withdrawn own-voice-only prohibition is GONE from every vc_* tool desc
 });
 
 // ---------------------------------------------------------------------------
+// vc_import_voice_model (m23-di-2a)
+// ---------------------------------------------------------------------------
+
+test("vc_import_voice_model forwards modelPath and omits unset optionals", async () => {
+  const stubbedResult = {
+    voiceId: "my-voice",
+    name: "my-voice",
+    hasIndex: false,
+    state: "needsConversion",
+    directoryPath: "/Users/example/Library/Application Support/DAWPro/VoiceModels/my-voice",
+  };
+  queuedResult = stubbedResult;
+
+  const result = await client.callTool({
+    name: "vc_import_voice_model",
+    arguments: { modelPath: "/Users/example/Downloads/my-voice.pth" },
+  });
+
+  assert.equal(calls.length, 1, "exactly one bridge call");
+  assert.equal(calls[0]!.command, "vc.importVoiceModel");
+  assert.deepEqual(calls[0]!.params, {
+    modelPath: "/Users/example/Downloads/my-voice.pth",
+    indexPath: undefined,
+    voiceId: undefined,
+    name: undefined,
+    overwrite: undefined,
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(!r.isError);
+  assert.deepEqual(parseJSON(r), stubbedResult, "the app's import result round-trips back verbatim");
+});
+
+test("vc_import_voice_model forwards every optional param when given", async () => {
+  queuedResult = {
+    voiceId: "narrator",
+    name: "Narrator",
+    hasIndex: true,
+    state: "needsConversion",
+    directoryPath: "/tmp/VoiceModels/narrator",
+  };
+
+  await client.callTool({
+    name: "vc_import_voice_model",
+    arguments: {
+      modelPath: "/Users/example/model.pth",
+      indexPath: "/Users/example/model.index",
+      voiceId: "narrator",
+      name: "Narrator",
+      overwrite: true,
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "vc.importVoiceModel");
+  assert.deepEqual(calls[0]!.params, {
+    modelPath: "/Users/example/model.pth",
+    indexPath: "/Users/example/model.index",
+    voiceId: "narrator",
+    name: "Narrator",
+    overwrite: true,
+  });
+});
+
+test("vc_import_voice_model requires modelPath — rejected at the MCP boundary, never reaches the bridge", async () => {
+  const result = await client.callTool({ name: "vc_import_voice_model", arguments: {} });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(r.isError, "a missing required modelPath must be rejected before the bridge call");
+  assert.equal(calls.length, 0);
+});
+
+test("vc_import_voice_model rejects an unrecognized argument at the MCP boundary (never reaches the bridge)", async () => {
+  const result = await client.callTool({
+    name: "vc_import_voice_model",
+    arguments: { modelPath: "/tmp/x.pth", bogus: true },
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(r.isError, "the strict schema must reject an unknown key");
+  assert.equal(calls.length, 0, "the strict schema rejects before bridge.send is ever invoked");
+});
+
+test("vc_import_voice_model surfaces the app's actionable error verbatim (e.g. reserved id, file not found)", async () => {
+  queuedError = new Error(
+    "'base' is the reserved smoke-test voice id — pass a different 'voiceId' or 'name' for this import"
+  );
+
+  const result = await client.callTool({
+    name: "vc_import_voice_model",
+    arguments: { modelPath: "/tmp/base.pth" },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "vc.importVoiceModel");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(r.isError, "a bridge-side failure must be a tool error, never a silent success");
+  assert.match(r.content[0].text as string, /reserved smoke-test voice id/, "the app's message passes through verbatim");
+});
+
+test("vc_import_voice_model's description carries the rights-responsibility policy and the needsConversion honesty note", async () => {
+  const listed = await client.listTools();
+  const tool = listed.tools.find((t) => t.name === "vc_import_voice_model");
+  assert.ok(tool, "vc_import_voice_model is registered");
+  assert.match(tool!.description ?? "", /RIGHTS-RESPONSIBILITY POLICY/);
+  assert.match(
+    tool!.description ?? "",
+    /needsConversion/,
+    "the tool must not imply the imported voice is immediately usable"
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Additive guarantee: the sibling ai_sidecar_* tools are unaffected.
 // ---------------------------------------------------------------------------
 

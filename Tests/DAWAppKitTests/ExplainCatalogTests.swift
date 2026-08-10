@@ -39,9 +39,11 @@ struct ExplainCatalogTests {
         // .referenceSpectrum), taking the surface to 88; m23-a added the channel
         // strip's round volume knob (.mixerVolumeKnob) → 89; m23-c2 added the
         // arrange toolbar's FOLLOW chip (.arrangeFollow) → 90; m23-m3 added the
-        // export dialog (.exportDialog) → 91.
-        #expect(ExplainID.allCases.count >= 91,
-                "explain coverage shrank below the m23-m3 floor: \(ExplainID.allCases.count)")
+        // export dialog (.exportDialog) → 91; m23-cq-1 added the step sequencer's
+        // three (.stepSequencerMode / .stepSequencerGrid / .stepSequencerStep)
+        // → 94.
+        #expect(ExplainID.allCases.count >= 94,
+                "explain coverage shrank below the m23-cq-1 floor: \(ExplainID.allCases.count)")
     }
 
     @Test("ExplainID round-trips its raw value; unknown raw is nil (debug.explainMode focus)")

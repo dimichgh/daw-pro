@@ -149,6 +149,30 @@ fi
 echo "==> plutil -lint"
 plutil -lint "$APP/Contents/Info.plist"
 
+# --- Strip (m23-dp) ----------------------------------------------------------
+# The linked binary carries ~20.6 MB of symbols — more than half the shipped
+# bundle. `-S` drops the debug symbol table, `-x` drops local symbols; neither
+# touches the external/dynamic symbols Swift reflection and SwiftUI need, which
+# is why the aggressive forms (`-r`, `-u`, bare `strip`) are deliberately NOT
+# used here.
+#
+# ⚠️ ORDERING IS LOAD-BEARING: this MUST run BEFORE `codesign` below. Stripping
+# rewrites the Mach-O, so doing it after signing silently invalidates the seal
+# and the app fails Gatekeeper with no error at bundle time.
+#
+# Set DAWPRO_NO_STRIP=1 to keep symbols when you need readable crash reports
+# with function names instead of raw addresses.
+if [[ "${DAWPRO_NO_STRIP:-0}" == "1" ]]; then
+    echo "==> strip SKIPPED (DAWPRO_NO_STRIP=1) — symbols kept for crash reports"
+else
+    STRIP_TARGET="$APP/Contents/MacOS/$EXECUTABLE"
+    BEFORE_BYTES=$(stat -f %z "$STRIP_TARGET")
+    strip -S -x "$STRIP_TARGET"
+    AFTER_BYTES=$(stat -f %z "$STRIP_TARGET")
+    echo "==> strip -S -x: $((BEFORE_BYTES / 1048576)) MB -> $((AFTER_BYTES / 1048576)) MB" \
+         "(saved $(( (BEFORE_BYTES - AFTER_BYTES) / 1048576 )) MB)"
+fi
+
 # --- Sign --------------------------------------------------------------------
 # Ad-hoc (identity "-"): runs on this machine and any machine after a
 # right-click > Open (Gatekeeper prompt once). Notarization lifts that later.

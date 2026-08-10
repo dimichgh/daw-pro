@@ -26,7 +26,7 @@
 //   The outdir arg still works and is resolved by the APP against ITS cwd, so
 //   pass an absolute path. Omitted, it defaults to the staging out dir.
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, panelDensityGuard, verdict } from "./_staging.mjs";
 
 const GATE = "m23b";                                  // names the pidfile + out dir
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
@@ -57,9 +57,16 @@ startStaging({ gate: GATE });
 // to preserve. The harness also retries 40x1 s rather than failing after a single
 // 5 s attempt — the right budget against a cold boot we now own.
 const ws = await connect();
+// m23-ej-2: raw cmd(ws,…), never `must` — `must` process.exit(1)s on any
+// failing command, and a guard built on it would die mid-restore-loop.
+const guard = panelDensityGuard((command, params) => cmd(ws, command, params));
 async function must(command, params) {
   const r = await cmd(ws, command, params);
-  if (!r.ok) { log(`FAIL ${command}: ${JSON.stringify(r.error)}`); process.exit(1); }
+  if (!r.ok) {
+    log(`FAIL ${command}: ${JSON.stringify(r.error)}`);
+    await guard.restore("must-failure");
+    process.exit(1);
+  }
   return r.result;
 }
 let clipId = null;
@@ -133,16 +140,16 @@ async function restoreLayout(reason) {
 }
 for (const sig of ["unhandledRejection", "uncaughtException"]) {
   process.on(sig, async (err) => {
-    console.error(`\n${sig.toUpperCase()} — restoring panelLayout before exit:`, err);
+    console.error(`\n${sig.toUpperCase()} — restoring panelLayout + panelDensity before exit:`, err);
     await restoreLayout(sig);
+    await guard.restore(sig);
     stopStaging(GATE);
     process.exit(3);
   });
 }
-// ⚠️ NOT restored here and NOT this item's scope: this gate also sets
-// `debug.panelDensity {panel:"pianoRoll", mode:"pro"}` and never puts it back —
-// that is the m23-ej-2 class, which has its own sweep and its own verification
-// plan. Fixing it here would land it outside that item's leg-for-leg comparison.
+// m23-ej-2: `debug.panelDensity {panel:"pianoRoll", mode:"pro"}` below now goes
+// through the shared guard (`panelDensityGuard`, _staging.mjs) — the class this
+// comment used to defer to its own item.
 
 await must("debug.panelLayout", { reset: true });
 await must("debug.windowFrame", { width: 1440, height: 900 });
@@ -150,7 +157,7 @@ await sleep(400);
 
 // 1. Pro, default zoom — the reference frame (gutter + grid + scrub strip +
 //    velocity lane + controller strip all in one).
-await must("debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
+await guard.set("pianoRoll", "pro");
 await sleep(400);
 await cap("pro-default");
 
@@ -178,7 +185,7 @@ await sleep(400);
 await cap("pro-playhead");
 
 // 5. Simple density (no velocity lane / no snap picker) — same gutter.
-await must("debug.panelDensity", { panel: "pianoRoll", mode: "simple" });
+await guard.set("pianoRoll", "simple");
 await sleep(400);
 await cap("simple-default");
 
@@ -186,13 +193,21 @@ await cap("simple-default");
 await must("debug.windowFrame", { width: 1208, height: 640 });
 await sleep(400);
 await cap("simple-floor");
-await must("debug.panelDensity", { panel: "pianoRoll", mode: "pro" });
+await guard.set("pianoRoll", "pro");
 await sleep(400);
 await cap("pro-floor");
 
-// m23-dv-1: restore BEFORE teardown — after stopStaging there is nobody to ask.
+// m23-dv-1 / m23-ej-2: restore BEFORE teardown — after stopStaging there is
+// nobody to ask.
 await restoreLayout("normal exit");
+await guard.restore("normal exit");
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
 log("done");
 ws.close();
-process.exit(0);
+// m23-fl: this gate ASSERTS NOTHING and always has — its header says so in prose, but nothing
+// MACHINE-READABLE did, so a corpus run counted it as a passing gate indistinguishable from one
+// that actually checked something. `verdict({ran: 0, ...}, {allowEmpty})` states it in a form the
+// census can read: it still exits 0 (correct — this is a capture tool), but it is now counted as
+// EXEMPTED, never as MIGRATED, and the reason is enforced non-empty at RUNTIME rather than by
+// convention. Assertions were deliberately NOT invented for it: the real check is a human eye.
+verdict({ ran: 0, failed: 0 }, { allowEmpty: "capture-only by design: keyboard-gutter frames in situ against the grid, scrub strip, velocity lane and controller strip in both densities. The full-range proof lives in the offscreen harness, not here; these frames are for pixel review. See this file's own header." });

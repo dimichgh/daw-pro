@@ -109,6 +109,11 @@ public final class PianoRollModel {
     /// Per-note snapshot captured at the start of a move drag so each tick maps
     /// the raw translation off the original position (no accumulated drift).
     @ObservationIgnored private var moveBaseline: [UUID: (pitch: Int, startBeat: Double)] = [:]
+    /// The note the pointer grabbed — the gesture's ANCHOR (m23-ek-2). Its
+    /// absolute start is the ONE thing that snaps; everything else in the
+    /// selection translates by the delta that produced it. Captured by
+    /// `beginMove(anchorID:)`, read by `moveSelection`.
+    @ObservationIgnored private var moveAnchorID: UUID?
 
     public init(
         notes: [MIDINote] = [],
@@ -129,6 +134,7 @@ public final class PianoRollModel {
         self.clipLengthBeats = max(0, clipLengthBeats)
         self.selection = []
         self.moveBaseline = [:]
+        self.moveAnchorID = nil
     }
 
     // MARK: - External-mutation reseed seam (m18-i)
@@ -228,15 +234,53 @@ public final class PianoRollModel {
         return Swift.min(note.endBeat, clipLengthBeats)
     }
 
-    /// A note's rectangle in content coordinates. A minimum drawn width keeps a
-    /// very short note clickable.
-    public func rect(for note: MIDINote) -> CGRect {
+    /// ⭐ THE ONE PRODUCER of a note's rectangle in content coordinates — the
+    /// rect a CLICK hit-tests against, the rect a RUBBER BAND intersects, and
+    /// (inset) the pill the Canvas draws.
+    ///
+    /// `max(3, …)` is a minimum HIT width, not a drawing flourish: it is what
+    /// keeps a very short note clickable. At the default 32 px/beat a 1/64 note
+    /// is 2 px wide and floors to 3, so ANY second spelling of this arithmetic
+    /// disagrees with the click over a 1 px column — a note you can click but
+    /// cannot band-select, or the reverse. That is why this is one `static` with
+    /// three callers rather than three expressions that agree by luck (the m23-f
+    /// finding; `ArrangeGroupDrag.swift:21-29` legislates the same rule one
+    /// surface over).
+    ///
+    /// `nonisolated` is required, not stylistic: the `@Sendable` Canvas renderer
+    /// (`PianoRollGrid.drawNotes`) needs this arithmetic and may not touch the
+    /// model, exactly as `pitchCount` / `drawnWidth` / `playableEndBeat` already
+    /// are for the same reason. It is pure value math, never actor state.
+    public nonisolated static func noteRect(
+        _ note: MIDINote, rowHeight: CGFloat, pixelsPerBeat: CGFloat
+    ) -> CGRect {
         CGRect(
-            x: x(forBeat: note.startBeat),
-            y: y(forPitch: note.pitch),
-            width: max(3, CGFloat(note.lengthBeats) * pixelsPerBeat),
+            x: CGFloat(note.startBeat) * pixelsPerBeat,
+            y: CGFloat(pitchCount - 1 - note.pitch) * rowHeight,
+            width: Swift.max(3, CGFloat(note.lengthBeats) * pixelsPerBeat),
             height: rowHeight
         )
+    }
+
+    /// A note's rectangle at THIS model's live scales — a one-line forwarder to
+    /// `noteRect`, kept because it is what every call site inside the model
+    /// reads naturally.
+    public func rect(for note: MIDINote) -> CGRect {
+        Self.noteRect(note, rowHeight: rowHeight, pixelsPerBeat: pixelsPerBeat)
+    }
+
+    /// Every drafted note's id paired with its HIT rect, in draft order — the
+    /// input `PianoRollMarquee.hits` takes.
+    ///
+    /// The band gets its rects from HERE rather than being handed `draft` +
+    /// `rowHeight` + `pixelsPerBeat`, and that is a deliberate constraint on the
+    /// geometry type's signature: a `hits(band:notes:rowHeight:ppb:)` would
+    /// FORCE the marquee to re-spell `max(3, …)` and `(127 - pitch) · rowHeight`
+    /// inline, i.e. would make breaking the one-producer rule the path of least
+    /// resistance. A rule cannot be enforced by a signature that rewards
+    /// ignoring it.
+    public func noteRects() -> [(id: UUID, rect: CGRect)] {
+        draft.map { ($0.id, rect(for: $0)) }
     }
 
     // MARK: - Snap
@@ -301,29 +345,168 @@ public final class PianoRollModel {
         return note
     }
 
-    /// Snapshots the selected notes' positions for a move drag. Call once at
-    /// drag start, then `moveSelection` each tick.
-    public func beginMove() {
+    /// Replaces the WHOLE draft, dropping any selection id the new array no
+    /// longer carries (m23-cq-1 — the step sequencer's write path).
+    ///
+    /// The sequencer is a second VIEW over this one draft, not a second store:
+    /// `StepSequencerEdit.toggle` is a pure function from `[MIDINote]` to
+    /// `[MIDINote]`, and this is how its answer lands here before the roll's own
+    /// `commit()` submits it. That is what keeps ONE note store and ONE commit
+    /// funnel behind both editors.
+    ///
+    /// **The selection prune is not tidiness.** The step grid draws no
+    /// selection, so a note it removes could otherwise leave a dangling id in
+    /// `selection` — and `selection` is what `PianoRollNoteSelectionBridge`
+    /// publishes, i.e. what Edit ▸ Delete and the arrange's arrow-key nudge
+    /// decide on. A selection naming notes that no longer exist would keep
+    /// claiming keystrokes for content the user cannot see.
+    public func replaceDraft(_ notes: [MIDINote]) {
+        draft = notes
+        selection = selection.intersection(notes.map(\.id))
+    }
+
+    /// Snapshots the selected notes' positions for a move drag, and fixes the
+    /// gesture's ANCHOR. Call once at drag start, then `moveSelection` each tick.
+    ///
+    /// - Parameter anchorID: the note under the pointer. Defaults to nil, which
+    ///   resolves to the earliest note in the selection (`startBeat`, then
+    ///   `pitch`, then `id` — a TOTAL order, never `Set` iteration order, which
+    ///   is unstable run to run). The default exists so a caller that has no
+    ///   pointer (a test, a future menu-driven nudge) still gets a deterministic
+    ///   rigid drag rather than a deformed one.
+    public func beginMove(anchorID: UUID? = nil) {
         moveBaseline = [:]
         for note in draft where selection.contains(note.id) {
             moveBaseline[note.id] = (note.pitch, note.startBeat)
         }
+        if let anchorID, moveBaseline[anchorID] != nil {
+            moveAnchorID = anchorID
+        } else {
+            moveAnchorID = draft
+                .filter { moveBaseline[$0.id] != nil }
+                .min { a, b in
+                    (a.startBeat, a.pitch, a.id.uuidString)
+                        < (b.startBeat, b.pitch, b.id.uuidString)
+                }?.id
+        }
     }
 
     /// Moves every note in the move baseline by a raw (unsnapped) beat/pitch
-    /// delta off its captured start. Start snaps to the grid and clamps to >= 0;
-    /// pitch clamps to 0...127. Length and velocity are preserved.
+    /// delta off its captured position — **RIGIDLY**. Length and velocity are
+    /// preserved.
+    ///
+    /// ⭐ THE RULE (m23-ek-2), and it is `ArrangeGroupDrag`'s, applied to notes:
+    /// **snapping and clamping are properties of the GESTURE, not of each note.**
+    /// The note under the pointer is the ANCHOR; its absolute start snaps ONCE;
+    /// the resulting delta translates every selected note. Clamps are computed
+    /// ONCE over the whole selection and applied uniformly.
+    ///
+    /// ⚠️ WHAT THIS REPLACED, because it shipped and was wrong at scale. The
+    /// pre-ek-2 body applied three PER-NOTE operations —
+    /// `(base.pitch + deltaPitch).clamped(to:)`, `max(0, base.startBeat + delta)`
+    /// and `snap(…)` on each note's own base — each of which is the m23-g2
+    /// welding defect on a different axis:
+    ///   1. per-note pitch clamp: drag a chord up into 127 and the top note
+    ///      stops while the rest keep rising — INTERVALS COLLAPSE, a chord
+    ///      becomes a cluster;
+    ///   2. per-note beat floor: drag left past 0 and the notes pile up on 0 —
+    ///      the rhythm is destroyed;
+    ///   3. per-note snap: two notes at beats 0 and 0.5 under `.beat`, dragged
+    ///      +0.1, land on 0 and 1 — the 0.5-beat gap becomes 1.0, silently.
+    /// It was invisible because a selection was only reachable one shift-click
+    /// at a time; the m23-ek-1 rubber band makes 40-note selections one gesture.
+    ///
+    /// ⭐ SINGLE-NOTE DRAGS ARE BYTE-IDENTICAL, which is what makes the fix
+    /// cheap, and it is algebra rather than hope: with one note the anchor IS
+    /// the note and IS the min and IS the max, so
+    /// `base + max(d, -base)` = `max(base + d, 0)`; `snap` of that is exactly
+    /// the old expression, and the post-snap re-clamp is a no-op because `snap`
+    /// already floors at 0. The pitch range `(-minPitch)...(127 - maxPitch)`
+    /// likewise collapses to `clamped(to: 0...127)` when min == max.
+    /// `PianoRollModelTests` pins this across the whole snap ladder — and pins
+    /// it through the SIX pre-existing single-note call sites that were
+    /// deliberately NOT rewritten.
+    ///
+    /// ⚠️ WHY NOT `ArrangeGroupDrag.plan(…)` DIRECTLY: it snaps through
+    /// `ClipEdit.movedStartBeat`, whose vocabulary is `ClipSnap` + `MeterMap`
+    /// (bar/beat against a meter map). The roll snaps with `SnapResolution`,
+    /// which carries 1/32, 1/64 and triplets that `ClipSnap` cannot express. A
+    /// reuse would have to re-derive the grid on the way in — the duplicate
+    /// computation that type's own doc forbids. The RULE is shared; the snap
+    /// home is not.
     public func moveSelection(deltaBeats: Double, deltaPitch: Int, resolution: SnapResolution) {
+        guard !moveBaseline.isEmpty else { return }
+        let bases = moveBaseline.values
+        // ── PITCH: one clamp for the whole group, so the shape survives the wall.
+        let minPitch = bases.map(\.pitch).min() ?? 0
+        let maxPitch = bases.map(\.pitch).max() ?? 0
+        let pitchDelta = deltaPitch.clamped(to: (-minPitch)...(MIDINote.pitchRange.upperBound - maxPitch))
+        // ── BEAT: floor the ASK once against the group, snap the ANCHOR once,
+        // then re-clamp the RESULT uniformly.
+        //
+        // ⚠️ BOTH CLAMPS ARE LOAD-BEARING and neither subsumes the other. The
+        // first keeps the anchor's snap decision measured against travel the
+        // group can actually make. The second exists because a snap can round
+        // the anchor DOWN past the floor that was just applied: notes at 0.2
+        // (min) and 2.4 (anchor) under `.beat` with a raw −0.1 floor to −0.1,
+        // put the anchor at 2.3, which snaps to 2 — an applied −0.4 that would
+        // land the min note at −0.2. Re-clamping uniformly stops the GROUP at
+        // the wall (min note exactly on 0) with the anchor left off-grid, which
+        // is what "stops as a unit" means.
+        let minStart = bases.map(\.startBeat).min() ?? 0
+        let anchorBase = moveAnchorID.flatMap { moveBaseline[$0]?.startBeat } ?? minStart
+        let askedDelta = max(deltaBeats, -minStart)
+        let snappedAnchor = snap(beat: max(0, anchorBase + askedDelta), resolution: resolution)
+        // ONE note's landing is computed EXACTLY and everything else translates
+        // off it — never `base + (landing - base)`, which is not reliably
+        // `landing` in binary floating point (0.2 + (2.2 − 2.4) is 2.8e-16, not
+        // 0). A drag has to be byte-exact where the user can see it: on the note
+        // that decided the gesture.
+        //
+        //  • normally that is the ANCHOR, landing on its snapped start — which
+        //    is what makes a single-note drag byte-identical to the pre-ek-2
+        //    expression, since one note is its own anchor;
+        //  • when the WALL binds it is the EARLIEST note, landing exactly on
+        //    beat 0. The wall binds when the anchor's snap rounds it DOWN past
+        //    the floor already applied to `askedDelta` — notes at 0.25 and 2.5
+        //    (anchor) under `.beat` with a raw −0.125 floor to −0.125, put the
+        //    anchor on 2.375, which snaps to 2: an applied −0.5 that would land
+        //    the earliest note at −0.25. Re-anchoring on the wall stops the
+        //    GROUP there rigidly, with the anchor left off-grid, which is what
+        //    "stops as a unit" means.
+        let (referenceBase, referenceLanding): (Double, Double) =
+            snappedAnchor < anchorBase - minStart
+                ? (minStart, 0)
+                : (anchorBase, snappedAnchor)
+        let appliedDelta = referenceLanding - referenceBase
         for (id, base) in moveBaseline {
             guard let index = draft.firstIndex(where: { $0.id == id }) else { continue }
             let note = draft[index]
-            let newPitch = (base.pitch + deltaPitch).clamped(to: MIDINote.pitchRange)
-            let newStart = snap(beat: max(0, base.startBeat + deltaBeats), resolution: resolution)
             draft[index] = MIDINote(
-                id: id, pitch: newPitch, velocity: note.velocity,
-                startBeat: newStart, lengthBeats: note.lengthBeats
+                id: id, pitch: base.pitch + pitchDelta, velocity: note.velocity,
+                // Every note at the reference start takes the exact landing —
+                // they are indistinguishable by construction, so there is no
+                // choice to make between them.
+                startBeat: base.startBeat == referenceBase
+                    ? referenceLanding : base.startBeat + appliedDelta,
+                lengthBeats: note.lengthBeats
             )
         }
+    }
+
+    // MARK: - Rubber band (m23-ek-1)
+
+    /// Apply a rubber band's outcome to the selection: REPLACE with what the
+    /// band touched, or UNION it onto the selection frozen when the band armed.
+    ///
+    /// The base is a parameter rather than model state because a marquee
+    /// re-decides the WHOLE selection on every pointer update — growing the band
+    /// adds notes and shrinking it gives them back — which is only possible
+    /// against a frozen base. Reading the live selection instead would make each
+    /// update compound the last, and an additive band could never give anything
+    /// back (the `TimelineLanesView.updateMarquee` rule, one surface over).
+    public func applyMarquee(hits: Set<UUID>, base: Set<UUID>, additive: Bool) {
+        selection = additive ? base.union(hits) : hits
     }
 
     /// Resizes a note's right edge to a snapped end beat. Length can't fall

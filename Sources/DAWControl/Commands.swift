@@ -159,6 +159,17 @@ public final class CommandRouter {
     /// added mid-session takes effect without a restart. Never logs key material.
     private let lyricsWriterProvider: @MainActor () throws -> any LyricsGenerating
 
+    /// `vc.importVoiceModel` (m23-di-2a) — the RVC voice store's target
+    /// directory. Pure filesystem copy, no HTTP/sidecar dependency, so unlike
+    /// `voiceConverting` above this needs no protocol seam — just an
+    /// injectable destination (the `store.generationImportsDirectory`
+    /// precedent: `ProjectStore+Generation.swift`). Defaults to
+    /// `VoiceModelImport.voicesDirectory` (the SAME path
+    /// `VoiceConversionManager.spawnAndPoll` hands the sidecar as
+    /// `RVC_VOICES_DIR`); tests inject a scratch temp directory instead so a
+    /// test run never writes into the real Application Support tree.
+    private let voiceModelImportDirectory: URL
+
     /// App-layer command extension hook. DAWApp installs this to serve `debug.*`
     /// commands (e.g. `debug.captureUI`) that render the live SwiftUI hierarchy —
     /// inherently main-actor, UI-runtime work with no headless equivalent.
@@ -417,6 +428,11 @@ public final class CommandRouter {
         // against `ai.sidecarStop`.
         "ai.modelResidency",
         "ai.modelUnload",
+        // m23-di-2a: third-party RVC voice-model IMPORT — a local filesystem
+        // copy into the app-owned voice store (VoiceModelImport.swift), no
+        // sidecar HTTP call. STRICTLY ADDITIVE, appended at the end per the
+        // additive-at-end law.
+        "vc.importVoiceModel",
     ]
 
     public init(
@@ -433,7 +449,8 @@ public final class CommandRouter {
         connectionInfo: ControlConnectionInfo = ControlConnectionInfo(),
         lyricsWriter: (@MainActor () throws -> any LyricsGenerating)? = nil,
         importGenerator: SongGenerating? = nil,
-        modelLifecycle: ModelLifecycleCoordinator = .shared
+        modelLifecycle: ModelLifecycleCoordinator = .shared,
+        voiceModelImportDirectory: URL = VoiceModelImport.voicesDirectory
     ) {
         self.store = store
         self.sidecarManager = sidecarManager
@@ -447,6 +464,7 @@ public final class CommandRouter {
         self.keyEnvironment = keyEnvironment
         self.connectionInfo = connectionInfo
         self.modelLifecycle = modelLifecycle
+        self.voiceModelImportDirectory = voiceModelImportDirectory
         // Default: resolve a writer from the shared key chain on each call.
         // `ai.writeLyrics` uses the APP's keys + live project context — the MCP
         // server's own legacy `generate_lyrics` calls a provider directly with its
@@ -1084,10 +1102,24 @@ public final class CommandRouter {
             // "adopt" with a non-zero atBeat is a refusal (the maps are
             // absolute, so there is no honest offset adoption).
             //
-            // instruments: "gm" assigns General MIDI sound-bank programs from
-            // the file's program changes (channel 10 = the standard drum kit);
-            // "none" (the default) leaves the tracks on the default instrument.
-            // The program each part ASKS for is reported either way.
+            // instruments: "gm" (THE DEFAULT since m23-k5) assigns General MIDI
+            // sound-bank programs from the file's program changes (channel 10 =
+            // the standard drum kit), so an imported file sounds like the
+            // instruments it names; "none" is the explicit opt-out and leaves
+            // the tracks on the default instrument. The program each part ASKS
+            // for is reported either way. The flip is MEASURED, not assumed: on
+            // a 13-part file the import call costs the same either way (26 ms)
+            // and all 13 banks report `ready` in engine.auPrepareStats 161 ms
+            // after a COLD import, with no main-actor cost above the "none"
+            // control — the prepares are async, off the caller's edit.
+            //
+            // Each imported part reports BOTH names: `name` is the file's
+            // LITERAL spelling and `trackName` is what the track was actually
+            // called. They differ whenever the file's own name does not
+            // distinguish the parts — a format-0 file carries ONE chunk name for
+            // every channel, so `name` can be the song title 13 times while
+            // `trackName` reads "Acoustic Grand Piano", "Standard Drum Kit",
+            // "Distortion Guitar (ch 9)"… Read `trackName` to find a track.
             //
             // The recommended agent workflow is dryRun: true first — read the
             // report's `parts` array and the resolved tempo policy, then call
@@ -4647,7 +4679,18 @@ public final class CommandRouter {
             // ai.sidecarStatus's M10-b tracking. Response: the model's own
             // VoiceConversionStatus Codable (AIServices) — {state, message,
             // version?, engine?, baseModelPresent?, voiceCount?, pid?,
-            // phase?, startingForSeconds?}. Additive and independent of
+            // phase?, startingForSeconds?, mitigationActive?,
+            // mitigationDetail?}.
+            //
+            // m23-fo-2 — `mitigationActive` is TRI-STATE and only populated
+            // when healthy: `true` the facade runs `mx.clear_cache()` before
+            // every conversion; `false` a POSITIVE answer that it does NOT
+            // (either no hook at all — typically a `run.sh` started by hand
+            // outside the app — or a hook whose engine patch failed); `null`
+            // the probe itself did not complete. `false` and `null` are NOT
+            // interchangeable: only `false` means "we know you are
+            // unprotected", and only `false` puts the m23-fo warning in
+            // `message`. Additive and independent of
             // ai.sidecarStatus — this is a SECOND, separate local sidecar.
             // This is process-lifecycle management only — voice-conversion/
             // training tools arrive in a later roadmap item.
@@ -4859,6 +4902,74 @@ public final class CommandRouter {
             } catch {
                 throw await translateVoiceConversionError(error)
             }
+
+        case "vc.importVoiceModel":
+            // Third-party RVC voice-model IMPORT (m23-di-2a) — the "drop a
+            // model folder in" case scripts/rvc/server.py:141's own comment
+            // names, wired up. params: modelPath (required — absolute or
+            // ~-expanded local path to a third-party RVC .pth checkpoint).
+            // indexPath (optional — absolute/~-expanded path to its
+            // companion FAISS .index; raises conversion quality when
+            // present, server.py's hasIndex field). voiceId (optional — the
+            // store id this voice is listed under; derived from 'name' or
+            // the model file's own stem when omitted, sanitised to
+            // [A-Za-z0-9-_]; the reserved smoke-test id "base" is refused).
+            // name (optional display name written into a voice.json
+            // alongside the model — defaults to the same stem voiceId
+            // derives from). overwrite (optional bool, default false —
+            // replace an existing voice at that id instead of refusing, the
+            // ai.installSpeechModel precedent).
+            //
+            // PURE LOCAL FILESYSTEM COPY into VoiceModelImport.voicesDirectory
+            // (<Application Support>/DAWPro/VoiceModels — never inside the
+            // read-only scripts/rvc/ checkout). Needs no running sidecar:
+            // the facade's own _scan_voices() (server.py:177) is a plain
+            // directory scan, and RVC_VOICES_DIR now points HERE at every
+            // vc.sidecarStart (VoiceConversionManager.spawnAndPoll), so a
+            // voice imported before OR after the sidecar's first boot is
+            // found either way — confirm with vc.listVoices once the
+            // sidecar is healthy. Never converts .pth -> .npz (m23-di-2b,
+            // blocked on the user's word — no sidecar route exists for it,
+            // and adding one would mean editing scripts/rvc/server.py,
+            // which is forbidden): the voice lands honestly in
+            // "needsConversion" state, the same state vc.listVoices/the
+            // Voice panel's "NEEDS PREP" chip already render for a
+            // partially-prepared voice.
+            //
+            // Rights-responsibility policy (m23-n2d — the user WITHDREW the
+            // old own-voice-only prohibition): third-party/celebrity voice
+            // models are supported; provenance and licensing are the
+            // user's, not this command's concern.
+            try params.rejectUnknownKeys(
+                ["modelPath", "indexPath", "voiceId", "name", "overwrite"],
+                verb: "vc.importVoiceModel")
+            let vimModelPathRaw = try params.require("modelPath", \.stringValue)
+            let vimModelPath = (vimModelPathRaw as NSString).expandingTildeInPath
+            guard vimModelPath.hasPrefix("/") else {
+                throw ControlError("'modelPath' must be an absolute path")
+            }
+            var vimIndexPath: String?
+            if let vimIndexPathRaw = params["indexPath"]?.stringValue {
+                let expanded = (vimIndexPathRaw as NSString).expandingTildeInPath
+                guard expanded.hasPrefix("/") else {
+                    throw ControlError("'indexPath' must be an absolute path")
+                }
+                vimIndexPath = expanded
+            }
+            let vimResult = try VoiceModelImport.importModel(
+                modelPath: vimModelPath,
+                indexPath: vimIndexPath,
+                voiceId: params["voiceId"]?.stringValue,
+                name: params["name"]?.stringValue,
+                overwrite: params["overwrite"]?.boolValue ?? false,
+                voicesDirectory: voiceModelImportDirectory)
+            return .success(request.id, .object([
+                "voiceId": .string(vimResult.voiceId),
+                "name": .string(vimResult.name),
+                "hasIndex": .bool(vimResult.hasIndex),
+                "state": .string("needsConversion"),
+                "directoryPath": .string(vimResult.directoryPath),
+            ]))
 
         case "clip.transcribe":
             // BLOCKING (m23-n2b) — the render.mixdown-class precedent stated
@@ -5744,16 +5855,22 @@ public final class CommandRouter {
     }
 
     /// Parses `project.importMIDI`'s optional `instruments`, same rule.
+    ///
+    /// ABSENT ⇒ `.gm` since m23-k5 (it was `.none` in k3, which is why every
+    /// human import landed on the default poly synth). The default lives in
+    /// `MIDIImportInstruments`; it is REPEATED here rather than deferred to
+    /// `store.importMIDIFile`'s own default because this parser must return a
+    /// value, and the two are pinned together by a test.
     private static func parseMIDIImportInstruments(_ value: JSONValue?) throws
         -> MIDIImportInstruments {
-        guard let raw = value?.stringValue else { return .none }
+        guard let raw = value?.stringValue else { return .gm }
         guard let mode = MIDIImportInstruments(rawValue: raw) else {
             let legal = MIDIImportInstruments.allCases.map { "\"\($0.rawValue)\"" }
                 .joined(separator: ", ")
             throw ControlError(
-                "'instruments' must be one of \(legal) — got \"\(raw)\". \"gm\" assigns General "
-                + "MIDI sound-bank programs from the file's program changes; \"none\" leaves the "
-                + "new tracks on the default instrument")
+                "'instruments' must be one of \(legal) — got \"\(raw)\". \"gm\" (the default) "
+                + "assigns General MIDI sound-bank programs from the file's program changes; "
+                + "\"none\" leaves the new tracks on the default instrument")
         }
         return mode
     }
@@ -6086,6 +6203,7 @@ public final class CommandRouter {
                 "releaseMs": .number(comp.releaseMs),
                 "kneeDb": .number(comp.kneeDb),
                 "makeupDb": .number(comp.makeupDb),
+                "mix": .number(comp.mix),
             ])
         case .limiter:
             let limiter = effect.resolvedLimiter

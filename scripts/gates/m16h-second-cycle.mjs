@@ -42,7 +42,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, verdict } from "./_staging.mjs";
 
 const GATE = "m16h";                        // names the pidfile + staging out dir
 const CYCLES = Number(process.env.CYCLES || "5");
@@ -145,8 +145,15 @@ try {
 }
 
 let failures = 0;
+// m23-fa-1: `ran` for the verdict primitive must come from a counter
+// incremented INSIDE the loop, never from `CYCLES` itself — `CYCLES` is the
+// requested count, not the recorded one, and using it as `ran` would make
+// `CYCLES=0` (or a loop that throws before its first iteration completes)
+// report a bogus non-zero `ran` and defeat the whole point of this migration.
+let cyclesRun = 0;
 try {
   for (let c = 1; c <= CYCLES; c++) {
+    cyclesRun++;
     const t0 = Date.now();
     await cmd(ws, "project.new", { discardChanges: true });
     for (let i = 0; i < STRIPS; i++) {
@@ -195,9 +202,10 @@ try {
 // Both remaining exits mean the soak completed and rendered a verdict; the
 // abrupt exit(2) paths above are covered structurally by armTeardown.
 stopStaging(GATE);
-if (failures === 0) {
-  log(`m16-h gate PASS: ${CYCLES}/${CYCLES} cycles audible, zero clip-unplayable`);
-  process.exit(0);
-}
-log(`m16-h gate FAIL: ${failures}/${CYCLES} cycles silent or raising (the pre-fix signature)`);
-process.exit(1);
+log(`m16-h gate: ${cyclesRun}/${CYCLES} cycles ran, ${failures} silent or raising (the pre-fix signature)`);
+// m23-fa-1: was `if (failures === 0) exit(0) else exit(1)` — vacuous when
+// CYCLES=0 (verified LIVE, pre-migration: `CYCLES=0 … node m16h-second-
+// cycle.mjs` exits 0, "0/0 cycles audible", a real reachable false green, not
+// a hypothetical one). `ran: cyclesRun` (never `CYCLES`) is what makes
+// verdict() catch it: a loop that never executes leaves cyclesRun at 0.
+verdict({ ran: cyclesRun, failed: failures });

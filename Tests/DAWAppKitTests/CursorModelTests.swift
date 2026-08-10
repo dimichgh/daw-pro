@@ -38,8 +38,10 @@ struct CursorModelTests {
         }
         // 12 → 13 in m17-c: the arrange playhead grab strip joined the movable
         // bodies (drag scrub-seeks the transport). 13 → 14 in m23-h: the arrange
-        // TRACK HEADER joined them too (drag reorders the track list).
-        #expect(CursorAffordance.allCases.count == 14)
+        // TRACK HEADER joined them too (drag reorders the track list). 14 → 15
+        // in m23-cq-1: the step-sequencer CELL joined the place/paint family
+        // (click authors a hit by position; nothing there can be picked up).
+        #expect(CursorAffordance.allCases.count == 15)
     }
 
     @Test("value adjusters keep their resize cursor for the whole drag")

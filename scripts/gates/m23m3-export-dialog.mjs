@@ -12,7 +12,7 @@
 // no retry — fine when a human had the app up already, a race against our own boot now.
 // The harness retries 40x1 s and refuses port 17600 outright.
 import fs from "fs";
-import { buildOrAbort, startStaging, stopStaging, connect, sleep } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, connect, sleep, verdict } from "./_staging.mjs";
 const GATE = "m23m3-export-dialog";   // names the pidfile + out dir = the default OUT
 const OUT = process.argv[2] || `/tmp/daw-gate-out/${GATE}`;
 const log = (s) => fs.writeSync(1, s + "\n");
@@ -51,11 +51,15 @@ const cap = async (name, params = {}) => {
 };
 
 // m23-bg: pin the capture window and CONFIRM it stuck before anything else
-// runs. A pin's own echo is not proof it took — `debug.windowFrame
-// {width:1440,height:640}` returns 640 exactly, then the window drifts to
-// 672 within ~100ms and holds there (WindowFloor is applied to the content
-// area below the titlebar while this command sets a contentRect INCLUDING
-// it, +32 exactly) — {1400,1000} holds perfectly instead. So this settles,
+// runs. A pin's own echo is not proof it took — until m23-dw fixed it,
+// `debug.windowFrame {width:1440,height:640}` used to return 640 exactly, then
+// the window silently drifted to 672 within ~100ms and held there (WindowFloor
+// is applied to the content area below the titlebar while this command sets a
+// contentRect INCLUDING it, +32 exactly). m23-dw fixed the drift itself: that
+// same request now lands on 672 immediately and stays (`WindowFloor.
+// minWindowContentHeight`) — but this gate pins {1400,1000} anyway, which
+// held perfectly even before the fix, and keeps the re-read-confirm pattern
+// as a general defense, not one specific to the old bug. So this settles,
 // then re-reads with a BARE (mutation-free — DAWProApp.swift:3617 only
 // mutates when width/height are present) call and asserts the re-read
 // matches the request. Unpinned, this gate would inherit whatever size the
@@ -188,4 +192,4 @@ await cap("05-closed");
 log(`\n${PASS} passed, ${FAIL} failed`);
 ws.close();
 stopStaging(GATE);   // SIGTERMs by exact pid AND releases our session.lock
-process.exit(FAIL ? 1 : 0);
+verdict({ ran: PASS + FAIL, failed: FAIL });

@@ -445,4 +445,84 @@ struct ProjectStoreMIDIImportTests {
         try store.undo()
         #expect(store.tracks[0].clips[0].notes?.map(\.pitch) == [36])
     }
+
+    // MARK: - m23-k5 — the defaults a human import actually gets
+
+    /// THE USER'S BUG AT STORE LEVEL. `DAWProApp.importFiles` calls
+    /// `importMIDIFile(path:atBeat:)` and names NO instrument policy — that is
+    /// the whole of the human import path — so what this signature defaults to
+    /// IS what File→Import and the arrange drop do. It defaulted to `.none`, and
+    /// every imported track landed on the default poly synth.
+    ///
+    /// Asserted THROUGH THE DEFAULT (no `instruments:` argument) on purpose: a
+    /// test that passed `.gm` explicitly would keep passing on a build that
+    /// reverted the default, which is exactly the defect.
+    @Test("m23-k5 — an import that names no instrument policy assigns the file's GM programs")
+    func defaultImportAssignsGMInstruments() throws {
+        let (store, _) = Self.makeStore()
+        let url = try Self.stagedFixture("hazard-type0-named-programs")
+
+        let report = try store.importMIDIFile(path: url.path)
+
+        #expect(report.instrumentsAssigned == "gm")
+        #expect(store.tracks.count == 5)
+        #expect(store.tracks.allSatisfy { $0.instrument?.kind == .soundBank })
+        #expect(store.tracks.map { $0.instrument?.soundBank?.program } == [40, 30, 30, 0, 0])
+        // Channel 10 is the kit whatever program it names.
+        #expect(store.tracks.last?.instrument?.soundBank?.bankMSB
+                == GMProgramCatalog.percussionBankMSB)
+
+        // …and the tracks are named for their PARTS, not thirteen copies of the
+        // song title. Both halves of the user's report, on one import.
+        #expect(store.tracks.map(\.name) == [
+            "Violin", "Distortion Guitar (ch 2)", "Distortion Guitar (ch 3)",
+            "Fixture Song (ch 5)", "Standard Drum Kit",
+        ])
+        #expect(store.tracks.flatMap { $0.clips.map(\.name) } == store.tracks.map(\.name))
+        // The report still says what the FILE said, verbatim — additive, not a
+        // repurposing of a shipped field.
+        #expect(report.parts.map(\.name) == Array(repeating: "Fixture Song", count: 5))
+        #expect(report.parts.map(\.trackName) == store.tracks.map(\.name))
+    }
+
+    /// The opt-out survives the flip: a caller who explicitly wants bare tracks
+    /// still gets them, and the programs are reported either way.
+    @Test("m23-k5 — instruments: .none is still an explicit opt-out")
+    func explicitNoneStillOptsOut() throws {
+        let (store, _) = Self.makeStore()
+        let url = try Self.stagedFixture("hazard-type0-named-programs")
+
+        let report = try store.importMIDIFile(path: url.path, instruments: .none)
+
+        #expect(report.instrumentsAssigned == "none")
+        #expect(store.tracks.allSatisfy { $0.instrument == nil })
+        #expect(report.parts.map(\.programName) == [
+            "Violin", "Distortion Guitar", "Distortion Guitar", nil, "Standard Drum Kit",
+        ])
+        // Naming does NOT depend on the instrument policy — the tracks are still
+        // named for their parts with `.none`.
+        #expect(store.tracks.map(\.name) == [
+            "Violin", "Distortion Guitar (ch 2)", "Distortion Guitar (ch 3)",
+            "Fixture Song (ch 5)", "Standard Drum Kit",
+        ])
+    }
+
+    /// A clip import creates no track, so it must not silently re-point the host
+    /// track's instrument — `importMIDIIntoClip` pins `.none` explicitly and the
+    /// flipped project-path default must not leak into it.
+    @Test("m23-k5 — a clip import leaves the host track's instrument alone")
+    func clipImportDoesNotAssignInstruments() throws {
+        let (store, _) = Self.makeStore()
+        let track = store.addTrack(kind: .instrument)
+        let clip = try store.addMIDIClip(toTrack: track.id, atBeat: 0, lengthBeats: 8, notes: [])
+        let url = try Self.stagedFixture("hazard-type0-named-programs")
+
+        let report = try store.importMIDIIntoClip(clipID: clip.id, path: url.path)
+
+        #expect(report.instrumentsAssigned == "none")
+        #expect(store.tracks[0].instrument == nil)
+        // …and the clip keeps its own name: a clip import replaces CONTENT.
+        #expect(store.tracks[0].clips[0].name == clip.name)
+        #expect(store.tracks[0].clips[0].notes?.map(\.pitch) == [60])
+    }
 }

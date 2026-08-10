@@ -41,6 +41,7 @@ import {
   ROOT, LIVE_PORT, STAGING_PORT,
   buildOrAbort, startStaging, stopStaging, connect,
   sessionLockPath, stagingSessionLockPath, releaseSessionLock, sleep,
+  verdict,
 } from "./_staging.mjs";
 
 const GATE = "m23ac2c";
@@ -195,7 +196,7 @@ async function realPathLeg() {
   fs.writeFileSync(`${OUT}/result.json`, JSON.stringify(checks, null, 2));
   const passed = checks.filter((c) => c.pass).length;
   console.log(`\n${passed}/${checks.length} checks passed`);
-  process.exit(passed === checks.length ? 0 : 1);
+  verdict({ ran: checks.length, failed: checks.length - passed });
 })().catch((e) => {
   console.log(`FAIL  unhandled: ${e && e.stack ? e.stack : e}`);
   try { stopStaging(GATE, PIDFILE); } catch {}

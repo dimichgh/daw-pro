@@ -70,7 +70,7 @@
 // tests the PREVIOUS build).
 import fs from "fs";
 import { execFileSync } from "child_process";
-import { buildOrAbort, startStaging, stopStaging } from "./_staging.mjs";
+import { buildOrAbort, startStaging, stopStaging, verdict } from "./_staging.mjs";
 
 const GATE = "m23ag2";
 const PORT = process.env.DAW_CONTROL_PORT || "17695";
@@ -320,4 +320,4 @@ for (const r of results) if (!r.ok) console.log(`FAIL ${r.n}\n     ${r.d}`);
 try { ws.close(); } catch {}
 stopStaging(GATE, PIDFILE);
 clearTimeout(killer);
-process.exit(pass === results.length ? 0 : 1);
+verdict({ ran: results.length, failed: results.length - pass });
