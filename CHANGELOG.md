@@ -191,6 +191,22 @@ A third we had assumed was fine genuinely is fine — we ran it to be sure inste
 earlier word for it. Both leaking tests now restore your panel settings the way the others do, and
 both still pass.
 
+
+The bigger fix behind those two: our tests no longer share their saved settings with the copy of the
+app you use. They used to write into exactly the same place your own preferences live, which is how a
+test run was able to move where your window opens — that one was not even our code doing it, it was
+the system's own window-position memory, so no amount of tidying up individual settings could have
+caught it.
+
+Tests now run under a different name, which gives them their own separate store of settings. Everything
+they save goes there instead, including the things the system saves on their behalf without asking us.
+Your own settings are untouched, and we verified that by comparing the file byte for byte before and
+after — along with a deliberately corrupted copy, to prove the comparison would have noticed if
+anything had changed.
+
+The per-setting protections we added earlier are still in place. They are now redundant, and we are
+leaving them there anyway until the new approach has more time behind it.
+
 ## 2026-08-10 — Voice conversion no longer degrades the more you use it
 
 Converting the same vocal a few times in a row used to get progressively louder and more distorted,
