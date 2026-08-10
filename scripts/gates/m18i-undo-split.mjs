@@ -48,6 +48,53 @@
 // only and never pin an absolute hash: an absolute baseline here is
 // guaranteed to rot, and the drift is confirmed erratic, not a settling
 // transient.
+//
+// ═══ m23-gf-d (2026-08-10): the drift above is EXPLAINED and no longer
+// reproduces. The suspicion recorded in 2026-08-05 was RIGHT ABOUT THE STORE
+// and WRONG ABOUT THE KEY. ═══
+// The store was UserDefaults, but the fix was NOT relocation: `DAWProStaging.
+// plist` lives in `~/Library/Preferences` too. What mattered is that the
+// domain used to be SHARED — across gate runs AND with the user's own app —
+// so whatever the last gate left behind was inherited by the next m18i run.
+// m23-gf-b gave staging its own domain (`DAWProStaging`, via a symlink named
+// alias — the CFPreferences domain follows the EXECUTABLE PATH) and
+// `resetStagingDefaultsDomain()` deletes + reseeds it once per gate process.
+// ⛔ NOT the window frame. The frame DIMENSIONS were pinned and identical
+//    (2800x2000) across all 11 drifting runs, so frame SIZE cannot be it.
+//    (`NSWindow Frame` also encodes origin/screen; those stay unrefuted.)
+//    The sensitive keys are the geometry ones this gate does NOT pin —
+//    `panelLayout.editorFraction` / `rowHeight` / `arrangePPB` /
+//    `sidebarWidth` and the `panelDensity.*` set. Grep confirms this file
+//    pins none of them (0 hits; same pattern finds 16 in the seed file).
+// Measured this cycle, in the order that makes it causal rather than a streak:
+//   1. SENSITIVITY — seed `panelLayout.editorFraction` 0.45 -> 0.60 moved u0
+//      (379147 -> 380496 bytes, different hash); restoring 0.45 returned it to
+//      the byte-exact prior value. So u0 genuinely responds to domain state.
+//   2. THE DISCRIMINATING RUN — planted `editorFraction 0.60` directly into
+//      `DAWProStaging` (read back as 0.6 first, so the test is not vacuous),
+//      then ran: the reset reseeded it to 0.45 and u0 came out byte-identical
+//      to baseline. That is exactly the "last gate left a value in the domain"
+//      case, i.e. the condition that produced the original drift.
+//   3. 14 consecutive runs byte-identical. ⚠️ This is CORROBORATION ONLY, not
+//      the finding: those runs were m18i back-to-back with nothing interleaved,
+//      and the OLD shared-domain setup would also have looked clean under that
+//      condition. Leg 2 is what discriminates. (A clean streak measured under
+//      conditions that differ from the ones that produced the variance cannot
+//      tell a fix apart from the changed conditions.)
+// ⚠️ HONEST RESIDUAL — capability, not occurrence: this proves `editorFraction`
+//    CAN produce variation of exactly this shape. It does NOT prove that key is
+//    what actually drifted in 2026-08-05; those runs are gone and the specific
+//    key stays unidentified.
+// ⚠️ Determinism here has TWO tiers, and only one is pinned. The 17 seeded keys
+//    are held at fixed values. The `NS*` keys (`NSWindow Frame …`, `NSSplitView
+//    …`, `NSToolbar …`) are deliberately NOT seeded — they are cleared and
+//    REGENERATE each run, so their stability rests on the frame pin above plus
+//    an identical action sequence. If u0 ever drifts again with the seed intact,
+//    suspect NS* regeneration first.
+// ⛔⛔ STILL DO NOT PIN AN ABSOLUTE HASH, and the reason is now concrete rather
+//    than precautionary: m23-gf-e flips the seed from today's ambient snapshot
+//    to the SHIPPED defaults (six of seven panels `pro` -> `.simple`), which
+//    will certainly move u0. The within-run-only legs stay as they are.
 // ⚠️ If PIXEL/CONTROL ever flap, the fix is to CROP to the editor region
 // (the item's original preference) before hashing — not to delete the
 // legs. Full-frame hashing is used now only because within-run identity

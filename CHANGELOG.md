@@ -232,6 +232,31 @@ only surfaced because we compared the full before and after picture rather than 
 still broadly passed. It is fixed, and the name is now derived in one place instead of written down in
 two.
 
+**And it solved a five-day-old mystery.** One test takes a picture of the editor, undoes an edit, and
+takes another picture to prove the undo repainted the screen exactly as it was. That test worked, but
+it had a note attached recording something nobody could explain: the picture it took came out slightly
+different each time it ran — three different file sizes across eleven runs, with no pattern. The note
+guessed the cause was the window size being remembered somewhere outside the test's control, and
+admitted it was a guess.
+
+The guess was half right, and the half it got wrong is the interesting half. The window size was never
+it — the test pins the window and the dimensions were identical every time. The culprit was the same
+shared settings file, holding things the test does not pin: how tall the editor pane is, how tall the
+rows are, how far you are zoomed in. Another test would leave one of those changed, and the next run of
+this one would inherit it and draw a slightly different picture.
+
+It now runs identically every time. We were careful not to let a clean streak stand in for a proper
+explanation, because running the same test fifteen times in a row with nothing in between is exactly
+the situation where the old setup would also have looked clean. So we checked it the other way round:
+we deliberately planted a leftover value in the settings — the same thing another test would have
+done — confirmed it was really there, and ran. The picture came out identical to every other run,
+because the settings are now wiped and reset before each one. We also confirmed the picture genuinely
+does respond to those settings, so that "identical every time" means something rather than nothing.
+
+We did not pin the exact picture as the expected answer, deliberately. A change already queued will
+alter it on purpose, and an expected answer that goes stale the moment you look away is worse than
+none.
+
 ## 2026-08-10 — Voice conversion no longer degrades the more you use it
 
 Converting the same vocal a few times in a row used to get progressively louder and more distorted,
