@@ -207,6 +207,18 @@ anything had changed.
 The per-setting protections we added earlier are still in place. They are now redundant, and we are
 leaving them there anyway until the new approach has more time behind it.
 
+
+And a test that checks the tests: it launches the app, makes it save a setting, and then confirms your
+own preferences file is byte-for-byte what it was. It proves it is capable of noticing a change first,
+by planting one deliberately and catching it — a check that has never been seen to fail at anything is
+not worth much. It also checks the specific thing that started all this: that the window position the
+system saves on the app's behalf now lands in the test's own store rather than yours.
+
+To prove it is watching a real target rather than an empty one, it launches a second, throwaway copy
+under a different name and confirms it notices that copy's writes. The tempting alternative — switch
+the protection off and check that something breaks — was rejected: when that test worked, it would do
+so by writing into your real settings, which is the thing being protected.
+
 ## 2026-08-10 — Voice conversion no longer degrades the more you use it
 
 Converting the same vocal a few times in a row used to get progressively louder and more distorted,
