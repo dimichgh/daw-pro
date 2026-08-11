@@ -53,6 +53,7 @@
 //   M23FO_REPS=4 node scripts/gates/m23fo-conversion-stability.mjs   # smoke
 import { spawn, spawnSync } from "node:child_process";
 import { startStaging, stopStaging, connect, buildOrAbort } from "./_staging.mjs";
+import { verdict } from "./_verdict.mjs";
 import {
   mkdirSync, rmSync, writeFileSync, readFileSync, existsSync,
   copyFileSync, symlinkSync, statSync, readdirSync,
@@ -142,6 +143,14 @@ async function cleanupAll(reason) {
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     for (const e of tracked) { try { process.kill(e.pid, "SIGKILL"); } catch { /* gone */ } }
+    // m23-fa-4b-4: DELIBERATELY LEFT AT 130, and checked rather than assumed.
+    // The m23-fa-4b-3 lesson is that migrating a tail changes what the OTHER
+    // exit codes in the file mean, so every one of them was enumerated here:
+    // 130 is the POSIX 128+SIGINT convention for "killed by a signal", which
+    // collides with none of verdict's 0/1/2 and carries information the
+    // primitive has no way to express. An operator who ^C's a soak has not
+    // learned that the gate failed, nor that it asserted nothing — they
+    // learned they stopped it.
     process.exit(130);
   });
 }
@@ -232,8 +241,13 @@ console.log("");
 console.log("0. preflight + scratch topology");
 
 if (!existsSync(VENV_PY)) {
-  console.log(`FAIL vendored interpreter missing at ${VENV_PY} — run scripts/rvc/install.sh`);
-  process.exit(1);
+  // m23-fa-4b-4: an ENVIRONMENT precondition, checked before any `ck()` runs.
+  // Exiting 1 would report "the conversion stability under test FAILED"; what
+  // actually happened is that the gate could not test anything at all. Same
+  // mapping m16a's pre-loop abort (m23-fa-5) and m23bb1's responder abort
+  // (m23-fa-4b-1) got — `{ran: 0}` says the true thing.
+  console.log(`ABORT vendored interpreter missing at ${VENV_PY} — run scripts/rvc/install.sh`);
+  verdict({ ran: 0, failed: 0 });
 }
 
 // Refuse to run if anything already owns our port, and NEVER probe 8002/17600.
@@ -637,7 +651,16 @@ async function runLeg3() {
 // ======================================================================
 // legs
 // ======================================================================
-let exitCode = 1;
+// m23-fa-4b-4: `let exitCode = 1` lived here and was assigned once at the end
+// of the try block (`exitCode = fail === 0 ? 0 : 1`) — and then NEVER READ. The
+// real exit has always been the `process.exit(fail === 0 ? 0 : 1)` at the very
+// bottom, which recomputes the same expression. Harmless, but it reads like the
+// variable controls the exit code, so anyone "fixing" the tail to use it would
+// believe they had changed nothing. Removed rather than migrated: dead code
+// that impersonates the verdict is exactly the confusion this milestone is
+// about. ⚠️ Note it did NOT protect the throw path either — on a throw the
+// `finally` runs and the error propagates, so neither this variable nor the
+// bottom line is reached.
 const report = {};
 const AUDIO = LEGS.has("1") || LEGS.has("2");
 const EMPTY_LEG = { outputs: [], captured: [], reps: [], logSlice: "" };
@@ -797,7 +820,6 @@ try {
 
   }  // end AUDIO reporting
 
-  exitCode = fail === 0 ? 0 : 1;
 } finally {
   await cleanupAll("finally");
 
@@ -841,4 +863,20 @@ try {
   console.log(`${GATE.toUpperCase().replace(/-/g, "_")} pass=${pass} fail=${fail}`);
   console.log(`report: ${path.join(OUT, "report.json")}`);
 }
-process.exit(fail === 0 ? 0 : 1);
+// m23-fa-4b-4: was `process.exit(fail === 0 ? 0 : 1)` — green whenever nothing
+// failed, including if every `ck()` in this file were removed.
+//
+// ⚠️ MEASURED, BECAUSE THE FIRST DRAFT OF THIS COMMENT CLAIMED THE WRONG THING.
+// It said a typo'd `M23FO_LEGS` made this "a false green one env var away", by
+// analogy with m16a's `ITERS=0`. That analogy is FALSE here: the preflight and
+// fence-audit checks sit OUTSIDE every leg guard, so `M23FO_LEGS=9` still runs
+// 13 of the 53 checks (verified: `13/13 check(s) passed`, exit 0) and is not an
+// empty run at all.
+//
+// What that env var DOES buy is a silent 53 -> 13 COVERAGE COLLAPSE that both
+// the old and new code exit 0 on. The one thing the migration adds is that the
+// banner now states the denominator — "13/13" vs "53/53" — where the old
+// `pass=13 fail=0` line left a reader to know 53 was the right number. Worth
+// saying plainly rather than overclaiming: this migration closed the
+// zero-checks hole, not the wrong-subset hole. The latter is still open.
+verdict({ ran: pass + fail, failed: fail });

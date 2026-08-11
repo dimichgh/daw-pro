@@ -74,6 +74,30 @@ become indistinguishable from a run that tested nothing — the precise confusio
 effort removing, reintroduced by the act of removing it. A crash is now recorded as a failure, like
 any other. We confirmed it by deliberately crashing the check and watching the two versions disagree.
 
+The last one is the check that proves repeated voice conversion doesn't degrade into noise. It was
+brought in on its full run — two rounds of twelve real conversions plus the app-integration round —
+rather than the cheap stand-in round, which was the whole reason we wrote that requirement down a
+cycle earlier: taking the shortcut would have declared the check covered while the expensive parts of
+it had never actually run once. Results were identical before and after, and the read-only vendored
+directory it borrows from was verified untouched afterwards by two independent means.
+
+That completes the effort. Every check the app has now reports how much it checked, and none of them
+can report success after checking nothing. Two honest caveats, both of which we would rather write
+down than let someone rediscover. First, this fixes checking *nothing*; it does not fix checking
+*less than intended* — and we demonstrated that on a real check, which can be reduced from
+fifty-three tests to thirteen by one mis-set environment variable and still reports success. It now
+at least prints how many it ran, so the shortfall is visible to a reader, but nothing objects
+automatically. Second, a separate family of abrupt exits scattered through these checks is untouched
+and tracked on its own.
+
+One pattern is worth recording because it outlived every individual fix. Six checks had been set
+aside as too expensive or too constrained to bring in. Examined one at a time, every single one was
+cheaper or less restricted than its own note claimed: one never loads a model at all, one only ever
+starts a load and immediately aborts it, one was described as runnable only once when in fact only a
+button was, and one was said to be already protected when it was protected on only half its paths.
+Each of those notes had been read and believed for cycles. A note explaining why something was
+deferred is an unverified measurement, and it gets more trusted the longer it sits there.
+
 
 
 The app has 73 automated checks that drive a real copy of it and inspect what happens. Each one

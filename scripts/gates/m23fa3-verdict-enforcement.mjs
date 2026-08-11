@@ -43,9 +43,19 @@
 // wording, chosen so the first person to migrate one of these six reads a
 // correct gate as telling them to update THIS FILE, never as a regression in
 // the gate they just fixed.
+// ⭐⭐ THE LIST IS NOW EMPTY, AND THAT IS THE POINT — as of m23-fa-4b-4 every
+// gate in the corpus routes through the primitive, with no standing waivers.
+// The entries are kept below as comments rather than deleted, because the
+// history is the useful part: EVERY ONE of the six was deferred behind a cost
+// or capability claim that turned out to be wrong or overstated when finally
+// measured, and each claim had survived unexamined for cycles.
+// ⚠️ An empty list is a state to DEFEND, not an achievement to file away: the
+// next gate that lands without `verdict()` fails this gate, which is exactly
+// the drift-prevention m23-fa-3 was built for.
 const EXEMPTIONS = {
-  // m23-fa-2's six deliberately deferred gates. m23aw/m23ej2 (the CHEAP two,
-  // m23-fa-4a) and m23bb1 (m23-fa-4b-1) are gone from this list.
+  // m23-fa-2's six deliberately deferred gates — ALL CLEARED. m23aw/m23ej2 (the
+  // CHEAP two, m23-fa-4a), m23bb1 (m23-fa-4b-1), m17h (4b-2), m18g (4b-3),
+  // m23fo (4b-4), plus m16a separately at m23-fa-5.
   //
   // ⚠️ THE OLD BLANKET JUSTIFICATION HERE WAS MEASURED FALSE AT m23-fa-4b-1. It
   // read: "The remaining four are SIDECAR gates: migrating them means running
@@ -71,16 +81,18 @@ const EXEMPTIONS = {
   //         model load each time though — unlike m17h's aborted boot — and the
   //         gate does NOT clean up after itself (`stopStaging` stops the
   //         staging APP, never the sidecar), so the operator must.
-  //   m23fo legs 1/2 boot a REAL fenced RVC facade (12 conversions); leg 3
-  //         (`M23FO_LEGS=3`) is stub-only and cheap. ⛔ Leg 3 alone must NOT
-  //         license deleting this exemption: legs 1/2 own verdict sites of their
-  //         own, and a verdict() call that never executed is precisely the
-  //         unmeasured claim this milestone exists to kill.
+  //   m23fo MIGRATED at m23-fa-4b-4, on a FULL default run (legs 1,2,3 — the
+  //         real fenced RVC facade, 12 conversions per audio leg), NOT on the
+  //         cheap stub-only leg 3. That distinction was filed one cycle ahead
+  //         precisely so this cycle could not quietly take the cheap path:
+  //         legs 1/2 own verdict sites of their own, and a verdict() call that
+  //         never executed is the unmeasured claim this milestone exists to
+  //         kill. 53/53 both before and after; fence audit clean.
   //
   // ⭐ The general lesson, same shape as m23-fa-5: a deferral justified by a
   // blanket cost claim deserves the cost RE-MEASURED PER ITEM before the next
-  // cycle pays it.
-  "m23fo-conversion-stability.mjs": "m23-fa-4b-4",
+  // cycle pays it. Every one of the four was cheaper or less constrained than
+  // its label said, and the labels had survived three cycles unexamined.
   // m16a-poison-recipe.mjs was here, exempted on the grounds that its inline
   // `if (ITERS < 1) { … exit(5) }` guard (m23-fj) gave EQUIVALENT protection, so
   // migrating was "bookkeeping, not a bug fix". Migrated and DELETED at m23-fa-5
