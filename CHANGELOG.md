@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-08-11 — A quick mode for the automated checks, so they're cheap enough to actually run
+
+We have a suite of roughly seventy-five automated checks that exercise the app end to end. Running
+all of them takes about half an hour, which in practice means they get run rarely.
+
+Two of those checks are unusual: instead of driving the app, they run our entire unit-test suite —
+one of them five times over. Timed directly, those two alone account for just under twelve minutes.
+Two checks out of seventy-five, and they dominate the clock.
+
+There's now a quick mode that leaves those two out and runs the other seventy-three. It works out
+which ones to skip by reading the checks themselves and spotting the ones that launch the full test
+suite, so it stays correct on its own as checks are added or changed — nothing is hardcoded.
+
+It also refuses to be quietly wrong. It names every check it skipped and why, it prints the real
+total so a partial run can never be mistaken for a complete one, it rejects an unrecognised mode
+name rather than silently running everything, and if it ever finds nothing to skip it says so
+loudly — because a filter that has quietly stopped working looks exactly like one with nothing to
+do.
+
 ## 2026-08-11 — A checking tool that couldn't run now says so, instead of looking like a failed check
 
 One of our internal audit tools needs a code-parsing library that isn't shipped with the project. If
