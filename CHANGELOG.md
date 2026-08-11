@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-08-11 — Every screenshot the app takes now records whether it was the frontmost window
+
+A long-running puzzle got closed today, though not by being solved.
+
+For months a particular screenshot our checks take had come back very slightly different from run to
+run — about 94 bytes apart, out of roughly 380,000, at identical dimensions. Small, erratic, and
+unexplained. Four possible causes had been named over time. All four are now ruled out, and they are
+ruled out by *size*: three of them change that screenshot by thousands of bytes, which is far too
+much to be the culprit. The last one, whether the app happened to be the frontmost window, turns out
+to change the picture by exactly nothing — measured across eight screenshots in both states, while a
+deliberate control change moved the same picture by 19,000 bytes.
+
+So the honest summary is that the difference no longer happens and we cannot say why it once did.
+The original runs came from a version of the app we can no longer reconstruct. Absence is not an
+explanation, and the entry says so rather than claiming a fix.
+
+What did ship is the instrument. Every screenshot the app takes now reports whether the app was
+frontmost when it was taken. If the difference ever returns, that fact will already be recorded
+beside it instead of having to be guessed at afterwards.
+
+That instrument justified itself within the hour. The experiment meant to settle the question tried
+twice to hold the app's focus steady and failed both times — nothing hands focus back to an app that
+never asks for it. Both halves of the comparison had quietly become the same half. Because every
+screenshot now records its own focus state, a broken controlled experiment could be salvaged as a
+sound observational one, instead of returning a confident and meaningless "no difference".
+
 ## 2026-08-10 — Re-ran the window-size experiments now that they can actually vary something
 
 With the window size finally sticking, we went back and ran the experiment it exists for.

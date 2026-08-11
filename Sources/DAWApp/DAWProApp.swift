@@ -10205,6 +10205,21 @@ final class AppModel {
                 // construction rather than by two independent reads (m23-ag).
                 "rect": Self.rectJSON(contentView.bounds),
                 "scale": .number(Double(window.backingScaleFactor)),
+                // ⭐ m23-ds — THE CAPTURE STATES ITS OWN FOCUS AMBIENT.
+                // m23-ds chased a ~94 B erratic spread in `u0-open.png` across
+                // ~13 runs and excluded three mechanisms by MAGNITUDE (density
+                // 29 KB, rowHeight 2.8 KB, editorFraction 2.3 KB — all orders
+                // too large). The last untested candidate was window-focus
+                // chrome, and it was untestable after the fact for one reason:
+                // those runs never recorded whether the app was frontmost, so
+                // the question could not be asked BACKWARD. Recording it beside
+                // every capture is what makes the next occurrence localisable
+                // instead of forensic. ⚠️ Staging never calls `NSApp.activate`,
+                // but it is nonetheless ACTIVE by default at launch (m23r3b's
+                // F0 leg asserts exactly that) — so this is a fact that VARIES
+                // with the desktop, which is precisely why it must be recorded
+                // rather than assumed.
+                "appActive": .bool(NSApplication.shared.isActive),
             ])
         }
 
@@ -10228,6 +10243,10 @@ final class AppModel {
             // The fixed frame this path renders at, and the scale it DOES honor.
             "rect": Self.rectJSON(CGRect(x: 0, y: 0, width: 1280, height: 800)),
             "scale": .number(scale),
+            // m23-ds — recorded on EVERY capture path, including this one. This
+            // path renders offscreen chrome and should be focus-independent;
+            // that is a claim worth being able to CHECK rather than assert.
+            "appActive": .bool(NSApplication.shared.isActive),
         ])
     }
 
@@ -10286,6 +10305,9 @@ final class AppModel {
             "method": .string("plugin"),
             "rect": Self.rectJSON(contentView.bounds),
             "scale": .number(Double(panel.backingScaleFactor)),
+            // m23-ds — a plugin panel is the surface MOST likely to carry
+            // focus-dependent chrome, since it is a separate window.
+            "appActive": .bool(NSApplication.shared.isActive),
         ])
     }
 
