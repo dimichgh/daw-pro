@@ -44,16 +44,35 @@
 // correct gate as telling them to update THIS FILE, never as a regression in
 // the gate they just fixed.
 const EXEMPTIONS = {
-  // m23-fa-2's six deliberately deferred gates. m23aw/m23ej2 (the two CHEAP
-  // ones, migrated at m23-fa-4a) are gone from this list. The remaining four
-  // are SIDECAR gates: migrating them means running them, and running them
-  // means loading models (the ACE sidecar alone holds ~75 GB while RSS
-  // reports ~1 GB) — so migration was deferred rather than done blind.
-  // Owner: m23-fa-4b.
-  "m17h-generation-card.mjs": "m23-fa-4b",
-  "m18g-sketchpad-honesty.mjs": "m23-fa-4b",
-  "m23bb1-vc-stop-honesty.mjs": "m23-fa-4b",
-  "m23fo-conversion-stability.mjs": "m23-fa-4b",
+  // m23-fa-2's six deliberately deferred gates. m23aw/m23ej2 (the CHEAP two,
+  // m23-fa-4a) and m23bb1 (m23-fa-4b-1) are gone from this list.
+  //
+  // ⚠️ THE OLD BLANKET JUSTIFICATION HERE WAS MEASURED FALSE AT m23-fa-4b-1. It
+  // read: "The remaining four are SIDECAR gates: migrating them means running
+  // them, and running them means loading models." That is true of two of them,
+  // PARTIAL for one, and was simply WRONG for m23bb1 — which spawns a Node stub
+  // on an ephemeral port and never touches 8001/8002 at all. It sat exempt for
+  // a cost it does not have. The honest per-gate classification:
+  //
+  //   m17h  REAL ACE boot (~75 GB). Leg G kicks one as its own test, and LOUD-
+  //         SKIPS when the sidecar is already up — so the gate is deliberately
+  //         NOT idempotent (first run 12/0, later runs 10/2). Fail-set identity
+  //         against a HEAD copy therefore needs BOTH runs pinned to the same
+  //         sidecar state, or it reads a skip as a regression.
+  //   m18g  REAL cold boot, and the window is SINGLE-USE per sidecar lifetime
+  //         on this machine — the harder constraint is the one-shot, not the GB.
+  //   m23fo legs 1/2 boot a REAL fenced RVC facade (12 conversions); leg 3
+  //         (`M23FO_LEGS=3`) is stub-only and cheap. ⛔ Leg 3 alone must NOT
+  //         license deleting this exemption: legs 1/2 own verdict sites of their
+  //         own, and a verdict() call that never executed is precisely the
+  //         unmeasured claim this milestone exists to kill.
+  //
+  // ⭐ The general lesson, same shape as m23-fa-5: a deferral justified by a
+  // blanket cost claim deserves the cost RE-MEASURED PER ITEM before the next
+  // cycle pays it.
+  "m17h-generation-card.mjs": "m23-fa-4b-2",
+  "m18g-sketchpad-honesty.mjs": "m23-fa-4b-3",
+  "m23fo-conversion-stability.mjs": "m23-fa-4b-4",
   // m16a-poison-recipe.mjs was here, exempted on the grounds that its inline
   // `if (ITERS < 1) { … exit(5) }` guard (m23-fj) gave EQUIVALENT protection, so
   // migrating was "bookkeeping, not a bug fix". Migrated and DELETED at m23-fa-5

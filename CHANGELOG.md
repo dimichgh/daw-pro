@@ -39,6 +39,15 @@ absence of any news at all were arriving under the same label. Folding it in pul
 confirmed it by deliberately breaking the app mid-run and watching the check report a real failure,
 where before it would have reported something indistinguishable from never having started.
 
+Four checks remained outside the system, set aside together on the grounds that bringing them in
+would mean running them, and running them would mean loading the very large AI models they exercise.
+Pricing that out one check at a time rather than as a group, the reason held for two of them, half
+held for a third, and did not apply at all to the fourth — which never loads a model, never contacts
+the real services, and stands up a small stand-in of its own instead. It had been set aside for a
+cost it does not have. It is now folded in, and the remaining three are tracked separately with their
+real costs written down rather than assumed. The best evidence that this was worth doing: with all
+its tests disabled, that check used to report success, and now reports that it tested nothing.
+
 
 
 The app has 73 automated checks that drive a real copy of it and inspect what happens. Each one
