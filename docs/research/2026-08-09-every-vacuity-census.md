@@ -1,34 +1,45 @@
-# The `every()`-vacuity census (m23-ee-1)
+# The `every()`-vacuity census — method and findings
 
-**Measured 2026-08-09.** Instrument: `scripts/every-vacuity-census.mjs` (acorn AST, not grep).
-Reproduce: `ACORN_DIR=<dir-with-acorn> node scripts/every-vacuity-census.mjs`.
+**Method snapshot dated 2026-08-09.** Instrument: `scripts/every-vacuity-census.mjs` (acorn AST, not grep).
 
-> ## ⚠️ STATUS — the per-site table below is the ee-1 SNAPSHOT and is now PARTLY SUPERSEDED
+**To get current figures:** `node scripts/every-vacuity-census.mjs --json`, then read the `notCleared` field.
+
+⚠️ **That bare form works only once `acorn`/`acorn-walk` exist at `scripts/node_modules/`, which is
+GITIGNORED and NOT tracked** — so it is present on a machine where someone installed it and ABSENT on a
+fresh clone. Deliberately so: acorn is not a repo dependency (see the script's own header). **If it is
+missing, use the OUT-OF-TREE recipe the script's header already documents** — install to a scratch dir and
+pass an ABSOLUTE `ACORN_DIR` — rather than adding packages under `scripts/`. The default lookup is
+otherwise CWD-INDEPENDENT: verified by running the bare command from an unrelated working directory.
+
+> ⛔ **`ACORN_DIR` IS A TRAP FOR RELATIVE PATHS — MEASURED 2026-08-11 at the m23-gq close, because the
+> line that used to sit here (`ACORN_DIR=<dir-with-acorn> node …`) DID NOT RUN.** The variable is
+> consumed as ``await import(`${ACORN_DIR}/acorn/dist/acorn.mjs`)``, and a dynamic import with a
+> relative specifier resolves **against the importing module's own URL — `scripts/` — not your shell's
+> cwd.** So `ACORN_DIR=./scripts/node_modules` from the repo root becomes `scripts/scripts/node_modules`
+> and dies with `ERR_MODULE_NOT_FOUND`. **Only set `ACORN_DIR` when acorn is genuinely out of tree, and
+> then give it an ABSOLUTE path** (verified working). ⭐ This is why a documented command has to be RUN
+> and not merely read: the old line looked more careful than the bare one, and was the broken one.
+
+> ⚠️ **Why this document does not cite counts:**
 >
-> **Re-measured 2026-08-09 at the m23-ee-2b close: 130 sites, 16 not-cleared, 15 actionable.**
-> Six of the original 22 at-risk sites are FIXED and now report cleared:
-> `m20d:272`, `m20e:1257`, `m23bp:852` (ee-2a) and `m17b:140`, `m23a2:366`, `m23k4a:183` (ee-2b).
-> Line numbers in the table below are **pre-fix**; the fixes added explanatory comments and
-> shifted them. The remaining 15 are carried as **m23-ee-2c**, grouped there by fix shape
-> (empty-literal accumulators / `.filter()` results / awaited values / helper-returned).
+> The per-site coordinate table that originally lived at lines 95–118 contained line numbers like
+> `m23ak:305` and `m23ak:553`. Those coordinates drifted during subsequent fixes (now at 313 and 561).
+> A stale pair was copied into `scripts/every-vacuity-census.mjs`'s header comment, where it persisted
+> until roadmap item m23-gp re-measured those lines and found unrelated code. **This incident proves that
+> a snapshot's numbers can rot faster than its method.** This document carries METHOD and REASONING;
+> the instrument reports its own numbers on demand and will not grow stale.
+
+> ## Triage: `notCleared` is not actionable
 >
-> **Do not read a count off this table — re-run the instrument and read its `notCleared` field.**
-> - ⭐ **The tool now reports the count itself** (added at the ee-2b close). Consumers were
->   filtering `rows` by hand, and a consumer that guesses the field name wrong gets a confident
->   **`0`** — a filter that never matched, indistinguishable from a clean corpus. That happened:
->   a query for `r.atRisk` (there is no such field; it is `r.cleared`) printed
->   `"AT-RISK TOTAL: 0"` when the true answer was **16**. The instrument knows its own schema,
->   so the instrument counts.
-> - ⚠️ If you do filter by hand, the predicate is **`r.cleared === false`**, and check
->   **`parseFails.length === 0`** in the same breath — a sibling field rendering blank is exactly
->   the tell that your field names are wrong.
+> ⭐ **The tool now reports the count itself** (`notCleared` field). Consumers were
+> deriving counts by hand, and a consumer that guesses the field name wrong gets a confident
+> **`0`** — a filter that never matched, indistinguishable from a clean corpus.
 > - ⚠️ **`notCleared` is not the ACTIONABLE count.** A receiver that is a helper *parameter* is an
 >   interprocedural question and clears by inspection, not by this tool. Actionable =
->   `notCleared` − those. Reconcile from two directions before recording it.
->
-> `m23do:163` counts as not-cleared but is **not** actionable — its receiver is a helper
-> **parameter**, cleared by inspection. That is why 16 not-cleared is 15 actionable, and it
-> reconciles from both directions: 22 − 6 = 16, and 21 − 6 = 15.
+>   `notCleared` − those.
+> - ⚠️ If you do filter by hand, the predicate is **`r.cleared === false`**, and check
+>   **`parseFails.length === 0`** in the same breath — a sibling field rendering blank is the
+>   tell that your field names are wrong.
 
 ## The axis
 
@@ -48,96 +59,58 @@ value the assertion *wants*:
 | `some(…)` | `false` | ✅ self-defending — reddens |
 | `!some(…)` | `true` | ⚠️ vacuous pass |
 
-A positive `.some()` is its own emptiness guard. Counting all sites as one population overstates
-the problem by about a third.
+A positive `.some()` is its own emptiness guard. **So treating every `.every`/`.some` occurrence as one at-risk population OVERSTATES the problem** — the self-defending polarities have to come out first, and they are a large fraction of the total. (The original snapshot put that fraction at about a third; the number is not reproduced here because only the instrument can tell you today's.)
 
 ## Grep vs parser, reconciled exactly
 
-A raw text grep finds **133** occurrences; the parser finds **130** code sites. The gap is **exactly 3**, all in
-`m23c2`: two on `:370` (``// m23-bj: EVERY leg below is an `s.every(…)`, and `[].every(fn)` is `true`.``) and one
-on `:443`. ⭐ **The prose contaminating the grep is m23-bj's own comment documenting the fix** — i.e. the
-better a defect is documented in-line, the more the naive grep over-counts. Reconciled per-file; no file has a
-grep hit the parser missed.
+⚠️ **There are TWO distinct gaps here and merging them loses both.**
 
-⚠️ Note `grep -c` counts **lines**, not occurrences (it reads 125 here because six lines carry two sites each).
-Use `grep -o | wc -l` when the number is meant to be an occurrence count.
+**Gap 1 — grep occurrences vs parser code sites.** A raw text grep finds MORE occurrences than the parser
+finds code sites, and at the ee-1 measurement the difference was accounted for exactly, per-file, with every
+excess hit landing in **comment prose**. ⭐ **The prose contaminating the grep is the fix's own comment
+documenting the defect** — i.e. the better a defect is documented in-line, the more the naive grep
+over-counts. No file had a grep hit the parser missed, and that per-file reconciliation is the check worth
+repeating, not the difference it produced.
 
-## Scope, re-derived
+**Gap 2 — lines vs occurrences.** ⚠️ `grep -c` counts **LINES**, not occurrences, and it under-reads
+whenever a single line carries more than one site (several do). Use `grep -o | wc -l` when the number is
+meant to be an occurrence count.
 
-The filed scope (115 occurrences / 39 gates / 67 non-harness) had **rotted** — the corpus has grown.
-Measured now: **71 non-harness gates**, and a raw text grep finds 133 occurrences across 42 files.
-That grep counts **comment prose**, which is why this uses a parser: the real figure is
-**130 code sites across 42 gates**, 0 parse failures.
+## At-risk candidates: what makes a site flagged
 
-## Result
-
-**130 sites → 108 cleared by the scanner, 22 flagged; 1 cleared by inspection at ee-1 → 21 ACTIONABLE candidates across 16 gates.**
-
-### Cleared, by reason
-
-| clearing reason | sites |
-|---|---|
-| inline .length conjunct | 37 |
-| literal receiver | 30 |
-| polarity (some is false on empty — reddens instead) | 21 |
-| leading count-pin leg | 18 |
-| inline .length conjunct (via source `busSeen`) | 2 |
-
-`.filter(…).length === 0` — the extension the item suggested — has **zero** instances in the corpus.
-
-### At-risk: the 22 candidates
-
-⚠️ **These are CANDIDATES, not confirmed defects.** Each needs the same question m23-bj asked of
+⚠️ **Flagged sites are CANDIDATES, not confirmed defects.** Each needs the same question m23-bj asked of
 `m23c2`: *can this collection actually be empty on a run that should otherwise pass?* A candidate
-whose collection is non-empty by construction is a false positive; the fix cycle clears it with a
-reason, not a re-grep.
+whose collection is non-empty by construction is a false positive; the fix cycle clears it by adding a
+guard rule or count-pin.
 
-| gate | line | shape | receiver | why it is a candidate |
-|---|---|---|---|---|
-| `m17b-arrange-zoom` | 125 | `every` | `r.result?.undo ?? []` | receiver is an expression: r.result?.undo ?? [] |
-| `m20d-project-rate` | 262 | `every` | `devicesOf(r)` | ArrowFunctionExpression: r => r.result?.devices ?? [] |
-| `m20e-flip-path` | 1251 | `every` | `devicesOf(r)` | ArrowFunctionExpression: r => r.result?.devices ?? [] |
-| `m23a2-insert-slot-reserve` | 360 | `every` | `(floor.mixerFader ?? []).slice(0, 3)` | receiver is an expression: (floor.mixerFader ?? []).slice(0, 3) |
-| `m23ag-explain-capture-origin` | 474 | `every` | `results` | empty-literal accumulator, fill NOT provably fixed-bound |
-| `m23ak-note-selection-drop` | 305 | `every` | `after` | awaited: await starts([a0, a1, a2]) |
-| `m23ak-note-selection-drop` | 553 | `every` | `afterL5` | awaited: await starts(L5.clips) |
-| `m23al-editor-surface` | 517 | `every` | `onTrue` | call: iRows.filter(...) |
-| `m23al-editor-surface` | 518 | `every` | `onFalse` | call: iRows.filter(...) |
-| `m23am-refusal-anchor` | 257 | `every` | `aIDs` | empty-literal accumulator, fill NOT provably fixed-bound |
-| `m23bp-held-note` | 846 | `every` | `devicesOf(r)` | ArrowFunctionExpression: r => r.result?.devices ?? [] |
-| `m23do-menubar` | 163 | `every` | `needle` | `needle` not declared in-file (param/import) |
-| `m23e-empty-lane-create` | 212 | `!some` | `clipsOf(ov, instId)` | ArrowFunctionExpression: (ov, trackId) => (ov.tracks.find((t) => t.id === trackId)?.c |
-| `m23f-arrange-drop` | 359 | `every` | `checks` | empty-literal accumulator, fill NOT provably fixed-bound |
-| `m23g1-arrange-multiselect` | 306 | `every` | `clips` | empty-literal accumulator, fill NOT provably fixed-bound |
-| `m23g1-arrange-multiselect` | 392 | `every` | `restored` | call: tracks.map(...) |
-| `m23g1-arrange-multiselect` | 411 | `every` | `clips` | empty-literal accumulator, fill NOT provably fixed-bound |
-| `m23k4a-midi-export` | 176 | `every` | `snap.tracks ?? []` | receiver is an expression: snap.tracks ?? [] |
-| `m23k4b-midi-drop` | 226 | `every` | `inst4` | call: ov.tracks.filter(...) |
-| `m23m3c-stems-dialog` | 147 | `!some` | `st.plannedFiles` | awaited: await cmd(ws, "debug.exportDialog", { open: true }) |
-| `m23m3c-stems-dialog` | 197 | `!some` | `onDisk` | call: listing(...) |
-| `m23v-empty-lane-hint` | 363 | `every` | `hintsOf(e)` | ArrowFunctionExpression: (e) => e.emptyLaneHints ?? [] |
+The candidate patterns include:
+- Receivers built with `?? []` (literal fallback to empty)
+- Receivers returned by a locally-declared arrow-function helper whose own body can yield `[]`
+  — e.g. `devicesOf(r)` where `const devicesOf = (r) => r.result?.devices ?? []`. ⚠️ It is the
+  RECEIVER's provenance that matters, never the callback passed to `.every()`/`.some()` — every
+  such call has a callback, so that could not distinguish anything.
+- Accumulators initialised to `[]` and filled where the bound is not provably fixed
+- `.filter(…)` results, whose size is runtime-derived by definition
+- Awaited values, where the collection arrives from the wire
 
-### Progress
+## Already cleared by inspection
 
-- **m23-ee-2a (2026-08-09): the three `devicesOf` sites are FIXED** — `m20d:262`, `m20e:1251`, `m23bp:846`.
-  Re-running the census confirms all three now clear via the inline `.length` conjunct. **22 flagged → 19;
-  21 actionable → 18.** Refresh this table by re-running the scanner rather than editing it by hand.
+- **Helper-parameter receivers** — When the receiver is a function **parameter**, its emptiness is an
+  **INTERPROCEDURAL question** and cannot be resolved at the declaration site. The scanner reports such
+  sites as UNKNOWN, and the question can only be settled by READING EVERY CALL SITE. In the ee-1 case
+  there was exactly one caller and it passed a fixed-size array literal, so that site was a false
+  positive. ⛔ **DO NOT generalise that into "a flagged helper parameter is a false positive" — it is
+  a false positive only once its call sites have actually been read, and a helper with a caller that
+  can pass an empty collection is a REAL find.** The durable rule is narrower: lumping "unresolvable"
+  in with "runtime-derived" is the same population-mixing that polarity already corrected once, so
+  these sites belong in their own bucket — not cleared, not counted as actionable.
 
-### Already cleared by inspection (do not re-litigate in ee-2)
+## The shape worth reading first
 
-- **`m23do:163`** — `needle.every(…)` inside the helper `hasConsecutiveRun(haystack, needle)`. The scanner
-  reports it UNKNOWN, not RUNTIME: `needle` is a **function parameter**, so its provenance does not live at
-  the declaration at all — it lives at the call sites. There is exactly one caller (`:257`) and it passes
-  `importExportBlock`, a 4-element array literal. Not reachable-empty. **FALSE POSITIVE.**
-  ⚠️ The general rule: a helper parameter's emptiness is an INTERPROCEDURAL question, and lumping
-  "unresolvable" in with "runtime-derived" is the same population-mixing that polarity already corrected once.
-
-### The shape worth reading first
-
-Six of the 22 build their collection with `?? []` (`r.result?.undo ?? []`, `snap.tracks ?? []`,
-`(floor.mixerFader ?? []).slice(…)`, and the three `devicesOf(r)` helpers). That idiom does not
-merely *permit* an empty array — it **manufactures one** the moment the field is absent or renamed.
-A wire rename would turn the leg green rather than red, which is the exact inversion this axis is about.
+Several flagged sites build their collection with `?? []` (e.g. `r.result?.undo ?? []`, `snap.tracks ?? []`,
+`(floor.mixerFader ?? []).slice(…)`). That idiom does not merely *permit* an empty array — it
+**manufactures one** the moment the field is absent or renamed. A wire rename would turn the leg green
+rather than red, which is the exact inversion this axis is about.
 
 ## The fix shape (settled at m23-bj; copy, do not re-derive)
 

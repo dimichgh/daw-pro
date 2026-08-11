@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-08-11 — A research note stopped quoting numbers, and its own instructions turned out not to work
+
+One of our research notes described an audit tool and then reproduced that tool's output: totals, and a
+table of every flagged spot with its line number. Those line numbers went out of date, and one stale pair
+was copied into the tool's own source, where it sat until last cycle's work went to check those lines and
+found unrelated code. So the table was not merely at risk of going stale — it had already exported a wrong
+fact into working code. The note now carries the method and the reasoning and no numbers at all; the tool
+prints its own, on demand, and cannot go stale.
+
+Checking the note's instructions rather than just reading them turned up a second problem: the command it
+told you to run did not work, and had not worked for either author who wrote it. The setting it used takes
+a path interpreted relative to the script's own folder rather than the folder you are standing in, so the
+obvious value silently pointed one level too deep. The plain command, with no setting at all, works fine —
+and now that is what the note says, along with a warning for anyone who does need the setting.
+
 ## 2026-08-11 — A decision not to build something, and a correction to yesterday's note
 
 Two of the tests the audit tool still flags are sound; it simply cannot prove it, because the proof lives
