@@ -48,6 +48,18 @@ cost it does not have. It is now folded in, and the remaining three are tracked 
 real costs written down rather than assumed. The best evidence that this was worth doing: with all
 its tests disabled, that check used to report success, and now reports that it tested nothing.
 
+A second of those checks turned out to be cheaper than its label too. It tests what the app shows you
+when you ask for a song while the AI service is switched off, which means it has to actually kick the
+service into starting — the expensive part. Except it doesn't wait for it: it shuts the service down
+the instant it can identify it, so the model never finishes loading. Across five runs, the service
+never once got as far as accepting connections, and nothing was left running afterwards. Measuring
+that before committing to it turned a job budgeted at several sittings into one.
+
+That check also had a specific way of lying. It can legitimately skip part of its work when
+conditions aren't right, and it correctly refuses to count a skip as a success — but it decided its
+overall result by asking only whether anything had failed. Skip everything, and nothing has failed,
+so it passed. It now reports how much it actually checked, and a run that checks nothing says so.
+
 
 
 The app has 73 automated checks that drive a real copy of it and inspect what happens. Each one

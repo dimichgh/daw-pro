@@ -56,6 +56,7 @@
 // already writes its captures into; the "mkdir -p before running" note above is
 // obsolete because the harness makes the directory.
 import { sleep, buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { verdict } from "./_verdict.mjs";
 import { spawnSync } from "node:child_process";
 
 const GATE = "m17h-orch";
@@ -434,4 +435,13 @@ ws.close();
 stopStaging(GATE);
 // m23-az defect (1): exit code now reflects the result instead of an
 // unconditional process.exit(0) — this gate can go red.
-process.exit(fail === 0 ? 0 : 1);
+//
+// m23-fa-4b-2: `ran` is `pass + fail` and DELIBERATELY EXCLUDES `skipped`,
+// which is what makes this migration more than bookkeeping. m23-bj's law is
+// that a skip must never fold into pass — but `exit(fail === 0 ? 0 : 1)` did
+// exactly that at the limit: if leg G's precondition failed AND every other
+// leg had been removed, `fail` would be 0 and this gate would exit 0 while
+// having asserted NOTHING. Counting only real checks means an all-skipped run
+// now lands in verdict's `ran === 0` branch and says so. No `allowEmpty`: a
+// fully-skipped run of this gate is precisely the state that must be loud.
+verdict({ ran: pass + fail, failed: fail });
