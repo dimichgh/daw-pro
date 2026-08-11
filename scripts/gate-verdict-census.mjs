@@ -51,7 +51,7 @@
 //   1 — SELF-TEST FAILED: the classifier misclassifies one of its own
 //       synthetic VACUOUS/GUARDED/MIGRATED/EXEMPTED fixtures. NO count below
 //       may be trusted.
-//   2 — CORPUS ASSERTED NOTHING: zero files were scanned or zero verdict
+//   2 — CENSUS MEASURED NOTHING: zero files were scanned or zero verdict
 //       sites were classified. Borrows `_verdict.mjs`'s phrasing ("this run
 //       proves nothing") because it reads correctly to a human.
 //       ⚠️ BUT THE TWO EXIT-2s ARE NOT THE SAME THING, AND NOTHING SHOULD BE
@@ -344,12 +344,12 @@ function scanSource(label, code, { synthetic = false } = {}) {
 
 // m23-gb: a WRONG path is the single most likely way this census ends up with
 // nothing to measure — and it used to be the one case that did NOT reach the
-// exit-2 "asserted nothing" report below. `readdirSync` threw ENOENT uncaught,
+// exit-2 "measured nothing" report below. `readdirSync` threw ENOENT uncaught,
 // so the reader got a raw Node stack trace and exit 1, indistinguishable from a
 // classifier defect, while the exit-2 message itself advises "check the
 // `GATES`/`VC_GATES` path". Advice printed only on the paths where it does not
 // apply is worse than no advice. Caught here so a bad path lands on the same
-// exit-2 vocabulary as an empty one: both mean "this run asserted nothing".
+// exit-2 vocabulary as an empty one: both mean "this run measured nothing".
 let files;
 try {
   files = readdirSync(GATES).filter((f) => f.endsWith(".mjs") && !f.startsWith("_")).sort();
@@ -357,7 +357,7 @@ try {
   console.error(
     `\n✘✘✘ CORPUS UNREADABLE (exit 2) — could not list the gate corpus at \`${GATES}\`.\n` +
     `    ${e?.message ?? String(e)}\n` +
-    `    This run asserted NOTHING about the corpus. Set \`VC_GATES\` to a real ` +
+    `    This run scanned NOTHING of the corpus. Set \`VC_GATES\` to a real ` +
     `directory of gate \`.mjs\` files, or unset it to use the default.`
   );
   process.exit(2);
@@ -498,7 +498,7 @@ console.log(JSON.stringify({
 // full vocabulary; both checks below are independent and both hard-fail. ──
 if (!corpusNonVacuousOk) {
   console.error(
-    "\n✘✘✘ CORPUS ASSERTED NOTHING (exit 2) — this run scanned " +
+    "\n✘✘✘ CENSUS MEASURED NOTHING (exit 2) — this run scanned " +
     `${files.length} file(s) and classified ${rows.length} verdict site(s). ` +
     "A census that scans zero files, or classifies zero sites, would pass " +
     "every synthetic self-test above and still exit 0 reporting a clean " +

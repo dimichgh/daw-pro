@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-08-11 — Finished reserving the alarm phrase, and added a guard so it stays reserved
+
+An earlier fix stopped our shared check-reporting code from printing a deliberately alarming phrase
+when the thing reporting wasn't actually a check. Two more places still printed it in their own
+wording: the auditing tool that surveys all our checks, in both its "I couldn't read anything" and
+"I found nothing to look at" messages.
+
+Both are real warnings worth keeping loud, and both keep their wording, their exit codes and their
+advice — only the reserved phrase is gone, so searching for it once again means one thing. The
+judgement behind that: the phrase means "a check tested nothing and still looked fine," whereas the
+auditing tool means "I scanned no files." A different claim wearing the same words is precisely what
+costs somebody an investigation.
+
+The more useful part is a guard against this recurring. The previous round of this fix checked one
+message in a file and missed another a hundred and forty lines further down, which is how these two
+survived. So the guard now runs the tools, drives each into its failure state, and inspects what they
+actually print — plus a rule that the phrase may appear in the auditing tool only in comments, never
+in something it prints. That second rule covers a message we can't easily trigger on demand. Proven
+by planting the phrase into exactly that untriggerable message and confirming the guard caught it
+while every other check stayed green.
+
 ## 2026-08-11 — The test harness could leave a launched app running behind it
 
 The harness that launches the app for automated checks tracks each launch by a small file holding
