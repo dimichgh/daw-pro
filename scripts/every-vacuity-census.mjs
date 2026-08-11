@@ -83,9 +83,6 @@
 //     arguments and two over-clear surfaces (cf. the m23-ex / m23-eu /
 //     m23-gl / m23-gm axes) bought for 2–3 rows the paragraph above already
 //     says are NOT the actionable count.
-//   • (m23x-arrow-nudge's bullet was DELETED at the m23-gp close: m23-go
-//     LANDED in 588841b and fixed that leg, so it is no longer a live flag.
-//     This parenthetical is a tombstone, not a flag — drop it freely.)
 //
 // ⚠️ Deliberately NO `file:line` list here — line numbers in these gates drift
 // and a stale coordinate list is worse than none; the roadmap items carry the
