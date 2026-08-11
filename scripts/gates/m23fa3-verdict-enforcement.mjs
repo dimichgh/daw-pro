@@ -44,16 +44,16 @@
 // correct gate as telling them to update THIS FILE, never as a regression in
 // the gate they just fixed.
 const EXEMPTIONS = {
-  // m23-fa-2's six deliberately deferred gates. The last four are SIDECAR
-  // gates: migrating them means running them, and running them means loading
-  // models (the ACE sidecar alone holds ~75 GB while RSS reports ~1 GB) — so
-  // migration was deferred rather than done blind. Owner: m23-fa-4.
-  "m23aw-prepare-headroom.mjs": "m23-fa-4",
-  "m23ej2-density-restore-census.mjs": "m23-fa-4",
-  "m17h-generation-card.mjs": "m23-fa-4",
-  "m18g-sketchpad-honesty.mjs": "m23-fa-4",
-  "m23bb1-vc-stop-honesty.mjs": "m23-fa-4",
-  "m23fo-conversion-stability.mjs": "m23-fa-4",
+  // m23-fa-2's six deliberately deferred gates. m23aw/m23ej2 (the two CHEAP
+  // ones, migrated at m23-fa-4a) are gone from this list. The remaining four
+  // are SIDECAR gates: migrating them means running them, and running them
+  // means loading models (the ACE sidecar alone holds ~75 GB while RSS
+  // reports ~1 GB) — so migration was deferred rather than done blind.
+  // Owner: m23-fa-4b.
+  "m17h-generation-card.mjs": "m23-fa-4b",
+  "m18g-sketchpad-honesty.mjs": "m23-fa-4b",
+  "m23bb1-vc-stop-honesty.mjs": "m23-fa-4b",
+  "m23fo-conversion-stability.mjs": "m23-fa-4b",
   // m16a already has EQUIVALENT protection by another route (`:205-208`,
   // `if (ITERS < 1) { … process.exit(5); }`, added at m23-fj) — it is not
   // vacuous, it just does not spell its guard as `verdict()`. Consolidating

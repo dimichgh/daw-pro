@@ -44,7 +44,11 @@ import { fileURLToPath } from "node:url";
 // launch anything: `startStaging`/`connect` are only invoked when CALLED, and
 // this gate calls neither. `panelDensityGuard` takes its `call` as a parameter,
 // so its whole contract is testable against a fake with no app and no socket.
-import { panelDensityGuard } from "./_staging.mjs";
+// `verdict` (m23-fa-4a): this gate is NOT one of the two pure-static
+// exceptions `_verdict.mjs`'s own header names (`m23aq`, `m23aw`) — it
+// already imports `_staging.mjs` for `panelDensityGuard`, so it gets
+// `verdict` through the same re-export, same as the other 70 staged gates.
+import { panelDensityGuard, verdict } from "./_staging.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SELF = "m23ej2-density-restore-census.mjs";
@@ -249,7 +253,11 @@ const files = readdirSync(HERE)
 if (files.length <= 20) {
   console.log(`FAIL anti-vacuity: only ${files.length} .mjs files seen under ${HERE} `
     + `(expected > 20) — the glob is almost certainly broken, not the corpus shrunk`);
-  process.exit(2);
+  // m23-fa-4a: this genuinely IS "the census measured nothing" — a broken
+  // glob means every check below never had real corpus data to run against,
+  // so it maps onto verdict()'s ran==0 vacuous path. Same exit code (2) as
+  // the direct process.exit(2) this replaces.
+  verdict({ ran: 0, failed: 0 });
 }
 console.log(`filesSeen=${files.length} (> 20, anti-vacuity OK)`);
 
@@ -456,4 +464,15 @@ console.log(`\n=== m23ej2-density-restore-census: ${wired.length}/${writesDensit
   + `class drift ${(newlyJoined.length + noLongerPresent.length) === 0 ? "NONE" : "DETECTED"}, `
   + `ordering ${orderingBad.length === 0 ? "CLEAN" : "VIOLATED"}, `
   + `guard contract ${contractPass}/${contract.length} ===`);
-process.exit(fail === 0 ? 0 : 1);
+
+// m23-fa-4a: `fail` already counts EXACTLY one increment per failing check —
+// checks 1-3 each add at most 1 (one `fail++` per census-level assertion,
+// regardless of how many files trip it) and the contract's `c()` helper adds
+// at most 1 per leg — so `fail` is a true failed-count, not just a boolean,
+// and matches `ran` (3 census checks + every contract leg) 1:1. This is the
+// SAME mechanical mapping `m23aq-data-dir-leak.mjs` uses (legsTotal /
+// legsTotal - legsPassed): no leg here has an m23aw-style pre-existing
+// exit-code scheme to reconcile, so there is nothing to decide beyond the
+// counts themselves.
+const ran = 3 + contract.length;
+verdict({ ran, failed: fail });

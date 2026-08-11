@@ -79,6 +79,55 @@
 // Never touches control port 17600/17695 — pure `./scripts/test.sh` +
 // text parsing, no staging app involved.
 //
+// ══ verdict() MIGRATION (m23-fa-4a) — scoreCampaign's OWN 0/1/2 exit-code
+// scheme is NOT mechanically the same thing as `_verdict.mjs`'s narrower
+// {ran, failed} vocabulary, and this gate has THREE distinct exit sites, not
+// one (campaign, `--selftest`, arg-error). Decided PER LEG, at the two exit
+// sites that report an actual verdict about the subject under test:
+//
+//   scoreCampaign leg              old code   verdict() call           new code
+//   ------------------------------ --------   -----------------------  --------
+//   NO_RUNS_PARSED                    2       verdict({ran:0,failed:0})   2 (unchanged)
+//   MISSING_MEASURED_LINE             2       verdict({ran:0,failed:0})   2 (unchanged)
+//   CAMPAIGN_INVALID_WALLTIME         2       verdict({ran:0,failed:0})   2 (unchanged)
+//   RED_RUN                           2       verdict({ran:1,failed:1})   1 (CHANGED — see below)
+//   ANTI_CIRCUMVENTION_HORIZON        1       verdict({ran:1,failed:1})   1 (unchanged)
+//   THRESHOLD_EXCEEDED                1       verdict({ran:1,failed:1})   1 (unchanged)
+//   OK                                0       verdict({ran:1,failed:0})   0 (unchanged)
+//
+// The first three legs never produced a scoreable observation of the thing
+// this gate measures (no runs parsed at all / no measured line found in any
+// run / the campaign invalidated by contention before scoring) — that is
+// exactly verdict()'s ran==0 vacuous case, "this run proves nothing", and
+// keeps the same exit code (2) it always had.
+//
+// ⛔ RED_RUN IS THE DELIBERATE EXCEPTION, decided at m23-fa-4a, NOT a
+// mechanical carry-over. scoreCampaign groups it with the three "cannot
+// score" legs above (same code, 2) because refusing the whole campaign on a
+// red run is its own correct design choice (§7.3 of the header above) — but
+// a red `./scripts/test.sh` run is a REAL, POSITIVE finding: something in
+// the suite broke. verdict() has no third bucket for "ran, but the result is
+// untrustworthy for an unrelated reason" — its only two non-passing states
+// are "0 checks ran" (ran==0) and "a check failed" (failed>0). Reporting
+// RED_RUN as ran==0 would print "⚠️⚠️ 0 checks ran — this gate ASSERTED
+// NOTHING" over a run that in fact found a failure — misfiling a genuine
+// failure as a vacuous gate, the exact defect m23-fa exists to eliminate,
+// introduced BY the migration meant to enforce against it. failed>0 (exit 1)
+// is the honest mapping. This is a DELIBERATE, DOCUMENTED exit-code change
+// for this one leg (2 -> 1) — anything consuming this gate's exit code
+// (a CI script, a human script checking `$?`) sees a red run as a "1" now,
+// not a "2". `scoreCampaign`'s OWN `result.code`/`result.leg` fields are
+// UNCHANGED by this migration (so `--selftest`'s FIXTURES table, which
+// asserts against `result.code` directly, needed no edits) — only the
+// process's ACTUAL exit code, chosen at the two call sites below, moves.
+//
+// The two arg-error exits (`--from-logs` with no path; `--runs` not a
+// positive integer) stay direct `process.exit(2)`, unmigrated — the same
+// precedent `m23fa3-verdict-enforcement.mjs` sets for its own pre-flight
+// GATES-unreadable abort: a run that cannot even reach its subject (here,
+// never even attempts to gather runs) exits directly, because verdict() is
+// reserved for a run that DID reach its subject and has an opinion about it.
+//
 // Usage:
 //   node scripts/gates/m23aw-prepare-headroom.mjs                # 5 runs, ~9 min — BACKGROUND THIS
 //   node scripts/gates/m23aw-prepare-headroom.mjs --runs 3
@@ -90,6 +139,10 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
+// One of only 2 gates that import from `_verdict.mjs` directly rather than
+// `_staging.mjs` — pure static/subprocess analysis, no staging app, no port,
+// no lifecycle. See `_verdict.mjs`'s own header ("WHY ITS OWN FILE") for why.
+import { verdict } from "./_verdict.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const GATES_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -373,7 +426,13 @@ function runSelftest() {
   }
   console.log(`\nobserved exit codes: ${observed.map((o) => o.code).join(", ")}`);
   console.log(allOK ? "SELFTEST PASSED — all five fixtures scored as designed." : "SELFTEST FAILED.");
-  process.exit(allOK ? 0 : 1);
+  // m23-fa-4a: each of the 5 fixtures IS its own check (does scoreCampaign
+  // score this static input the way §7.3 designed it to) — a mismatch is a
+  // real, scoreable failure of this gate's own scoring logic, never "nothing
+  // was measured", so this is squarely verdict()'s failed>0 branch. `allOK`
+  // stays above only because it still drives the human-readable summary line;
+  // the real exit decision is this call, not the manual ternary it replaces.
+  verdict({ ran: observed.length, failed: observed.filter((o) => !o.ok).length });
 }
 
 // ── Entry point ──
@@ -390,6 +449,10 @@ function main() {
   if (fromLogsIdx !== -1) {
     const target = args[fromLogsIdx + 1];
     if (!target) {
+      // Pre-flight arg-error abort — this run never even attempts to gather
+      // a campaign, so (m23-fa-4a, see header) it exits directly rather than
+      // through verdict(), same precedent as m23fa3-verdict-enforcement.mjs's
+      // own GATES-unreadable abort.
       console.log("✘ --from-logs requires a path");
       process.exit(2);
     }
@@ -398,6 +461,7 @@ function main() {
     const runsIdx = args.indexOf("--runs");
     const n = runsIdx !== -1 ? Number(args[runsIdx + 1]) : DEFAULT_RUNS;
     if (!Number.isInteger(n) || n < 1) {
+      // Same pre-flight precedent as the --from-logs abort above.
       console.log("✘ --runs must be a positive integer");
       process.exit(2);
     }
@@ -408,7 +472,41 @@ function main() {
   console.log(`\n${result.code === 0 ? "✔" : "✘"} ${result.message}`);
   printCampaignTable(result, runs);
   console.log(result.code === 0 ? "\nGATE PASSED." : `\nGATE FAILED (leg: ${result.leg}).`);
-  process.exit(result.code);
+  // m23-fa-4a: map scoreCampaign's own leg onto verdict()'s {ran, failed} —
+  // see the file header's table for the full per-leg rationale. NOT the same
+  // as `result.code`: RED_RUN is scoreCampaign's code 2 but verdict()'s
+  // failed>0 (exit 1) — deliberately, because a red test run is a genuine
+  // failure, not "this gate asserted nothing".
+  switch (result.leg) {
+    case "NO_RUNS_PARSED":
+    case "MISSING_MEASURED_LINE":
+    case "CAMPAIGN_INVALID_WALLTIME":
+      // No trustworthy observation of the thing this gate measures ever
+      // existed this run — verdict()'s ran==0 vacuous path, same exit code
+      // (2) scoreCampaign already used for these three legs.
+      verdict({ ran: 0, failed: 0 });
+      break;
+    case "RED_RUN":
+      // ⛔ THE ONE LEG WHOSE EXIT CODE CHANGES (2 -> 1). See header table.
+      verdict({ ran: 1, failed: 1 });
+      break;
+    case "ANTI_CIRCUMVENTION_HORIZON":
+    case "THRESHOLD_EXCEEDED":
+      // Real threshold-type failures — same exit code (1) as before.
+      verdict({ ran: 1, failed: 1 });
+      break;
+    case "OK":
+      verdict({ ran: 1, failed: 0 });
+      break;
+    default:
+      // scoreCampaign returned a leg this mapping does not know about — fail
+      // LOUDLY rather than let an unmapped leg fall through to some default
+      // verdict() call that would misreport it either way.
+      throw new Error(
+        `m23-fa-4a verdict() mapping: unrecognized scoreCampaign leg "${result.leg}" — ` +
+        `the switch in main() must cover every leg scoreCampaign can return.`
+      );
+  }
 }
 
 main();

@@ -312,6 +312,29 @@ answers to match. Two independent instruments, because a single one cannot notic
 The diagnostic is strictly read-only — a check whose job is proving the app does not write where it
 shouldn't must not itself write anywhere.
 
+**Two more checks moved onto the shared reporting code.** Continuing the work at the top of this
+entry: two checks that were still deciding pass-or-fail their own way now go through the shared
+piece that also asks "how many tests actually ran". One of them turned out to have exactly the
+weakness that piece exists to catch — its self-test would have reported success if its list of
+fixtures were ever emptied, because nothing had failed. It now says it tested nothing instead.
+
+One of the two needed a judgement rather than a mechanical change. It had its own numbering for how
+it reports outcomes, and one of those outcomes — a test run that came back red — was filed under
+"could not score this" rather than "this failed". A red run is a failure, and reporting it as though
+the check had done no work would have been the precise defect this whole effort is meant to remove.
+That one outcome was reclassified; the rest were left exactly as they were.
+
+We checked that reclassification could not confuse anything downstream, and the first reason we came
+up with for why it was safe turned out to be wrong — a search that appeared to prove the check wasn't
+used anywhere was actually a search that found nothing at all. The real reason it is safe is that the
+thing consuming these results only ever distinguishes success from failure, not one kind of failure
+from another.
+
+A latent problem surfaced along the way and is written up rather than quietly patched: one check
+reports the line numbers where it finds issues, and those numbers drift out of alignment whenever the
+file contains a multi-line comment, because of how it strips comments before scanning. It has been
+handing out coordinates that point a few lines off.
+
 ## 2026-08-10 — Voice conversion no longer degrades the more you use it
 
 Converting the same vocal a few times in a row used to get progressively louder and more distorted,
