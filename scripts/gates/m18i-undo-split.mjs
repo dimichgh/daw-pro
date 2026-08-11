@@ -91,10 +91,66 @@
 //    REGENERATE each run, so their stability rests on the frame pin above plus
 //    an identical action sequence. If u0 ever drifts again with the seed intact,
 //    suspect NS* regeneration first.
-// ⛔⛔ STILL DO NOT PIN AN ABSOLUTE HASH, and the reason is now concrete rather
-//    than precautionary: m23-gf-e flips the seed from today's ambient snapshot
-//    to the SHIPPED defaults (six of seven panels `pro` -> `.simple`), which
-//    will certainly move u0. The within-run-only legs stay as they are.
+// ⛔⛔ STILL DO NOT PIN AN ABSOLUTE HASH — confirmed necessary, not just
+//    precautionary; see the m23-gf-e addendum immediately below for the
+//    measured before/after.
+//
+// ═══ m23-gf-e (2026-08-10): the seed shrunk from 17 keys to 1
+// (`onboarding.state` only) and u0 MOVED, exactly as the gf-d line predicted.
+// The mechanism is now identified. ═══
+// ⚠️ CORRECTION TO THIS ADDENDUM'S OWN FIRST DRAFT, kept because the mistake
+// is instructive: it opened by "PARTIALLY RETRACTING" the gf-d prediction and
+// said that line had blamed `panelLayout.editorFraction`. IT HAD NOT. The
+// committed gf-d text (ad786a6) reads "six of seven panels `pro` -> `.simple`,
+// which will certainly move u0" — it named the DENSITY flip, correctly, and
+// never mentioned `editorFraction`. The misreading was introduced by the
+// orchestrator's own briefing note this cycle and propagated here in good
+// faith. THE gf-d PREDICTION WAS RIGHT, AND RIGHT FOR THE RIGHT REASON; there
+// is nothing to retract. ⭐ The general trap: a summary of an earlier claim,
+// written from memory rather than from the text, is itself an unverified
+// measurement — re-read the line before you retract it.
+// Separately confirmed and worth keeping: `editorFraction` IS a value no-op —
+// seeded at exactly `PanelLayoutStore.defaultEditorFraction` (0.45) both
+// before and after the shrink (measured by reading the shrunk seed and the
+// shipped default side by side, not assumed). So it is not among the movers,
+// which is why the density mechanism below is the whole story.
+// u0 moved anyway: 379147 bytes / sha `273303db847f53d9…` (the gf-d baseline,
+// 15 runs) -> 339193 bytes / sha `f69ef3c82b671b1b…` under the shrunk seed —
+// a real, reproducible difference (this file's own PIXEL/CONTROL legs still
+// passed 7/7; the U-leg's u0==u1 and the CONTROL's s1!=u0 hold regardless of
+// u0's absolute bytes, which is why the gate stayed green through this).
+// A confirmed CONTRIBUTING mechanism (single-variable A/B, not just source
+// inference): reseeding ONLY `panelDensity.pianoRoll: "pro"` on top of the
+// 1-key shrunk seed and re-running this gate moves u0 to 369275 bytes / sha
+// `1752b9b2309d546c…` — different from BOTH the shrunk-seed value (339193)
+// AND the original 17-key BEFORE value (379147). That inequality is the
+// finding: pianoRoll density IS a real cause (369275 != 339193 — flipping it
+// back changes the pixels), but it is NOT the sole cause (369275 != 379147 —
+// flipping only it back does not reproduce the old total). `PianoRollView.swift`
+// (~lines 460, 906, 913, 922, 947) renders conditionally on that density,
+// which explains its share, but `debug.captureUI` with no `rect` param
+// rasterises the FULL window content view (`DAWProApp.swift` ~10178-10197,
+// "snapshot the real window content"), not a piano-roll crop — so any other
+// panel visible in that 1400x1000 frame (arrange sidebar, transport bar,
+// etc.) whose density also flipped pro -> .simple under the shrunk seed can
+// contribute additional pixels to the same PNG. This gate never pins
+// `pianoRoll` OR any other panel's density (0 hits, confirmed by grep, same
+// as the geometry keys below), so it inherits whatever the seed leaves
+// ambient across the whole visible window, not just the editor.
+// So: the RETRACTION holds for `editorFraction` (confirmed a no-op); the
+// PREDICTION that gf-e would move u0 also holds, via a density mechanism —
+// but "the mechanism is panelDensity.pianoRoll" is too strong a claim from
+// source-reading alone. `pianoRoll` is a MEASURED, PARTIAL contributor; the
+// remainder is attributed to other panelDensity keys sharing the same frame,
+// not measured further here since the gate's own PIXEL/CONTROL legs (which
+// are what it actually asserts) do not depend on u0's absolute byte count.
+// ⚠️ STALE AS OF THIS ADDENDUM — do not read as current: "16 in the seed
+// file" (line above) and "The 17 seeded keys are held at fixed values"
+// (below) both describe the seed as it stood AT THE gf-d MEASUREMENT
+// (17 keys). The current seed (post gf-e) holds exactly 1 key
+// (`onboarding.state`); the six `panelDensity.*` keys and all `panelLayout.*`
+// keys this gate still does not pin are no longer seeded at all. Left
+// unedited above as the historical record of what was true when measured.
 // ⚠️ If PIXEL/CONTROL ever flap, the fix is to CROP to the editor region
 // (the item's original preference) before hashing — not to delete the
 // legs. Full-frame hashing is used now only because within-run identity

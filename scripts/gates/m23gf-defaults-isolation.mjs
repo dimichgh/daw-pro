@@ -373,8 +373,18 @@ try {
   // seed already wrote. Vacuity check (advisor #1): if this passed with the
   // wire call skipped entirely, it would only be proving the SEED landed,
   // which resetStagingDefaultsDomain() already proves on every run. So: read
-  // the seed's value for `quantize` FIRST (pro), then drive the OPPOSITE
-  // value (simple), and assert the app-written value differs from the seed.
+  // the seed's value for `quantize` FIRST, then drive a DIFFERENT value
+  // (simple), and assert the app-written value differs from the seed.
+  // ⛔ m23-gf-e: this used to assert `seedQuantizeBefore === "pro"`, which was
+  // true only while the seed carried `panelDensity.quantize: "pro"`. Phase E
+  // shrank the seed to `onboarding.state` alone, the key became ABSENT
+  // (stored: null), and POS1 failed on its OWN PREMISE rather than on app
+  // behaviour — a fixture asserting the seed's former contents, not the thing
+  // the check exists to prove. The condition below is now stated the way the
+  // sentence above always meant it: whatever the prior value was, driving to
+  // "simple" must be a REAL change, so the prior must not already BE "simple".
+  // That holds for "pro" (old seed), for null (absent), and for any value a
+  // future seed might carry — it cannot go stale against seed content again.
   const guard = panelDensityGuard((cmd, params) => req(cmd, params));
   const seedRead = await req("debug.panelDensity", { panel: "quantize" });
   seedQuantizeBefore = seedRead.stored;
@@ -396,7 +406,7 @@ try {
         + "app's own response. Without this, A1 below would pass for a staging app that crashed "
         + "before writing anything, since the SEED alone already puts panelDensity.* keys in the "
         + "domain",
-        seedQuantizeBefore === "pro" && wrote.ok && afterWrite.stdout === "simple",
+        seedQuantizeBefore !== "simple" && wrote.ok && afterWrite.stdout === "simple",
         `seed stored=${JSON.stringify(seedQuantizeBefore)}; ${STAGING_DEFAULTS_DOMAIN} `
         + `panelDensity.quantize now reads ${JSON.stringify(afterWrite.stdout)} (confirmed after `
         + `${wrote.elapsedMs}ms, exit ${afterWrite.status})`);

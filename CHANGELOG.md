@@ -257,6 +257,44 @@ We did not pin the exact picture as the expected answer, deliberately. A change 
 alter it on purpose, and an expected answer that goes stale the moment you look away is worse than
 none.
 
+**The tests now run against the app as it ships, not as this machine happens to be set up.** When we
+gave the tests their own settings, we filled those settings with a snapshot of whatever this
+particular Mac was already using. That was deliberate — it let us make the change without altering
+what any test saw. But it left the tests running against one developer's preferences rather than
+against what a new user actually gets.
+
+We have now emptied that snapshot down to a single entry. Everything else falls back to the app's own
+shipped defaults.
+
+Before doing it we worked out, key by key, which settings would actually change. Sixteen entries were
+removed; only six of them differ from what the app ships. The rest — panel widths, zoom levels, row
+heights, three on/off switches, the assistant's model — had been captured at values identical to the
+defaults, so removing them changes nothing. Knowing that in advance turned the whole exercise from
+guesswork into checking predictions, and it meant we could tell a real problem from an expected
+change immediately.
+
+The six that do differ all concern how densely panels are packed. The tests had been running with six
+of seven panels in the denser "pro" layout, while a new user gets the simpler one.
+
+One test genuinely broke, and it is a real flaw worth having found: it measures a strip along the
+bottom of the window, but never specified which layout the transport bar should be in. It had been
+passing because of a setting it never asked for. We have not patched over it — loosening the
+measurement until it passes would gut the very check that gives the test its meaning — so it is
+written up to be fixed properly.
+
+One more failed for an amusing reason: a test that verifies the settings isolation was itself
+checking, as part of its setup, that a particular setting held a particular value — the value that
+had just been removed. It was asserting the contents of the snapshot rather than the behaviour it
+exists to prove. Fixed so it can't go stale against that snapshot again, in either direction.
+
+Two others failed only when the whole suite ran at once and passed cleanly on their own — ordinary
+timing sensitivity under load. We checked that claim rather than assuming it: the same
+run-it-alone method still reproduced the genuine failure above, so it is a real test and not a way of
+making everything look fine.
+
+Your own settings files came through all of it byte-for-byte unchanged, verified with a check we
+first proved capable of detecting a single flipped byte.
+
 ## 2026-08-10 — Voice conversion no longer degrades the more you use it
 
 Converting the same vocal a few times in a row used to get progressively louder and more distorted,
