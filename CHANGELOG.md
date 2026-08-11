@@ -28,6 +28,17 @@ couldn't see. Depending on which way we had resolved it, that would either have 
 report an impossible result, or — worse — swallowed the crash and turned a failing check green. All
 three now record the crash as a failed test like any other.
 
+The last check still standing outside this system was the one that hunts a specific old crash by
+launching the app and hammering it ten times in a row. It had been left alone deliberately, with a
+note explaining that it already used its own numbering for results and that folding it in would blur
+two of them together. Reading that note against the check itself, the reasoning turned out to be
+backwards. The blurring it warned about was already there, and worse than predicted: the same result
+number meant both "the app never started, so this proved nothing" and "the app died halfway through"
+— which is the check succeeding at the exact job it exists to do. The best possible news and the
+absence of any news at all were arriving under the same label. Folding it in pulled them apart. We
+confirmed it by deliberately breaking the app mid-run and watching the check report a real failure,
+where before it would have reported something indistinguishable from never having started.
+
 
 
 The app has 73 automated checks that drive a real copy of it and inspect what happens. Each one

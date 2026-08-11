@@ -37,14 +37,19 @@
 // 10 iterations of `project.new`, play, and file deletion — at the user's LIVE
 // session. `assertStagingPort` now refuses 17600 structurally.
 //
-// Exit codes: 0 = all iterations clean (wire answered throughout);
-// 2 = app dead (connect failed); 3 = wedge (commands stopped answering);
-// 4 = iteration shortfall (an iteration failed without a wedge/crash).
+// Exit codes (m23-fa-5: now the SHARED scheme from `_verdict.mjs` — 0 passed /
+// 1 failed / 2 asserted nothing). The old bespoke scheme (2 dead / 3 wedged /
+// 4 shortfall / 5 nothing-ran) is GONE; the dead-vs-wedged-vs-shortfall
+// distinction this gate exists to draw now lives where it was always actually
+// read — the log line immediately above the verdict ("app dead" / "WEDGED" /
+// "iteration shortfall"). See the migration note above the final verdict call
+// for why collapsing those three codes loses nothing and fixes something.
 // >>> THESE CODES ARE SIGNALS, NOT PASS/FAIL — see the connect budget below. <<<
 import fs from "fs";
 import os from "os";
 import path from "path";
 import { buildOrAbort, startStaging, stopStaging, connect } from "./_staging.mjs";
+import { verdict } from "./_verdict.mjs";
 
 const GATE = "m16a";                        // names the pidfile + staging out dir
 const ITERS = Number(process.env.ITERS || "10");
@@ -145,7 +150,11 @@ try {
   try { boot.close(); } catch { /* ignore */ }
 } catch {
   log("staging app never accepted a connection — aborting before iteration 1");
-  process.exit(2);
+  // m23-fa-5: ZERO iterations ran, so this run proves nothing about the
+  // poisoner recipe. It is NOT the same event as "the app died at iteration 7"
+  // below, which is this gate CATCHING its defect — yet before the migration
+  // both exited 2 and were indistinguishable from the outside.
+  verdict({ ran: 0, failed: 0 });
 }
 
 let clean = 0;
@@ -155,7 +164,9 @@ for (let iter = 1; iter <= ITERS; iter++) {
     ws = await reconnect();
   } catch {
     log(`iter ${iter}: CONNECT FAILED — app dead (pre-fix signature: crash)`);
-    process.exit(2);
+    // `iter` is 1-based, so ran >= 1 here and verdict's `failed > ran` throw
+    // cannot fire: iterations 1..iter-1 completed clean, and THIS one failed.
+    verdict({ ran: iter, failed: 1 });
   }
   try {
     const codes = await iteration(ws, iter);
@@ -172,11 +183,11 @@ for (let iter = 1; iter <= ITERS; iter++) {
         log(`iter ${iter}: transient timeout but wire answers — continuing (${e.message})`);
       } catch {
         log(`iter ${iter}: WEDGED — wire connects/dead or gone (pre-fix signature: leaked executor record)`);
-        process.exit(3);
+        verdict({ ran: iter, failed: 1 });
       }
     } else {
       log(`iter ${iter}: command error: ${e.message}`);
-      process.exit(2);
+      verdict({ ran: iter, failed: 1 });
     }
   }
   try { ws.close(); } catch {}
@@ -196,20 +207,52 @@ stopStaging(GATE);
 // clean", "C1 PASS". ITERS is a documented tuning knob, so this was a false green one
 // env var away, with no code defect required.
 //
-// ⚠️ DELIBERATELY NOT MIGRATED TO `_verdict.mjs`, AND THE REASON IS A FINDING (m23-fm):
-// the primitive exits 2 for "asserted nothing", but THIS GATE ALREADY USES 2 FOR "app
-// dead" (and 3 for "wedged"). Routing through it would make exit 2 ambiguous WITHIN ONE
-// GATE — a reader could not tell a dead app from an empty run. So the guard is inline
-// and uses code 5, which is free in this gate's scheme (0 pass / 2 dead / 3 wedged /
-// 4 verdict-fail / 5 nothing-ran).
+// ⛔ THE PARAGRAPH BELOW IS THE SUPERSEDED m23-fm DECISION. It is kept verbatim
+// because its REASONING WAS MEASURABLY WRONG, and the way it was wrong is the
+// finding (m23-fa-5, 2026-08-10):
+//
+//   > ⚠️ DELIBERATELY NOT MIGRATED TO `_verdict.mjs`, AND THE REASON IS A FINDING (m23-fm):
+//   > the primitive exits 2 for "asserted nothing", but THIS GATE ALREADY USES 2 FOR "app
+//   > dead" (and 3 for "wedged"). Routing through it would make exit 2 ambiguous WITHIN ONE
+//   > GATE — a reader could not tell a dead app from an empty run. So the guard is inline
+//   > and uses code 5, which is free in this gate's scheme (0 pass / 2 dead / 3 wedged /
+//   > 4 verdict-fail / 5 nothing-ran).
+//
+// ⭐⭐ "Would MAKE exit 2 ambiguous" presumes exit 2 was UNambiguous. It was not.
+// Exit 2 already meant THREE different things in this one file:
+//   • the pre-loop abort — "never accepted a connection, aborting before iteration 1",
+//     i.e. the soak ran ZERO iterations and proved NOTHING;
+//   • the in-loop "CONNECT FAILED — app dead", i.e. the gate CAUGHT THE CRASH it exists
+//     to catch — the strongest possible RED;
+//   • the in-loop "command error".
+// So exit 2 conflated "this gate proved nothing" with "this gate proved the defect is
+// back" — the two most opposite verdicts a gate can render, wearing one code. The
+// migration did not introduce that ambiguity; it REMOVED it (0 / 1 / 2 now mean passed /
+// failed / asserted-nothing, and the first bullet is the only one that keeps code 2).
+//
+// ⭐ THE GENERAL TRAP, which is why this is worth ten lines: m23-fm reasoned about the
+// collision from the PRIMITIVE's side (what does verdict's 2 mean?) and never enumerated
+// THIS FILE's own uses of 2. An exit-code audit that reads one end of the mapping is half
+// an audit — and the half it skipped was the one already broken.
+//
+// What the collapse costs: exit codes 3 (wedged) and 4 (shortfall) are gone, so dead vs
+// wedged vs shortfall is no longer readable from `$?`. That distinction is preserved in
+// the log line printed immediately before each verdict, which is where it was actually
+// read — MEASURED: nothing consumes this gate's exit codes (`gate-corpus-run.mjs` scores
+// `green = status === 0`, and every other reference to m16a is prose in docs/research/).
+//
+// The bespoke `ITERS < 1` / exit-5 guard is likewise gone, subsumed rather than deleted:
+// `ran: ITERS` sends ITERS=0 straight into verdict's own `ran === 0` branch, which prints
+// the shared ASSERTED-NOTHING banner and exits 2. That is the m23-fj false-green fix
+// surviving the migration on the one home's machinery instead of its own.
+// ⚠️ The PASS/FAIL line MUST stay inside the `else`. `clean === ITERS` is true at
+// ITERS=0 (0 === 0) — the exact m23-fj false green — so an unguarded ternary would
+// print "C1 PASS" one line above an ASSERTED-NOTHING exit 2. Routing the EXIT through
+// verdict() does not sanitise the gate's own LOG; a human reading stdout would still
+// see the word PASS on a run that proved nothing.
 if (ITERS < 1) {
-  log(`C1 ASSERTED NOTHING: ITERS=${ITERS} ran zero iterations, so the soak proved nothing.`);
-  log("  This is NOT a pass. Re-run with ITERS>=1 (default 10).");
-  process.exit(5);
+  log(`ITERS=${ITERS} ran zero iterations. Re-run with ITERS>=1 (default 10).`);
+} else {
+  log(clean === ITERS ? "C1 PASS" : "C1 FAIL");
 }
-if (clean === ITERS) {
-  log("C1 PASS");
-  process.exit(0);
-}
-log("C1 FAIL");
-process.exit(4);
+verdict({ ran: ITERS, failed: ITERS - clean });

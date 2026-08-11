@@ -54,11 +54,15 @@ const EXEMPTIONS = {
   "m18g-sketchpad-honesty.mjs": "m23-fa-4b",
   "m23bb1-vc-stop-honesty.mjs": "m23-fa-4b",
   "m23fo-conversion-stability.mjs": "m23-fa-4b",
-  // m16a already has EQUIVALENT protection by another route (`:205-208`,
-  // `if (ITERS < 1) { … process.exit(5); }`, added at m23-fj) — it is not
-  // vacuous, it just does not spell its guard as `verdict()`. Consolidating
-  // it onto the one home is bookkeeping, not a bug fix. Owner: m23-fa-5.
-  "m16a-poison-recipe.mjs": "m23-fa-5",
+  // m16a-poison-recipe.mjs was here, exempted on the grounds that its inline
+  // `if (ITERS < 1) { … exit(5) }` guard (m23-fj) gave EQUIVALENT protection, so
+  // migrating was "bookkeeping, not a bug fix". Migrated and DELETED at m23-fa-5
+  // — and the premise turned out to be wrong in the gate's favour: the guard was
+  // equivalent for the ITERS=0 case only. m16a's exit 2 separately meant BOTH
+  // "never accepted a connection, zero iterations ran" AND "app died at iteration
+  // N" — i.e. proved-nothing and caught-the-crash shared one code. Migrating
+  // split them (2 vs 1). ⭐ An exemption justified by "equivalent protection"
+  // deserves the same scepticism as a green test: equivalent on WHICH leg?
 };
 
 import { readdirSync, readFileSync } from "node:fs";
