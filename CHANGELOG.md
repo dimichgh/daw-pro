@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-08-11 — Triage notes for the audit tool, and a claim of ours withdrawn
+
+The audit tool flags a handful of tests it cannot prove sound. Those flags are not all the same thing,
+and the tool now says so: some are real weaknesses, and some are tests that genuinely cannot misfire
+where the proof simply lives in a different function than the one being read. Treating the second kind
+as the first leads to "fixes" that make a test worse, so the distinction is now written down beside the
+tool with both known examples named.
+
+We had recorded one of those tests as a third, separate kind — a case where a test passing on an empty
+list was the right answer rather than an oversight. Checking that before acting on it showed it was
+wrong: every place that test is called supplies a non-empty list, so the situation never arises. The
+note is withdrawn and the test is filed with the others. What survived the check was more useful than
+the claim: the test's guard compares two lengths to each other rather than to zero, which looks like a
+safeguard and is not one on its own. That shape is now documented so nobody mistakes it for one.
+
 ## 2026-08-11 — A research note stopped quoting numbers, and its own instructions turned out not to work
 
 One of our research notes described an audit tool and then reproduced that tool's output: totals, and a

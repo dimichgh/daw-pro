@@ -48,8 +48,50 @@
 // a blank-looking sibling field is the tell that your field names are wrong.
 //
 // `notCleared` is NOT the actionable count: a receiver that is a helper PARAMETER
-// is interprocedural and clears by inspection, not by this tool (`m23do:163` is the
-// standing example). Actionable = notCleared − those. Reconcile from two directions.
+// is interprocedural and clears by inspection, not by this tool (m23do-menubar's
+// `hasConsecutiveRun(haystack, needle)` is the standing example — NAMED, NOT
+// NUMBERED, because this header has now carried THREE stale coordinates; that one
+// said `m23do:163`, which is a BLANK LINE. Find it with
+// `grep -n 'function hasConsecutiveRun'`). Actionable = notCleared − those.
+// Reconcile from two directions.
+//
+// ⚠️⚠️ TRIAGE — `notCleared` MIXES AT LEAST TWO KINDS, AND ONLY ONE IS A DEFECT.
+// Added at the m23-gr close (2026-08-11). A triager who reads every uncleared row
+// as a find will file defects that are not defects, and "fixing" the second kind
+// makes the gate WORSE:
+//
+//   (1) REAL FINDS — nothing in the expression establishes non-emptiness, so the
+//       leg can pass having measured nothing. m23-go's `m23x-arrow-nudge` leg was
+//       one; it was fixed by adding a count pin.
+//
+//   (2) SOUND VIA AN INTERPROCEDURAL FACT — the site cannot be vacuous on any run,
+//       but the proof lives outside the expression (in a helper body, or across the
+//       call sites), which this tool does not read BY DESIGN. Two known members:
+//       m23g1-arrange-multiselect (guarded by `totalClips(ov) === 3`, a helper call
+//       on a DIFFERENT object) and m23cf-delete-key's `same(a, b)` — see the
+//       RELATIVE COUNT PIN note below. Roadmap m23-gp decided WON'T-DO on modelling
+//       this class; these rows are expected to stay flagged forever.
+//       ⚠️ Not to be confused with the m23-gm-scoped "KNOWN FALSE FLAGS" note
+//       below, which counts only the flags m23-gm INTRODUCED — m23cf pre-dates it,
+//       so "ONE ... REMAINS" there and "two known members" here are both correct.
+//
+// ⭐⭐ THE RELATIVE COUNT PIN — A SHAPE THAT LOOKS LIKE IDIOM A AND IS NOT.
+// m23cf-delete-key's helper is
+//     const same = (a, b) => a.length === b.length && sortIds(a).every(…)
+// `a.length === b.length` reads like a count pin, but it pins the receiver to
+// ANOTHER BINDING'S LENGTH, not to non-zero: `same([], [])` reaches `[].every(…)`
+// and returns `true`. It becomes a non-emptiness proof ONLY given a separate fact
+// about `b`. MEASURED at m23-gr: every one of the seven call sites passes a `b`
+// that is non-empty by construction (a 1-element literal, `withIds` = 4, and
+// `survivors` = 3), so `a.length === b.length` does force `a` non-empty — but that
+// argument is interprocedural, which is why the row stays flagged. Idiom A compares
+// `.length` against a NUMBER; this compares it against another `.length`, and the
+// two must not be conflated by any future clearing rule.
+//
+// ⛔ DO NOT "FIX" `same` BY ADDING `a.length > 0`. No current caller passes
+// empty/empty, so it would not silence a live failure — it would change the
+// HELPER'S CONTRACT, so that a future caller comparing two legitimately empty
+// id-lists gets a FALSE FAILURE. Two empty lists are the same list.
 //
 // ⚠️⚠️ KNOWN FALSE FLAGS — AMENDED AT THE m23-gn CLOSE (2026-08-11), NOT
 // DELETED. READ THIS BEFORE TRIAGING A RISE IN `notCleared`.
