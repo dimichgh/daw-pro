@@ -544,6 +544,52 @@ function armTeardown(gate, pidfileOverride) {
 }
 
 /**
+ * ONE process-wide `exit` listener that flushes every ATTACHED launch's
+ * captured stdout/stderr log, however many `startStaging({ detached: false })`
+ * calls this process makes (m23-gi).
+ *
+ * WHY. The previous shape registered a fresh `process.on("exit", ...)`
+ * closure inline in `startStaging`'s attached branch on EVERY call, with no
+ * guard at all — unlike `armTeardown` just above, which already dedupes on
+ * gate name (`armed.has`) and on `signalsHooked`. MEASURED: 12 same-gate
+ * attached launches in one process left 12 live `exit` listeners (one per
+ * launch), climbing past Node's default MaxListeners(10) warning threshold,
+ * with `armTeardown`'s own hooks flat throughout — the leak was isolated to
+ * this one unguarded site.
+ *
+ * A bare per-gate dedupe (mirroring `armTeardown`) is the WRONG fix: each
+ * launch's hook closes over ITS OWN `log` array and `logPath`, so deduping to
+ * "first launch only" would flush just the first relaunch's log and silently
+ * drop every later one for a gate restarted in the same process — trading a
+ * listener leak for lost evidence, which is strictly worse. `stopStaging`
+ * never writes this log either (it only SIGTERMs, releases the session lock,
+ * and removes the pidfile) — the `exit` hook is the ONLY flush mechanism for
+ * an attached launch, not a crash-path fallback, so it cannot be dropped.
+ *
+ * So: ONE hook, installed once ever, iterating a registry of `{ path, log }`
+ * entries appended on every attached launch and writing each at real exit —
+ * same net effect as the old per-launch hooks (a relaunch that reuses the
+ * same `logPath` still lets the LAST launch's content win on disk, because
+ * the registry preserves insertion order and later entries flush later, same
+ * as the FIFO order Node fires listeners in) — with zero extra listeners.
+ * Each write is its own try/catch, deliberately not one try around the whole
+ * loop: one unwritable path must not lose every later launch's log.
+ */
+const pendingLogFlushes = []; // { path, log }[] — one entry per attached launch, never pruned (small; the process is exiting)
+let logFlushHookInstalled = false;
+
+function armLogFlush(path, log) {
+  pendingLogFlushes.push({ path, log });
+  if (logFlushHookInstalled) return;
+  logFlushHookInstalled = true;
+  process.on("exit", () => {
+    for (const entry of pendingLogFlushes) {
+      try { writeFileSync(entry.path, entry.log.join("")); } catch { /* best effort */ }
+    }
+  });
+}
+
+/**
  * Launch a staging instance. Returns { pid, out, pidfile }.
  *
  * `detached: true` matches the shape m23v/m23x use — the child outlives this
@@ -647,9 +693,7 @@ export function startStaging({
     log = [];
     child.stdout.on("data", (d) => log.push(d.toString()));
     child.stderr.on("data", (d) => log.push(d.toString()));
-    process.on("exit", () => {
-      try { writeFileSync(logPath || `${out}/staging.log`, log.join("")); } catch { /* best effort */ }
-    });
+    armLogFlush(logPath || `${out}/staging.log`, log);
   }
   // ⚠️ PIDFILE + TEARDOWN ARE ARMED *BEFORE* THE F1 CONFIRMATION BELOW, ON
   // PURPOSE. If confirmation fails, this function throws — and this module's

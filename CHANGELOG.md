@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-08-11 — Fixed a slow leak in the test harness that launches the app
+
+Our automated checks launch the app in a sandboxed copy and capture everything it prints. The code
+that arranged to save that output registered a new shutdown handler every single time it launched
+the app, and never removed any of them. A check that launches once or twice never noticed. Anything
+that launched a dozen times in one go accumulated handlers until Node itself warned about a memory
+leak — and that warning lands in the same output the checks read as evidence.
+
+There's now a single shutdown handler that saves every launch's output from a list, instead of one
+handler per launch. Verified by counting handlers across twelve launches rather than by watching for
+the warning, since the warning only appears past ten and a short test would look fine either way.
+
+Worth recording why the obvious shortcut was rejected: simply refusing to register the handler more
+than once keeps the count flat and looks correct, but each handler was holding its own launch's
+output, so only the first launch's log would ever be saved. That version passes a handler count and
+quietly throws away eleven logs out of twelve — a worse bug than the one being fixed.
+
 ## 2026-08-11 — A warning that meant "something is broken" stopped crying wolf
 
 Our automated checks share a small piece of common code that prints the final verdict. When a check
