@@ -70,6 +70,28 @@ public actor VoiceConversionClient: VoiceConverting {
     public let config: Configuration
     private let session: URLSession
 
+    // MARK: m23-fp state — the convert gate, the sequence, the instrument
+
+    /// True while one conversion holds the gate (see `acquireConvertGate()`).
+    private var convertGateHeld = false
+    /// FIFO of conversions parked waiting for the gate.
+    private var convertGateWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Strictly increasing, per client instance — the human-readable ordering
+    /// part of a capture's file name. NOT a uniqueness key (see
+    /// `VoiceConversionOutput.captureFileName`).
+    private var captureSequence = 0
+    /// How many conversions are currently between "POST issued" and "output
+    /// captured".
+    private var convertsInFlight = 0
+    /// The highest value `convertsInFlight` has ever reached — the instrument
+    /// for the gate's one claim, and the reason that claim is testable without
+    /// timing. It must be `1` after ANY number of concurrent `convert(_:)`
+    /// calls; a `2` means some conversion was issued while an earlier output
+    /// was still uncaptured, which is exactly the window the facade overwrites
+    /// its own file in. Internal on purpose: `@testable` reaches it, nothing
+    /// shipped depends on it.
+    private(set) var maxConvertsInFlight = 0
+
     public init(configuration: Configuration = .resolved()) {
         self.config = configuration
         let sessionConfig = URLSessionConfiguration.ephemeral
@@ -135,7 +157,46 @@ public actor VoiceConversionClient: VoiceConverting {
     /// (health/list/status/train all stay fast) — the `ACEStepClient.post`
     /// per-call `timeoutSeconds` override precedent (`POST /v1/init`'s
     /// `modelInitTimeoutSeconds`), not a second client instance.
+    ///
+    /// ## m23-fp — the returned `outputPath` is OURS, not the facade's
+    ///
+    /// The facade overwrites its own output within a wall-clock second
+    /// (`VoiceConversionOutput`'s doc has the measurement and the full
+    /// reasoning), so this call COPIES the file it is told about into
+    /// `config.captureDirectory` and returns THAT path. The facade's own path
+    /// is preserved, unaltered, in `VoiceConvertResult.sidecarOutputPath` for
+    /// diagnostics — but nothing downstream may read it.
+    ///
+    /// ⚠️ **Wire-visible meaning change:** `vc.convertVocals`'s `outputPath`
+    /// response field now names this app's copy. Same field, same type, no
+    /// rename and nothing removed — but a caller that previously correlated
+    /// that string with a file in `scripts/rvc/runtime/out/` will not find it
+    /// there any more. That is the fix, not a side effect.
+    ///
+    /// The whole POST-parse-copy sequence runs under a gate that admits ONE
+    /// conversion at a time, so a second conversion cannot be issued while an
+    /// earlier output is still uncaptured. That is what makes the copy safe
+    /// rather than merely likely: `_engine_lock` serialises the facade, so
+    /// while we hold the gate there is no other conversion in existence to
+    /// overwrite the file underneath us.
+    ///
+    /// ⚠️ **Honest limit of that guarantee — it is per client INSTANCE.** The
+    /// app builds exactly one `VoiceConversionClient` and shares it with the
+    /// control router (`DAWProApp.swift:3212`/`:3574`), so the wire and the
+    /// Voice panel are covered by one gate. A second instance, or a second
+    /// process (a gate run, a script) converting against the same sidecar, is
+    /// NOT — no in-process lock can cover that, and nothing here pretends to.
     public func convert(_ request: VoiceConvertRequest) async throws -> VoiceConvertResult {
+        await acquireConvertGate()
+        defer { releaseConvertGate() }
+        return try await performConvert(request)
+    }
+
+    private func performConvert(_ request: VoiceConvertRequest) async throws -> VoiceConvertResult {
+        convertsInFlight += 1
+        maxConvertsInFlight = max(maxConvertsInFlight, convertsInFlight)
+        defer { convertsInFlight -= 1 }
+
         let body: [String: Any] = [
             "inputPath": request.inputPath,
             "voiceId": request.voiceId,
@@ -159,11 +220,61 @@ public actor VoiceConversionClient: VoiceConverting {
             throw VoiceConversionError.malformedResponse(
                 "/v1/voice/convert response is missing one or more required fields")
         }
+        // m23-fp — copy NOW, before the gate is released and another
+        // conversion may be issued. Throws rather than falling back to
+        // `outputPath`: handing back a path known to be overwritable is the
+        // failure this item exists to end.
+        captureSequence += 1
+        let captured = try VoiceConversionOutput.capture(
+            sidecarPath: outputPath,
+            voiceId: voiceId,
+            sequence: captureSequence,
+            into: config.captureDirectory)
         return VoiceConvertResult(
-            outputPath: outputPath, voiceId: voiceId, inputSeconds: inputSeconds,
+            outputPath: captured.path, sidecarOutputPath: outputPath, voiceId: voiceId,
+            inputSeconds: inputSeconds,
             engineLoadSeconds: engineLoadSeconds, inferSeconds: inferSeconds,
             rtf: asDouble(object["rtf"]), sampleRate: sampleRate, realConversion: realConversion,
             note: object["note"] as? String)
+    }
+
+    // MARK: - The convert gate (m23-fp)
+
+    /// Admits one conversion at a time, FIFO.
+    ///
+    /// An `actor` alone does NOT give this: `convert(_:)` suspends at its
+    /// `await` on the network, and the actor is re-entrant across that
+    /// suspension, so without this gate a second call would happily issue its
+    /// POST while the first conversion's output sat uncaptured on disk. The
+    /// classic actor-mutex shape — the `withCheckedContinuation` closure runs
+    /// synchronously, still on the actor, so appending the waiter cannot race
+    /// the check above it.
+    ///
+    /// Deliberately NOT an unstructured `Task` chain: parking the CALLER keeps
+    /// `convert(_:)` structured, so cancelling the caller still cancels the
+    /// underlying `URLSession` request exactly as it did before this existed.
+    private func acquireConvertGate() async {
+        if !convertGateHeld {
+            convertGateHeld = true
+            return
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            convertGateWaiters.append(continuation)
+        }
+    }
+
+    /// Hands the gate to the next waiter, or drops it if there is none.
+    ///
+    /// Note that `convertGateHeld` stays `true` when a waiter is resumed —
+    /// ownership is transferred, never released and re-taken, so a third
+    /// caller arriving in between cannot jump the queue. Always reached: the
+    /// call site is a `defer`, so a throwing conversion releases the gate too.
+    private func releaseConvertGate() {
+        if convertGateWaiters.isEmpty {
+            convertGateHeld = false
+        } else {
+            convertGateWaiters.removeFirst().resume()
+        }
     }
 
     // MARK: - Train (M10-p-4/p-6 will wire this behind `vc.trainVoice`)
@@ -270,15 +381,27 @@ extension VoiceConversionClient {
         /// `ACEStepClient.Configuration.modelInitTimeoutSeconds` precedent
         /// for "one call on this client legitimately needs its own budget".
         public var convertTimeoutSeconds: Double
+        /// m23-fp — where `convert(_:)` copies the facade's output to, and
+        /// therefore what its returned `outputPath` names.
+        ///
+        /// Defaults to the app-owned `VoiceConversionOutput.directory`.
+        /// Injectable so tests capture into a temp directory instead of the
+        /// real profile; there is deliberately NO environment override for it
+        /// — `AppDirectories` already relocates the whole profile through
+        /// `DAWPRO_PROFILE_ROOT`, and a second, narrower variable would be one
+        /// more thing that can be set inconsistently.
+        public var captureDirectory: URL
 
         public init(
             baseURL: URL = URL(string: "http://127.0.0.1:8002")!,
             requestTimeoutSeconds: Double = 10,
-            convertTimeoutSeconds: Double = 300
+            convertTimeoutSeconds: Double = 300,
+            captureDirectory: URL = VoiceConversionOutput.directory
         ) {
             self.baseURL = baseURL
             self.requestTimeoutSeconds = requestTimeoutSeconds
             self.convertTimeoutSeconds = convertTimeoutSeconds
+            self.captureDirectory = captureDirectory
         }
 
         /// `RVC_API_URL` env override wins if set (same variable
@@ -384,7 +507,21 @@ public struct VoiceConvertRequest: Sendable, Equatable {
 
 /// `POST /v1/voice/convert` success response.
 public struct VoiceConvertResult: Codable, Sendable, Equatable {
+    /// ⚠️ **Since m23-fp this is THIS APP'S copy, not the facade's file.**
+    /// `VoiceConversionClient.convert(_:)` copies the facade's output into
+    /// `Configuration.captureDirectory` the moment it parses the response,
+    /// because the facade overwrites its own output within a wall-clock second
+    /// (`VoiceConversionOutput`). Everything downstream — `vc.convertVocals`'s
+    /// wire response, `ProjectStore.importConvertedVoice`, the Voice panel —
+    /// consumes this path.
     public var outputPath: String
+    /// The facade's OWN `outputPath`, verbatim, for diagnostics only (m23-fp).
+    ///
+    /// Never open this file: by the time anyone reads it, a later conversion
+    /// in the same wall-clock second may have overwritten it — that is the
+    /// entire defect. Nil for a `VoiceConvertResult` built by a fake/test that
+    /// never talked to a facade.
+    public var sidecarOutputPath: String?
     public var voiceId: String
     public var inputSeconds: Double
     public var engineLoadSeconds: Double
@@ -407,11 +544,13 @@ public struct VoiceConvertResult: Codable, Sendable, Equatable {
     /// `internal` — callers outside AIServices (DAWControl's fakes for
     /// `VoiceConverting`) need to construct one without `@testable import`.
     public init(
-        outputPath: String, voiceId: String, inputSeconds: Double, engineLoadSeconds: Double,
+        outputPath: String, sidecarOutputPath: String? = nil, voiceId: String,
+        inputSeconds: Double, engineLoadSeconds: Double,
         inferSeconds: Double, rtf: Double? = nil, sampleRate: Int, realConversion: Bool,
         note: String? = nil
     ) {
         self.outputPath = outputPath
+        self.sidecarOutputPath = sidecarOutputPath
         self.voiceId = voiceId
         self.inputSeconds = inputSeconds
         self.engineLoadSeconds = engineLoadSeconds
@@ -451,6 +590,17 @@ public enum VoiceConversionError: Error, LocalizedError, Equatable {
     /// envelope parsed, nil when it didn't (an unexpected non-facade error).
     case requestFailed(status: Int, code: String?, message: String)
     case malformedResponse(String)
+    /// m23-fp — the conversion itself succeeded, but this app could not take
+    /// its own copy of the output, so the only path it could return is one the
+    /// facade may overwrite at any moment. Deliberately an ERROR rather than a
+    /// fallback: a silently-returned colliding path is what this case exists
+    /// to prevent.
+    ///
+    /// ⚠️ Added at m23-fp. Nothing switches exhaustively over this enum
+    /// outside `errorDescription` below (checked: `VoicePanelModel` has a
+    /// `default`, `CommandRouter.translateVoiceConversionError` uses an `if
+    /// case`), so no call site silently changed meaning.
+    case outputCaptureFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -462,6 +612,12 @@ public enum VoiceConversionError: Error, LocalizedError, Equatable {
             return "RVC voice-conversion sidecar request failed (HTTP \(status)): \(codePrefix)\(message)"
         case .malformedResponse(let detail):
             return "could not parse the RVC voice-conversion sidecar's response: \(detail)"
+        case .outputCaptureFailed(let detail):
+            return "the voice conversion finished, but its audio could not be copied into this "
+                + "app's own storage (\(detail)) — the sidecar reuses output filenames within "
+                + "one second, so the file it wrote cannot be trusted to survive; free up disk "
+                + "space or check permissions on the DAWPro/VoiceConversions folder, then "
+                + "convert again."
         }
     }
 }

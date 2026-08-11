@@ -247,10 +247,16 @@ public actor VoiceConversionManager: VoiceConversionManaging {
         // `SidecarStop.Identity.rvc` still matches the process it execs) —
         // one environment variable is the entire seam. Built as a pure
         // function so prepend-not-clobber is tested without spawning.
-        process.environment = Configuration.childEnvironment(
-            base: ProcessInfo.processInfo.environment,
-            voicesDir: VoiceModelImport.voicesDirectory.path,
-            mitigationDir: config.mitigationDirURL?.path)
+        //
+        // m23-fp: the same merge now ALSO sets `RVC_OUT_DIR`. `server.py:67`
+        // resolves `OUT_DIR` from it and nothing in `Sources/` set it before,
+        // so every shipped conversion wrote its wav into
+        // `scripts/rvc/runtime/out/` — inside the read-only fence. This
+        // redirects those writes to app-owned storage; it creates nothing
+        // under `scripts/rvc/`. Which paths get armed is `spawnEnvironment`'s
+        // job (one expression, testable without spawning) precisely so this
+        // call site cannot arm the wrong ones.
+        process.environment = config.spawnEnvironment(base: ProcessInfo.processInfo.environment)
         // No log-handle assignment — see this type's own doc comment,
         // deviation 2: `run.sh` redirects its own stdout/stderr to
         // `config.logFileURL` internally (`exec >> ... 2>&1`) before it execs
@@ -799,18 +805,53 @@ extension VoiceConversionManager {
         /// dictionary state from "absent" and a real shell environment.
         /// Refusing to launch is `resolveLaunchPlan()`'s job and ONLY its job;
         /// one refusal point, not two.
+        /// m23-fp adds `outDir` -> `RVC_OUT_DIR`. REQUIRED, no default: a
+        /// defaulted parameter is exactly how the m23-fo-2 hook nearly shipped
+        /// un-armed ("until this item nothing in the app set the one
+        /// environment variable that arms it, so no user reached it"), and the
+        /// point of this variable is that the facade stops writing its output
+        /// into the read-only `scripts/rvc/` checkout.
+        ///
+        /// An EMPTY `outDir` leaves `RVC_OUT_DIR` unset rather than setting it
+        /// to `""`. That matters: `server.py:67` does `Path(os.environ.get(
+        /// "RVC_OUT_DIR", ...))`, and `Path("")` is `.` — the facade's cwd,
+        /// which it `chdir`s to `SRC_DIR` INSIDE the fence. Unset means the
+        /// facade's own in-checkout default, which is merely the pre-m23-fp
+        /// behaviour. Unreachable in practice (the real value comes from
+        /// `AppDirectories`), pinned by a test so it stays that way.
         public static func childEnvironment(
             base: [String: String],
             voicesDir: String,
-            mitigationDir: String?
+            mitigationDir: String?,
+            outDir: String
         ) -> [String: String] {
             var environment = base
             environment["RVC_VOICES_DIR"] = voicesDir
+            if !outDir.isEmpty { environment["RVC_OUT_DIR"] = outDir }
             guard let mitigationDir, !mitigationDir.isEmpty else { return environment }
             let inherited = base["PYTHONPATH"] ?? ""
             environment["PYTHONPATH"] =
                 [mitigationDir, inherited].filter { !$0.isEmpty }.joined(separator: ":")
             return environment
+        }
+
+        /// The environment the spawner actually hands the facade — ONE
+        /// expression, so the spawn site has nothing left to get wrong.
+        ///
+        /// m23-fp built this seam deliberately. Testing `childEnvironment`
+        /// alone proves the merge RULE and says nothing about whether the app
+        /// arms it with the right values; every one of those assertions can be
+        /// green while `spawnAndPoll` passes a path that never leaves the
+        /// fence. This closes that gap while staying spawn-free and
+        /// write-free (it resolves directory URLs; it creates nothing — the
+        /// facade `mkdir`s `RVC_OUT_DIR` itself at `server.py:325`, and
+        /// `VoiceConversionOutput.capture` creates the capture home).
+        public func spawnEnvironment(base: [String: String]) -> [String: String] {
+            Self.childEnvironment(
+                base: base,
+                voicesDir: VoiceModelImport.voicesDirectory.path,
+                mitigationDir: mitigationDirURL?.path,
+                outDir: VoiceConversionOutput.sidecarOutputDirectory.path)
         }
 
         /// Pure path resolution — no process spawned. Throws `.notInstalled`

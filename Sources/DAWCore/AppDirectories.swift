@@ -65,6 +65,26 @@ public enum AppDirectories {
         /// see `VoiceModelImport`'s doc for why. Distinct from
         /// `.voiceDatasets` (raw training AUDIO, not model artifacts).
         case voiceModels = "VoiceModels"
+        /// RVC voice-conversion OUTPUT (m23-fp) — the finished converted audio
+        /// this app hands downstream, plus (in its `sidecar-out/` child) the
+        /// raw files the facade itself writes. `AIServices
+        /// .VoiceConversionOutput` owns the layout; `RVC_OUT_DIR` is pointed at
+        /// that child at every sidecar spawn.
+        ///
+        /// Two reasons it is its own category rather than a corner of an
+        /// existing one. **(1)** It must not live under `.voiceModels`: the
+        /// facade's `_scan_voices()` treats every SUBDIRECTORY of
+        /// `RVC_VOICES_DIR` as a voice, so an output folder there would surface
+        /// as a bogus `"incomplete"` voice in `vc.listVoices` and the Voice
+        /// panel. **(2)** It must not live under `.generations`, which holds
+        /// project media (`gen-*.wav`, the copies `importConvertedVoice` makes);
+        /// these are the pre-import originals, a different lifetime.
+        ///
+        /// Distinct from `.voiceModels` (model artifacts) and `.voiceDatasets`
+        /// (raw training audio). Deliberately NOT inside the read-only
+        /// `scripts/rvc/` checkout — before m23-fp the facade wrote its output
+        /// into `scripts/rvc/runtime/out/` because nothing set `RVC_OUT_DIR`.
+        case voiceConversions = "VoiceConversions"
 
         /// The on-disk directory name.
         public var directoryName: String { rawValue }

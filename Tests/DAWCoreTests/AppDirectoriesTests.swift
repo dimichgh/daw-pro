@@ -37,6 +37,9 @@ struct AppDirectoriesTests {
             .modelLifecycle: "ModelLifecycle",
             // m23-di-2a: the RVC voice-conversion model store.
             .voiceModels: "VoiceModels",
+            // m23-fp: the RVC voice-conversion OUTPUT home (our captured
+            // copies, plus the facade's own raw writes in `sidecar-out/`).
+            .voiceConversions: "VoiceConversions",
         ]
         // Closed set: a NEW category must be added to the pin above, so it can
         // never be introduced without someone reading this table.

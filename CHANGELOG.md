@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-08-11 — Converted vocals no longer overwrite each other, and land somewhere stable
+
+Voice conversion is handled by a small local service that writes its result to a file and hands back
+the path. It names that file using the current time to the nearest second, plus two other values that
+never change while it is running. So two conversions finishing in the same second produced the same
+filename, and the second silently replaced the first. Measured: twenty-four conversions produced only
+seven distinct files.
+
+A single vocal take takes far longer than a second to convert, so this was unlikely to bite one clip
+at a time. It mattered for converting in batches, and for anything driving conversions in a loop —
+including us: an earlier performance measurement looked reassuringly flat only because later runs were
+re-reading a file that had been overwritten.
+
+The app now copies each result to its own storage the moment it arrives, before it can issue another
+conversion, under a name that cannot collide. Converted audio also now lands in the app's own folder
+rather than inside the service's directory. If a copy ever fails, the conversion reports an error
+rather than handing back a path that might be overwritten.
+
+One visible consequence: the file path reported for a conversion now points at the app's copy rather
+than the service's. That is the point of the change — the reported path and the audio that was
+imported are now guaranteed to be the same file.
+
 ## 2026-08-11 — An audit tool was excusing a check that tests nothing
 
 We have a tool that hunts for a specific weak spot in our automated checks: asserting "every item in

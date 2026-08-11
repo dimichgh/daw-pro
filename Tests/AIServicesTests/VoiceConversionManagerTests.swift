@@ -1105,7 +1105,7 @@ struct VoiceConversionChildEnvironmentTests {
     func prependsToInherited() {
         let env = Config.childEnvironment(
             base: ["PYTHONPATH": "/user/one:/user/two"],
-            voicesDir: "/voices", mitigationDir: "/hook")
+            voicesDir: "/voices", mitigationDir: "/hook", outDir: "/out")
         #expect(env["PYTHONPATH"] == "/hook:/user/one:/user/two")
     }
 
@@ -1113,14 +1113,14 @@ struct VoiceConversionChildEnvironmentTests {
     func oursIsFirst() {
         let env = Config.childEnvironment(
             base: ["PYTHONPATH": "/someone/elses/sitecustomize/home"],
-            voicesDir: "/voices", mitigationDir: "/hook")
+            voicesDir: "/voices", mitigationDir: "/hook", outDir: "/out")
         #expect(env["PYTHONPATH"]?.hasPrefix("/hook:") == true)
     }
 
     @Test("no inherited PYTHONPATH -> set to ours alone, with no stray separator")
     func setsWhenAbsent() {
         let env = Config.childEnvironment(
-            base: [:], voicesDir: "/voices", mitigationDir: "/hook")
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook", outDir: "/out")
         #expect(env["PYTHONPATH"] == "/hook")
     }
 
@@ -1131,7 +1131,7 @@ struct VoiceConversionChildEnvironmentTests {
     @Test("inherited PYTHONPATH of \"\" -> ours alone, never a trailing colon")
     func emptyInheritedProducesNoTrailingColon() {
         let env = Config.childEnvironment(
-            base: ["PYTHONPATH": ""], voicesDir: "/voices", mitigationDir: "/hook")
+            base: ["PYTHONPATH": ""], voicesDir: "/voices", mitigationDir: "/hook", outDir: "/out")
         #expect(env["PYTHONPATH"] == "/hook")
         #expect(env["PYTHONPATH"]?.hasSuffix(":") == false)
     }
@@ -1139,29 +1139,59 @@ struct VoiceConversionChildEnvironmentTests {
     @Test("nil mitigationDir leaves an inherited PYTHONPATH EXACTLY as it was")
     func nilMitigationDirLeavesInheritedUntouched() {
         let env = Config.childEnvironment(
-            base: ["PYTHONPATH": "/user/one"], voicesDir: "/voices", mitigationDir: nil)
+            base: ["PYTHONPATH": "/user/one"], voicesDir: "/voices", mitigationDir: nil,
+            outDir: "/out")
         #expect(env["PYTHONPATH"] == "/user/one")
     }
 
     @Test("nil mitigationDir does not INVENT a PYTHONPATH where there was none")
     func nilMitigationDirDoesNotInvent() {
         let env = Config.childEnvironment(
-            base: [:], voicesDir: "/voices", mitigationDir: nil)
+            base: [:], voicesDir: "/voices", mitigationDir: nil, outDir: "/out")
         #expect(env["PYTHONPATH"] == nil)
     }
 
     @Test("an empty-string mitigationDir is treated as absent, not joined in")
     func emptyMitigationDirIsAbsent() {
         let env = Config.childEnvironment(
-            base: ["PYTHONPATH": "/user/one"], voicesDir: "/voices", mitigationDir: "")
+            base: ["PYTHONPATH": "/user/one"], voicesDir: "/voices", mitigationDir: "",
+            outDir: "/out")
         #expect(env["PYTHONPATH"] == "/user/one")
     }
 
     @Test("RVC_VOICES_DIR is still set (m23-di-2a must not regress)")
     func stillSetsVoicesDir() {
         let env = Config.childEnvironment(
-            base: [:], voicesDir: "/voices/here", mitigationDir: "/hook")
+            base: [:], voicesDir: "/voices/here", mitigationDir: "/hook", outDir: "/out")
         #expect(env["RVC_VOICES_DIR"] == "/voices/here")
+    }
+
+    // MARK: - m23-fp: RVC_OUT_DIR
+
+    @Test("RVC_OUT_DIR is set from outDir (m23-fp — the facade stops writing into the fence)")
+    func setsOutDir() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook", outDir: "/app/out")
+        #expect(env["RVC_OUT_DIR"] == "/app/out")
+    }
+
+    /// `Path("")` is `.` in Python, and the facade `chdir`s to `SRC_DIR` INSIDE
+    /// the fence — so setting the variable to an empty string would be strictly
+    /// worse than not setting it. Unreachable in practice; pinned so it stays
+    /// unreachable.
+    @Test("an empty outDir leaves RVC_OUT_DIR ABSENT, never set to \"\"")
+    func emptyOutDirLeavesVariableAbsent() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook", outDir: "")
+        #expect(env["RVC_OUT_DIR"] == nil)
+    }
+
+    @Test("an inherited RVC_OUT_DIR is REPLACED — ours is authoritative")
+    func inheritedOutDirIsReplaced() {
+        let env = Config.childEnvironment(
+            base: ["RVC_OUT_DIR": "/somewhere/else"], voicesDir: "/voices",
+            mitigationDir: "/hook", outDir: "/app/out")
+        #expect(env["RVC_OUT_DIR"] == "/app/out")
     }
 
     /// The whole reason this merges onto the inherited environment instead of
@@ -1171,10 +1201,69 @@ struct VoiceConversionChildEnvironmentTests {
     func preservesTheRestOfTheEnvironment() {
         let env = Config.childEnvironment(
             base: ["PATH": "/usr/bin", "HOME": "/Users/tester", "ANTHROPIC_API_KEY": "sk-x"],
-            voicesDir: "/voices", mitigationDir: "/hook")
+            voicesDir: "/voices", mitigationDir: "/hook", outDir: "/out")
         #expect(env["PATH"] == "/usr/bin")
         #expect(env["HOME"] == "/Users/tester")
         #expect(env["ANTHROPIC_API_KEY"] == "sk-x")
+    }
+}
+
+/// m23-fp — the gap `childEnvironment` tests alone CANNOT close: the merge rule
+/// can be perfect while the spawner arms it with the wrong paths. This is the
+/// one expression `spawnAndPoll` now uses, so what these assert is what the
+/// facade is actually launched with.
+@Suite("VoiceConversionManager.spawnEnvironment — what the spawner really arms (m23-fp)")
+struct VoiceConversionSpawnEnvironmentTests {
+    private typealias Config = VoiceConversionManager.Configuration
+
+    @Test("RVC_OUT_DIR is armed with VoiceConversionOutput.sidecarOutputDirectory")
+    func armsOutDirWithTheAppOwnedPath() {
+        let env = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc"))
+            .spawnEnvironment(base: [:])
+        #expect(env["RVC_OUT_DIR"] == VoiceConversionOutput.sidecarOutputDirectory.path)
+    }
+
+    /// The whole point of the variable. If this ever fails, shipped conversions
+    /// are writing wavs inside the read-only checkout again.
+    @Test("RVC_OUT_DIR points OUTSIDE the read-only scripts/rvc fence")
+    func outDirIsOutsideTheFence() throws {
+        let env = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc"))
+            .spawnEnvironment(base: [:])
+        let outDir = try #require(env["RVC_OUT_DIR"])
+        #expect(!outDir.contains("scripts/rvc"), "\(outDir)")
+        #expect(outDir.contains("/DAWPro/VoiceConversions/"), "\(outDir)")
+    }
+
+    @Test("RVC_VOICES_DIR and PYTHONPATH are still armed (m23-di-2a / m23-fo-2 must not regress)")
+    func stillArmsTheOlderTwo() {
+        let env = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc"))
+            .spawnEnvironment(base: ["PYTHONPATH": "/user/one"])
+        #expect(env["RVC_VOICES_DIR"] == VoiceModelImport.voicesDirectory.path)
+        #expect(env["PYTHONPATH"] == "/repo/scripts/rvc-mitigation:/user/one")
+    }
+
+    @Test("the inherited environment still survives (no fresh dictionary)")
+    func preservesInherited() {
+        let env = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc"))
+            .spawnEnvironment(base: ["PATH": "/usr/bin", "HOME": "/Users/tester"])
+        #expect(env["PATH"] == "/usr/bin")
+        #expect(env["HOME"] == "/Users/tester")
+    }
+
+    /// `spawnEnvironment` resolves directory URLs; it must not CREATE either of
+    /// them (the facade `mkdir`s `RVC_OUT_DIR` itself, and the capture home is
+    /// created on first capture). A spawner that mkdirs as a side effect would
+    /// leave directories behind on every dry run and every refused launch.
+    @Test("computing the environment creates no directories")
+    func createsNothing() {
+        // Stated as "unchanged", not "absent": this machine may legitimately
+        // already have the directory from real use, and an assertion that only
+        // holds on a fresh machine is not an assertion.
+        let target = VoiceConversionOutput.sidecarOutputDirectory.path
+        let existedBefore = FileManager.default.fileExists(atPath: target)
+        _ = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc")).spawnEnvironment(base: [:])
+        _ = Config(rvcDir: URL(fileURLWithPath: "/repo/scripts/rvc")).spawnEnvironment(base: [:])
+        #expect(FileManager.default.fileExists(atPath: target) == existedBefore)
     }
 }
 

@@ -16,8 +16,21 @@ private func baseURL(port: UInt16) -> URL {
     URL(string: "http://127.0.0.1:\(port)")!
 }
 
-private func makeClient(port: UInt16) -> VoiceConversionClient {
-    VoiceConversionClient(configuration: .init(baseURL: baseURL(port: port)))
+/// m23-fp — `convert(_:)` now COPIES the facade's output into
+/// `captureDirectory`, so every client built here is pointed at scratch. The
+/// DEFAULT is a temp path, never `VoiceConversionOutput.directory`: a test that
+/// forgets to pass one must not be able to write into the person's real
+/// `~/Library/Application Support/DAWPro/VoiceConversions/`.
+private func testCaptureDirectory() -> URL {
+    URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("m23fp-clienttests-\(UUID().uuidString)", isDirectory: true)
+}
+
+private func makeClient(
+    port: UInt16, captureDirectory: URL = testCaptureDirectory()
+) -> VoiceConversionClient {
+    VoiceConversionClient(
+        configuration: .init(baseURL: baseURL(port: port), captureDirectory: captureDirectory))
 }
 
 @Suite("VoiceConversionClient — health() (m10-p-3)")
@@ -157,23 +170,42 @@ struct VoiceConversionClientVoicesTests {
 
 @Suite("VoiceConversionClient — convert() (m10-p-3)")
 struct VoiceConversionClientConvertTests {
+    /// ⚠️ m23-fp changed what `outputPath` MEANS (not its name or type): it is
+    /// now this app's own copy, because the facade overwrites its output within
+    /// a wall-clock second. The facade's path is still asserted here — it moved
+    /// to `sidecarOutputPath`. Everything else about the m10-p-3 contract (the
+    /// decoded fields, the request body shape) is unchanged.
     @Test("POST /v1/voice/convert happy path -> VoiceConvertResult decoded, request body shaped correctly")
     func convertHappyPathDecodesResult() async throws {
+        let scratch = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("m23fp-happy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        // A real file at the facade's reported path — before m23-fp nothing in
+        // this test needed to exist on disk, because nothing read it.
+        let sidecarOut = scratch.appendingPathComponent("out.wav")
+        try Data("converted audio".utf8).write(to: sidecarOut)
+
         let server = StubACEStepServer()
         try server.start()
         defer { server.stop() }
         server.enqueue(
             StubACEStepServer.jsonResponse("""
-                {"outputPath":"/tmp/out.wav","voiceId":"base","inputSeconds":5.0,\
+                {"outputPath":"\(sidecarOut.path)","voiceId":"base","inputSeconds":5.0,\
                 "engineLoadSeconds":0.5,"inferSeconds":0.135,"rtf":37.13,"sampleRate":40000,\
                 "realConversion":false,"note":"base is the untrained generic target"}
                 """),
             forKey: "POST /v1/voice/convert")
 
-        let result = try await makeClient(port: server.port).convert(
-            VoiceConvertRequest(inputPath: "/tmp/in.wav", voiceId: "base", pitchSemitones: 2))
+        let result = try await makeClient(
+            port: server.port,
+            captureDirectory: scratch.appendingPathComponent("captures", isDirectory: true)
+        ).convert(VoiceConvertRequest(inputPath: "/tmp/in.wav", voiceId: "base", pitchSemitones: 2))
 
-        #expect(result.outputPath == "/tmp/out.wav")
+        #expect(result.sidecarOutputPath == sidecarOut.path)
+        #expect(result.outputPath != sidecarOut.path, "m23-fp: the returned path must be OURS")
+        #expect(try Data(contentsOf: URL(fileURLWithPath: result.outputPath))
+                == Data("converted audio".utf8))
         #expect(result.voiceId == "base")
         #expect(result.inputSeconds == 5.0)
         #expect(result.sampleRate == 40000)
