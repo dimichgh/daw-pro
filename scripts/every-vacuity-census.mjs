@@ -51,6 +51,21 @@
 // is interprocedural and clears by inspection, not by this tool (`m23do:163` is the
 // standing example). Actionable = notCleared − those. Reconcile from two directions.
 //
+// ⚠️⚠️ KNOWN FALSE FLAGS AS OF 2026-08-11 (the m23-gm close) — READ THIS BEFORE
+// TRIAGING A RISE IN `notCleared`. Tightening idiom A at m23-gm moved `notCleared`
+// 6 → 12, and FIVE of the six new flags are KNOWN-SOUND, not finds. They live in
+// m23g1-arrange-multiselect, m23ak-note-selection-drop, m23x-arrow-nudge (two), and
+// m23g2-group-drag. All five prove non-emptiness by a route this tool does not yet
+// model: they do not ASSERT a length, they INDEX the receiver and dereference it, so
+// an empty collection THROWS and the check fails LOUDLY rather than passing
+// vacuously. **Roadmap m23-gn teaches this idiom and will clear them again.** The
+// SIXTH new flag (in m23x-arrow-nudge, the `trimmedIds`/`removedIds` leg) is a REAL
+// vacuous leg and is roadmap m23-go. ⚠️ Deliberately NO `file:line` list here —
+// line numbers in these gates drift and a stale coordinate list is worse than none;
+// the roadmap items carry the exact coordinates, and this note carries the shape.
+// ⭐ WHEN m23-gn AND m23-go BOTH LAND, DELETE THIS PARAGRAPH — a "known false
+// flags" note that outlives its cause teaches the next reader to ignore real finds.
+//
 // ⚠️ `notClearedByProvenance` was added at m23-ee-2c: {rows, parseFails,
 // filesScanned, notCleared, notClearedByProvenance}. It buckets the `notCleared`
 // rows by `provenance` so a consumer doesn't have to re-derive the breakdown by

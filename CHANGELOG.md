@@ -18,8 +18,8 @@ yesterday's fix — requires the check to be about the same list the test iterat
 Six tests were being excused on reasoning that didn't hold. Five are sound anyway, and now show up as
 unexplained until we teach the tool the pattern they actually use; that follow-up is written down. The
 sixth is the genuinely thin one, and it is now correctly flagged. Nothing else moved: the other
-forty-three excused tests are excused for exactly the same reasons as before, and no test anywhere became
-*more* excused — the tool only got stricter.
+forty-three excused tests are excused for exactly the same reasons as before, and nothing in the current
+test suite became *more* excused — across today's tests, the tool only got stricter.
 
 ## 2026-08-11 — An audit tool stopped accepting the wrong evidence, and we found it doing something worse
 
