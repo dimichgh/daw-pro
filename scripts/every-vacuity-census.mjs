@@ -61,39 +61,55 @@
 // collection THROWS and the check fails LOUDLY instead of passing vacuously.
 // Those four clear again, with `clearedBy` naming idiom G.
 //
-// ⚠️ TWO KNOWN-SOUND-OR-KNOWN-WEAK FLAGS REMAIN, AND THEY ARE NOT THE SAME
-// KIND OF THING:
-//   • m23g1-arrange-multiselect — SOUND, and PERMANENTLY FLAGGED unless
-//     roadmap m23-gp decides otherwise. Its check is guarded by a HELPER CALL
-//     ON A DIFFERENT OBJECT (`totalClips(ov) === 3` guarding `ov.tracks.every`)
-//     — there is no index access anywhere in the expression, so idiom G does
-//     not and MUST NOT reach it. It is sound only via an INTERPROCEDURAL fact
-//     (that `totalClips` sums over `ov.tracks`), exactly the class
-//     localHelperCall()'s header declares out of scope. m23-gn deliberately
-//     did not stretch to it; m23-gp is the decision item, and its likely
-//     answer is "won't do".
-//   • m23x-arrow-nudge (the `trimmedIds`/`removedIds` leg) — a REAL vacuous
-//     leg, roadmap m23-go. Its own conjuncts constrain DIFFERENT OBJECTS than
-//     the receiver, so nothing in its check expression establishes
-//     non-emptiness. This one is a find, not a false flag.
+// ⚠️ ONE KNOWN-SOUND FLAG REMAINS, AND IT IS NOW PERMANENT:
+//   • m23g1-arrange-multiselect — SOUND, and PERMANENTLY FLAGGED. ⭐ roadmap
+//     m23-gp DECIDED "WON'T DO" 2026-08-11; this bullet is that decision's
+//     only durable explanation, so DO NOT DELETE IT. Its check is guarded by
+//     a HELPER CALL ON A DIFFERENT OBJECT (`totalClips(ov) === 3` guarding
+//     `ov.tracks.every`) — there is no index access anywhere in the
+//     expression, so idiom G does not and MUST NOT reach it. It is sound only
+//     via an INTERPROCEDURAL fact (that `totalClips` sums over `ov.tracks`),
+//     exactly the class localHelperCall()'s header declares out of scope.
+//     ⚠️ THE REASON IS *NOT* "only one row would benefit" — m23-gp's own
+//     filing said that and MEASURING IT AT THE CLOSE FOUND IT FALSE. The real
+//     reason is that clearing this row and the HELPER-RETURN rows needs TWO
+//     DISTINCT interprocedural mechanisms, not one: (A) resolve a helper
+//     called in a SIBLING CONJUNCT to constrain a DIFFERENT binding — this
+//     row; (B) resolve a helper whose RETURN IS the receiver — m23ak's
+//     `starts(ids)` = `ids.map(…)`, length fixed by its argument. And (B)
+//     only finishes the job when that argument is itself a literal: m23ak's
+//     other flagged row passes a RUNTIME array, so (B) reduces it to a new
+//     unanswered question rather than clearing it. That is two soundness
+//     arguments and two over-clear surfaces (cf. the m23-ex / m23-eu /
+//     m23-gl / m23-gm axes) bought for 2–3 rows the paragraph above already
+//     says are NOT the actionable count.
+//   • (m23x-arrow-nudge's bullet was DELETED at the m23-gp close: m23-go
+//     LANDED in 588841b and fixed that leg, so it is no longer a live flag.
+//     This parenthetical is a tombstone, not a flag — drop it freely.)
 //
 // ⚠️ Deliberately NO `file:line` list here — line numbers in these gates drift
 // and a stale coordinate list is worse than none; the roadmap items carry the
 // exact coordinates, and this note carries the shape.
-// ⭐ WHEN m23-go LANDS, DELETE ITS BULLET ONLY. Do NOT delete this paragraph
-// wholesale: if m23-gp closes as "won't do", the m23g1 bullet is the ONLY
-// place that explains why one permanently-flagged row is not a defect, and a
+// ⭐ BOTH INSTRUCTIONS THIS PARAGRAPH ONCE CARRIED ARE NOW DISCHARGED (m23-gp
+// close, 2026-08-11): m23-go landed, so its bullet was deleted; m23-gp closed
+// won't-do, so the m23g1 bullet became PERMANENT rather than provisional. The
+// standing rule that produced them is what survives, and it cuts both ways: a
 // "known false flags" note that outlives its cause teaches the next reader to
-// ignore real finds — but one deleted too early strands a permanent false
-// flag with no explanation at all.
+// ignore real finds, but one deleted too early strands a permanent false flag
+// with no explanation at all. So the m23g1 bullet stays until the row itself
+// stops being flagged — which, per m23-gp, is not planned.
 //
 // ⚠️ `notClearedByProvenance` was added at m23-ee-2c: {rows, parseFails,
 // filesScanned, notCleared, notClearedByProvenance}. It buckets the `notCleared`
 // rows by `provenance` so a consumer doesn't have to re-derive the breakdown by
 // filtering `rows` (see the `r.atRisk` incident above — same failure mode, new
 // field). The `HELPER-RETURN` bucket is receivers that come from a call to a
-// function declared in THIS FILE (`m23ak:305/553`'s `starts(ids)` is the standing
-// example) — genuinely `cleared: false` (this tool does not resolve helper
+// function declared in THIS FILE (m23ak-note-selection-drop's `starts(ids)` is
+// the standing example — NAMED, NOT NUMBERED: this note said `m23ak:305/553`
+// until the m23-gp close measured those lines and found `await depth()` and a
+// template fragment, i.e. the note carried stale coordinates two paragraphs
+// after warning against carrying coordinates. Find it by `grep -n 'async
+// function starts'`) — genuinely `cleared: false` (this tool does not resolve helper
 // bodies — that is out of scope, see localHelperCall()'s header comment) but
 // distinguishable from an open unknown: it means "go read one function", not
 // "trace an external API". `notClearedByProvenance["HELPER-RETURN"]` is exactly

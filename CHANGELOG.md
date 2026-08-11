@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-08-11 — A decision not to build something, and a correction to yesterday's note
+
+Two of the tests the audit tool still flags are sound; it simply cannot prove it, because the proof lives
+inside a helper function it deliberately does not read. We decided not to teach it to. Writing that down
+took longer than writing the code would have, because the reason we had recorded for the decision — that
+only one test would benefit — turned out to be wrong when checked. Three would. The decision holds anyway,
+for a better reason: those three tests need two different kinds of cross-function reasoning, not one, and
+each kind is a new way for the tool to wrongly declare a test sound. The tool's value is that when it
+clears something, you can believe it.
+
+This note also corrects the previous one. It claimed that running a single test directly left our
+"which tests have actually been run" ledger un-updated, so a freshly fixed test was recorded as both
+never-run and out-of-date. That was false — the ledger updates on a direct run, and says so in a comment
+we did not read. The ledger is accurate and the staleness figure never moved. The original complaint that
+prompted the note, about single-test runs overwriting a full run's summary, is a different file and still
+stands.
+
 ## 2026-08-11 — A test that checked "nothing was trimmed" now also checks there was something to trim
 
 The audit tool described in the last three notes found one genuinely weak test, as opposed to tests it
