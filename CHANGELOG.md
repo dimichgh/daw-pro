@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-08-10 — Our window-size experiments had been comparing a thing to itself
+
+Nothing in the app changed here either. This is the second repair of the day to the checks that
+guard it, and it came out of noticing that an experiment we had already trusted could not have
+worked.
+
+Some of our checks are sensitive to how big the app window is. To find out which, we run a check
+twice at two different window sizes and compare. Setting the size worked — we set it, we read it
+back, it was what we asked for. But every check still ran at the same default size regardless,
+because starting the app deliberately wipes its saved settings so each run begins from a clean
+slate. That wipe is correct and worth keeping; it just also erased the size we had set moments
+earlier. So both halves of the experiment ran at the identical size, and comparing them told us
+nothing at all. The results looked perfectly normal, which is the whole problem.
+
+The size is now applied after the wipe rather than before it, so there is nothing left to undo it.
+Asking for a size the app already has now says so plainly instead of quietly looking like a success,
+a typo in the size stops everything before the app is even launched, and a size that fails to take
+hold is treated as a wrong measurement rather than a small cosmetic miss.
+
+Worth recording how close this came to going wrong twice. The first version of the fix worked, and
+covered only 31 of our 75 checks — the other 44 open their connection to the app a different way and
+silently got no size at all. It surfaced because one of those checks passed 38 out of 38 under a
+setting that had never been applied to it: the passing result was identical either way, and the only
+clue was a line missing from the log. Passing while a feature sits inert is not evidence the feature
+works.
+
 ## 2026-08-10 — Closed a hole that let an automated check pass without checking anything
 
 Nothing in the app itself changed today. This is about the checks that guard it.

@@ -572,6 +572,10 @@ export function startStaging({
 } = {}) {
   if (!gate) throw new Error("startStaging requires a { gate } name for its pidfile/out dir");
   assertStagingPort(port);
+  // m23-dx-3: parsed HERE, before anything is spawned, so a typo'd
+  // STAGING_WINDOW_SIZE fails without first launching an app that would then
+  // have to be torn down. Absent env ⇒ null ⇒ this whole feature is inert.
+  const wantWindowSize = parseStagingWindowSize();
   // m23-ay: same "present-but-invalid throws, absent is legal" split as every
   // other optional argument in this file. A non-string here would be spread into
   // `env` and reach the child as the STRING "[object Object]" or "42", which the
@@ -674,6 +678,37 @@ export function startStaging({
       `launch that cannot be confirmed isolated.`
     );
   }
+  // m23-dx-3: THE WINDOW PIN. Deliberately the LAST thing `startStaging` does.
+  //
+  //  - AFTER `resetStagingDefaultsDomain()`, so the reset cannot undo it. That
+  //    ordering is the whole point: m23-dx's original method pinned in a
+  //    THROWAWAY EARLIER SESSION and the reset wiped it, so every "pinned" gate
+  //    silently ran at the app default 1440x900 (measured, m23-dx-2).
+  //  - AFTER `armTeardown`, so a pin failure still kills the app it launched
+  //    rather than orphaning it on the staging port.
+  //  - AFTER `confirmAliasIdentity`, so we only ever pin a confirmed-isolated app.
+  //  - Via `spawnSync` on a separate process, because `startStaging` is
+  //    SYNCHRONOUS and every gate depends on that; the pin needs async socket
+  //    work. Making this function async would break the whole corpus.
+  //
+  // Port is passed EXPLICITLY, never inherited by luck — the pinner is a
+  // different process and re-asserts the staging-port rule itself.
+  if (wantWindowSize) {
+    const pin = spawnSync(
+      process.execPath,
+      [`${root}/scripts/gates/_pin-window.mjs`, String(port), String(wantWindowSize.width), String(wantWindowSize.height)],
+      { stdio: "inherit" }
+    );
+    if (pin.status !== 0) {
+      throw new Error(
+        `startStaging: ${STAGING_WINDOW_SIZE_ENV}=${wantWindowSize.width}x${wantWindowSize.height} ` +
+        `could not be applied (pinner exit ${pin.status}). Refusing to hand back a session whose ` +
+        `window size is not the one that was asked for — a wrong size is a WRONG MEASUREMENT, ` +
+        `not a cosmetic miss.`
+      );
+    }
+  }
+
   return { pid: child.pid, out, pidfile, profileRoot: profile, binary: alias, defaultsDomain };
 }
 
@@ -899,6 +934,69 @@ export function stopStaging(gate, pidfileOverride, { lockPath } = {}) {
 }
 
 /** Connect to the staging control port, retrying while the app boots. */
+/**
+ * m23-dx-3 — `STAGING_WINDOW_SIZE=<W>x<H>` pins the staging window size.
+ *
+ * WHY THIS LIVES HERE AND NOT IN A THROWAWAY SESSION: `startStaging` resets the
+ * staging defaults domain on every launch (the m23-gf isolation seam), which
+ * wipes the `NSWindow Frame …` autosave a previous session wrote. So a pin set
+ * in session N is GONE in session N+1, and m23-dx's sweep method silently
+ * compared an arm against itself — measured at m23-dx-2, where all four runs
+ * across two arms ran at the app default 1440x900 while the pinning session's
+ * own read-back cheerfully said 1400x1000. Applying the pin AFTER the reset,
+ * inside the session that will actually run the gate, is the only placement the
+ * reset cannot undo. ⛔ The other tempting fix — seeding an `NSWindow Frame …`
+ * key — is forbidden by `_staging-defaults-seed.json` in terms, and for a
+ * stated reason: NS* keys must regenerate or the isolation seam is defeated.
+ *
+ * ⚠️ RE-APPLIED ON EVERY `connect()`, DELIBERATELY. A once-per-process flag
+ * would silently skip the pin for a second staging launch in the same process,
+ * and a missed pin is exactly the invisible no-op this item exists to remove.
+ * Re-pinning is idempotent and cheap; only TRANSITIONS are logged.
+ *
+ * ⚠️ THE LOG DISTINGUISHES A REAL PIN FROM A NO-OP ON PURPOSE. 1440x900 is the
+ * app default, so `STAGING_WINDOW_SIZE=1440x900` sets what is already there and
+ * its read-back would "succeed" while proving nothing — the precise shape that
+ * blessed the broken method at m23-dx-2. `pin: 1440x900 -> 1400x1000` and
+ * `pin: 1440x900 (already — no change)` must never be confused for each other.
+ * This does NOT abort on equality: pinning the default is legitimate. It is the
+ * SWEEP's job to require that the two arms' GATE-REPORTED frames differ.
+ */
+export const STAGING_WINDOW_SIZE_ENV = "STAGING_WINDOW_SIZE";
+
+export function parseStagingWindowSize(raw = process.env[STAGING_WINDOW_SIZE_ENV]) {
+  if (raw === undefined || raw === null || String(raw).trim() === "") return null;
+  const m = /^\s*(\d+)\s*[xX]\s*(\d+)\s*$/.exec(String(raw));
+  if (!m) {
+    throw new Error(
+      `${STAGING_WINDOW_SIZE_ENV}="${raw}" is not <WIDTH>x<HEIGHT> (e.g. 1400x1000). ` +
+      `Refusing to continue: a malformed pin that silently did nothing is the defect ` +
+      `m23-dx-3 exists to remove.`
+    );
+  }
+  const width = Number(m[1]), height = Number(m[2]);
+  if (!(width > 0 && height > 0)) {
+    throw new Error(`${STAGING_WINDOW_SIZE_ENV}="${raw}" parsed to a non-positive size`);
+  }
+  return { width, height };
+}
+
+/**
+ * ⛔ THE PIN IS APPLIED IN `startStaging`, NOT HERE — MEASURED REASON, KEEP.
+ * The first implementation of m23-dx-3 pinned inside this `connect()`. It
+ * worked, and it was still wrong: only **31 of the 75** non-harness gates
+ * import this function. The other 44 define their own local `connect` or
+ * hand-roll a raw `new WebSocket`, so they inherited NO pin — and inherited it
+ * SILENTLY, which is the very invisible-no-op failure class this item exists to
+ * remove. It was caught because `m23e-empty-lane-create` passed 38/38 under a
+ * pin that had never been applied: the `pin:` line was simply ABSENT from the
+ * log. `startStaging` is the one call every gate makes (`launchStaging`
+ * delegates to it just below), so that is where the pin belongs.
+ *
+ * ⭐ A GREEN RUN UNDER A FEATURE THAT NEVER RAN IS NOT EVIDENCE THE FEATURE
+ * WORKS. Check that the feature ANNOUNCED ITSELF, not merely that the gate
+ * passed — the pass was identical in both cases.
+ */
 export async function connect({ port = STAGING_PORT, attempts = 40, intervalMs = 1000 } = {}) {
   assertStagingPort(port);
   for (let i = 0; i < attempts; i++) {
