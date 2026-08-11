@@ -526,16 +526,80 @@ export function pidfilePath(gate, override) {
  * ownership-checked `releaseSessionLock` without waiting for the app (see its
  * docstring, verified at m23-ac-2c), so nothing here needs to await anything.
  */
-const armed = new Map(); // gate -> pidfileOverride, for gates started in this process
+/**
+ * gate -> Map<pidfileOverride, profileRoot>, for gates started in this
+ * process. THE VALUE IS READ (m23-gk) — every override this gate was ever
+ * launched with, so the exit hook below can tear ALL of them down, not just
+ * the first.
+ *
+ * ⚠️ m23-gk: this used to be `gate -> pidfileOverride` (singular) and the
+ * exit hook closed over the FIRST launch's override only. A relaunch of the
+ * SAME gate with a DIFFERENT explicit `pidfile` (and typically a different
+ * `port`, so the first instance keeps running) got silently orphaned: at
+ * exit, only the first override's app+pidfile were torn down, the second's
+ * survived — a live, un-killable staging process plus a stray pidfile
+ * pointing at it. MEASURED with a synthetic repro (no real gate in this
+ * corpus relaunches WITH an explicit pidfile override, so this could not
+ * have been caught by the existing 75-gate corpus): pidfile A removed, pid
+ * A dead; pidfile B still on disk, pid B still alive after process exit.
+ *
+ * "Last-launch-wins" (closing over the CURRENT override instead of the
+ * first) is not a fix either — walk the relaunch: `startStaging`'s own
+ * pre-launch orphan cleanup (below) uses the CURRENT call's override, so
+ * launching B never touches A's still-live app or still-present pidfile.
+ * Last-wins would tear down B at exit and leave A orphaned instead of B —
+ * same defect, opposite victim. The only correct shape is "tear down EVERY
+ * override this gate was ever armed with."
+ *
+ * `pidfileOverride` is normalized to `undefined` at the add site below
+ * (never `null`) because `pidfilePath`/`stopStaging` treat `null` and
+ * `undefined` as the SAME absence marker deriving the SAME path; without
+ * that normalization a gate relaunched once with `null` and once with
+ * `undefined` would look like two distinct overrides and fire two
+ * teardowns of the one derived-path instance.
+ *
+ * profileRoot is the SECOND value, alongside the override, needed to build
+ * the correct `stagingSessionLockPath` for THIS launch's teardown — reading
+ * it from `stopStaging`'s own gate-keyed `profileRoots` map at exit time
+ * would break as soon as the FIRST iteration's `stopStaging` call deletes
+ * that gate's entry (`profileRoots.delete(gate)`, see `stopStaging`), which
+ * would silently point the SECOND iteration's lock lookup at the user's
+ * REAL `~/Library/Application Support/DAWPro/Autosave/session.lock` instead
+ * of the staging one. Capturing profileRoot per override here avoids that
+ * entirely — each iteration gets an explicit `lockPath`, never the
+ * gate-keyed fallback. MEASURED (m23-gk redden): with two DISTINCT explicit
+ * profileRoots, the OLD gate-keyed fallback's ONE teardown call read
+ * `profileRoots.get(gate)` == the SECOND launch's root (overwritten by
+ * every `startStaging` call regardless of override) and so consulted the
+ * WRONG lock entirely — the first launch's own lock was never even read.
+ */
+const armed = new Map();
 let signalsHooked = false;
 
-function armTeardown(gate, pidfileOverride) {
-  if (!armed.has(gate)) {
-    armed.set(gate, pidfileOverride);
+function armTeardown(gate, pidfileOverride, profileRoot) {
+  const key = pidfileOverride ?? undefined; // collapse null/undefined to the ONE absence marker
+  let overrides = armed.get(gate);
+  if (!overrides) {
+    overrides = new Map();
+    armed.set(gate, overrides);
     process.on("exit", () => {
-      try { stopStaging(gate, pidfileOverride); } catch { /* exiting anyway */ }
+      // ONE hook per gate (preserves the m23-gi dedupe — a fresh
+      // process.on("exit", ...) per LAUNCH is the exact leak shape m23-gi
+      // fixed for the log-flush site; do not reintroduce it here). It reads
+      // `overrides` — the SAME Map object every later call for this gate
+      // mutates via `.set()` below — at exit time, so every override armed
+      // for this gate before exit is present, however many relaunches
+      // happened after this hook was installed.
+      for (const [override, profRoot] of overrides) {
+        try {
+          stopStaging(gate, override, {
+            lockPath: profRoot ? stagingSessionLockPath(profRoot) : undefined,
+          });
+        } catch { /* exiting anyway — one override's failure must not skip the rest */ }
+      }
     });
   }
+  overrides.set(key, profileRoot); // relaunching with the SAME override just refreshes its profileRoot; still ONE entry, ONE teardown
   if (signalsHooked) return;
   signalsHooked = true;
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -707,7 +771,7 @@ export function startStaging({
   live.set(gate, { child, pidfile, out, log });
   // Registered AFTER the log-flush hook above, so `exit` runs them in that
   // order: write the log we captured, then kill the app that produced it.
-  armTeardown(gate, pidfileOverride);
+  armTeardown(gate, pidfileOverride, profile);
 
   // F1's out-of-band confirmation: the kernel's own idea of this pid's process
   // name must read the staging domain name, not just "we spawned the alias

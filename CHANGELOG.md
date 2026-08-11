@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-08-11 — The test harness could leave a launched app running behind it
+
+The harness that launches the app for automated checks tracks each launch by a small file holding
+the process id, and shuts everything down when the check finishes. That shutdown step remembered
+only the *first* launch of a given check. A check that launched the app a second time under its own
+id file would, on finishing, shut down the first one and quietly leave the second running — along
+with a stale id file pointing at it.
+
+Shutdown now covers every launch a check made, not just the first. The obvious alternative, keeping
+only the most recent launch, was rejected: it moves the problem rather than fixing it, since the
+first launch is never cleaned up either, so it would strand the first app instead of the second.
+
+Fixing this also closed a related hazard. Each launch keeps its own private settings folder, and the
+shutdown step looked that folder up by check name — a lookup the first shutdown erases. The second
+shutdown would then have fallen back to the real application's own lock file rather than the
+sandboxed one. Each launch now carries its own path explicitly, so shutdown can never reach outside
+its sandbox.
+
+No check in the current suite launches twice under its own id file, so nothing was actually
+stranding processes in practice. It was fixed because the harness's whole safety guarantee is that
+it only ever shuts down processes it can name exactly.
+
 ## 2026-08-11 — Fixed a slow leak in the test harness that launches the app
 
 Our automated checks launch the app in a sandboxed copy and capture everything it prints. The code
