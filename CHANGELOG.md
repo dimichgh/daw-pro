@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-08-11 — An audit tool stopped accepting the wrong evidence, and we found it doing something worse
+
+One of our automated checks looks for tests that would pass even if the thing being tested were empty —
+"every item in the list is correct" is trivially true of a list with nothing in it. To avoid crying wolf,
+the tool excuses such a test when a nearby line proves the list isn't empty.
+
+It was matching that nearby line too loosely. If a test checked "every landing is on the right track",
+the tool would accept a nearby line about a completely different list — the *clips*, say — as proof the
+*landings* weren't empty. Both lines mention the same result object, so they looked related; they aren't.
+No test in the current suite was written that way, so nothing was being wrongly excused today. The point
+of fixing it is that the next test written that way would have been waved through silently.
+
+While confirming that fix, we found the same flaw in a second, much more widely used part of the same
+tool — and that one is active. It reads the surrounding source as text within a fixed window, and the
+window is wide enough to reach inside the test's own body. So a test could end up counted as its own
+proof. It also treated any property whose name merely *starts with* "length" as a length check, and
+"lengthBeats" — how long a clip is — appears all over these tests.
+
+Six checks in the current suite are being excused for a reason that doesn't hold. All six turn out to be
+genuinely sound for other reasons, so no test is actually weaker than it looks. It's the tool's
+reasoning that was wrong, and it's now written down and scheduled rather than left as a footnote.
+
 ## 2026-08-11 — Converted vocals no longer overwrite each other, and land somewhere stable
 
 Voice conversion is handled by a small local service that writes its result to a file and hands back

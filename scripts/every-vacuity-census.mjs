@@ -241,14 +241,16 @@ function findLengthGuard(ancestors, recvRoot, code) {
 // need — checked, not assumed); `var` hoisting is modelled with a bounded
 // recursive descent that refuses to cross a NESTED function boundary.
 //
-// A KNOWN, DELIBERATELY UNFIXED GAP, distinct from the one this item closes:
-// countPinInStmt() still matches a candidate on `rootIdent(len.object)`, so
-// `res.clips.length === 2` can still "pin" a DIFFERENT property read off the
-// very same `res` (`res.landings.every(…)`) — a property-level over-clear,
-// not a binding-level one. Binding identity cannot catch this by
-// construction (both reads resolve to the SAME `res` binding); it is a
-// different axis, not exercised by any known site in this corpus today, and
-// left exactly as conservative as it was before this fix.
+// m23-gl — FIXED (was a known, deliberately-unfixed gap, distinct from the
+// one m23-ex closed): countPinInStmt() used to match a candidate on
+// `rootIdent(len.object)` alone, so `res.clips.length === 2` could still
+// "pin" a DIFFERENT property read off the very same `res`
+// (`res.landings.every(…)`) — a property-level over-clear, not a
+// binding-level one. Binding identity (m23-ex) cannot catch this by
+// construction (both reads resolve to the SAME `res` binding); it needed a
+// separate check, one property-path axis up. See memberPath()'s and
+// countPinInStmt()'s own comments, below, for the precise rule and its two
+// known remaining limits (an unresolvable path shape, and a chain hop).
 
 // The root Identifier AST NODE (not just its name — rootIdent() above
 // already computes the name; this is its sibling for when the NODE itself
@@ -263,6 +265,54 @@ function rootIdentNode(node) {
     else break;
   }
   return n.type === "Identifier" ? n : null;
+}
+
+// m23-gl — the full property-name path from the ROOT identifier down to
+// `node`, ROOT FIRST: `res.landings` -> ["res", "landings"]; a bare
+// identifier `x` -> ["x"]. This is the PROPERTY axis that root-identity
+// alone (rootIdent/rootIdentNode, above) cannot see: two reads can share a
+// root binding and still be different properties of it.
+//
+// Returns `null` when the chain contains a shape this conservative walk
+// does not structurally model — a CallExpression in the middle (`foo().bar`,
+// receiver came off a call, not a plain property read) or a computed member
+// with a non-Literal key (`res[i]`). ⚠️ A null here is deliberately treated
+// by countPinInStmt() as "cannot verify the property axis, fall back to the
+// OLD root-only match" — NOT this file's usual fail-toward-flagging stance.
+// Reason: tightening a shape this scanner cannot even describe risks a
+// silent regression on some corpus shape never audited against it, for a
+// combination (a call-derived receiver sharing a root with a candidate pin)
+// with no known motivating site, at-risk or otherwise. See countPinInStmt()
+// for where this is applied and derivationChain()'s own header for the
+// SEPARATE, still-open gap on a chain-hop candidate — this function is not
+// involved in that leg at all (see findCountPin()'s call site below).
+function memberPath(node) {
+  const parts = [];
+  let n = node;
+  for (;;) {
+    if (n.type === "ChainExpression") { n = n.expression; continue; }
+    if (n.type === "TSNonNullExpression") { n = n.expression; continue; }
+    if (n.type === "Identifier") { parts.unshift(n.name); return parts; }
+    if (n.type === "MemberExpression") {
+      if (n.computed) {
+        if (n.property.type !== "Literal") return null;
+        parts.unshift(String(n.property.value));
+      } else {
+        if (n.property.type !== "Identifier") return null;
+        parts.unshift(n.property.name);
+      }
+      n = n.object;
+      continue;
+    }
+    return null; // CallExpression, ThisExpression, etc. — not modelled
+  }
+}
+
+// Structural equality of two memberPath() results — plain array-of-strings compare.
+function pathsEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 // Ancestor path from `root` (INCLUSIVE — root genuinely is an ancestor of
@@ -431,8 +481,39 @@ function resolveBinding(name, ancestorPath) {
 // findCountPin(); `wantedDecl` is the SITE's own resolved binding for
 // `recvRoot`, computed once by the caller. A candidate only counts as a pin
 // if ITS `recvRoot` resolves to that exact same node.
-function countPinInStmt(stmt, recvRoot, code, ancestorsPrefix, wantedDecl) {
+//
+// ⚠️ m23-gl — BINDING IDENTITY IS NOT THE PROPERTY AXIS EITHER. Same-binding
+// (above) answers "same variable?"; `recvPath`, if given, answers "same
+// PROPERTY of it?" — `res.clips.length === 2` and `res.landings.every(…)`
+// both resolve `res` to one binding but describe two different properties
+// of it, and the count pin says nothing about the property being iterated.
+// `recvPath` is `memberPath(...)` of the SITE's own receiver, computed ONCE
+// by the caller (findCountPin()) and threaded through unchanged; `null`
+// means "do not apply this axis" (see findCountPin()'s call site: that is
+// deliberately the case for a chain hop, where there is no single receiver
+// node this leg is standing in for — see derivationChain()'s header).
+//
+// ⚠️ WHEN `recvPath` IS given (the receiver could itself be structurally
+// described — including a BARE IDENTIFIER, `["landings"]`, which is why
+// this is NOT gated on `recvPath.length > 1`: a bare-identifier receiver is
+// not immune to this axis either — `landings.clips.length === 2` pins a
+// DIFFERENT thing than `landings.every(…)` just as surely as the property
+// case does, and gating on length would let it straight through), the
+// candidate's own path (`len.object`, via `memberPath()`) must match it
+// EXACTLY. If the candidate's path is itself NOT structurally describable
+// (`res[i].length`, `foo().bar.length`), that is a REJECTION, not a
+// fallback: `recvPath` is known here, so a candidate that cannot be shown
+// to describe the SAME thing has not earned the clear — this file's own
+// documented stance for a CLEARING rule specifically (m23-eu's comment,
+// above prevReassignment(): "the opposite of this file's usual
+// over-reporting-is-inspectable stance, which is about FLAGGING, not
+// clearing"). The ONE remaining permissive branch is `recvPath === null`
+// itself (the RECEIVER, not the candidate, is undescribable — nothing to
+// compare against at all) — see memberPath()'s header for why that specific
+// direction stays root-only.
+function countPinInStmt(stmt, recvRoot, code, ancestorsPrefix, wantedDecl, recvPath) {
   let found = null;
+  let propertyMismatch = false;   // m23-gl — at least one root+shape match rejected on the property axis
   walk.simple(stmt, {
     BinaryExpression(b) {
       if (found) return;
@@ -442,13 +523,17 @@ function countPinInStmt(stmt, recvRoot, code, ancestorsPrefix, wantedDecl) {
       if (lit?.type !== "Literal" || typeof lit.value !== "number" || lit.value <= 0) return;
       const identNode = rootIdentNode(len.object);
       if (!identNode || identNode.name !== recvRoot) return;
+      if (recvPath) {
+        const pinPath = memberPath(len.object);
+        if (!pinPath || !pathsEqual(pinPath, recvPath)) { propertyMismatch = true; return; }   // m23-gl
+      }
       const innerPath = findAncestorPath(stmt, identNode);
       const candBinding = innerPath ? resolveBinding(recvRoot, ancestorsPrefix.concat(innerPath)) : null;
       if (!candBinding || candBinding.declNode !== wantedDecl) return;
       found = txt(code, b).slice(0, 60);
     },
   });
-  return found;
+  return { found, propertyMismatch };
 }
 
 // ⑦ (m23-ee-2c-2b) — a pin AFTER the site is exactly as visible as one
@@ -556,13 +641,31 @@ function prevReassignment(body, recvRoot, site) {
   return lo;
 }
 
-// Returns { found: string|null, unresolved: boolean }. `unresolved: true`
-// means the SITE's own `recvRoot` could not be placed in any scope on its
-// ancestor path (m23-ex, resolveBinding() above) — a scanner limitation,
-// not a "no pin exists" verdict; the caller surfaces this in the row's own
-// `pinScope` field rather than letting it collapse into an identical-looking
-// `pin: null`. See this function's own header comment, further up, for why.
-function findCountPin(ancestors, recvRoot, site, code) {
+// Returns { found: string|null, unresolved: boolean, propertyMismatch: boolean }.
+// `unresolved: true` means the SITE's own `recvRoot` could not be placed in
+// any scope on its ancestor path (m23-ex, resolveBinding() above) — a
+// scanner limitation, not a "no pin exists" verdict; the caller surfaces
+// this in the row's own `pinScope` field rather than letting it collapse
+// into an identical-looking `pin: null`. See this function's own header
+// comment, further up, for why.
+//
+// `recvPath` (m23-gl) is `memberPath()` of the receiver this particular call
+// is standing in for, or `null` to skip the property-axis check entirely —
+// see the call site (the `chain` loop, far below) for exactly when each is
+// passed: `recvPath` is only ever given on the FIRST chain entry (the
+// site's own, un-derived receiver); a chain hop always passes `null`,
+// because derivationChain() only ever yields a bare root NAME for a hop,
+// with no property expression left to compare against (see its own header).
+//
+// `propertyMismatch` (m23-gl) — mirrors `unresolved`'s own reasoning, one
+// axis over: true when at least one candidate shared `recvRoot` and the
+// count-pin SHAPE (a `.length` comparison against a positive literal, same
+// binding-eligible root) but was rejected because it could not be shown to
+// describe the SAME property as `recvPath` — see countPinInStmt()'s own
+// header. Surfaced in `pinScope` (below, at the call site) so a rejection
+// on THIS axis doesn't look identical to "no pin candidate was ever found",
+// the exact collapse `unresolved` exists to prevent for the binding axis.
+function findCountPin(ancestors, recvRoot, site, code, recvPath) {
   // m23-ex — resolve the SITE's own binding for `recvRoot` ONCE, before
   // scanning anything. Every candidate pin found below must resolve to this
   // SAME declaring node (by identity) to count — see countPinInStmt()'s own
@@ -570,8 +673,9 @@ function findCountPin(ancestors, recvRoot, site, code) {
   // resolved, there is nothing to verify a candidate against, so this
   // returns immediately rather than falling back to the old name-only match.
   const siteBinding = resolveBinding(recvRoot, ancestors);
-  if (!siteBinding) return { found: null, unresolved: true };
+  if (!siteBinding) return { found: null, unresolved: true, propertyMismatch: false };
   const wantedDecl = siteBinding.declNode;
+  let anyPropertyMismatch = false;   // m23-gl — accumulated across every statement/level tried below
 
   // ⚠️ m23-eu — `knownLo` is a RUNNING FLOOR carried ACROSS ancestor levels,
   // not recomputed fresh at each one. Needed because findCountPin already
@@ -610,8 +714,9 @@ function findCountPin(ancestors, recvRoot, site, code) {
     for (const stmt of body) {
       if (stmt.start >= site.start) break;
       if (stmt.start <= knownLo) continue;   // stale — superseded by a later reassignment
-      const found = countPinInStmt(stmt, recvRoot, code, ancestorsPrefix, wantedDecl);
-      if (found) return { found, unresolved: false };
+      const r = countPinInStmt(stmt, recvRoot, code, ancestorsPrefix, wantedDecl, recvPath);
+      if (r.propertyMismatch) anyPropertyMismatch = true;
+      if (r.found) return { found: r.found, unresolved: false, propertyMismatch: false };
     }
 
     // FORWARD (⑦) — any statement strictly after the site, up to (not
@@ -624,11 +729,12 @@ function findCountPin(ancestors, recvRoot, site, code) {
     for (const stmt of body) {
       if (stmt.start <= site.end) continue;   // the site's own statement, or anything not strictly after it
       if (stmt.start >= hi) break;            // past this binding's reassignment epoch
-      const found = countPinInStmt(stmt, recvRoot, code, ancestorsPrefix, wantedDecl);
-      if (found) return { found, unresolved: false };
+      const r = countPinInStmt(stmt, recvRoot, code, ancestorsPrefix, wantedDecl, recvPath);
+      if (r.propertyMismatch) anyPropertyMismatch = true;
+      if (r.found) return { found: r.found, unresolved: false, propertyMismatch: false };
     }
   }
-  return { found: null, unresolved: false };
+  return { found: null, unresolved: false, propertyMismatch: anyPropertyMismatch };
 }
 
 // Is `name` an accumulator whose fill count is fixed at authoring time?
@@ -992,6 +1098,19 @@ function detailArgCall(anc, node) {
 // them — the gate is correct and a scanner that only matches the receiver's OWN
 // name calls it a defect. Resolve each receiver back through its derivation chain
 // and accept a guard on ANY ancestor.
+// ⚠️ m23-gl — a chain hop is a bare NAME (`base = rootIdent(n)`, below), never
+// a property path: `const restored = res.landings.map(fn)` pushes `"res"`
+// onto the chain, discarding `.landings` entirely. That is a SEPARATE,
+// still-open instance of the property-axis gap countPinInStmt() otherwise
+// closes (m23-gl) — a pin on `res.someOtherProp.length` would still "clear"
+// `restored.every(…)` via this hop, because nothing downstream of this
+// function retains what property of `res` `restored` was actually derived
+// from. Deliberately left open: fixing it would mean this function returning
+// a property path per hop, not just a name, which changes what every caller
+// of `chain` (the `nm` loop, far below) receives — a larger, riskier change
+// than this item's own scope (its filed shape has a single, un-hopped
+// receiver), with no known motivating site in this corpus for the hop
+// version either. If one is ever found, start here.
 function derivationChain(ast, name, code) {
   const MONOTONE = new Set(["map", "sort", "slice", "reverse", "concat", "flat"]);
   const chain = [name];
@@ -1185,6 +1304,7 @@ for (const f of files) {
     const recvNode = callee.object;
     const recvText = txt(code, recvNode).slice(0, 44);
     const recvRoot = rootIdent(recvNode);
+    const recvPath = memberPath(recvNode);   // m23-gl — null if not structurally resolvable
 
     // A receiver that is ITSELF an inline array literal can never be runtime-empty.
     let provenance, reason;
@@ -1394,9 +1514,50 @@ for (const f of files) {
         // (whichever `nm` the loop stops on, success or not) — an
         // unresolved attempt on an EARLIER chain name that a LATER name goes
         // on to clear normally is not worth reporting as a limitation.
-        const r = findCountPin(anc, nm, node, code);
+        //
+        // ⚠️ m23-gl — CONFIRMED BY PROBE, NOT JUST INFERRED: `pinScope` is
+        // OVERWRITTEN on every loop iteration, not accumulated. If an EARLIER
+        // chain entry sets a meaningful `pinScope` (UNRESOLVED or, new here,
+        // PROPERTY-MISMATCH) and a LATER entry finds nothing AND has nothing
+        // to report either, that later `null` silently erases the earlier
+        // entry's reason — `cleared`/`notCleared` stay correct either way
+        // (this only touches the DIAGNOSTIC string, never the verdict), but
+        // a reader chasing "why didn't this clear" sees `pinScope: null` and
+        // has no way to tell that from "no candidate was ever looked at",
+        // even though one was found and rejected. Confirmed with `restored`
+        // (derived from `tracks` by `.map()`) carrying a property-mismatched
+        // pin on `restored` itself, `tracks` on the second hop offering no
+        // candidate at all: final `pinScope` came back `null`. Deliberately
+        // left as-is — this exact "recorded only for the deciding entry"
+        // shape already existed for UNRESOLVED before this item (see the
+        // paragraph just above) and fixing it means changing what BOTH
+        // diagnostics accumulate across chain entries, a strictly larger
+        // change than this item's own scope (which is the CLEARING rule,
+        // not the chain-loop's diagnostic bookkeeping). If this ever needs
+        // fixing, make `pinScope` sticky (first non-null reason wins, reset
+        // only when `guard || pin` actually succeeds) rather than
+        // overwritten-every-iteration.
+        //
+        // m23-gl — the property-axis check (recvPath) only applies on the
+        // FIRST chain entry (`nm === recvRoot`, i.e. no hop): that is the
+        // only case where `recvNode` — the actual expression this row is
+        // about — is the thing being matched against. A hop's own `nm` is
+        // just a bare root name with no member path of its own to enforce
+        // (see derivationChain()'s and findCountPin()'s headers) — passing
+        // `null` there is exactly the pre-fix root-only match, unchanged.
+        // A DIRECT CONSEQUENCE: `r.propertyMismatch` can only ever come back
+        // true when `nm === recvRoot` (countPinInStmt only sets it inside
+        // its own `if (recvPath)` guard, and recvPath is null on every hop),
+        // so `recvText` — the SITE's own receiver text, already computed
+        // above for the row itself — is always the right thing being
+        // described here, not just "whatever `nm` currently is".
+        const r = findCountPin(anc, nm, node, code, nm === recvRoot ? recvPath : null);
         pin = r.found;
-        pinScope = r.unresolved ? `UNRESOLVED — \`${nm}\` could not be placed in any scope on the path` : null;
+        pinScope = r.unresolved
+          ? `UNRESOLVED — \`${nm}\` could not be placed in any scope on the path`
+          : r.propertyMismatch
+            ? `PROPERTY-MISMATCH — a candidate pin shared \`${nm}\`'s root but described a different property than \`${recvText}\` itself (m23-gl)`
+            : null;
       }
       if (guard || pin) { via = nm === recvRoot ? null : nm; break; }
     }
@@ -1426,8 +1587,10 @@ for (const f of files) {
       reason,
       guard,                                   // idiom A — inline conjunct
       pin,                                     // idiom B — leading count-pin leg
-      pinScope,                                // m23-ex — non-null iff idiom B's OWN receiver name could not
-                                                // be resolved to a binding (scanner limitation, not "no pin exists")
+      pinScope,                                // m23-ex/m23-gl — non-null iff idiom B's OWN receiver name could
+                                                // not be resolved to a binding (UNRESOLVED), OR a same-root
+                                                // candidate was rejected on the property axis (PROPERTY-MISMATCH)
+                                                // — either way, a reason `pin: null` alone would not show
       someLegPin,                              // idiom D — preceding, asserted .some() leg, same predicate
       joinPin,                                 // idiom E — equality on a derived .map().join() (⑥)
       eqPin,                                   // idiom F — deep-equality (eq) pin against an expected list (⑧)
