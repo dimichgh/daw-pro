@@ -98,6 +98,22 @@ button was, and one was said to be already protected when it was protected on on
 Each of those notes had been read and believed for cycles. A note explaining why something was
 deferred is an unverified measurement, and it gets more trusted the longer it sits there.
 
+Nothing shipped from the next piece of work, and the reason is worth writing down. Two of these
+checks take pictures of the app, so they need testing at more than one window size before anyone
+relies on them. The established way to do that is to set the size in a throwaway session, then run
+the check and compare. We ran both sizes. Both checks reported identical results — which looked like
+the answer we wanted, and was worthless: each check also prints the window size it actually started
+with, and all four runs had started at the same size. The size we set never reached them. A change
+made earlier for good reasons — wiping saved settings between runs so each starts clean — also wipes
+the saved window size, so the size-setting step had been quietly doing nothing.
+
+Two right decisions that are incompatible with each other, which is the honest description of the
+problem and now its own tracked item. What is worth keeping from it: had those checks not printed
+the size they started at, two identical runs would have been recorded as evidence that window size
+does not matter. The experiment caught itself; the small test we wrote to validate the approach
+beforehand did not, because it reproduced the mechanism in miniature and the miniature differed in
+exactly the way that mattered.
+
 
 
 The app has 73 automated checks that drive a real copy of it and inspect what happens. Each one
