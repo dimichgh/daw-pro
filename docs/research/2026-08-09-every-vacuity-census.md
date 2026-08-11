@@ -22,7 +22,7 @@ otherwise CWD-INDEPENDENT: verified by running the bare command from an unrelate
 
 > ⚠️ **Why this document does not cite counts:**
 >
-> The per-site coordinate table that originally lived at lines 95–118 contained line numbers like
+> The per-site coordinate table this document used to carry contained line numbers like
 > `m23ak:305` and `m23ak:553`. Those coordinates drifted during subsequent fixes (now at 313 and 561).
 > A stale pair was copied into `scripts/every-vacuity-census.mjs`'s header comment, where it persisted
 > until roadmap item m23-gp re-measured those lines and found unrelated code. **This incident proves that
