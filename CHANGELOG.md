@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-08-10 — Re-ran the window-size experiments now that they can actually vary something
+
+With the window size finally sticking, we went back and ran the experiment it exists for.
+
+Six of our visual checks had never been confirmed safe to run at a fixed window size. All six have
+now been run twice, at two different sizes, and none of them behaves differently — so all six are
+safe to pin. Three of those six had been declared safe once before; that earlier verdict came from
+the broken method, so it was worth nothing until re-measured. It holds up. The other three, which
+drive the song-generation model and are slow and memory-hungry, had never been measured at all.
+
+The part worth stating plainly is the limit of what this proves. Every run passed, at both sizes. So
+what we compared was two clean results against each other, and two clean results look identical
+whether or not size matters. This says these six checks are safe to pin at the two sizes we tried.
+It does not say window size never matters to them.
+
+Each run now records the window size it actually started with, and we compare those recorded sizes
+before trusting any comparison of the results — which is precisely the step whose absence let the
+earlier round quietly measure nothing.
+
 ## 2026-08-10 — Our window-size experiments had been comparing a thing to itself
 
 Nothing in the app changed here either. This is the second repair of the day to the checks that
