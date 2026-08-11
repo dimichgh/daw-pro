@@ -60,30 +60,113 @@
 //       about the corpus and is worth surfacing. This script exiting 2 is a
 //       FAILED MEASUREMENT: the instrument could not look, so there is no
 //       finding at all — the opposite claim. They are safe to share a number
-//       today only because NOTHING invokes this script programmatically
-//       (verified m23-gb: the corpus runner globs `scripts/gates/` and this
-//       file lives in `scripts/`, and the only repo-wide references to it are
-//       two comments in `_verdict.mjs`). ⭐ IF YOU EVER WIRE THIS INTO
-//       AUTOMATION, GIVE IT ITS OWN CODE FIRST — otherwise a "measured
-//       nothing" gets counted as a "found something".
-//   (an `acorn`/`acorn-walk` module-resolution failure below exits 1 too,
-//   via Node's own uncaught-exception default, with Node's own
-//   "Cannot find module" text — see RUNNING IT below for the fix.)
+//       today only because nothing treats this script's exit code as a bare
+//       pass/fail signal (re-measured m23-gd-1, bounded grep over
+//       `.mjs`/`.js`/`.ts`/`.sh`/`.json`, positive-controlled on the known
+//       `_verdict.mjs:63` hit): six comment references in `.mjs` code
+//       (`_verdict.mjs` :63,:105,:275; `_skip-tally.mjs` :21;
+//       `m23fa3-verdict-enforcement.mjs` :24,:119 — none spawn/exec/import/
+//       invoke this file), prose mentions in `docs/ROADMAP.md`, and exactly
+//       ONE programmatic invoker — `gate-verdict-census.selftest.mjs`
+//       (m23-gd-1 itself), which is exit-CODE-aware (asserts `=== 3` and
+//       `=== 0` specifically, never "any nonzero") and so cannot confuse
+//       exit 2 with exit 3. ⭐ IF YOU EVER WIRE THIS INTO OTHER AUTOMATION,
+//       GIVE IT ITS OWN CODE FIRST — otherwise a "measured nothing" gets
+//       counted as a "found something".
+//   3 — INSTRUMENT COULD NOT LOOK (m23-gd-1): `acorn`/`acorn-walk` failed to
+//       resolve at ACORN_DIR. This used to fall through to Node's own
+//       uncaught ERR_MODULE_NOT_FOUND — a raw stack trace and exit 1, the
+//       SAME code the SELF-TEST FAILED branch above uses, so a missing
+//       dependency read as indistinguishable from a genuine classifier
+//       defect. Now caught explicitly: distinct code, no stack trace, a
+//       banner that says plainly the instrument could not look (this is a
+//       FAILED MEASUREMENT, not a finding, and must never say "asserted
+//       nothing" — that phrase is reserved for exit 2 above, a *gate*
+//       finding, not an instrument failure), plus a copy-pasteable install
+//       recipe. See RUNNING IT below.
 //
 // RUNNING IT. Needs `acorn` + `acorn-walk`, DELIBERATELY NOT a repo dependency
-// (this is a periodic audit, not part of any gate):
+// (this is a periodic audit, not part of any gate — vendoring it is its own
+// decision, split out as m23-gd-2, not made here). `--no-save`: npm 7+
+// auto-creates a `package.json` for a bare `npm i <pkg>` in a directory that
+// doesn't have one, which would silently commit to the exact decision this
+// item is NOT authorised to make — `--no-save` installs into
+// `scripts/node_modules` without that side effect (verified m23-gd-1):
 //
-//     mkdir -p /tmp/vac2 && cd /tmp/vac2 && npm i acorn acorn-walk
+//     mkdir -p scripts && (cd scripts && npm i --no-save acorn acorn-walk)
+//     node scripts/gate-verdict-census.mjs
+//
+// …or install anywhere else and point ACORN_DIR at it. Use an ABSOLUTE path
+// or one starting `./`/`../` — ACORN_DIR is spliced into an `import()`
+// specifier, so a `./`-prefixed value resolves relative to THIS SCRIPT's own
+// directory (Node's relative-import semantics), NOT the caller's cwd, while
+// a bare value with no leading `./`/`/` (e.g. `node_modules` typed without
+// the dot) is a *different* Node resolution algorithm (package lookup, not a
+// file-relative path) and will not do what you expect:
+//
 //     ACORN_DIR=/tmp/vac2/node_modules node scripts/gate-verdict-census.mjs
 //
 // Prints a human-readable summary to stderr (so `> census.json` on stdout
-// stays clean JSON) and the full classified row set as JSON to stdout.
+// stays clean JSON) and the full classified row set as JSON to stdout. The
+// resolved ACORN_DIR and the acorn package version are printed on EVERY run,
+// success or failure: classification is AST-shape-dependent
+// (`ecmaVersion: "latest"`), so a run whose numbers can't be attributed to a
+// specific parser build isn't a measurement.
 
-const ACORN_DIR = process.env.ACORN_DIR || "./node_modules";
-const acorn = await import(`${ACORN_DIR}/acorn/dist/acorn.mjs`);
-const walk = await import(`${ACORN_DIR}/acorn-walk/dist/walk.mjs`);
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ACORN_DIR = process.env.ACORN_DIR || "./node_modules";
+// Mirrors Node's own relative-import resolution (relative to this script's
+// directory, not cwd — see RUNNING IT above) so the package.json read below,
+// used only for the version banner, points at the exact install the parser
+// actually loaded (or tried to).
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const ACORN_DIR_ABS = path.isAbsolute(ACORN_DIR) ? ACORN_DIR : path.join(SCRIPT_DIR, ACORN_DIR);
+
+function readAcornVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(ACORN_DIR_ABS, "acorn", "package.json"), "utf8"));
+    return typeof pkg.version === "string" ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+function printAcornProvenance() {
+  const version = readAcornVersion();
+  console.error(`ACORN_DIR resolved to: ${ACORN_DIR_ABS}`);
+  console.error(
+    `acorn version: ${version ?? "UNKNOWN — could not read " +
+      path.join(ACORN_DIR_ABS, "acorn", "package.json")}`
+  );
+}
+
+let acorn, walk;
+try {
+  acorn = await import(`${ACORN_DIR}/acorn/dist/acorn.mjs`);
+  walk = await import(`${ACORN_DIR}/acorn-walk/dist/walk.mjs`);
+} catch (e) {
+  printAcornProvenance();
+  console.error(
+    "\n✘✘✘ INSTRUMENT COULD NOT LOOK (exit 3) — this is a FAILED " +
+    "MEASUREMENT, not a finding: `acorn`/`acorn-walk` could not be " +
+    "resolved, so the census never scanned a single file and nothing below " +
+    "says anything about the corpus.\n" +
+    `    ${e?.message ?? String(e)}\n\n` +
+    "    Fix — install once into scripts/ (already covered by the " +
+    "repo-root `.gitignore`'s `node_modules/` line; `--no-save` avoids npm " +
+    "auto-creating a scripts/package.json this task is not authorised to " +
+    "add) and re-run with the default ACORN_DIR:\n" +
+    "        mkdir -p scripts && (cd scripts && npm i --no-save acorn acorn-walk)\n" +
+    "        node scripts/gate-verdict-census.mjs\n\n" +
+    "    …or point ACORN_DIR at an install that already exists elsewhere:\n" +
+    "        ACORN_DIR=<dir> node scripts/gate-verdict-census.mjs\n"
+  );
+  process.exit(3);
+}
+printAcornProvenance();
 
 const GATES = process.env.VC_GATES || "/Users/dsemenov/Views/daw-pro/scripts/gates";
 

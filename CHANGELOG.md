@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-08-11 — A checking tool that couldn't run now says so, instead of looking like a failed check
+
+One of our internal audit tools needs a code-parsing library that isn't shipped with the project. If
+that library wasn't installed, the tool crashed with a wall of technical error text and stopped with
+the same failure signal it uses to report a genuine problem with the code.
+
+That combination is worse than it sounds. Someone running the audit on a fresh copy of the project
+would see a failure and have no way to tell whether the code was bad or the tool had simply never
+managed to start. A broken instrument was reporting itself as a finding.
+
+It now stops with its own distinct signal and says plainly that it could not look — that this is a
+failed measurement, not a result — followed by the exact command to fix it. It also prints which
+copy of the parsing library it used, and that library's version, on every single run. The tool's
+conclusions depend on how that library reads code, so a result that can't be traced back to a
+specific version isn't really a measurement at all.
+
+Nothing about the app changed, and no new dependency was added to the project.
+
 ## 2026-08-11 — Every screenshot the app takes now records whether it was the frontmost window
 
 A long-running puzzle got closed today, though not by being solved.
