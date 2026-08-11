@@ -18,9 +18,14 @@ window is wide enough to reach inside the test's own body. So a test could end u
 proof. It also treated any property whose name merely *starts with* "length" as a length check, and
 "lengthBeats" — how long a clip is — appears all over these tests.
 
-Six checks in the current suite are being excused for a reason that doesn't hold. All six turn out to be
-genuinely sound for other reasons, so no test is actually weaker than it looks. It's the tool's
-reasoning that was wrong, and it's now written down and scheduled rather than left as a footnote.
+Six checks in the current suite are being excused for a reason that doesn't hold. We read all six. Five
+are sound anyway, for a reason worth noting: they don't state that the list is non-empty, they reach
+into it by position — so on an empty list they fail loudly rather than passing quietly. The sixth is
+genuinely weak, and only an earlier line in the same test keeps it honest.
+
+So no test in the suite is silently passing when it shouldn't. But the tool's reasoning was wrong in all
+six cases, and one test is thinner than it appears. Both are now written down and scheduled rather than
+left as a footnote.
 
 ## 2026-08-11 — Converted vocals no longer overwrite each other, and land somewhere stable
 
