@@ -51,20 +51,41 @@
 // is interprocedural and clears by inspection, not by this tool (`m23do:163` is the
 // standing example). Actionable = notCleared − those. Reconcile from two directions.
 //
-// ⚠️⚠️ KNOWN FALSE FLAGS AS OF 2026-08-11 (the m23-gm close) — READ THIS BEFORE
-// TRIAGING A RISE IN `notCleared`. Tightening idiom A at m23-gm moved `notCleared`
-// 6 → 12, and FIVE of the six new flags are KNOWN-SOUND, not finds. They live in
-// m23g1-arrange-multiselect, m23ak-note-selection-drop, m23x-arrow-nudge (two), and
-// m23g2-group-drag. All five prove non-emptiness by a route this tool does not yet
-// model: they do not ASSERT a length, they INDEX the receiver and dereference it, so
-// an empty collection THROWS and the check fails LOUDLY rather than passing
-// vacuously. **Roadmap m23-gn teaches this idiom and will clear them again.** The
-// SIXTH new flag (in m23x-arrow-nudge, the `trimmedIds`/`removedIds` leg) is a REAL
-// vacuous leg and is roadmap m23-go. ⚠️ Deliberately NO `file:line` list here —
-// line numbers in these gates drift and a stale coordinate list is worse than none;
-// the roadmap items carry the exact coordinates, and this note carries the shape.
-// ⭐ WHEN m23-gn AND m23-go BOTH LAND, DELETE THIS PARAGRAPH — a "known false
-// flags" note that outlives its cause teaches the next reader to ignore real finds.
+// ⚠️⚠️ KNOWN FALSE FLAGS — AMENDED AT THE m23-gn CLOSE (2026-08-11), NOT
+// DELETED. READ THIS BEFORE TRIAGING A RISE IN `notCleared`.
+//
+// HISTORY: tightening idiom A at m23-gm moved `notCleared` 6 → 12, and five of
+// the six new flags were KNOWN-SOUND rather than finds. m23-gn (idiom G,
+// findDerefProof() below) now models FOUR of those five — the ones that prove
+// non-emptiness by INDEXING the receiver and dereferencing it, so an empty
+// collection THROWS and the check fails LOUDLY instead of passing vacuously.
+// Those four clear again, with `clearedBy` naming idiom G.
+//
+// ⚠️ TWO KNOWN-SOUND-OR-KNOWN-WEAK FLAGS REMAIN, AND THEY ARE NOT THE SAME
+// KIND OF THING:
+//   • m23g1-arrange-multiselect — SOUND, and PERMANENTLY FLAGGED unless
+//     roadmap m23-gp decides otherwise. Its check is guarded by a HELPER CALL
+//     ON A DIFFERENT OBJECT (`totalClips(ov) === 3` guarding `ov.tracks.every`)
+//     — there is no index access anywhere in the expression, so idiom G does
+//     not and MUST NOT reach it. It is sound only via an INTERPROCEDURAL fact
+//     (that `totalClips` sums over `ov.tracks`), exactly the class
+//     localHelperCall()'s header declares out of scope. m23-gn deliberately
+//     did not stretch to it; m23-gp is the decision item, and its likely
+//     answer is "won't do".
+//   • m23x-arrow-nudge (the `trimmedIds`/`removedIds` leg) — a REAL vacuous
+//     leg, roadmap m23-go. Its own conjuncts constrain DIFFERENT OBJECTS than
+//     the receiver, so nothing in its check expression establishes
+//     non-emptiness. This one is a find, not a false flag.
+//
+// ⚠️ Deliberately NO `file:line` list here — line numbers in these gates drift
+// and a stale coordinate list is worse than none; the roadmap items carry the
+// exact coordinates, and this note carries the shape.
+// ⭐ WHEN m23-go LANDS, DELETE ITS BULLET ONLY. Do NOT delete this paragraph
+// wholesale: if m23-gp closes as "won't do", the m23g1 bullet is the ONLY
+// place that explains why one permanently-flagged row is not a defect, and a
+// "known false flags" note that outlives its cause teaches the next reader to
+// ignore real finds — but one deleted too early strands a permanent false
+// flag with no explanation at all.
 //
 // ⚠️ `notClearedByProvenance` was added at m23-ee-2c: {rows, parseFails,
 // filesScanned, notCleared, notClearedByProvenance}. It buckets the `notCleared`
@@ -244,6 +265,276 @@ function findLengthGuard(ancestors, recvRoot, code, site, recvPath) {
   }
   return null;
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// IDIOM G (m23-gn) — THROW-ON-EMPTY: A DEREFERENCED INDEX INTO THE RECEIVER.
+//
+// A THIRD clearing class, alongside a `.length` read (idiom A) and a count pin
+// (idiom B), and the one m23-gm's own close predicted would be needed. These
+// sites never ASSERT non-emptiness — a sibling conjunct INDEXES the receiver
+// and DEREFERENCES the result, so an empty collection throws a TypeError and
+// the gate fails LOUDLY instead of passing vacuously:
+//
+//   IDIOM G-A — DIRECT DEREFERENCED INDEX (m23ak-note-selection-drop,
+//   m23x-arrow-nudge):
+//       near(after[1].startBeat - after[0].startBeat, 8) && after.every(…)
+//       near(c[1].startBeat - c[0].startBeat, 2.5)       && c.every(…)
+//   IDIOM G-B — LITERAL-ARRAY-DRIVEN INDEX (m23g2-group-drag, m23x-arrow-nudge):
+//       f.every(…) && [0, 2.5, 0, 8, 16, 1.5, 6, 12].every((b, i) => near(f[i].startBeat, b))
+//
+// ⚠️⚠️ THE TWO ARE **NOT** ONE RECOGNIZER WITH A WIDER INDEX RULE, AND
+// UNIFYING THEM IS AN OVER-CLEAR. G-A's dereference sits in the conjunct's own
+// expression, so it is evaluated when the conjunct is. G-B's sits inside a
+// CALLBACK, which runs **only because the iterated array literal is non-empty**
+// — `[].every((b, i) => near(f[i].startBeat, b))` returns `true` having never
+// dereferenced anything, proving exactly nothing. So G-B carries an extra,
+// non-negotiable precondition (`elements.length >= 1` on an ArrayExpression
+// LITERAL — not an identifier, not a call) that G-A has no use for. Two
+// recognizers, two fixture sets.
+//
+// ⚠️ `x[0]` ALONE IS NOT A PROOF — it evaluates to `undefined` without
+// throwing. The index access must be DEREFERENCED: the parent must be a
+// MemberExpression reading a property off it (`x[0].foo`).
+//
+// ⚠️⚠️ OPTIONAL CHAINING DEFEATS THE WHOLE IDIOM AND IS THE HIGHEST-RISK HOLE
+// IN THIS RULE. `R[0]?.foo` and `R?.[0].foo` evaluate to `undefined` on an
+// empty `R` — they do NOT throw, so the site really does pass vacuously.
+// Rejected on BOTH axes, deliberately redundantly: the `optional` flag on the
+// index member and on the dereferencing member, AND any ChainExpression on the
+// path from the scanned part down to the candidate (which also covers the
+// exotic `obj?.[R[0].foo]`, where an optional short-circuit ABOVE the
+// candidate skips evaluating the computed key entirely).
+//
+// ⚠️ THE PROOF MUST BE FOUND **OUTSIDE** THE PART OF THE `&&` THAT CONTAINS
+// THE SITE — the same span-containment invariant m23-gm introduced for idiom A
+// (`p.start <= site.start && site.end <= p.end` → skip), and for the identical
+// reason: without it a site's own callback body (`afterL5.every((c, i) =>
+// near(c.startBeat - beforeL5[i].startBeat, BAR))`) clears the site, which is
+// m23-gm's fault ① under a new name.
+//
+// ⭐ MEASURED, NOT ASSUMED — AND THE RESULT WAS NOT THE EXPECTED ONE: in THIS
+// recognizer the span-containment `continue` is REDUNDANT with evalStatus()'s
+// function-boundary rule, and it is kept as defence in depth, not as the thing
+// doing the work. A naive variant with span containment REMOVED AND NOTHING
+// ELSE CHANGED still refuses the m23-gm shape (fixture N6), because the only
+// dereference in the site's own part sits inside the site's own callback and
+// evalStatus() rejects any candidate under a Function. Removing BOTH clears
+// N6; removing EITHER ONE does not. ⚠️ Do not read that as "span containment
+// is dead code" and delete it — the two rules cover DIFFERENT shapes and only
+// overlap on this one. Fixture N7 is the proof: a dereference in a SIBLING
+// callback over a RUNTIME collection (`other.every((z) => near(c7[0].startBeat,
+// z)) && c7.every(…)`) is unsound for exactly N1's reason one step out — an
+// empty `other` never runs the callback — and span containment does NOT catch
+// it, because the sibling is not the site's part. Dropping the
+// function-boundary rule alone CLEARS N7.
+//
+// ⚠️ SAME-PATH MATCHING IS MANDATORY AND STRICTER HERE THAN IN IDIOM A.
+// `memberPath()`/`pathsEqual()` (m23-gl) gate the candidate exactly as they
+// gate a `.length` guard — but this rule additionally REFUSES OUTRIGHT when
+// the SITE's own `recvPath` is null, where findLengthGuard falls back to
+// root-only matching. Reason: `rootIdent()` unwraps a CallExpression to its
+// CALLEE, so a receiver like `sortIds(a)` (m23cf-delete-key) has
+// `recvRoot === "sortIds"` and no describable path at all — root-only matching
+// against a FUNCTION NAME is not a property axis, it is a coincidence. This
+// file's documented stance for a CLEARING rule is that an undescribable path
+// is a REJECTION, not a fallback (see countPinInStmt()'s header). All four
+// motivating sites have bare-identifier receivers, so nothing is lost.
+//
+// ⚠️ DELIBERATELY **NOT** APPLIED ACROSS THE DERIVATION CHAIN. Idioms A and B
+// are tried against every name in derivationChain() (a guard on the SOURCE
+// collection bounds anything length-monotone derived from it); this one is
+// tried against the SITE's own receiver ONLY. A chain hop yields a bare root
+// NAME with no property path (derivationChain()'s header), which would force
+// exactly the root-only fallback the paragraph above refuses. No motivating
+// site needs the hop version; if one is ever found, it needs its own fixtures.
+//
+// ⚠️ SCOPE, STATED SO THE NEXT READER DOES NOT MISTAKE IT FOR COVERAGE:
+// only `&&` is modelled. The climb BREAKS at a `||`/`??`, at a
+// ConditionalExpression, at a `!`, and at a function boundary rather than
+// reasoning about them, because each needs its own polarity argument (in
+// `site || Z` a vacuous `true` short-circuits Z away entirely, and a `!` above
+// a short-circuit turns "false, so the gate fails" into "true, so it passes").
+// Fails toward FLAGGING, this file's standing rule for a clearing rule.
+//
+// ⛔ WHAT IT STILL CANNOT MODEL — stated so nobody re-derives it as coverage:
+//   • NO BINDING-IDENTITY CHECK (the m23-ex axis) — inherited from idiom A,
+//     which has never had one either. A same-named shadowing binding in a
+//     sibling conjunct could clear. No corpus site has that shape; left as a
+//     known gap rather than fixed here, since it is idiom A's axis as much as
+//     this one's and closing it for one alone would be misleading.
+//   • NO DERIVATION-CHAIN reach (see above) and no `||`/ternary/`!` reasoning.
+//   • G-B requires an EXPRESSION-BODIED callback: a `{ … }` block body is
+//     refused outright rather than reasoned about, because "is this statement
+//     reached" is control-flow analysis, not an expression-position walk.
+//   • A proof PASSED TO a function that dereferences it (`assertPairGap(after)`)
+//     is invisible — interprocedural, the same boundary localHelperCall()'s
+//     header declines. This is what keeps m23g1-arrange-multiselect flagged.
+//   • `.forEach`/`.map` in G_B_METHODS have ZERO corpus sites. They are
+//     covered by scratchpad fixtures only (a `.map` and a `.forEach` positive,
+//     plus a `.map` negative whose deref sits behind a `&&` inside the
+//     callback), never by a real gate — the same "covered by fixture, not by
+//     corpus" status the m23-gm close recorded for its `filter().length==0`
+//     shape. If a real site ever appears, re-read this rule before trusting it.
+
+// Where the candidate sits relative to the part being scanned:
+//   "ALWAYS"          — evaluated whenever the part is evaluated.
+//   "IF-FALSE-FAILS"  — may be short-circuited away by a `&&`, but ONLY in the
+//                       case where the part therefore evaluates FALSE, which
+//                       makes the enclosing conjunction false and the gate leg
+//                       RED. Either the dereference happens (and throws on an
+//                       empty receiver) or the check fails. Both are loud.
+//   null              — cannot be shown to be either.
+// `path` is findAncestorPath()'s output: the ancestors from the scanned part
+// (INCLUSIVE) down to, but excluding, `target`.
+//
+// ⚠️⚠️ `falsityPropagates` IS THE NON-OBVIOUS HALF, AND WITHOUT IT THE
+// "IF-FALSE-FAILS" ARGUMENT IS SIMPLY FALSE. That argument is "the candidate
+// was short-circuited away, THEREFORE the part is false, THEREFORE the leg is
+// red" — and the middle step only holds if falsity actually REACHES the part
+// from the `&&` that did the short-circuiting. `&&` propagates falsity in both
+// operand positions; a CallExpression, a BinaryExpression, arithmetic, a
+// MemberExpression do NOT. `(flag && c[0].startBeat) === false && c.every(…)`
+// is the discriminating shape: a falsy `flag` skips the dereference AND makes
+// the `=== false` comparison come out TRUE, so the conjunct passes with
+// nothing dereferenced and the site goes on to pass vacuously. `!` is rejected
+// outright above for the same reason one level simpler; `=== false` is the
+// same inversion wearing different clothes, and there is no reason to think it
+// is the last one. So the downgrade is only permitted while every node walked
+// so far has been an `&&` — anything else clears the flag, and a later
+// short-circuit then REFUSES rather than downgrades. Fixture N8.
+function evalStatus(path, target) {
+  let status = "ALWAYS";
+  let falsityPropagates = true;   // is every node walked so far an `&&`?
+  for (let i = 0; i < path.length; i++) {
+    const parent = path[i];
+    const child = i + 1 < path.length ? path[i + 1] : target;
+    if (/Function/.test(parent.type)) return null;      // a callback may never run
+    if (parent.type === "ChainExpression") return null; // optional chaining: no throw
+    if (parent.type === "ConditionalExpression") return null;
+    if (parent.type === "UnaryExpression" && parent.operator === "!") return null; // inverts the polarity argument
+    if (parent.type === "LogicalExpression") {
+      if (parent.operator !== "&&") return null;
+      if (child === parent.right) {
+        if (!falsityPropagates) return null;   // the short-circuit's falsity cannot reach the part
+        status = "IF-FALSE-FAILS";
+      }
+      continue;
+    }
+    // Everything else (Call arguments, Binary operands, Member objects,
+    // template expressions, …) evaluates its children unconditionally — but
+    // SWALLOWS falsity, so no `&&` below this point may downgrade any more.
+    falsityPropagates = false;
+  }
+  return status;
+}
+
+// Is `m` a DEREFERENCED index access on the site's own receiver? `indexOk`
+// decides what counts as an index (a numeric literal for G-A, the callback's
+// index parameter for G-B). Returns the DEREFERENCING parent MemberExpression
+// (the node that actually throws) or null.
+//
+// `parent` is supplied by the caller from findAncestorPath() — deliberately
+// NOT from acorn-walk's ancestor visitors, whose base-visitor table only
+// enumerates node types it was told about, so a shape it does not know returns
+// a null that is indistinguishable from "no proof exists" (findAncestorPath()'s
+// own header documents exactly this, which is why it exists at all).
+function derefIndexOn(m, parent, recvRoot, recvPath, indexOk) {
+  if (m.type !== "MemberExpression" || !m.computed || m.optional) return null;
+  if (!indexOk(m.property)) return null;
+  if (rootIdent(m.object) !== recvRoot) return null;
+  const candPath = memberPath(m.object);
+  if (!candPath || !pathsEqual(candPath, recvPath)) return null;   // m23-gl axis
+  // `x[0]` alone proves nothing — it must be DEREFERENCED, and not optionally.
+  if (!parent || parent.type !== "MemberExpression" || parent.object !== m) return null;
+  if (parent.computed || parent.optional) return null;
+  return parent;
+}
+
+const NUMERIC_INDEX = (p) => p.type === "Literal" && typeof p.value === "number" &&
+                             Number.isInteger(p.value) && p.value >= 0;
+const G_B_METHODS = new Set(["every", "forEach", "map"]);
+
+// G-A: a directly-dereferenced numeric-literal index anywhere in `p` that is
+// evaluated (or whose non-evaluation makes `p` false).
+function derefProofA(p, recvRoot, recvPath, code) {
+  const cands = [];
+  walk.simple(p, { MemberExpression(m) { cands.push(m); } });
+  for (const m of cands) {
+    const path = findAncestorPath(p, m);
+    if (!path) continue;
+    const parent = path.length ? path[path.length - 1] : null;
+    const deref = derefIndexOn(m, parent, recvRoot, recvPath, NUMERIC_INDEX);
+    if (!deref) continue;
+    if (!evalStatus(path, m)) continue;
+    return `direct index deref: ${txt(code, deref).slice(0, 60)}`;
+  }
+  return null;
+}
+
+// G-B: `.every`/`.forEach`/`.map` over a NON-EMPTY ARRAY LITERAL whose callback
+// takes an index parameter and dereferences `R[<that param>]`.
+//
+// ⚠️ THE CALLBACK'S BODY IS HELD TO THE STRICTER "ALWAYS" STANDARD, not the
+// "IF-FALSE-FAILS" one the enclosing conjunct gets. Inside a `.map`/`.forEach`
+// callback a falsy return means nothing at all (`[1].map(() => false)` is a
+// truthy non-empty array), so the "it short-circuited, therefore the leg is
+// red" argument does not survive the call boundary.
+function derefProofB(p, recvRoot, recvPath, code) {
+  const calls = [];
+  walk.simple(p, { CallExpression(c) { calls.push(c); } });
+  for (const c of calls) {
+    const callee = c.callee;
+    if (callee.type !== "MemberExpression" || callee.computed || callee.optional) continue;
+    if (callee.property.type !== "Identifier" || !G_B_METHODS.has(callee.property.name)) continue;
+    const arr = callee.object;
+    if (arr.type !== "ArrayExpression" || arr.elements.length < 1) continue;   // `[]` proves NOTHING
+    const cb = c.arguments[0];
+    if (!cb || !/^(ArrowFunctionExpression|FunctionExpression)$/.test(cb.type)) continue;
+    const idxParam = cb.params[1];
+    if (!idxParam || idxParam.type !== "Identifier") continue;
+    if (cb.body.type === "BlockStatement") continue;   // expression bodies only — statements are not modelled
+    // The `.every(...)` call itself must be reached when `p` is evaluated.
+    const callPath = findAncestorPath(p, c);
+    if (!callPath || !evalStatus(callPath, c)) continue;
+    const isIdx = (prop) => prop.type === "Identifier" && prop.name === idxParam.name;
+    const cands = [];
+    walk.simple(cb.body, { MemberExpression(m) { cands.push(m); } });
+    for (const m of cands) {
+      const inner = findAncestorPath(cb.body, m);
+      if (!inner) continue;
+      const parent = inner.length ? inner[inner.length - 1] : null;
+      const deref = derefIndexOn(m, parent, recvRoot, recvPath, isIdx);
+      if (!deref) continue;
+      if (evalStatus(inner, m) !== "ALWAYS") continue;
+      return `literal-array index deref (${arr.elements.length} elements): ${txt(code, c).slice(0, 60)}`;
+    }
+  }
+  return null;
+}
+
+// The climb. Same shape as findLengthGuard's — outward through the ancestors,
+// span-containment on each part — but `&&` ONLY, and refusing outright when the
+// receiver has no describable path. See the header block above for every
+// deliberate narrowing.
+function findDerefProof(ancestors, recvRoot, code, site, recvPath) {
+  if (!recvRoot || !recvPath) return null;
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    const a = ancestors[i];
+    if (/Function/.test(a.type)) break;
+    if (a.type === "ConditionalExpression") break;
+    if (a.type === "UnaryExpression" && a.operator === "!") break;
+    if (a.type === "LogicalExpression") {
+      if (a.operator !== "&&") break;
+      for (const p of [a.left, a.right]) {
+        if (p.start <= site.start && site.end <= p.end) continue;   // the part containing the SITE ITSELF
+        const found = derefProofA(p, recvRoot, recvPath, code) || derefProofB(p, recvRoot, recvPath, code);
+        if (found) return found;
+      }
+    }
+  }
+  return null;
+}
+// ─────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────
 // m23-ex — REAL LEXICAL SCOPE RESOLUTION for findCountPin()'s idiom-B match.
@@ -1642,6 +1933,26 @@ for (const f of files) {
     const joinPin = (!guard && !pin && !someLegPin) ? findJoinPin(anc, recvNode, node, code) : null;
     const eqPin = (!guard && !pin && !someLegPin && !joinPin) ? findEqPin(anc, recvNode, node, code, ast) : null;
 
+    // ⭐ IDIOM G (m23-gn) — throw-on-empty index dereference, findDerefProof()
+    // far above. THE LAST RESORT, DELIBERATELY: it is consulted ONLY when the
+    // site is not already cleared by ANY other route, including the ones that
+    // are not idioms at all (DETAIL-ARG, LITERAL provenance, polarity).
+    //
+    // ⚠️ THAT GATING IS A SAFETY PROPERTY, NOT AN OPTIMISATION, AND IT IS WHY
+    // `alreadyCleared` is hoisted into its own binding instead of being
+    // inlined into `cleared:` as it used to be. m23-gm was a TIGHTENING, so
+    // "zero rows widen" was available as its acceptance test; THIS IS A
+    // CLEARING RULE, where widening is the whole point and that test is gone.
+    // Computing idiom G only for rows that are currently `cleared: false`
+    // makes "no already-cleared row can change ANY field" structurally true
+    // rather than something a diff has to discover — the diff then only has to
+    // confirm WHICH flagged rows moved. Keep the operand order below identical
+    // to the historical `cleared:` expression: `provenance` is read AFTER the
+    // DETAIL-ARG override has had its chance to reassign it.
+    const alreadyCleared = isDetailArg || Boolean(guard || pin || someLegPin || joinPin || eqPin)
+                         || provenance === "LITERAL" || selfDefending;
+    const derefProof = alreadyCleared ? null : findDerefProof([...anc, node], recvRoot, code, node, recvPath);
+
     rows.push({
       file: f,
       line: node.loc.start.line,
@@ -1659,9 +1970,10 @@ for (const f of files) {
       someLegPin,                              // idiom D — preceding, asserted .some() leg, same predicate
       joinPin,                                 // idiom E — equality on a derived .map().join() (⑥)
       eqPin,                                   // idiom F — deep-equality (eq) pin against an expected list (⑧)
+      derefProof,                              // idiom G — dereferenced index into the receiver: THROWS on empty (m23-gn)
       negated: neg,
       selfDefending,                           // idiom C — polarity fails on empty
-      cleared: isDetailArg || Boolean(guard || pin || someLegPin || joinPin || eqPin) || provenance === "LITERAL" || selfDefending,
+      cleared: alreadyCleared || Boolean(derefProof),
       clearedBy: isDetailArg ? `DETAIL-ARG (argument 3 of \`${detailArg.callee}(\` — diagnostic string, cannot affect the verdict)`
                : provenance === "LITERAL" ? "literal receiver"
                : guard ? "inline .length conjunct"
@@ -1670,6 +1982,7 @@ for (const f of files) {
                : joinPin ? "preceding pin via equality on a derived .map().join()"
                : eqPin ? "preceding pin via deep-equality (eq) against an expected list"
                : selfDefending ? `polarity (${neg ? "!" : ""}${method} is false on empty — reddens instead)`
+               : derefProof ? `throw-on-empty index dereference (${derefProof})`
                : null,
       via,                                     // guard found on a SOURCE collection, not the receiver
     });

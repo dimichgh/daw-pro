@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-08-11 — The audit tool now understands a test that proves itself by crashing
+
+The last two notes described a checking tool that was excusing tests too easily. Tightening it left four
+tests flagged as unexplained that were in fact perfectly sound — so this change teaches the tool the
+reason they were sound, and they are quietly excused again.
+
+The pattern is worth describing, because it is not the obvious one. Those tests never state that the list
+they are checking is non-empty. Instead they reach into it — "the gap between the second and third item
+is four beats" — so if the list were empty the test would crash rather than pass. Failing loudly is a
+perfectly good proof of non-emptiness; it just does not look like one.
+
+Two shapes are now recognised: reaching in by position directly, and reaching in from inside a loop over
+a fixed list of expected values. The second needed care — a loop over an *empty* fixed list proves
+nothing at all, so the tool checks that the list actually has entries.
+
+Four tests are excused again. Two remain flagged and they are different from each other: one is sound for
+a reason that lives inside another function, which this tool deliberately does not follow, and stays
+flagged on purpose; the other is the genuinely thin check found last time, still waiting on its own fix.
+Both are now written into the tool's own notes so nobody has to rediscover which is which.
+
+Because this change makes the tool excuse *more* rather than less, the checking was inverted: rather than
+proving nothing new was excused, we proved that exactly the four intended tests changed, that nothing
+moved the other way, and that no other test's verdict shifted in any respect. Two of the newly handled
+shapes appear nowhere in the current test suite and are covered only by purpose-built examples.
+
 ## 2026-08-11 — The audit tool no longer counts a test as its own proof
 
 Yesterday's note described a checking tool that was excusing tests too easily, and a worse version of the
