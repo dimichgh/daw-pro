@@ -1,5 +1,62 @@
 # Changelog
 
+## 2026-08-11 — A test that was measuring the machine, not the app
+
+The same follow-the-playhead check had a rule reading "the view must have scrolled to at least three
+different positions during the test." That sounds like a statement about the app. It isn't. Three
+positions means two page-turns, and the second page-turn only happens once the music has played for
+about twelve seconds — inside a test window of fifteen. Roughly two seconds of margin. Every run we
+measured landed on exactly three. A slightly busier machine would have failed the test without
+anything being wrong with the software.
+
+It now asks for two positions instead of three, which needs one page-turn at around six and a half
+seconds — four times the margin, and no longer tied to how far ahead the view likes to scroll.
+
+Worth being honest about two things. The looser rule is not free of assumptions either; it still
+depends on the window size, just far less tightly, and the comment in the file now says so rather
+than overclaiming. And the reason we had written down for making this change turned out to be wrong:
+we thought this was the only rule left proving the view moves at all, but another rule added in the
+very same round already proves that. The rule earns its place for a different reason — it is the only
+one proving the view moved during the stretch the screenshots were taken from — and that reason is
+now written where the next person will find it.
+
+## 2026-08-11 — A test that had been watching the wrong pixels
+
+Our automated check for "does the view follow the playhead while music plays" had been failing four
+of its checks for weeks, on the piano roll side only. The cause turned out to be more interesting
+than a stale number: **notes are drawn in exactly the same cyan as the playhead.** The check finds
+the playhead by looking for that cyan in a strip of the grid that is supposed to contain no notes —
+and that strip had ended up sitting directly on the row where every note in the test song lives. So
+it was measuring a note and reporting it as the playhead.
+
+Nothing about the app was broken. The instrument was.
+
+That strip is no longer a fixed number. Every run, the check now asks the app where the grid
+actually is, scans it to find which row the notes occupy, and picks a clear one — then proves it
+aimed correctly before trusting anything it sees: the playhead has to move in every single frame,
+and its mark has to be a two-pixel line rather than a wide block. A note sits still between page
+turns and is nearly two hundred pixels wide, so either check alone catches the old mistake.
+
+The whole thing now passes for the first time.
+
+## 2026-08-11 — A playback test that was two seconds from failing for the wrong reason
+
+One of our automated checks watches the view scroll to keep up with the playhead during playback, and
+it insisted the view scrolled *at least twice*. That number was never the thing worth checking — it
+just falls out of the window width, the zoom and how far ahead of the playhead we like to sit. Improve
+any of those for good reasons and the check goes red while the app is working perfectly.
+
+Measuring showed how close that already was. In the piano roll the view scrolled exactly twice, and
+the second scroll needed about twelve seconds of playback inside a fifteen-second measurement window
+that also has to absorb app launch. Roughly two seconds of margin — a slower machine would have failed
+a working app.
+
+The check now asserts only what it was really guarding: that we turn the page a handful of times
+during playback rather than jerking the view on every tick. The thing the old floor was quietly
+standing in for — that the playhead never slides off screen — is checked directly, and always was. A
+neighbouring check already answers "did it scroll at all", and we found it has the same fragility, so
+that one is written down as its own job rather than quietly patched here.
+
 ## 2026-08-11 — Triage notes for the audit tool, and a claim of ours withdrawn
 
 The audit tool flags a handful of tests it cannot prove sound. Those flags are not all the same thing,

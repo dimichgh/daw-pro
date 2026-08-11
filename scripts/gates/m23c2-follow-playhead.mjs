@@ -92,11 +92,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 //            draws one full-height RISER, which after the median subtraction is
 //            the only thing in the column profile (a flat hold-segment is ~3 px
 //            of ink down an 80 px column and reads as background).
+// ⚠️ m23-bk: RGRID.y and RNOTES.y below are PLACEHOLDERS, overwritten by the
+// CALIBRATION block right after the fixture opens. They used to be hardcoded
+// and were PROVEN mis-aimed: notes render in `DAWTheme.playback` — the SAME
+// cyan the playhead probe hunts for (`PianoRollView.noteColor`) — so
+// RGRID.y=1350 landed ON the pitch-60 note row (rasterized 1375..1443,
+// measured) instead of a note-free one, and RNOTES.y=1275 was ~100px off
+// that same row. Both are now MEASURED every run: `debug.explainFrames`
+// gives `pianoRollGrid`'s rasterized top (the m23-ag idiom — see
+// `m23c1-offclip-cue.mjs:237-273`, the working reference), then a
+// row-height scan inside that panel (rowHeight is PINNED to 34 by
+// buildFixture, so its capture-space size is a known constant, not a guess)
+// finds which row actually carries note ink and picks a nearby row that
+// carries none. RVEL/RCTRL were measured to already sit correctly inside
+// their panels and are left as hardcoded constants, verified (not derived)
+// at calibration time — see the CALIBRATION checks below.
 const W = {
   ARULER:  { x: 620, y: 280,  w: 2150, h: 80,  thr: 20 },
   ALANE:   { x: 800, y: 380,  w: 1970, h: 100, thr: 8 },
-  RGRID:   { x: 140, y: 1350, w: 2635, h: 150, thr: 20 },
-  RNOTES:  { x: 140, y: 1275, w: 2635, h: 34,  thr: 20 },
+  RGRID:   { x: 140, y: undefined, w: 2635, h: 150, thr: 20 },
+  RNOTES:  { x: 140, y: undefined, w: 2635, h: 34,  thr: 20 },
   RVEL:    { x: 140, y: 1570, w: 2635, h: 100, thr: 20 },
   RGUTTER: { x: 30,  y: 840,  w: 95,   h: 680, thr: 20 },
   RCTRL:   { x: 140, y: 1745, w: 2635, h: 80,  thr: 20 },
@@ -285,6 +300,117 @@ console.log(`fixture: clip1 @0 len ${CLIP_BEATS}, clip2 @${CLIP2_AT} len ${CLIP_
 // Open the editor once; later captures keep it open without re-selecting (a
 // re-select would be an edit-state change in the middle of a measurement).
 await req("debug.captureUI", { path: `${OUT}/open-editor.png`, selectClip: clipId });
+
+// ── m23-bk CALIBRATION — derive RGRID/RNOTES.y, verify RVEL/RCTRL ──────────
+// Parked at a known state (stopped, seek 0, both scrollers at 0) so the note
+// x's are the fixture's predictable beat*ppb positions, then measured with
+// the SAME `debug.explainFrames` idiom m23c1 uses (its header, lines 237-273,
+// is the copied reference) — NOT re-derived by guessing new pixel constants.
+await req("transport.stop", {});
+await req("transport.seek", { beats: 0 });
+await req("debug.followPlayhead", { simulateUserScroll: 0, surface: "pianoRoll" });
+await req("debug.followPlayhead", { simulateUserScroll: 0, surface: "arrange" });
+await sleep(500);
+const calPng = `${OUT}/calibration.png`;
+const calCap = await req("debug.captureUI", { path: calPng });
+if (calCap.width !== 2800 || calCap.height !== 2000) {
+  throw new Error(`calibration capture size ${calCap.width}x${calCap.height}`);
+}
+// explainFrames is INERT unless explain mode is ON, and a valid id then comes
+// back undefined — indistinguishable from a wrong id — so the frames are
+// asserted present below rather than trusted blindly. Off again immediately:
+// explain mode paints a violet overlay that must not leak into any capture
+// used for a real measurement.
+await req("debug.explainMode", { on: true });
+await sleep(300);
+const ef = await req("debug.explainFrames", { ids: ["pianoRollGrid", "pianoRollVelocity", "pianoRollControllers"] });
+await req("debug.explainMode", { on: false });
+await sleep(300);
+const gridFrame = ef.frames?.pianoRollGrid?.[0];
+const velFrame = ef.frames?.pianoRollVelocity?.[0];
+const ctrlFrame = ef.frames?.pianoRollControllers?.[0];
+if (!gridFrame || !velFrame || !ctrlFrame || !ef.captureOrigin || !ef.captureSize) {
+  throw new Error(`calibration: missing measured frames — ${JSON.stringify(ef).slice(0, 400)}`);
+}
+// The m23-ag idiom: explainRoot-space point -> capture pixel via captureOrigin
+// plus the ratio of a REAL capture's pixel height to the reported captureSize
+// (points) — never a guessed/hardcoded backing scale.
+const calScale = calCap.height / ef.captureSize.height;
+const toCaptureBox = (f) => ({
+  x: Math.round((f.x + ef.captureOrigin.x) * calScale),
+  y: Math.round((f.y + ef.captureOrigin.y) * calScale),
+  w: Math.round(f.width * calScale),
+  h: Math.round(f.height * calScale),
+});
+const gridBox = toCaptureBox(gridFrame);
+const velBox = toCaptureBox(velFrame);
+const ctrlBox = toCaptureBox(ctrlFrame);
+console.log(`calibration: scale=${calScale} captureOrigin=${JSON.stringify(ef.captureOrigin)}`);
+console.log(`calibration: pianoRollGrid capture box ${JSON.stringify(gridBox)}`);
+console.log(`calibration: pianoRollVelocity capture box ${JSON.stringify(velBox)}`);
+console.log(`calibration: pianoRollControllers capture box ${JSON.stringify(ctrlBox)}`);
+
+// Row scan: rowHeight is PINNED to 34pt by buildFixture, so its capture-space
+// size is a known constant. Scan every row-height slice of the grid panel and
+// find which one carries note ink (the fixture's single pitch, 60/C4) — that
+// is the row RNOTES must read, and every other row is a valid RGRID home.
+const rowHCap = 34 * calScale;
+const rows = [];
+for (let ry = gridBox.y, ri = 0; ry + rowHCap <= gridBox.y + gridBox.h; ry += rowHCap, ri++) {
+  const r = probe(calPng, `cal-row-${ri}`, { x: 140, y: Math.round(ry), w: 2635, h: Math.round(rowHCap), thr: 20 });
+  rows.push({ i: ri, y: Math.round(ry), peak: Number(r.peak) });
+}
+const sortedByPeak = rows.slice().sort((a, b) => b.peak - a.peak);
+const hotRow = sortedByPeak[0];
+const secondHotRow = sortedByPeak[1];
+console.log(`calibration: row scan (${rows.length} rows) — hottest row ${hotRow.i} `
+  + `y=${hotRow.y} peak=${hotRow.peak.toFixed(2)}; next-hottest peak=${secondHotRow?.peak.toFixed(2) ?? "n/a"}`);
+check("CALIBRATION: exactly one grid row is hot (the note row is unambiguous)",
+      hotRow.peak >= 20 && (!secondHotRow || secondHotRow.peak < 20),
+      `hot=${hotRow.peak.toFixed(2)} nextHot=${secondHotRow?.peak.toFixed(2) ?? "n/a"}`);
+
+// RNOTES: centered on the hot (note) row.
+//
+// ⚠️ m23-bk: because RNOTES now sits ON the pitch-60 row instead of ~100px
+// above it, its runList is note starts UNION the playhead — the playhead
+// spans every pitch row, including this one, so whenever it crosses this
+// x-window it adds one more "start" that is not on the note lattice.
+// MEASURED (a Leg 5 paged capture, roll offset 1133): starts
+// 267,654,1067,1867,2667 — four are exactly the beat-12/16/20/24 note
+// lattice (spacing 800px = 4 beats * 100ppb * 2x); 654 has no lattice fit
+// and lands exactly where `ROLL_X0 + (beat*PPB - offset)*SCALE` puts the
+// playhead at the beat the transport had reached (~13.9). Every CURRENT
+// consumer of RNOTES only tests riser ⊆ starts membership
+// (`risers.some(s => Math.abs(c - s) <= 3)`), which tolerates the extra
+// entry — but a FUTURE leg asserting `starts.length` exactly, or matching
+// bidirectionally, would need to filter the playhead out first.
+W.RNOTES.y = Math.round(hotRow.y + (rowHCap - W.RNOTES.h) / 2);
+// RGRID: a note-free band. Anchored at the grid panel's top unless that would
+// overlap the hot row or run past the panel's bottom — checked, not assumed —
+// in which case it falls back to just below the hot row.
+const overlaps = (aY, aH, bY, bH) => aY < bY + bH && bY < aY + aH;
+let candidateGridY = gridBox.y;
+if (overlaps(candidateGridY, W.RGRID.h, hotRow.y, rowHCap) || candidateGridY + W.RGRID.h > gridBox.y + gridBox.h) {
+  candidateGridY = Math.round(hotRow.y + rowHCap + 6);
+}
+W.RGRID.y = candidateGridY;
+check("CALIBRATION: the derived RGRID band fits inside the grid panel and does not overlap the note row",
+      W.RGRID.y >= gridBox.y && (W.RGRID.y + W.RGRID.h) <= (gridBox.y + gridBox.h)
+        && !overlaps(W.RGRID.y, W.RGRID.h, hotRow.y, rowHCap),
+      `RGRID y=${W.RGRID.y} h=${W.RGRID.h}, grid box ${JSON.stringify(gridBox)}, hot row y=${hotRow.y} h=${rowHCap}`);
+console.log(`calibration: derived W.RNOTES.y=${W.RNOTES.y}  W.RGRID.y=${W.RGRID.y}`);
+
+// RVEL / RCTRL: NOT re-derived — measured to already sit inside their panels
+// (the m23-bk item's own correction), so only VERIFIED here. A future layout
+// drift that moves either panel now fails this loudly instead of silently
+// re-detaching them the way RGRID/RNOTES had.
+check("CALIBRATION: W.RVEL sits inside the measured pianoRollVelocity panel",
+      W.RVEL.y >= velBox.y && (W.RVEL.y + W.RVEL.h) <= (velBox.y + velBox.h),
+      `RVEL=${JSON.stringify(W.RVEL)} velBox=${JSON.stringify(velBox)}`);
+check("CALIBRATION: W.RCTRL sits inside the measured pianoRollControllers panel",
+      W.RCTRL.y >= ctrlBox.y && (W.RCTRL.y + W.RCTRL.h) <= (ctrlBox.y + ctrlBox.h),
+      `RCTRL=${JSON.stringify(W.RCTRL)} ctrlBox=${JSON.stringify(ctrlBox)}`);
+
 // SETTLE the lanes' laid-out content width before any counter is trusted. The
 // lanes learn a newly added clip's extent on their next layout pass, which lands
 // a beat after the command returns — and a content-width change that arrives
@@ -388,17 +514,66 @@ report("FOLLOW ON", on);
   check("L1 arrange: the lane row shows the playhead at the SAME x as the ruler (they scroll in lockstep)",
         s.every((x) => covers(x.aLane, lineX(x.aRuler))),
         s.map((x) => `${lineX(x.aRuler)}∈[${x.aLane.runs}]`).join(" "));
-  check("L1 arrange: the surface actually SCROLLED (several distinct offsets)",
-        new Set(s.map((x) => x.follow.arrange.offset)).size >= 3,
+  // ── m23-gs: THE FLOOR WAS `>= 3`. IT IS NOW `>= 2` — AND THE REASON THE ITEM
+  //    GAVE FOR LOWERING IT WAS FALSE, SO THE REAL ONE IS RECORDED HERE. ──
+  //
+  // WHAT WAS DERIVED: `>= 3` needs TWO scrolls inside the sampled window. A page
+  // buys ~1131 pt on the roll, so the second scroll needs the playhead past
+  // ~beat 24.2 = 12.1 s of playback — inside a 15 s wall-clock window that also
+  // absorbs process launch and a 900 ms settle. ~2 s of slack. MEASURED over
+  // three runs 2026-08-11: arrange AND roll both produced exactly 3 distinct
+  // offsets, i.e. BOTH SURFACES SAT EXACTLY ON THE FLOOR.
+  //
+  // ⚠️ WHAT `>= 2` IS *NOT*: it is not "decoupled from everything tunable". The
+  // FIRST scroll fires when the playhead passes `viewport - edgeMargin` (~1290 pt
+  // on the roll = ~beat 12.9 = ~6.45 s), so this still depends on `viewport` and
+  // `edgeMargin` — it is decoupled from `leadFraction` only, and buys ~8.5 s of
+  // slack instead of ~2 s. Claiming more would replace one false statement with
+  // another.
+  //
+  // ⚠️⚠️ m23-gs's OWN JUSTIFICATION WAS FALSE AND MUST NOT BE RE-INHERITED. It
+  // said this leg is "STILL THE ONLY LEG ASSERTING THAT THE SURFACE MOVED AT
+  // ALL". It is not: the PAGE-policy legs below pin `scrolls >= 1` — which
+  // m23-ea added IN THE SAME CYCLE THAT FILED m23-gs.
+  //
+  // ⭐ SO WHY KEEP THIS LEG AT ALL? The two are non-redundant in ONE direction.
+  // `scrolls` is cumulative and read at `end` — AFTER the sample loop and after
+  // `transport.stop` — so a scroll landing between the last sample and that read
+  // increments `scrolls` and produces NO distinct offset. This leg is therefore
+  // the only one asserting the surface moved DURING THE WINDOW THE PIXELS WERE
+  // SAMPLED FROM, which is the window every other L1 leg reasons about. That
+  // asymmetry, not the magnitude, is its content.
+  //
+  // ⚠️ CONSEQUENCE — IT MAKES A SIBLING LOAD-BEARING: at `>= 3` this leg also
+  // failed on a short sample set, which is the "defended by accident" m23-bj
+  // names above. At `>= 2` a 2-sample run can satisfy it, so that accidental
+  // defence is now GONE and `s.length >= 5` is the SOLE short-run guard.
+  check("L1 arrange: the surface actually SCROLLED WITHIN THE SAMPLED WINDOW (>= 2 distinct offsets)",
+        new Set(s.map((x) => x.follow.arrange.offset)).size >= 2,
         [...new Set(s.map((x) => x.follow.arrange.offset))].join(","));
   check("L1 roll: the playhead is in frame in EVERY sample (note-free grid crop)",
         s.every((x) => lineX(x.rGrid) != null),
         s.map((x) => (lineX(x.rGrid) ?? "GONE")).join(" "));
+  // m23-bk MANDATORY POSITIVE CONTROL on the derived RGRID window itself. A
+  // mis-aimed crop that lands on static note ink still "finds a run" — that
+  // was exactly how the old RGRID passed for the wrong reason. Measured
+  // signature of the two cases: the real playhead's x is DISTINCT on every
+  // sample and its matched run is a ~2px stroke (arrange ruler: 931 1802 2531
+  // 1414 2156 1020 1758 2509, runs like 922-924); note ink's x is CONSTANT
+  // between scrolls and its run is ~168px wide (measured: 224 224 224 347.5
+  // 347.5 347.5 477.5 477.5, runs like 140-308).
+  check("L1 roll CALIBRATION: rGrid's x changes on EVERY sample (not just at scroll boundaries — proves it is the playhead, not static note ink)",
+        s.every((x, idx) => idx === 0 || lineX(x.rGrid) !== lineX(s[idx - 1].rGrid)),
+        s.map((x) => lineX(x.rGrid)).join(" "));
+  check("L1 roll CALIBRATION: rGrid's matched run is a thin ~2px stroke (the playhead), not a wide band of note ink",
+        s.every((x) => x.rGrid.runList.length === 1 && (x.rGrid.runList[0][1] - x.rGrid.runList[0][0]) <= 8),
+        s.map((x) => x.rGrid.runs).join(" | "));
   check("L1 roll: the VELOCITY lane shows the playhead at the SAME x as the grid (m23-c1 two-bands law)",
         s.every((x) => covers(x.rVel, lineX(x.rGrid))),
         s.map((x) => `${lineX(x.rGrid)}∈[${x.rVel.runs}]`).join(" "));
-  check("L1 roll: the surface actually SCROLLED (several distinct offsets)",
-        new Set(s.map((x) => x.follow.pianoRoll.offset)).size >= 3,
+  // Same change as the arrange leg above — see the m23-gs block.
+  check("L1 roll: the surface actually SCROLLED WITHIN THE SAMPLED WINDOW (>= 2 distinct offsets)",
+        new Set(s.map((x) => x.follow.pianoRoll.offset)).size >= 2,
         [...new Set(s.map((x) => x.follow.pianoRoll.offset))].join(","));
   check("L1 roll: the NON-FOLLOWED (vertical) axis holds — the keyboard gutter is byte-identical throughout",
         new Set(s.map((x) => x.rGutter.sha)).size === 1,
@@ -406,10 +581,66 @@ report("FOLLOW ON", on);
   // PAGE, not per-tick: ~15 s at 120 bpm is 30 beats = 3000 pt, under 3 arrange
   // viewports and under 3 roll viewports. A continuous policy would have issued
   // hundreds (measured: 262 over 8 bars — see FollowPlayhead's doc table).
-  check("L1 arrange: PAGE policy — a handful of scrolls, not one per transport tick",
-        on.end.arrange.scrolls >= 2 && on.end.arrange.scrolls <= 12, `${on.end.arrange.scrolls}`);
-  check("L1 roll: PAGE policy — a handful of scrolls, not one per transport tick",
-        on.end.pianoRoll.scrolls >= 2 && on.end.pianoRoll.scrolls <= 12, `${on.end.pianoRoll.scrolls}`);
+  //
+  // ── m23-ea: THE CEILING IS THE CLAIM. THE FLOOR IS ONLY AN ANTI-VACUITY PIN. ──
+  //
+  // These two legs used to read `>= 2 && <= 12`. The ceiling is the real
+  // assertion — it is what separates PAGE policy from the per-tick regression.
+  // The `2` was a DERIVED quantity: an arithmetic consequence of travel ×
+  // viewportWidth × `FollowPlayhead.leadFraction`, none of which this gate is
+  // about. It asserted a *consequence* of three tunables instead of the property
+  // it means, so a legitimate change to any of them reddens it against correct
+  // code.
+  //
+  // HOW TIGHT, MEASURED 2026-08-11 (not estimated — read off two identical runs):
+  // a page buys `viewport - edgeMargin - leadFraction*viewport` of travel, which
+  // is ~927 pt on the arrange (viewport 1090) and ~1131 pt on the roll (1322);
+  // the observed offset deltas were 932.5 and 1133, so that model is confirmed.
+  // At 100 pt/beat the roll's SECOND scroll therefore needs the playhead past
+  // ~beat 24.2 = 12.1 s of playback — inside a 15 s wall-clock window that also
+  // absorbs process launch and a 900 ms settle (see the m23-bj note above: t0 is
+  // stamped BEFORE both). That is ~2 s of slack. Both runs measured arrange=3,
+  // roll=2: THE ROLL SAT EXACTLY ON THE OLD FLOOR, one slow launch from a red
+  // that would have meant nothing about follow. (It cannot reach 3 either — the
+  // third page needs ~beat 35.6, past the end of the window.)
+  //
+  // NOTHING IS LOST BY DROPPING IT, for two independent reasons:
+  //   1. The property the floor smuggled in — THE PLAYHEAD NEVER LEFT THE
+  //      VIEWPORT — is asserted directly and pixel-wise by the two "the playhead
+  //      is in frame in EVERY sample" legs above. ⚠️ UPDATE (m23-bk, fixed): the
+  //      ROLL leg used to be green-but-UNSOUND — W.RGRID was mis-aimed onto the
+  //      pitch-60 note row, so `lineX` read note ink, not the playhead, and the
+  //      roll rested on reason 2 alone. RGRID.y is now derived at runtime (see
+  //      the CALIBRATION block above) and the two "L1 roll CALIBRATION" legs
+  //      prove it reads the playhead (x distinct every sample, ~2px run), so
+  //      the roll leg is sound and reason 1 applies to it too.
+  //   2. The floor was already IMPLIED by the "several distinct offsets" leg
+  //      above. `scrollCount` increments only when `FollowPlayhead.landing`
+  //      returns a real move — a clamped no-op returns nil and is never counted
+  //      — and the only non-follow offset sources are the `simulateUserScroll`
+  //      seam (unused in L1) and content reflow (L1 asserts widthChanges === 0).
+  //      So N distinct sampled offsets ⟹ at least N-1 scrolls, and that leg
+  //      pins N >= 2 (m23-gs lowered it from 3; N >= 2 still implies at least
+  //      one scroll, which is exactly what the PAGE-policy floor below claims).
+  //
+  // ⚠️ DO NOT read reason 2 as "the strong floor survives somewhere decoupled".
+  // The distinct-offsets leg carried the SAME leadFraction coupling and the same
+  // ~2 s of slack — that coupling WAS m23-gs and is now FIXED (that leg is
+  // `>= 2`; see the m23-gs block above), so neither leg carries a derived floor
+  // any more.
+  //
+  // `>= 1` stays as a bare "something happened" pin. It is NOT a correctness
+  // claim and NOT derived: it fails only if follow issued no scroll at all,
+  // which on a fixture asserting contentWidth > 3× viewport means follow is
+  // broken. ⚠️ Its value is that it is LOCAL — not that it is the last line of
+  // defence. A zero-scroll run also reddens the distinct-offsets leg, and a
+  // short one reddens the `s.length >= 5` pin. But a leg that greens on nothing
+  // and relies on a SIBLING to redden is the m23-bj shape; this one now answers
+  // for itself.
+  check("L1 arrange: PAGE-policy CEILING — not one scroll per transport tick",
+        on.end.arrange.scrolls >= 1 && on.end.arrange.scrolls <= 12, `${on.end.arrange.scrolls}`);
+  check("L1 roll: PAGE-policy CEILING — not one scroll per transport tick",
+        on.end.pianoRoll.scrolls >= 1 && on.end.pianoRoll.scrolls <= 12, `${on.end.pianoRoll.scrolls}`);
   check("L1: follow never grew either surface's content (the clamp holds — no lane relayout)",
         on.end.arrange.contentWidthChanges === 0 && on.end.pianoRoll.contentWidthChanges === 0,
         `arrange ${on.end.arrange.contentWidthChanges}, roll ${on.end.pianoRoll.contentWidthChanges}`);

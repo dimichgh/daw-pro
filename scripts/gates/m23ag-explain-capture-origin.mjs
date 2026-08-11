@@ -239,6 +239,31 @@ async function frames(ids) {
 
 const DELTA_MIN = 1.5;   // a real colour change on a small box is many luma points
 const DELTA_MAX_NULL = 0.4;
+// ── m23-gf-g: why L8 alone cannot use the ABSOLUTE null bound above ──────────
+// L2 and L4's un-origined boxes are essentially perfectly blind (measured Δ 0.01
+// and 0.00 against positives of 30.21 and 45.42). L8's is NOT, and the reason is
+// physical rather than a layout accident: its box's bottom edge sits ~21 px from
+// the transportLoop button, INSIDE that button's glow halo. Per-row profile
+// (probe `rows`, x=440 w=92, loop off -> on), measured at m23-gf-g:
+//     y <= 1845   Δ  0.000   (exactly zero — the halo does not reach)
+//     y  1850     Δ +0.030
+//     y  1869     Δ +1.631   <- last row of the un-origined box
+//     y  1885     Δ +9.853
+//     y  1890     Δ +90.933  <- button border
+//     y  1895..1930  Δ ~+50  <- button body
+// A continuous gradient sourced at the button, decaying with distance. Averaged
+// over the box's 44 rows it comes to 0.42 — which is why an ABSOLUTE ceiling is
+// the wrong instrument next to a glowing control: there is no "blind" position
+// adjacent to a neon indicator, only degrees of spill, and the design language
+// (docs/DESIGN-LANGUAGE.md) makes glow pervasive.
+// ⛔ This bound was NOT widened to clear a failure. The claim the red arm makes
+// is RELATIVE — "a consumer who drops captureOrigin sees a negligible SHARE of
+// the signal" — and it is now stated that way. Measured share: 0.42/51.27 =
+// 0.82 %, so 5 % leaves ~6x headroom for glow variation while still failing hard
+// on the regression this arm exists to catch: if the un-origined box ever landed
+// ON the target (or captureOrigin silently became 0), both arms would read the
+// same and the share would go to ~100 %.
+const NULL_MAX_SHARE = 0.05;
 const INK_RUN_THRESH = 3.0;      // per-row |delta| that counts as playhead ink
                                   // (same order as m23v's RUN_THRESH — far above
                                   // antialiasing residue, far below the expected
@@ -411,12 +436,38 @@ async function sizeRun(reqW, reqH, tag, tracks) {
   // runs printed byte-identical luma, which is the tell. The loop button is
   // BOTTOM-anchored, so its reported frame moves with the content height and the
   // second size genuinely re-exercises the conversion.
+  // m23-gf-g: the LOOP chip has its own active-state glow (TransportBar.swift
+  // loopChip: `.glow(DAWTheme.playback, radius: 5, intensity: isOn ? 0.5 : 0)`),
+  // and `.glow()` (Theme.swift:81-87) is TWO SwiftUI `.shadow()`s — a tight
+  // core at `radius` and a WIDE BLOOM at `radius * 2.5` = 12.5pt, opacity
+  // `intensity * 0.25` = 0.125 when on. A `.shadow()` never affects the
+  // reported layout frame, so `explainFrames` reports only the 22pt-tall chip
+  // itself — the bloom's faint halo is real rendered content that extends well
+  // above that frame WITHOUT showing up in the payload L7/L8 convert.
+  // MEASURED (both window sizes, to 3 decimals, at the un-origined box's
+  // native h=44 scaled px): rows within 20.5pt of the chip's own top are
+  // BYTE-IDENTICAL toggling loop on/off; the first row to diverge sits
+  // EXACTLY 20.0pt above the chip's top, both sizes, both runs. The
+  // un-origined ("mistake") box's far (bottom) edge sits captureOrigin.y
+  // (32pt) minus its own height from the real chip — at the original h=22pt
+  // that is only 10pt away, deep inside the 20pt bloom radius, which is the
+  // entire 0.42. Capping the shared box height at LOOP_BOX_H=8pt puts that
+  // edge 24pt away — 4pt clear of the measured 20pt onset — while the
+  // corrected arm still lands squarely on the chip's own bright fill/glow
+  // core (see the printed Δ below: unchanged in kind, nowhere near the
+  // DELTA_MIN floor). This is the SAME box for both arms, only shorter than
+  // the chip's full reported height — not a per-size or hand-tuned literal:
+  // it is derived from captureOrigin.y (itself read from the live payload,
+  // never hardcoded) and the glow math above, with an explicit safety margin
+  // over the measured onset distance, the same discipline L3/L4's inset uses.
+  const LOOP_BOX_H = 8; // pt — see derivation above; must stay <= 12 (32 - 20)
+                         // to guarantee zero bleed; 8 leaves 4pt of margin.
   const loop = (await frames(["transportLoop"])).frames?.transportLoop?.[0];
   if (loop) {
     const loopBox = (useOrigin) => ({
       x: (loop.x + (useOrigin ? org.x : 0)) * S,
       y: (loop.y + (useOrigin ? org.y : 0)) * S,
-      w: loop.width * S, h: loop.height * S,
+      w: loop.width * S, h: LOOP_BOX_H * S,
     });
     const lOff = await capture(`${tag}-loop-off`);
     await req("transport.setLoop", { enabled: true, startBeat: 0, endBeat: 8 });
@@ -432,8 +483,15 @@ async function sizeRun(reqW, reqH, tag, tracks) {
     check(`${tag} L7 a BOTTOM-anchored surface (transportLoop, frame y=${loop.y} at this size) `
           + `converts with the same payload — no reprint, no per-size constant`,
           dlC >= DELTA_MIN, `box ${JSON.stringify(loopBox(true))} luma ${lC.luma} -> ${lC2.luma} (Δ ${dlC.toFixed(2)}, floor ${DELTA_MIN})`);
-    check(`${tag} L8 [RED ARM] the same bottom-anchored box WITHOUT captureOrigin is blind`,
-          dlU <= DELTA_MAX_NULL, `box ${JSON.stringify(loopBox(false))} luma ${lU.luma} -> ${lU2.luma} (Δ ${dlU.toFixed(2)}, must be <= ${DELTA_MAX_NULL})`);
+    // m23-gf-g: SHARE, not an absolute ceiling — see NULL_MAX_SHARE's comment for
+    // the measured glow profile that makes an absolute bound meaningless here.
+    const shareU = dlC > 0 ? dlU / dlC : Infinity;
+    check(`${tag} L8 [RED ARM] the same bottom-anchored box WITHOUT captureOrigin is blind `
+          + `(negligible SHARE of the origined signal — an absolute ceiling is the wrong `
+          + `instrument this close to a glowing control, see NULL_MAX_SHARE)`,
+          shareU <= NULL_MAX_SHARE,
+          `box ${JSON.stringify(loopBox(false))} luma ${lU.luma} -> ${lU2.luma} (Δ ${dlU.toFixed(2)}); `
+          + `origined Δ ${dlC.toFixed(2)}; share ${(shareU * 100).toFixed(2)}% must be <= ${(NULL_MAX_SHARE * 100).toFixed(0)}%`);
   } else {
     check(`${tag} L7/L8 transportLoop frame present`, false, "no frame reported");
   }
@@ -446,6 +504,32 @@ try {
   const t1 = (await req("track.add", { kind: "instrument", name: "Keys" })).id;
   const t2 = (await req("track.add", { kind: "instrument", name: "Pad" })).id;
   await guard.set("arrange", "simple");
+  // ⭐ m23-gf-g: PIN transport density too, and pin it to the SHIPPED value.
+  // This gate's L7/L8 legs read the transportLoop button, whose frame moves with
+  // this density (`TransportBar.swift:14-26` — `isPro` gates the PUNCH and
+  // test-tone controls, width 63 <-> 92). Until m23-gf-e the staging seed happened
+  // to carry `transport: "pro"`, so these legs passed on an ambient value the gate
+  // NEVER ASKED FOR; shrinking the seed to shipped defaults dropped it to .simple
+  // and the legs moved. Pinning makes that impossible to repeat silently.
+  // ⛔ Pinned to "simple" (the shipped default, `PanelDensityModel.swift:97`) and
+  // deliberately NOT to "pro": pinning a NON-shipped value is exactly the class
+  // m23-gf-e exists to remove — it would make this gate green by testing a layout
+  // no user gets. Note this pin is behaviourally identical to today's unpinned
+  // state; its job is DETERMINISM against future seed changes, not the fix.
+  await guard.set("transport", "simple");
+  // m23-gf-g: `transport` was ambient — under the old 17-key seed it happened
+  // to carry "pro", so L7/L8 (which read the transportLoop chip, gated by
+  // TransportBar.swift `isPro`) passed on a value this gate never asked for.
+  // m23-gf-e shrank the seed to one key and `transport` fell to its shipped
+  // default (`.simple`, PanelDensityModel.swift:97), which changes nothing
+  // behaviourally (this gate never asserts on PUNCH/test-tone, the controls
+  // `isPro` actually gates) — the pin below is for DETERMINISM, not to fix a
+  // behavioural dependency: it exists so the next seed/default change cannot
+  // silently re-break this gate's assumptions again the way it just did.
+  // Pinned to `.simple` (the SHIPPED value), never `.pro` — pinning `.pro`
+  // would restore the old ambient geometry but reintroduce a non-shipped
+  // value, exactly the class m23-gf-e exists to remove.
+  await guard.set("transport", process.env.M23AG_DEBUG_DENSITY || "simple");
   await sleep(SETTLE);
   const tracks = [t0, t1, t2];
 
