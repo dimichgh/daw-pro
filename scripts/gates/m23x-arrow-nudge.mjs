@@ -240,10 +240,18 @@ try {
           && near(a[1].startBeat - a[0].startBeat, 4)
           && near(a[2].startBeat - a[1].startBeat, 5.5),
         a.map((c) => c.startBeat).join(","));
+  // m23-go: THE COUNT PIN ON `a` IS LOAD-BEARING AND BELONGS IN THIS EXPRESSION.
+  // The other two conjuncts are about `n` — a DIFFERENT OBJECT from the receiver
+  // — so without it `a.every(…)` is true of an EMPTY `a` and this leg would pass
+  // having measured nothing. N1c above would throw on an empty `a` first, but
+  // that protection lives in a SEPARATE STATEMENT, and per the open m23-bl a
+  // failed precondition does not halt the legs that depend on it.
   check("N1d nothing was trimmed or removed",
-        n.trimmedIds.length === 0 && n.removedIds.length === 0
+        a.length === 3
+          && n.trimmedIds.length === 0 && n.removedIds.length === 0
           && a.every((c) => near(c.lengthBeats, LEN)),
-        `trimmed=${JSON.stringify(n.trimmedIds)} removed=${JSON.stringify(n.removedIds)}`);
+        `count=${a.length} lengths=${a.map((c) => c.lengthBeats).join(",")} `
+        + `trimmed=${JSON.stringify(n.trimmedIds)} removed=${JSON.stringify(n.removedIds)}`);
   check("N1e a 3-clip nudge is ONE undo step, labelled countably",
         (await depth()) - d0 === 1 && (await history()).undo[0] === "Move 3 Clips",
         `depth+${(await depth()) - d0} label="${(await history()).undo[0]}"`);

@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-08-11 — A test that checked "nothing was trimmed" now also checks there was something to trim
+
+The audit tool described in the last three notes found one genuinely weak test, as opposed to tests it
+merely misunderstood. A check on arrow-key nudging asserted that nothing was trimmed or removed, and that
+every clip kept its length — but the first two parts were about a different object, so the third would
+have been satisfied by having no clips at all.
+
+It was never actually broken: an earlier check in the same test reads the clips by position and would
+have crashed first. But that protection lives in a separate statement, and a known open issue means a
+failed earlier check does not stop later ones from running. The check now states its own precondition —
+three clips — and its failure message reports the count and each clip's length, where before it printed
+nothing about the clips at all.
+
+Worth noting for what it is: with the test fixture as written, the new condition cannot fail today. Its
+value is that the check now stands on its own, and that it will catch a future change to how the fixture
+builds its clips.
+
+The test was run before and after the change — 55 of 55 passing both times, with the leg in question a
+genuine pass rather than a skip in each.
+
 ## 2026-08-11 — The audit tool now understands a test that proves itself by crashing
 
 The last two notes described a checking tool that was excusing tests too easily. Tightening it left four
