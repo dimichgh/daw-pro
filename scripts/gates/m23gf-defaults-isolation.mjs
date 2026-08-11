@@ -49,6 +49,11 @@
 //     kernel's own `ps`, and the filesystem), to have actually written to ITS
 //     OWN domain and to be identified as `DAWProStaging` by the OS — so A1/A2
 //     below cannot pass for a launch that crashed before writing anything.
+//   SELF (m23-gf-f) — the app's OWN report of the domain it persists under
+//     (`debug.defaultsDomain`), checked against PS's outside inference. PS asks
+//     the kernel what the process is CALLED; this asks the app where it is
+//     WRITING. One fact, two independent instruments — and two instruments
+//     disagreeing is the signal.
 //   NEG — a DECOY domain the differ is proven to detect a write to, in the
 //     SAME run, so "the user's domain is unchanged" is a measurement and not
 //     a tautology from an instrument that always says "identical". Never an
@@ -85,7 +90,7 @@ import { tmpdir } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import {
   LIVE_PORT, STAGING_PORT, ROOT, DEFAULT_BINARY,
-  STAGING_DEFAULTS_DOMAIN,
+  STAGING_DEFAULTS_DOMAIN, STAGING_PROCESS_NAME,
   launchStaging, stopStaging, connect, sleep,
   resetStagingDefaultsDomain, panelDensityGuard, stagingSessionLockPath,
   verdict,
@@ -410,6 +415,43 @@ try {
         `seed stored=${JSON.stringify(seedQuantizeBefore)}; ${STAGING_DEFAULTS_DOMAIN} `
         + `panelDensity.quantize now reads ${JSON.stringify(afterWrite.stdout)} (confirmed after `
         + `${wrote.elapsedMs}ms, exit ${afterWrite.status})`);
+
+  // ── SELF (m23-gf-f) — the APP's own statement, checked against PS's ────────
+  // PS above is an OUTSIDE inference: the kernel's `comm` for the pid. This is
+  // the app answering the same question from the inside, through CFPreferences.
+  // Two independent instruments on one fact — and two instruments disagreeing
+  // is the signal. A `comm` that reads `DAWProStaging` while the app persists
+  // somewhere else is precisely the failure PS alone cannot see.
+  //
+  // Three conjuncts, each doing separate work:
+  //   • `derivedDomain === STAGING_PROCESS_NAME` — the agreement itself.
+  //   • `probe.agrees && !probe.vacuous` — the DERIVATION is only a restatement
+  //     of Apple's rule; the probe is the measured half, so it must be
+  //     non-vacuously true. `panelDensity.quantize` is used deliberately: POS1
+  //     drove it over the wire moments ago and read it back off the filesystem,
+  //     so it is a key the APP ITSELF persisted (not a registration default,
+  //     which would be legitimately invisible to `persistentDomain(forName:)`).
+  //   • the domain dump is unchanged ACROSS the call — a measured read-only
+  //     proof for a verb whose whole purpose is proving the app does not
+  //     pollute a domain. It bounds the window to this one request; it is not a
+  //     claim about the handler's source, which is checked separately by grep.
+  const selfBefore = defaultsRead(STAGING_DEFAULTS_DOMAIN);
+  const selfReport = await req("debug.defaultsDomain", { probeKey: "panelDensity.quantize" });
+  const selfAfter = defaultsRead(STAGING_DEFAULTS_DOMAIN);
+  check("SELF the APP reports its own defaults domain (debug.defaultsDomain, m23-gf-f) and it "
+        + "agrees with STAGING_PROCESS_NAME — the inside view of what PS above infers from the "
+        + "outside — with a NON-VACUOUS probe on a key the app itself persisted, and the domain "
+        + "byte-unchanged across the call (the verb is read-only)",
+        selfReport.derivedDomain === STAGING_PROCESS_NAME
+        && selfReport.processName === STAGING_PROCESS_NAME
+        && selfReport.probe?.agrees === true && selfReport.probe?.vacuous === false
+        && selfAfter.stdout === selfBefore.stdout,
+        `derivedDomain=${JSON.stringify(selfReport.derivedDomain)} `
+        + `processName=${JSON.stringify(selfReport.processName)} `
+        + `bundleIdentifier=${JSON.stringify(selfReport.bundleIdentifier)} `
+        + `(expected ${JSON.stringify(STAGING_PROCESS_NAME)}); probe=${JSON.stringify(selfReport.probe)}; `
+        + `domain dump unchanged across the call=${selfAfter.stdout === selfBefore.stdout} `
+        + `(${selfBefore.stdout.length} vs ${selfAfter.stdout.length} bytes)`);
 
   // ── POS2 — the incident itself: debug.windowFrame -> NSWindow Frame write ──
   const before = defaultsRead(STAGING_DEFAULTS_DOMAIN);

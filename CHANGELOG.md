@@ -295,6 +295,23 @@ making everything look fine.
 Your own settings files came through all of it byte-for-byte unchanged, verified with a check we
 first proved capable of detecting a single flipped byte.
 
+**The app can now say which settings file it is writing to.** Until today, the way we confirmed the
+tests were writing somewhere separate from your settings was to ask the operating system what the
+test process was called, and reason from there. That is an inference about the app rather than a
+statement by it. There is now a diagnostic the app answers directly: which name it is running under,
+whether it has a bundle identity, and which preferences domain it therefore persists to.
+
+Two details we were careful about. The answer distinguishes what is *derived* from what is
+*measured* — the domain name is worked out from the app's identity, so it is labelled that way, and
+a separate optional check actually looks a key up through both paths and reports whether they agree.
+That second part refuses to report agreement when the key was never written in the first place,
+which would otherwise be a comparison of nothing against nothing that always looks fine.
+
+The isolation test now asks both the operating system and the app the same question and requires the
+answers to match. Two independent instruments, because a single one cannot notice its own mistake.
+The diagnostic is strictly read-only — a check whose job is proving the app does not write where it
+shouldn't must not itself write anywhere.
+
 ## 2026-08-10 — Voice conversion no longer degrades the more you use it
 
 Converting the same vocal a few times in a row used to get progressively louder and more distorted,

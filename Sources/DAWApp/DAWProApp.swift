@@ -3884,6 +3884,15 @@ final class AppModel {
                 return try self.followPlayheadDebug(params)
             case "debug.windowFrame":
                 return self.setWindowFrame(params)
+            // m23-gf-f — the app STATES which UserDefaults domain it persists
+            // under, instead of the harness inferring it with `/bin/ps -o comm=`.
+            // Sits beside `debug.windowFrame` deliberately: that verb's AppKit
+            // frame autosave is the write that reached the user's real domain
+            // before m23-gf-b. Handler in `DefaultsDomainStaging.swift` (the
+            // m23-cq-1 shape: debug tier, off allCommands/MCP, kept out of this
+            // file). STRICTLY READ-ONLY.
+            case "debug.defaultsDomain":
+                return try self.defaultsDomainDebug(params)
             case "debug.arrangeScroll":
                 return try self.setArrangeScroll(params)
             case "debug.arrangeZoom":
