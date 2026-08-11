@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-08-11 — The audit tool no longer counts a test as its own proof
+
+Yesterday's note described a checking tool that was excusing tests too easily, and a worse version of the
+same flaw in its most-used code path. That one is now fixed.
+
+It had been reading the surrounding source as plain text inside a fixed window. The window was wide
+enough to reach into the test's own body, so a test could be counted as the evidence that it was worth
+running. It also accepted any property whose name merely started with "length" — and "lengthBeats", how
+long a clip is, appears throughout these tests. Between them, a test could excuse itself using nothing
+more than a mention of a clip's length.
+
+It now looks at the code's actual structure instead of its text: it skips the part of the expression the
+test itself occupies, requires a real length check rather than a name that starts with one, and — as with
+yesterday's fix — requires the check to be about the same list the test iterates.
+
+Six tests were being excused on reasoning that didn't hold. Five are sound anyway, and now show up as
+unexplained until we teach the tool the pattern they actually use; that follow-up is written down. The
+sixth is the genuinely thin one, and it is now correctly flagged. Nothing else moved: the other
+forty-three excused tests are excused for exactly the same reasons as before, and no test anywhere became
+*more* excused — the tool only got stricter.
+
 ## 2026-08-11 — An audit tool stopped accepting the wrong evidence, and we found it doing something worse
 
 One of our automated checks looks for tests that would pass even if the thing being tested were empty —

@@ -167,15 +167,61 @@ function classifyInit(init, code) {
 //
 // Idiom B is the shape the item itself calls settled and says to copy, so a
 // scanner blind to it is measuring the wrong thing. Both are checked below.
-function findLengthGuard(ancestors, recvRoot, code) {
+// m23-gm — AST-based match, replacing the old regex-over-source-text scan
+// (`\\brecvRoot\\b[^;]{0,80}\\.length`), which had THREE compounding faults:
+//
+// ① SELF-MATCH — `parts` used to include the conjunct/branch that CONTAINS
+// THE SITE ITSELF, so a site's own callback body could satisfy its own
+// guard (`ok === true && after.every((c) => near(c.lengthBeats, LEN))`
+// "cleared", with the recorded guard being the `.every()` call itself).
+// Fixed by excluding any part whose span [start,end) contains the site's
+// own span — this generalises across arbitrarily deep `&&` chains (each
+// level of the climb re-applies the same exclusion to whichever part still
+// contains the site) and across the ConditionalExpression shape too
+// (whichever of test/consequent/alternate holds the site — a single
+// span-containment check covers both shapes uniformly, no special-casing
+// needed).
+//
+// ② PREFIX MATCH — a bare `\.length` substring test matched `.lengthBeats`
+// (a real, pervasive clip property in this corpus) as a prefix. Fixed by
+// requiring an actual MemberExpression with `property.name === "length"`
+// (non-computed), found via a proper subtree walk rather than a text scan.
+//
+// ③ ROOT-ONLY MATCH — the exact axis m23-gl fixed for idiom B, one file
+// section up: a guard's root identifier matching is not enough, since
+// `res.clips.length` says nothing about `res.landings.every(…)`. When
+// `recvPath` is given (the SITE's own receiver could be structurally
+// described via memberPath()), a candidate `.length` MemberExpression's own
+// object path must equal it EXACTLY; an undescribable candidate path is a
+// REJECTION, not a fallback — same stance countPinInStmt() takes, and for
+// the same reason: this is a CLEARING rule, and `recvPath` is known here, so
+// a candidate that cannot be shown to describe the SAME thing has not
+// earned the clear. `recvPath` is only ever non-null for the site's own
+// un-hopped receiver (see the call site, far below) — a derivation-chain
+// hop has no single receiver expression left to compare against
+// (derivationChain()'s own header) and passes `null`, which skips this axis
+// entirely, unchanged from before.
+function findLengthGuard(ancestors, recvRoot, code, site, recvPath) {
   for (let i = ancestors.length - 1; i >= 0; i--) {
     const a = ancestors[i];
     if (a.type === "LogicalExpression" || a.type === "ConditionalExpression") {
       const parts = a.type === "LogicalExpression" ? [a.left, a.right] : [a.test, a.consequent, a.alternate];
       for (const p of parts) {
         if (!p) continue;
-        const s = txt(code, p);
-        if (new RegExp(`\\b${recvRoot}\\b[^;]{0,80}\\.length`).test(s)) return s.slice(0, 80);
+        if (p.start <= site.start && site.end <= p.end) continue;   // ① — this part contains the site itself
+        let found = null;
+        walk.simple(p, {
+          MemberExpression(m) {
+            if (found || m.computed || m.property.type !== "Identifier" || m.property.name !== "length") return;   // ②
+            if (rootIdent(m.object) !== recvRoot) return;
+            if (recvPath) {
+              const candPath = memberPath(m.object);
+              if (!candPath || !pathsEqual(candPath, recvPath)) return;   // ③
+            }
+            found = m;
+          },
+        });
+        if (found) return txt(code, p).slice(0, 80);
       }
     }
     // Stop climbing at a function boundary — a guard outside it is not the same expression.
@@ -1503,7 +1549,11 @@ for (const f of files) {
     const chain = recvRoot ? derivationChain(ast, recvRoot, code) : [];
     let guard = null, pin = null, via = null, pinScope = null;
     for (const nm of chain) {
-      guard = findLengthGuard([...anc, node], nm, code);
+      // m23-gm — `recvPath` (fault ③) only applies on the site's own,
+      // un-hopped receiver, mirroring the identical `nm === recvRoot ? recvPath
+      // : null` threading already used for findCountPin() below — a chain hop
+      // is a bare root name with no member path of its own to enforce.
+      guard = findLengthGuard([...anc, node], nm, code, node, nm === recvRoot ? recvPath : null);
       if (!guard) {
         // m23-ex — findCountPin() now returns { found, unresolved }: a
         // candidate pin must resolve to the SAME binding as the site's own
