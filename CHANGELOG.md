@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-08-11 — An audit tool was excusing a check that tests nothing
+
+We have a tool that hunts for a specific weak spot in our automated checks: asserting "every item in
+this list is correct" without first establishing the list has anything in it. An empty list passes
+that test trivially, so such a check can look green while testing nothing at all.
+
+The tool excuses a check when it finds a nearby assertion establishing the list's size. It was
+matching those by name only. In one of our checks, two separate lists in unrelated blocks happened to
+share a name, and the tool credited the second with the first one's size assertion — an assertion
+describing a value that list never held. So a check that genuinely tests nothing was being marked
+fine.
+
+The tool now works out which declaration a name actually refers to, and only accepts a size assertion
+that refers to the same one. Where it can't work that out, it now says so and flags the check rather
+than excusing it.
+
+Exactly one check changed status across all 135 the tool examines, and that is the one this was
+about. Verified by keeping a record of all 135 beforehand and comparing every row — and by
+constructing three deliberate examples: the tool now catches the two it should while still excusing
+the legitimate pattern it exists to allow.
+
 ## 2026-08-11 — Finished reserving the alarm phrase, and added a guard so it stays reserved
 
 An earlier fix stopped our shared check-reporting code from printing a deliberately alarming phrase

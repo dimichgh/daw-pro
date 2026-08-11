@@ -184,11 +184,254 @@ function findLengthGuard(ancestors, recvRoot, code) {
   return null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// m23-ex — REAL LEXICAL SCOPE RESOLUTION for findCountPin()'s idiom-B match.
+//
+// THE DEFECT THIS FIXES: findCountPin()'s statement scan (below) matches a
+// candidate pin by NAME ONLY (`rootIdent(len.object) === recvRoot`). It also
+// (necessarily, for idiom B to reach a preceding sibling block at all — see
+// the m23-eu comment on prevReassignment(), further down) climbs OUTWARD
+// through enclosing Program/BlockStatement levels and, at each level, calls
+// countPinInStmt() on WHOLE SIBLING STATEMENTS — including sibling bare
+// `{ }` blocks it did not itself descend into. `m23aj2-move-wire.mjs` has
+// two separate `const landings = res.landings ?? [];` in non-overlapping
+// sibling blocks (:75-92 and :195-212); scanning the try-body level for a
+// pin on `:208`'s `landings` walks INTO the sibling `:75-92` block (a whole
+// statement that "starts before" :208) and matches `landings.length === 2`
+// at :86 — a BinaryExpression that happens to share the name `landings`,
+// but whose `landings` is a COMPLETELY DIFFERENT `const` binding. Name-only
+// matching cannot tell these apart; the reassignment-epoch bound (m23-eu,
+// prevReassignment/nextReassignment below) cannot either, because a `const`
+// redeclaration in a sibling block is not a reassignment of anything — it
+// is invisible to reassignment tracking by construction.
+//
+// THE FIX: resolve the SITE's own `recvRoot` to its actual declaring AST
+// node via a real (if deliberately bounded) scope walk — nearest enclosing
+// BLOCK wins for `let`/`const`/function-decl/class-decl and for-of/for-in/
+// for(let…)/catch bindings; nearest enclosing FUNCTION (or Program, at the
+// top) wins for `var` and for parameters — and require every candidate pin
+// found by the statement scan to resolve `recvRoot` to that SAME node, by
+// object identity, not by name. Two `const landings` in sibling blocks are
+// two distinct VariableDeclarator objects even though acorn assigns them
+// the same name, so this rejects the cross-block match while leaving every
+// same-scope idiom-B pin (the case this idiom exists to serve) untouched —
+// same-binding identity holds trivially when the pin and the site share an
+// enclosing block, however far that block's OWN ancestor chain climbs
+// (confirmed on `m23y-track-select.mjs:473`'s nested `.every` inside
+// `.every`, whose pin sits in the SAME `&&` expression as the site itself
+// but past two ArrowFunctionExpression closures with no `probeClips` param
+// of their own — genuinely the same closed-over `const`, correctly still
+// clears).
+//
+// FAILS TOWARD FLAGGING, per this file's standing rule for every
+// conservative branch: a name this resolver cannot place in ANY scope on
+// the path — a destructuring pattern, an import, a shape not modelled here
+// — makes findCountPin() refuse the whole lookup rather than guess, and
+// records that refusal in the row's own `pinScope` field (see the
+// `notCleared`-header discipline: a null field must be visible as null, not
+// silently indistinguishable from "no pin was ever looked for").
+//
+// SCOPED DELIBERATELY NARROW, matching this file's own established taste
+// for a conservative census over a general dataflow analysis: plain
+// `Identifier` declarators/params only (no destructuring/rest — an
+// unresolvable name is the conservative, correct answer for those, not a
+// wrong guess); `SwitchStatement` cases share ONE block scope (modelled,
+// since two gates in this corpus use `switch`, even though neither currently
+// has a `let`/`const` case body a `.every`/`.some`/`filter()` site could
+// need — checked, not assumed); `var` hoisting is modelled with a bounded
+// recursive descent that refuses to cross a NESTED function boundary.
+//
+// A KNOWN, DELIBERATELY UNFIXED GAP, distinct from the one this item closes:
+// countPinInStmt() still matches a candidate on `rootIdent(len.object)`, so
+// `res.clips.length === 2` can still "pin" a DIFFERENT property read off the
+// very same `res` (`res.landings.every(…)`) — a property-level over-clear,
+// not a binding-level one. Binding identity cannot catch this by
+// construction (both reads resolve to the SAME `res` binding); it is a
+// different axis, not exercised by any known site in this corpus today, and
+// left exactly as conservative as it was before this fix.
+
+// The root Identifier AST NODE (not just its name — rootIdent() above
+// already computes the name; this is its sibling for when the NODE itself
+// is needed, to resolve the binding it names).
+function rootIdentNode(node) {
+  let n = node;
+  for (;;) {
+    if (n.type === "MemberExpression") n = n.object;
+    else if (n.type === "CallExpression") n = n.callee;
+    else if (n.type === "ChainExpression") n = n.expression;
+    else if (n.type === "TSNonNullExpression") n = n.expression;
+    else break;
+  }
+  return n.type === "Identifier" ? n : null;
+}
+
+// Ancestor path from `root` (INCLUSIVE — root genuinely is an ancestor of
+// anything strictly inside it) down to (EXCLUDING) `target`, found by a
+// plain recursive descent over the AST's own shape. Deliberately NOT reused
+// from acorn-walk's own ancestor visitors (`walk.fullAncestor`), which only
+// enumerate the node TYPES they are told about via a base-visitor table —
+// this instead walks every own-enumerable child, so it cannot silently miss
+// a node shape the base visitor wasn't told about. `root` is normally a
+// SINGLE STATEMENT — small, EXCEPT at the outermost climb level in
+// findCountPin(), where `root` can be an entire top-level block (in
+// `m23aj2-move-wire.mjs`, the whole `try { … }` body) — this is a census
+// over ~75 files run periodically, not a hot path, and the corpus's gate
+// files are hundreds of lines at most, so an occasional whole-block walk is
+// not a cost worth optimising away.
+function findAncestorPath(root, target) {
+  let result = null;
+  (function visit(node, path) {
+    if (result || !node || typeof node !== "object" || typeof node.type !== "string") return;
+    if (node === target) { result = path; return; }
+    const nextPath = path.concat([node]);
+    for (const key in node) {
+      if (result) return;
+      if (key === "loc" || key === "start" || key === "end" || key === "range") continue;
+      const v = node[key];
+      if (Array.isArray(v)) {
+        for (const item of v) { if (result) return; visit(item, nextPath); }
+      } else if (v && typeof v === "object" && typeof v.type === "string") {
+        visit(v, nextPath);
+      }
+    }
+  })(root, []);
+  return result;
+}
+
+// Does `scopeNode` ITSELF (not some nested child scope) declare `name` as a
+// block-scoped binding? Covers: `let`/`const`/function-decl/class-decl at
+// the top level of a Block/Program/SwitchStatement (a `switch` body's cases
+// share exactly ONE block scope, not one each — modelled here because two
+// gates in this corpus use `switch`, even though neither currently needs
+// it for a receiver this census tracks); a function's own parameters;
+// a for-of/for-in/for(let…) loop's own declarator; a catch clause's own
+// parameter. Returns the declaring node — used as the BINDING IDENTITY
+// itself: two references share a binding iff they resolve to the identical
+// node object — or null.
+function declaresInScope(scopeNode, name) {
+  if (scopeNode.type === "BlockStatement" || scopeNode.type === "Program") {
+    for (const stmt of scopeNode.body) {
+      if (stmt.type === "VariableDeclaration" && stmt.kind !== "var") {
+        for (const d of stmt.declarations) {
+          if (d.id.type === "Identifier" && d.id.name === name) return d;
+        }
+      }
+      if (stmt.type === "FunctionDeclaration" && stmt.id?.name === name) return stmt;
+      if (stmt.type === "ClassDeclaration" && stmt.id?.name === name) return stmt;
+    }
+    return null;
+  }
+  if (scopeNode.type === "SwitchStatement") {
+    for (const c of scopeNode.cases) {
+      for (const stmt of c.consequent) {
+        if (stmt.type === "VariableDeclaration" && stmt.kind !== "var") {
+          for (const d of stmt.declarations) {
+            if (d.id.type === "Identifier" && d.id.name === name) return d;
+          }
+        }
+        if (stmt.type === "FunctionDeclaration" && stmt.id?.name === name) return stmt;
+        if (stmt.type === "ClassDeclaration" && stmt.id?.name === name) return stmt;
+      }
+    }
+    return null;
+  }
+  if (/Function/.test(scopeNode.type)) {
+    return scopeNode.params?.find((p) => p.type === "Identifier" && p.name === name) || null;
+  }
+  if (scopeNode.type === "ForOfStatement" || scopeNode.type === "ForInStatement") {
+    const left = scopeNode.left;
+    if (left?.type === "VariableDeclaration") {
+      for (const d of left.declarations) if (d.id.type === "Identifier" && d.id.name === name) return d;
+    }
+    return null;
+  }
+  if (scopeNode.type === "ForStatement") {
+    const init = scopeNode.init;
+    if (init?.type === "VariableDeclaration" && init.kind !== "var") {
+      for (const d of init.declarations) if (d.id.type === "Identifier" && d.id.name === name) return d;
+    }
+    return null;
+  }
+  if (scopeNode.type === "CatchClause") {
+    if (scopeNode.param?.type === "Identifier" && scopeNode.param.name === name) return scopeNode.param;
+    return null;
+  }
+  return null;
+}
+
+// `var` (and a `for (var …)` loop head) is FUNCTION-scoped, not
+// block-scoped — it hoists to the nearest enclosing function (or Program,
+// at the top level) regardless of how many bare `{ }`/if/for blocks sit
+// between the declaration and that boundary. Searched with a plain
+// recursive descent bounded to `fnOrProgram`'s own subtree, refusing to
+// cross into any NESTED function — a `var` inside a nested function is that
+// function's own hoisted binding, not this one's.
+function collectVarDecl(fnOrProgram, name) {
+  let found = null;
+  (function visit(node, isRoot) {
+    if (found || !node || typeof node !== "object" || typeof node.type !== "string") return;
+    if (!isRoot && /Function/.test(node.type)) return;   // do not cross a nested function boundary
+    if (node.type === "VariableDeclaration" && node.kind === "var") {
+      for (const d of node.declarations) {
+        if (d.id.type === "Identifier" && d.id.name === name) { found = d; return; }
+      }
+    }
+    for (const key in node) {
+      if (found) return;
+      if (key === "loc" || key === "start" || key === "end" || key === "range") continue;
+      const v = node[key];
+      if (Array.isArray(v)) { for (const item of v) { if (found) return; visit(item, false); } }
+      else if (v && typeof v === "object" && typeof v.type === "string") visit(v, false);
+    }
+  })(fnOrProgram, true);
+  return found;
+}
+
+// Resolve `name` to its declaring node by walking `ancestorPath` (root
+// first, immediate parent last — the shape both acorn-walk's own ancestors
+// array and findAncestorPath() above produce) from INNERMOST scope outward,
+// the way a JS engine's own scope chain does: nearest enclosing block wins
+// for let/const, nearest enclosing function (or Program) wins for var/
+// params. Returns { declNode, scopeNode }, or null if this scanner cannot
+// place `name` in any scope on the path — a destructuring pattern, an
+// import, a global, or some other shape it does not model. ⚠️ The caller
+// MUST treat a null result as "cannot verify", never as "assume it
+// clears" — this file's standing fail-toward-flagging rule, applied here.
+function resolveBinding(name, ancestorPath) {
+  for (let i = ancestorPath.length - 1; i >= 0; i--) {
+    const scopeNode = ancestorPath[i];
+    const isBlockLikeScope =
+      scopeNode.type === "BlockStatement" || scopeNode.type === "Program" ||
+      scopeNode.type === "SwitchStatement" || /Function/.test(scopeNode.type) ||
+      scopeNode.type === "ForOfStatement" || scopeNode.type === "ForInStatement" ||
+      scopeNode.type === "ForStatement" || scopeNode.type === "CatchClause";
+    if (isBlockLikeScope) {
+      const decl = declaresInScope(scopeNode, name);
+      if (decl) return { declNode: decl, scopeNode };
+    }
+    const isVarScope = scopeNode.type === "Program" || /Function/.test(scopeNode.type);
+    if (isVarScope) {
+      const varDecl = collectVarDecl(scopeNode, name);
+      if (varDecl) return { declNode: varDecl, scopeNode };
+    }
+  }
+  return null;
+}
+// ─────────────────────────────────────────────────────────────────────────
+
 // IDIOM B: a count pin on the same receiver. `s.length >= 5` clears it — a
 // short run reddens THERE, so the `.every` below can no longer pass vacuously.
 // Only `>=`/`>`/`===` against a NON-ZERO literal count as a pin: `s.length >= 0`
 // is vacuous itself, and `x.length === 0` is an emptiness ASSERTION, not a pin.
-function countPinInStmt(stmt, recvRoot, code) {
+//
+// ⚠️ m23-ex — NAME MATCH ALONE IS NOT ENOUGH, see the scope-resolution block
+// just above: a sibling block can declare its own same-named `const`
+// (`m23aj2-move-wire.mjs:86` vs `:208`). `ancestorsPrefix` is the path from
+// Program down to (and including) the body level currently being scanned in
+// findCountPin(); `wantedDecl` is the SITE's own resolved binding for
+// `recvRoot`, computed once by the caller. A candidate only counts as a pin
+// if ITS `recvRoot` resolves to that exact same node.
+function countPinInStmt(stmt, recvRoot, code, ancestorsPrefix, wantedDecl) {
   let found = null;
   walk.simple(stmt, {
     BinaryExpression(b) {
@@ -197,7 +440,11 @@ function countPinInStmt(stmt, recvRoot, code) {
       const [len, lit] = b.left.type === "MemberExpression" ? [b.left, b.right] : [b.right, b.left];
       if (!len || len.type !== "MemberExpression" || len.property?.name !== "length") return;
       if (lit?.type !== "Literal" || typeof lit.value !== "number" || lit.value <= 0) return;
-      if (rootIdent(len.object) !== recvRoot) return;
+      const identNode = rootIdentNode(len.object);
+      if (!identNode || identNode.name !== recvRoot) return;
+      const innerPath = findAncestorPath(stmt, identNode);
+      const candBinding = innerPath ? resolveBinding(recvRoot, ancestorsPrefix.concat(innerPath)) : null;
+      if (!candBinding || candBinding.declNode !== wantedDecl) return;
       found = txt(code, b).slice(0, 60);
     },
   });
@@ -263,31 +510,30 @@ function nextReassignment(body, recvRoot, site) {
 // ⚠️ DELIBERATELY NOT a byte-for-byte mirror of nextReassignment() in one
 // respect: nextReassignment() also treats a `VariableDeclaration` matching
 // `recvRoot` as a reassignment; prevReassignment() only matches a plain `=`
-// AssignmentExpression. This is NOT a claim that the resulting clear is
-// semantically correct — it demonstrably is not, on the m23aj2-move-wire.mjs
-// control (`landings` at :208, held in the item brief's own stay-cleared
-// list). `:208`'s pin is `landings.length === 2` at :86 — but :86's
-// `landings` and :208's `landings` are TWO SEPARATE `const` bindings in
-// non-overlapping SIBLING bare `{ }` blocks (:75-91 vs :195-212); they are
-// unrelated variables that share a name, not the same value at two points
-// in time. That is a genuine second over-clear, on a DIFFERENT axis than
-// this item's confirmed instance (cross-SIBLING-BLOCK name reuse, not
-// cross-reassignment-epoch staleness) — already the scanner's existing,
-// documented blind spot for PROVENANCE classification (see the "NEAREST
-// PRECEDING DECLARATOR" comment far below, which resolves a receiver's own
-// declarator the same scope-blind way). Fixing it needs actual lexical
-// scope resolution, which this census refuses by design (see the file-level
-// note on `localHelperCall()` for the line drawn there). The item's own
-// control set holds this specific instance OUT of scope for this pass
-// (`m23aj2-move-wire.mjs:208` is required to STAY cleared), so
-// VariableDeclaration is dropped here to keep it that way rather than
-// having the cross-level fix below (which is otherwise scope-blind in the
-// same way and would otherwise treat :208's own `const` line as a false
-// reassignment boundary) collide with it. `e` in the m23ek case is never
-// re-declared, only ever plain-assigned, so dropping the VariableDeclaration
-// leg costs the CONFIRMED fix nothing — but a future pass that wants
-// `m23aj2:208` actually fixed will need to resolve block scope, not extend
-// this reassignment-tracking approach.
+// AssignmentExpression. `e` in the m23ek case is never re-declared, only
+// ever plain-assigned, so this asymmetry costs that confirmed fix nothing.
+//
+// ⚠️⚠️ CORRECTED AT m23-ex — this comment PREVIOUSLY recorded
+// `m23aj2-move-wire.mjs:208` staying cleared as a REQUIREMENT ("the item's
+// own control set holds this specific instance OUT of scope … is required
+// to STAY cleared"). That requirement was itself the bug: the control set it
+// cited was DERIVED FROM this scanner's own (buggy) output, so it silently
+// encoded this exact over-clear as correct — `:86`'s `landings` and `:208`'s
+// `landings` are TWO SEPARATE `const` bindings in non-overlapping SIBLING
+// bare `{ }` blocks (:75-91 vs :195-212), unrelated variables that share a
+// name, not the same value at two points in time. `:208` is now, correctly,
+// NOT cleared. This did NOT need extending prevReassignment() (adding the
+// VariableDeclaration leg here would not even have reached the defect — the
+// redeclaration at `:85` sits INSIDE a sibling bare-block statement, never a
+// TOP-LEVEL statement of the body prevReassignment() scans, so it would
+// never have matched `isReassign` regardless). It needed exactly what this
+// comment's own last sentence, before this correction, already predicted:
+// real lexical scope resolution — see resolveBinding()/countPinInStmt(),
+// above prevReassignment() in this file — which findCountPin() now applies
+// as an INDEPENDENT check, layered on top of (not replacing) the
+// reassignment-epoch bound below: binding identity answers "is this the
+// same variable"; the epoch bound answers "is this still the same VALUE of
+// that variable". Both must hold; neither subsumes the other.
 //
 // ⚠️ KNOWN LIMIT, inherited from nextReassignment(): this only walks the
 // TOP-LEVEL statements of `body`, so a reassignment nested inside an
@@ -310,7 +556,23 @@ function prevReassignment(body, recvRoot, site) {
   return lo;
 }
 
+// Returns { found: string|null, unresolved: boolean }. `unresolved: true`
+// means the SITE's own `recvRoot` could not be placed in any scope on its
+// ancestor path (m23-ex, resolveBinding() above) — a scanner limitation,
+// not a "no pin exists" verdict; the caller surfaces this in the row's own
+// `pinScope` field rather than letting it collapse into an identical-looking
+// `pin: null`. See this function's own header comment, further up, for why.
 function findCountPin(ancestors, recvRoot, site, code) {
+  // m23-ex — resolve the SITE's own binding for `recvRoot` ONCE, before
+  // scanning anything. Every candidate pin found below must resolve to this
+  // SAME declaring node (by identity) to count — see countPinInStmt()'s own
+  // header, above. FAIL TOWARD FLAGGING: if the site's own binding cannot be
+  // resolved, there is nothing to verify a candidate against, so this
+  // returns immediately rather than falling back to the old name-only match.
+  const siteBinding = resolveBinding(recvRoot, ancestors);
+  if (!siteBinding) return { found: null, unresolved: true };
+  const wantedDecl = siteBinding.declNode;
+
   // ⚠️ m23-eu — `knownLo` is a RUNNING FLOOR carried ACROSS ancestor levels,
   // not recomputed fresh at each one. Needed because findCountPin already
   // climbs multiple enclosing bodies (try-block, then Program, etc. — this
@@ -337,6 +599,7 @@ function findCountPin(ancestors, recvRoot, site, code) {
     const a = ancestors[i];
     const body = a.type === "BlockStatement" || a.type === "Program" ? a.body : null;
     if (!body) continue;
+    const ancestorsPrefix = ancestors.slice(0, i + 1);   // Program … a, inclusive — m23-ex
 
     // BACKWARD — bounded by prevReassignment() (m23-eu, above): only a
     // statement strictly AFTER the last reassignment of `recvRoot` before
@@ -347,8 +610,8 @@ function findCountPin(ancestors, recvRoot, site, code) {
     for (const stmt of body) {
       if (stmt.start >= site.start) break;
       if (stmt.start <= knownLo) continue;   // stale — superseded by a later reassignment
-      const found = countPinInStmt(stmt, recvRoot, code);
-      if (found) return found;
+      const found = countPinInStmt(stmt, recvRoot, code, ancestorsPrefix, wantedDecl);
+      if (found) return { found, unresolved: false };
     }
 
     // FORWARD (⑦) — any statement strictly after the site, up to (not
@@ -361,11 +624,11 @@ function findCountPin(ancestors, recvRoot, site, code) {
     for (const stmt of body) {
       if (stmt.start <= site.end) continue;   // the site's own statement, or anything not strictly after it
       if (stmt.start >= hi) break;            // past this binding's reassignment epoch
-      const found = countPinInStmt(stmt, recvRoot, code);
-      if (found) return found;
+      const found = countPinInStmt(stmt, recvRoot, code, ancestorsPrefix, wantedDecl);
+      if (found) return { found, unresolved: false };
     }
   }
-  return null;
+  return { found: null, unresolved: false };
 }
 
 // Is `name` an accumulator whose fill count is fixed at authoring time?
@@ -686,10 +949,19 @@ function findSomeLegPin(ast, recvDecl, code, site) {
 // ⚠️ SCOPED STRICTLY BY ARGUMENT POSITION, NOT BY "is it inside a template
 // literal". A condition argument can legitimately hold one — m23ek-clipboard
 // .mjs:300 (`e.clips.every(...)` inside the `&&` chain that IS argument 1) is
-// the control: it MUST stay cleared via the count-pin idiom (findCountPin,
-// far above), never relabelled here. A detail argument can equally
-// legitimately be a bare expression with no template literal at all — this
-// function never looks at the argument's shape, only its POSITION.
+// the control: it MUST stay cleared, never relabelled here. ⚠️⚠️ CORRECTED
+// AT m23-ex — this previously said it clears "via the count-pin idiom
+// (findCountPin, far above)"; MEASURED FALSE. `:300`'s own row reads
+// `clearedBy: "inline .length conjunct", pin: null` — it clears via IDIOM A
+// (findLengthGuard, the SAME-EXPRESSION `&&` conjunct `e.result === true &&
+// e.clips.length === clipsBeforeCut - 1`), not idiom B at all. The
+// REQUIREMENT (stays cleared) was correct; the stated MECHANISM was not —
+// anyone reasoning from the old wording would mispredict that a
+// findCountPin change could affect `:300`. It cannot: `:300` never reaches
+// findCountPin, since `guard` (idiom A) is found first and idiom B is only
+// tried `if (!guard)`. A detail argument can equally legitimately be a bare
+// expression with no template literal at all — this function never looks at
+// the argument's shape, only its POSITION.
 //
 // Climbs `anc` from the site outward exactly like `encl` (below) does —
 // same function-boundary break — looking for the nearest CallExpression
@@ -1109,10 +1381,23 @@ for (const f of files) {
     // Check every name in the derivation chain, nearest first — a guard on the
     // source collection bounds everything length-monotone derived from it.
     const chain = recvRoot ? derivationChain(ast, recvRoot, code) : [];
-    let guard = null, pin = null, via = null;
+    let guard = null, pin = null, via = null, pinScope = null;
     for (const nm of chain) {
       guard = findLengthGuard([...anc, node], nm, code);
-      if (!guard) pin = findCountPin(anc, nm, node, code);
+      if (!guard) {
+        // m23-ex — findCountPin() now returns { found, unresolved }: a
+        // candidate pin must resolve to the SAME binding as the site's own
+        // `nm`, and if `nm` itself can't be placed in any scope, `pin` stays
+        // null but that refusal is recorded (pinScope) so it doesn't look
+        // identical to "no pin exists" — see findCountPin()'s own header.
+        // Recorded only for the name that ultimately decided the outcome
+        // (whichever `nm` the loop stops on, success or not) — an
+        // unresolved attempt on an EARLIER chain name that a LATER name goes
+        // on to clear normally is not worth reporting as a limitation.
+        const r = findCountPin(anc, nm, node, code);
+        pin = r.found;
+        pinScope = r.unresolved ? `UNRESOLVED — \`${nm}\` could not be placed in any scope on the path` : null;
+      }
       if (guard || pin) { via = nm === recvRoot ? null : nm; break; }
     }
 
@@ -1141,6 +1426,8 @@ for (const f of files) {
       reason,
       guard,                                   // idiom A — inline conjunct
       pin,                                     // idiom B — leading count-pin leg
+      pinScope,                                // m23-ex — non-null iff idiom B's OWN receiver name could not
+                                                // be resolved to a binding (scanner limitation, not "no pin exists")
       someLegPin,                              // idiom D — preceding, asserted .some() leg, same predicate
       joinPin,                                 // idiom E — equality on a derived .map().join() (⑥)
       eqPin,                                   // idiom F — deep-equality (eq) pin against an expected list (⑧)
