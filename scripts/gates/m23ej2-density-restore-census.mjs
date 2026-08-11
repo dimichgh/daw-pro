@@ -103,7 +103,19 @@ const PINNED = [
  * the `_exitpaths.py`/`_classify.py` `strip_comments` idiom to JS; protects
  * `ws://` from being eaten by the line-comment scan, matching `_classify.py`). */
 function stripComments(src) {
-  src = src.replace(/\/\*[\s\S]*?\*\//g, "");
+  // m23-fa-4c: replace each block comment with ITS OWN NEWLINES, never the empty
+  // string. Deleting the comment outright also deletes the line breaks inside it,
+  // so every coordinate this census reports AFTER the first multi-line `/* */`
+  // was short by that comment's line span — the header's "keeping line count
+  // stable" was true for `//` (that pass maps per line) and FALSE for `/* */`.
+  // MEASURED on `m23gf-defaults-isolation.mjs` at the time of the fix: 765 raw
+  // lines stripped to 758, and `staging?.ws?.close()` — really at line 536 — was
+  // reported at 529. ⛔ This mattered more than a cosmetic off-by-seven: a tool
+  // that GENERATES coordinates and gets them wrong manufactures path/line rot
+  // faster than anyone can chase it, and this project has repeatedly paid for
+  // that class. A single-line block comment still collapses to nothing (no
+  // newlines to keep), so mid-line `/* */` behaviour is unchanged.
+  src = src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ""));
   return src.split("\n").map((line) => {
     const guarded = line.replace(/:\/\//g, "\x00");
     const idx = guarded.indexOf("//");

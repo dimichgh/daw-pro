@@ -335,6 +335,22 @@ reports the line numbers where it finds issues, and those numbers drift out of a
 file contains a multi-line comment, because of how it strips comments before scanning. It has been
 handing out coordinates that point a few lines off.
 
+**That one is now fixed, and it was worse than it first looked.** The check removes comments before
+scanning, and removing a multi-line comment was also removing the line breaks inside it — so every
+line number it reported after that point was short by however many lines the comment spanned. It had
+been telling us line 529 for something that actually sits at line 536.
+
+The reason to spend real time on this rather than nudge the one number: we checked every file it
+scans instead of only the file where the problem turned up. Seventeen of eighty-nine were affected,
+and the worst was off by three hundred and twenty-seven lines — far enough that a reported location
+would land in an entirely different part of the file. A tool that hands out coordinates and gets them
+wrong generates bad references faster than anyone can chase them down, and misleading line numbers
+have cost us real investigations before.
+
+All eighty-nine now report accurately. We confirmed the fix changed nothing else — the check finds
+exactly the same problems it found before, only now with the right addresses — and confirmed our
+measurement could actually tell a real fix from a no-op before trusting it.
+
 ## 2026-08-10 — Voice conversion no longer degrades the more you use it
 
 Converting the same vocal a few times in a row used to get progressively louder and more distorted,
