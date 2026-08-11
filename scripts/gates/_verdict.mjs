@@ -225,10 +225,10 @@ function recordCoverage() {
  * full contract — every clause there is load-bearing, not incidental.
  *
  * @param {{ ran: number, failed: number }} counts
- * @param {{ allowEmpty?: string }} [opts]
+ * @param {{ allowEmpty?: string, subject?: string }} [opts]
  * @returns {never} always calls process.exit(); this function does not return.
  */
-export function verdict({ ran, failed } = {}, { allowEmpty } = {}) {
+export function verdict({ ran, failed } = {}, { allowEmpty, subject } = {}) {
   // Enforced at runtime, not by convention — a caller cannot pass
   // `{ allowEmpty: "" }` (or `true`, or forget the string entirely) and have
   // it silently do nothing. That is the exact shape of bug this escape hatch
@@ -239,6 +239,20 @@ export function verdict({ ran, failed } = {}, { allowEmpty } = {}) {
       `reason string when given (omit the option entirely if every run of this ` +
       `gate must record at least one check); got ${typeof allowEmpty}: ` +
       `${JSON.stringify(allowEmpty)}`
+    );
+  }
+  // `subject` SELECTS a template (m23-gh) — it does not accept caller prose.
+  // A caller that could pass its own ran==0 wording could reintroduce the
+  // corpus's reserved alarm phrase ("ASSERTED NOTHING") outside a gate
+  // context, which is exactly the false-hit this option exists to prevent.
+  // So this stays a short noun, validated the same way allowEmpty is: it
+  // must cost something to reach for, not silently no-op on a typo.
+  if (subject !== undefined && (typeof subject !== "string" || subject.length === 0)) {
+    throw new Error(
+      `verdict({ran, failed}, {subject}) requires subject to be a non-empty ` +
+      `noun string when given (omit the option entirely to keep the default ` +
+      `gate-corpus wording — every gate in scripts/gates/ must NOT pass this); ` +
+      `got ${typeof subject}: ${JSON.stringify(subject)}`
     );
   }
   if (!Number.isInteger(ran) || ran < 0) {
@@ -277,6 +291,25 @@ export function verdict({ ran, failed } = {}, { allowEmpty } = {}) {
       // allowed to drift, so neither is optional.
       console.log(`VERDICT: 0 checks ran — ALLOWED EMPTY (${allowEmpty})`);
       process.exit(0);
+    }
+    // m23-gh: a NON-GATE caller (`subject` given) gets a DIFFERENT ran==0
+    // template that never contains the corpus's reserved alarm phrase
+    // "ASSERTED NOTHING" — that string is what everyone in this milestone
+    // greps for to mean "a gate in scripts/gates/ ran zero checks", and a
+    // non-gate reporter landing the same phrase is a false hit that costs a
+    // real investigation. The DEFAULT path (no `subject`) below is untouched
+    // byte-for-byte — every one of the 75 gates still gets exactly this text.
+    if (subject) {
+      console.log(
+        `VERDICT: ⚠️⚠️ 0 checks ran — this ${subject} produced ZERO rows and ` +
+        `can say NOTHING about its subject from this run. That is NOT the ` +
+        `same claim as "checks passed": nothing was measured, so nothing is ` +
+        `known from this run. If every leg of this ${subject} can ` +
+        `legitimately produce zero on some runs, that is a real case — pass ` +
+        `{ allowEmpty: "<reason>" } to say so explicitly. Silence is not a ` +
+        `licence; a reason is.`
+      );
+      process.exit(2); // same "this run proves nothing" meaning as _staging.mjs's own ABORT exits
     }
     console.log(
       `VERDICT: ⚠️⚠️ 0 checks ran — this gate ASSERTED NOTHING. That is NOT the ` +

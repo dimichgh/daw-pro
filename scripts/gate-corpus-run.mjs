@@ -434,4 +434,4 @@ console.log(`  baseline: upserted ${results.length} record(s) at ${BASELINE_PATH
 // UNEXPECTED-GREEN is a failure on purpose: it means the allowlist above claims a
 // gate is broken when it is not, and a stale exemption hides the next real regression.
 const failed = by("FAIL").length + by("TIMEOUT").length + by("UNEXPECTED-GREEN").length;
-verdict({ ran: results.length, failed });
+verdict({ ran: results.length, failed }, { subject: "corpus run" });

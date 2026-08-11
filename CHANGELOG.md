@@ -1,6 +1,21 @@
 # Changelog
 
-## 2026-08-11 — A quick mode for the automated checks, so they're cheap enough to actually run
+## 2026-08-11 — A warning that meant "something is broken" stopped crying wolf
+
+Our automated checks share a small piece of common code that prints the final verdict. When a check
+finishes without having actually tested anything, that code prints a deliberately alarming warning —
+the point being that a check which quietly tests nothing is far more dangerous than one that fails,
+because it still reports success.
+
+The trouble was that this same piece of code is also used by a couple of tools that aren't checks at
+all — a report on which checks have gone stale, and the runner that executes them. When one of those
+legitimately had nothing to report, it printed the alarm word for word. It appeared in a log, someone
+went looking for a broken check, and there wasn't one.
+
+Those tools now print a differently worded message that says the same thing honestly without using
+the alarm phrase, so searching for the phrase means what it's supposed to mean again. The wording is
+chosen by the shared code rather than supplied by each caller, so no tool can reintroduce the alarm
+by accident. The checks themselves print exactly what they printed before, character for character.
 
 We have a suite of roughly seventy-five automated checks that exercise the app end to end. Running
 all of them takes about half an hour, which in practice means they get run rarely.

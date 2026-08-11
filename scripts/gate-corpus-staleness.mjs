@@ -132,8 +132,12 @@ try {
   files = readdirSync(GATES_DIR).filter((f) => f.endsWith(".mjs") && !f.startsWith("_")).sort();
 } catch (e) {
   console.log(`\n✘✘✘ CORPUS UNREADABLE (exit 2) — could not list gates at \`${GATES_DIR}\` (${e.message}).`);
-  console.log(`    This run asserted NOTHING about staleness. Check STALENESS_GATES / the gates directory.`);
-  verdict({ ran: 0, failed: 0 });
+  // m23-gh: deliberately avoids the corpus's reserved alarm phrase ("asserted
+  // nothing", in any case) — this reporter is NOT a gate, and the runner invokes
+  // it at startup, so a false hit here lands in corpus logs. Same reason the
+  // verdict() call below passes a `subject`.
+  console.log(`    This run measured NOTHING about staleness. Check STALENESS_GATES / the gates directory.`);
+  verdict({ ran: 0, failed: 0 }, { subject: "staleness report" });
 }
 console.log(`  total gates      ${files.length}`);
 
@@ -145,7 +149,7 @@ if (!existsSync(BASELINE_PATH)) {
   console.log(`    by running the corpus runner at least once, e.g.:`);
   console.log(`        node scripts/gate-corpus-run.mjs --only=<gate-substring>`);
   console.log(`    (it upserts scripts/gate-corpus-baseline.json for every gate that ran.)`);
-  verdict({ ran: 0, failed: 0 });
+  verdict({ ran: 0, failed: 0 }, { subject: "staleness report" });
 }
 
 let baseline;
@@ -155,7 +159,7 @@ try {
   console.log(`\n✘✘✘ NO BASELINE (exit 2) — ${BASELINE_PATH} exists but is not valid JSON (${e.message}).`);
   console.log(`    Treated the same as missing: recreate it via`);
   console.log(`        node scripts/gate-corpus-run.mjs --only=<gate-substring>`);
-  verdict({ ran: 0, failed: 0 });
+  verdict({ ran: 0, failed: 0 }, { subject: "staleness report" });
 }
 // Valid JSON that isn't a plain object — `null`, an array, a string, a
 // number — is a DIFFERENT failure than a parse error but must land on the
@@ -170,7 +174,7 @@ if (baseline === null || typeof baseline !== "object" || Array.isArray(baseline)
   );
   console.log(`    Treated the same as missing: recreate it via`);
   console.log(`        node scripts/gate-corpus-run.mjs --only=<gate-substring>`);
-  verdict({ ran: 0, failed: 0 });
+  verdict({ ran: 0, failed: 0 }, { subject: "staleness report" });
 }
 
 // ── classify ─────────────────────────────────────────────────────────────────
@@ -222,4 +226,4 @@ if (removed.length) {
 // mean a record exists and demonstrably no longer describes reality, which
 // NEVER-RUN alone does not claim.
 const failed = drifted.length + stale.length;
-verdict({ ran: files.length, failed });
+verdict({ ran: files.length, failed }, { subject: "staleness report" });
