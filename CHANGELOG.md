@@ -60,6 +60,20 @@ conditions aren't right, and it correctly refuses to count a skip as a success �
 overall result by asking only whether anything had failed. Skip everything, and nothing has failed,
 so it passed. It now reports how much it actually checked, and a run that checks nothing says so.
 
+A third check carried a warning that it could only ever be run once, because the AI service it needs
+in a freshly-stopped state cannot be stopped again through the app once it has started. That is true
+of the app's own stop button, but not of the service itself, which can simply be shut down directly —
+which is what we are required to do after these runs anyway. So the check ran twice in one sitting,
+before and after the change, and both runs exercised the part that only exists during a cold start.
+The warning had made a limitation of one button sound like a law of the machine.
+
+Bringing that one in surfaced a subtler problem worth describing, because it is the same mistake in a
+new place. These checks now use a shared result code meaning "this checked nothing". That check
+already used the same number to mean "the check itself crashed". Left alone, a crash would have
+become indistinguishable from a run that tested nothing — the precise confusion we spent this whole
+effort removing, reintroduced by the act of removing it. A crash is now recorded as a failure, like
+any other. We confirmed it by deliberately crashing the check and watching the two versions disagree.
+
 
 
 The app has 73 automated checks that drive a real copy of it and inspect what happens. Each one

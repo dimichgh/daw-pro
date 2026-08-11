@@ -61,8 +61,16 @@ const EXEMPTIONS = {
   //         residency. (The LOUD-SKIP hazard was real though: both comparison
   //         runs had to be pinned sidecar-DOWN or the skip reads as a
   //         regression.)
-  //   m18g  REAL cold boot, and the window is SINGLE-USE per sidecar lifetime
-  //         on this machine — the harder constraint is the one-shot, not the GB.
+  //   m18g  MIGRATED at m23-fa-4b-3. Its "SINGLE-USE per sidecar lifetime"
+  //         warning is REFUTED, empirically: that rested on m23-bb, "a stopped
+  //         sidecar cannot currently be re-stopped once started" — which is
+  //         about the APP's `ai.sidecarStop` command, NOT about the process.
+  //         Killing the sidecar PID-EXACT (args-confirmed, as the standing rule
+  //         requires anyway) re-opens the cold window; this gate was run cold
+  //         TWICE in one sitting, `loading=true` both times. It IS a real full
+  //         model load each time though — unlike m17h's aborted boot — and the
+  //         gate does NOT clean up after itself (`stopStaging` stops the
+  //         staging APP, never the sidecar), so the operator must.
   //   m23fo legs 1/2 boot a REAL fenced RVC facade (12 conversions); leg 3
   //         (`M23FO_LEGS=3`) is stub-only and cheap. ⛔ Leg 3 alone must NOT
   //         license deleting this exemption: legs 1/2 own verdict sites of their
@@ -72,7 +80,6 @@ const EXEMPTIONS = {
   // ⭐ The general lesson, same shape as m23-fa-5: a deferral justified by a
   // blanket cost claim deserves the cost RE-MEASURED PER ITEM before the next
   // cycle pays it.
-  "m18g-sketchpad-honesty.mjs": "m23-fa-4b-3",
   "m23fo-conversion-stability.mjs": "m23-fa-4b-4",
   // m16a-poison-recipe.mjs was here, exempted on the grounds that its inline
   // `if (ITERS < 1) { … exit(5) }` guard (m23-fj) gave EQUIVALENT protection, so
