@@ -16,16 +16,23 @@
 // drive: same session, already past the reset. Nothing has to persist.
 //
 // Usage: node _pin-window.mjs <port> <width> <height>
-const [, , portArg, widthArg, heightArg] = process.argv;
-const port = Number(portArg), width = Number(widthArg), height = Number(heightArg);
+//
+// ⚠️ THE PORT RULE HAS ONE HOME AND THIS IS NOT IT. This file opens a socket, so
+// it must assert the rule rather than trust its caller — but by IMPORTING
+// `assertStagingPort`, not by restating it. The first draft hard-coded
+// `port !== 17695`, which is STRICTER than the real rule (`assertStagingPort`
+// forbids only the live port and non-positive integers, so any other staging
+// port is legal). That mismatch would have hard-failed a legitimate
+// `startStaging({ port })` — and ONLY when STAGING_WINDOW_SIZE was set, so it
+// would have stayed invisible until someone ran a sweep. Two spellings of one
+// rule is the defect; importing is the fix. `assertStagingPort` logs and
+// `process.exit(2)`s itself, which already matches this file's convention.
+import { assertStagingPort } from "./_staging.mjs";
 
-// Hard safety: this file opens a socket, so it re-asserts the port rule itself
-// rather than trusting its caller. 17600 is the user's LIVE app.
-const STAGING_PORT = 17695, LIVE_PORT = 17600;
-if (port === LIVE_PORT || port !== STAGING_PORT) {
-  console.error(`_pin-window: refusing port ${port} — staging is ${STAGING_PORT}, and ${LIVE_PORT} is the user's live app.`);
-  process.exit(2);
-}
+const [, , portArg, widthArg, heightArg] = process.argv;
+const port = assertStagingPort(portArg);
+const width = Number(widthArg), height = Number(heightArg);
+
 if (!(width > 0 && height > 0)) {
   console.error(`_pin-window: bad size ${widthArg}x${heightArg}`);
   process.exit(2);
