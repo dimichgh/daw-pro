@@ -314,6 +314,14 @@ public final class ProjectStore {
             engine?.playheadHandler = { [weak self] beats in
                 self?.transport.positionBeats = beats
             }
+            // End-of-content stop (m25-d): the engine tells us it reached the
+            // pre-computed bound; WE own transport state, so the stop lands on
+            // the ordinary `stop()` path. Always pushed on the main actor from
+            // the engine's playhead task — nothing here runs on the render
+            // thread.
+            engine?.setEndStopHandler { [weak self] in
+                self?.handleContentEndReached()
+            }
             // Schedule-time degradations land in the store's coalescing ring
             // (m15-e) — the one source of truth the wire snapshot and the UI
             // chip both read. Always pushed on the main actor.
@@ -570,15 +578,122 @@ public final class ProjectStore {
 
     // MARK: - Transport
 
+    // MARK: End-of-content stop (m25-d)
+
+    /// Stop the transport when the playhead reaches the end of the last clip.
+    /// **Session preference, ON by default** — the user asked for the stop, so
+    /// on is the right default; running past the last clip (what Logic and
+    /// Live do) stays available by turning it off.
+    ///
+    /// Deliberately NOT on `TransportState`: that struct rides
+    /// `EditState.transport`, so undo would revert a *preference* along with
+    /// the edit it was toggled next to, and a new `CodingKey` there would
+    /// change every project file's and every snapshot's bytes. Deliberately
+    /// not `UserDefaults`-backed either, so **it does not survive relaunch**
+    /// — persisting it is app-layer work (the `PanelDensityStore` shape) and
+    /// is not part of this item.
+    ///
+    /// Never journaled, never written to disk, untouched by undo/redo — the
+    /// `engineNotices` class of session-transient state.
+    public private(set) var stopAtContentEnd: Bool = true
+
+    /// Sets the end-of-content stop preference and re-arms the live transport
+    /// immediately, so a toggle mid-playback takes effect on this run rather
+    /// than the next one. Allowed while recording (the arming predicate
+    /// refuses to produce a bound during a take regardless).
+    public func setStopAtContentEnd(_ enabled: Bool) {
+        stopAtContentEnd = enabled
+        refreshEndStop()
+    }
+
+    /// TRUE end of content in beats — the largest clip end across every track,
+    /// 0 for a project with no clips. THE single source of truth for "where
+    /// does the song end", with no display padding (see
+    /// `TransportEndStop.contentEndBeat`).
+    public var contentEndBeat: Double {
+        TransportEndStop.contentEndBeat(tracks: tracks)
+    }
+
+    /// The bound armed for the CURRENT run, or nil for "do not stop at content
+    /// end". THE one armed value: the engine gets a copy pushed to it, and the
+    /// headless ticker reads this property directly, so the two transports can
+    /// never disagree about where the song ends.
+    ///
+    /// Read O(1) per tick — the O(clips) max is computed only in
+    /// `refreshEndStop()`, at transition/edit rate.
+    private var armedEndStop: Double?
+
+    /// Recomputes the end-of-content bound, stores it, and pushes it to the
+    /// engine as one plain `Double?`. Called from every transition that can
+    /// change the answer: play, seek, loop change, preference toggle, and —
+    /// via both edit funnels — any edit that moves the content end.
+    ///
+    /// O(clips), on the main actor, never per tick and never per rendered
+    /// buffer. Called per EDIT, alongside the two `captureEditState()` deep
+    /// copies + structural compare `performEdit` already performs around every
+    /// edit body — a single max-scan over the same data. NOT benchmarked
+    /// against them; if edit latency ever becomes a measured problem this is a
+    /// candidate to gate on `transport.isPlaying`, at the cost of the armed
+    /// value being stale until the next transport transition.
+    ///
+    /// ⚠️ **BOTH EDIT FUNNELS OR NEITHER.** `performEdit` covers ordinary
+    /// edits; `undo()`/`redo()` bypass it entirely and reach
+    /// `restoreEditState`. Hooking only the first was MEASURED to leave the
+    /// bound stale in both directions mid-playback: adding a clip stopped the
+    /// transport EARLY at the old end, and undoing the last clip let it
+    /// OVERRUN to an end that no longer existed. Both are the exact bug this
+    /// feature exists to fix, so both funnels call this.
+    private func refreshEndStop() {
+        armedEndStop = currentEndStopBound()
+        engine?.setEndStop(beat: armedEndStop)
+    }
+
+    /// Clears the armed bound on BOTH sides. Used where a bound must provably
+    /// not survive — stop, and the start of a take.
+    private func disarmEndStop() {
+        armedEndStop = nil
+        engine?.setEndStop(beat: nil)
+    }
+
+    /// The bound for the transport as it stands right now, via the one shared
+    /// policy function — the store never re-derives it inline.
+    private func currentEndStopBound() -> Double? {
+        TransportEndStop.bound(
+            contentEndBeat: contentEndBeat,
+            positionBeats: transport.positionBeats,
+            isEnabled: stopAtContentEnd,
+            isRecording: transport.isRecording,
+            isLoopActive: TransportEndStop.isLoopActive(transport))
+    }
+
+    /// The engine reached the content-end bound. Stops on the ORDINARY path —
+    /// same state, same meter darkening, no journal entry — and guards against
+    /// a late callback arriving after the transport already stopped or a take
+    /// somehow started (belt-and-braces against the destructive mode: this is
+    /// the third independent place a recording take is protected).
+    private func handleContentEndReached() {
+        guard transport.isPlaying, !transport.isRecording else { return }
+        stop()
+    }
+
     public func play() {
         guard !transport.isPlaying else { return }
         transport.isPlaying = true
         if let engine {
             try? engine.prepare()
             engine.startPlayback(transport)
+            // AFTER startPlayback: the bound must not be readable by a
+            // playhead task that has not started yet, and startPlayback is
+            // what starts it. m25-d.
+            refreshEndStop()
         } else {
             // Headless (tests, no audio hardware injected): free-running
             // display ticker keeps the playhead honest.
+            // m25-d: arm BEFORE starting the ticker. Ordering is not actually
+            // load-bearing here (the tick sleeps first), but the ticker reads
+            // `armedEndStop` and leaving it set by a previous run would be a
+            // stale-bound trap the moment that changes.
+            refreshEndStop()
             startPositionTicker()
         }
     }
@@ -590,6 +705,10 @@ public final class ProjectStore {
         transport.isRecording = false
         playbackTask?.cancel()
         playbackTask = nil
+        // m25-d: disarm BEFORE the engine teardown, so a bound can never
+        // outlive the run that armed it and greet the next start (or the next
+        // TAKE) still live.
+        disarmEndStop()
         if wasRecording {
             // stopRecording halts playback internally AND finalizes the take —
             // calling stopPlayback here would tear the transport down twice.
@@ -612,6 +731,10 @@ public final class ProjectStore {
         }
         transport.positionBeats = max(0, beats)
         engine?.seek(transport)
+        // m25-d: the bound is armed only when playback STARTS before the
+        // content end, so a seek back from past-the-end re-arms it (and a seek
+        // past the end disarms) on this run rather than the next.
+        refreshEndStop()
     }
 
     public func returnToZero() throws {
@@ -899,6 +1022,24 @@ public final class ProjectStore {
         audition.stopAll(engine: engine)
         transport.isRecording = true
         transport.isPlaying = true
+        // ⚠️⚠️ m25-d — RECORDING MUST NEVER STOP AT CONTENT END. Recording past
+        // the end of existing material is the entire point of recording, so an
+        // end-of-content stop here would silently truncate takes: actively
+        // destructive, and the one failure mode of this feature that loses a
+        // user's work.
+        //
+        // This is an EXPLICIT disarm, not a consequence of not arming. `stop()`
+        // already pushes nil, and `record()` refuses unless the transport is
+        // stopped, so a bound "should" be impossible here — but "should" is how
+        // a stale bound from a previous run gets to meet a rolling take. Two
+        // more independent guards back it: `TransportEndStop.bound` returns nil
+        // whenever `isRecording`, and the engine tick requires `activeTake ==
+        // nil`. Deleting any ONE of the three still leaves takes safe.
+        //
+        // Disarms BOTH sides: the headless ticker reads `armedEndStop`, so
+        // clearing only the engine's copy would still let a MIDI-only take on
+        // an engineless store stop itself at the old content end.
+        disarmEndStop()
         do {
             try engine.startTake(transport, audioURL: url,
                                  captureMIDI: !armedInstrumentIDs.isEmpty) { [weak self] result in
@@ -1623,6 +1764,12 @@ public final class ProjectStore {
             transport.loopEndBeat = end
             engine?.loopChanged(transport)
         }
+        // m25-d: LOOPING TAKES PRECEDENCE. Enabling a loop mid-play disarms the
+        // content-end stop (the loop's own wrap owns the bound); disabling one
+        // re-arms it. Outside the `performEdit` on purpose — the bound is
+        // session state, not journaled document state, so undoing this edit
+        // must not restore an old bound.
+        refreshEndStop()
     }
 
     /// Enables/disables the punch recording window and optionally moves its
@@ -4072,6 +4219,46 @@ public final class ProjectStore {
         return (effective, effective != requested)
     }
 
+    /// What `moveClips(ids:byBeats:)` WOULD translate by — asked without moving
+    /// anything (m25-k).
+    ///
+    /// EXISTS SO A LIVE DRAG CAN DRAW AN HONEST GHOST. The arrange previews a
+    /// body drag instead of committing it per frame (`ArrangeBodyDrag` — the
+    /// cadence rule), and a preview that ignored the whole-group beat-0 clamp
+    /// would show clips crossing the wall and then snap them back on release.
+    ///
+    /// ⚠️ THIS IS NOT A SECOND CLAMP. It calls `clampedGroupBeatDelta` — the ONE
+    /// home — over the SAME `minStart` `moveClips` computes, so the preview and
+    /// the commit cannot disagree by construction. The m23-f finding (two
+    /// independent computations of one quantity that can agree BY LUCK) is
+    /// exactly what routing through the shared static avoids; a re-derived
+    /// `max(delta, -minStart)` here would have been that bug.
+    ///
+    /// DELIBERATELY NON-THROWING, unlike `moveClips`. This runs once per pointer
+    /// frame while ids can go stale under the gesture (an undo, an agent's
+    /// `clip.remove`), and a throw there would turn a cosmetic staleness into a
+    /// refused drag. Unknown ids are SKIPPED — the `ArrangeSelection.resolved(in:)`
+    /// silent-skip policy, one layer down — and an empty/all-stale set reports a
+    /// zero delta rather than pretending the drag can travel.
+    ///
+    /// It reports the CLAMP ONLY. It does not report what the drop would trim or
+    /// remove, and that omission is deliberate: answering "what will this
+    /// destroy" without destroying it needs the overlap pass run against a
+    /// scratch copy, which would be a second producer of the resolution the
+    /// choke point owns. The visible-preview idea (ROADMAP m25-k route ⓑ) wants
+    /// that answer and should get it by asking `resolvingGroupOverlaps` on a
+    /// copy, not by growing this query.
+    public func plannedGroupBeatDelta(ids: [UUID], byBeats delta: Double)
+        -> (effective: Double, clamped: Bool) {
+        var seen = Set<UUID>()
+        let starts: [Double] = ids.compactMap { id in
+            guard seen.insert(id).inserted, let loc = locateClip(id) else { return nil }
+            return tracks[loc.track].clips[loc.clip].startBeat
+        }
+        guard let minStart = starts.min() else { return (0, false) }
+        return Self.clampedGroupBeatDelta(requested: delta, minStart: minStart)
+    }
+
     /// The ONE home for the GROUP overlap RECIPE (hoisted out of `moveClips` at
     /// m23-aj): `resolvingOverlaps` run ONCE PER MOVER over ONE track's array,
     /// feeding the rebuilt array forward, in a caller-order-independent sort.
@@ -5994,6 +6181,14 @@ public final class ProjectStore {
             lastEditEvent = EditEvent(seq: editEventSeq, label: label, key: key)
         }
         markDirty()
+        // m25-d: an edit can move the content end, and a transport already
+        // running must obey the NEW end — otherwise adding a clip mid-playback
+        // stops early at the old one. Unconditional (not gated on
+        // `isPlaying`) so the armed value is correct before the next start
+        // too; the arming predicate handles recording and looping itself.
+        // The twin call is in `restoreEditState` — undo/redo never come
+        // through here. See `refreshEndStop()`.
+        refreshEndStop()
         return result
     }
 
@@ -6082,6 +6277,13 @@ public final class ProjectStore {
         if metronomeChanged || (meterChanged && !tempoChanged), transport.isPlaying {
             engine?.metronomeChanged(transport)
         }
+        // m25-d: the `performEdit` twin — undo/redo never pass through there,
+        // so without this an undo of "add the last clip" mid-playback leaves
+        // the transport armed at an end that no longer has content behind it
+        // (MEASURED: it overran to beat 24 with content ending at 8). Covers
+        // the loop-window restore above too, since the arming predicate reads
+        // the loop state that `restored` just installed.
+        refreshEndStop()
     }
 
     /// Saves the session to a `.dawproj` bundle.
@@ -7202,7 +7404,9 @@ public final class ProjectStore {
             midiInputs: engine?.availableMIDIInputs(),
             midiEventCount: engine?.midiEventCount(),
             engineNotices: engineNotices,
-            reference: reference
+            reference: reference,
+            stopAtContentEnd: stopAtContentEnd,
+            contentEndBeat: contentEndBeat
         )
     }
 
@@ -7227,6 +7431,12 @@ public final class ProjectStore {
     /// render-derived beats through `playheadHandler`, which is the source of
     /// truth for `transport.positionBeats` during playback.
     private func startPositionTicker() {
+        // m25-d: the tick reads `armedEndStop` — an O(1) stored property — not
+        // a recomputed max, so the 30 Hz loop stays cheap. It is deliberately
+        // NOT captured into a local: an edit that moves the content end
+        // mid-playback must reach the RUNNING transport, and a captured copy
+        // was measured going stale in both directions (early stop after an
+        // add, overrun after an undo). nil means "run linearly forever".
         playbackTask?.cancel()
         playbackTask = Task { [weak self] in
             var last = ContinuousClock.now
@@ -7242,6 +7452,17 @@ public final class ProjectStore {
                 // row 19) — advances correctly across future map boundaries.
                 self.transport.positionBeats = self.transport.tempoMap.beat(
                     from: self.transport.positionBeats, elapsedSeconds: seconds)
+                // End of content (m25-d): park the playhead EXACTLY on the
+                // content end rather than wherever this tick overshot to, then
+                // stop on the ordinary path. `stop()` cancels this very task
+                // (safe — cancelling self from inside is legal) and the break
+                // leaves the loop immediately either way.
+                if let endStop = self.armedEndStop,
+                   self.transport.positionBeats >= endStop {
+                    self.transport.positionBeats = endStop
+                    self.stop()
+                    break
+                }
             }
         }
     }

@@ -361,10 +361,12 @@ struct ClipCrossTrackMoveCommandTests {
         // longer last. The additive-at-end law is intact; what this test pins is
         // the ORDER, not the index. m23-di-2a then appended `vc.importVoiceModel`
         // after THAT, one rung further still.
-        #expect(CommandRouter.allCommands.dropLast(4).last == "clip.moveManyByTracks")
-        #expect(CommandRouter.allCommands.dropLast(3).last == "clip.moveManyToTrack")
-        #expect(CommandRouter.allCommands.dropLast(2).last == "ai.modelResidency")
-        #expect(CommandRouter.allCommands.dropLast().last == "ai.modelUnload")
-        #expect(CommandRouter.allCommands.last == "vc.importVoiceModel")
+        #expect(CommandRouter.allCommands.dropLast(5).last == "clip.moveManyByTracks")
+        #expect(CommandRouter.allCommands.dropLast(4).last == "clip.moveManyToTrack")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "ai.modelResidency")
+        #expect(CommandRouter.allCommands.dropLast(2).last == "ai.modelUnload")
+        #expect(CommandRouter.allCommands.dropLast().last == "vc.importVoiceModel")
+        // m25-d appended transport.setStopAtContentEnd at the END (same law).
+        #expect(CommandRouter.allCommands.last == "transport.setStopAtContentEnd")
     }
 }

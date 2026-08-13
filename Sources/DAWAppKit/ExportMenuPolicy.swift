@@ -23,10 +23,14 @@ import Foundation
 ///     to every gate this project can run; proving it would take
 ///     `dist/DAWPro.app` and the user's own hands, and the item could then not
 ///     be closed on machine evidence.
-///   • THERE IS AN OPEN, UNDIAGNOSED KEY-ROUTING DEFECT. m23-cf is still open on
-///     a DELETE key that does not reach its handlers. Adding a second key path
-///     into the app before the first one is understood makes both harder to
-///     diagnose, and would put this feature's fate inside that investigation.
+///   • ~~THERE IS AN OPEN, UNDIAGNOSED KEY-ROUTING DEFECT.~~ ⭐ **NO LONGER
+///     TRUE — RESOLVED 2026-08-12.** m23-cf's DELETE key is FIXED; the user
+///     confirmed it by hand ("we fixed delete button, it works ok"). This reason
+///     is retained struck-through, not deleted, because it is cited by
+///     `FileCommands.swift` and `ClipboardMenuPolicy.swift` — but it no longer
+///     blocks anything, and re-quoting it as a live blocker is a mistake.
+///     ⚠️ The FIRST reason above is untouched by that and still stands on its
+///     own: a key equivalent remains unverifiable by any gate in this tree.
 ///
 /// ⭐ THE DISTINCTION THAT MAKES THIS SHIPPABLE ANYWAY, inherited verbatim from
 /// `DeleteMenuPolicy`: THE HAZARD BELONGS TO THE SHORTCUT, NOT TO THE ITEM. A

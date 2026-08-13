@@ -10,9 +10,21 @@ import Foundation
 /// cross-referenced instead, and the ONE thing they genuinely share — the plural
 /// rule — was hoisted into `EditMenuTitles` so neither owns it.
 ///
-/// ⚠️⚠️ **NO ⌘C / ⌘X / ⌘V IN v1, AND THAT IS THE USER'S OWN RULING**, given
-/// after being shown the tradeoff. It is not a default and must not be
-/// "improved" later without re-asking them. Two independent reasons stand
+/// ⭐⭐⭐ **SUPERSEDED 2026-08-12 — ⌘C / ⌘X / ⌘V NOW SHIP (m25-f-1), AND THE
+/// RULING BELOW IS HISTORY, NOT A BLOCKER.** The user reversed it in their own
+/// words: *"copy/paste keybord shortcuts should also work based on track area
+/// for clips supporting group copy and pasting at playhead. In note editor we
+/// need the same."* The keystrokes arrive exactly as the closing paragraph of
+/// this banner prescribed — `cut:` / `copy:` / `paste:` on the RESPONDER CHAIN
+/// (`ClipboardResponder.swift`), which creates no key equivalent that outranks a
+/// text field, so BOTH reasons below were honoured rather than overridden. ⚠️ Do
+/// NOT re-quote the paragraph that follows as a prohibition; it is kept because
+/// its argument (a) is still the reason `.keyboardShortcut` must never be used
+/// here.
+///
+/// ⚠️⚠️ **[HISTORICAL] NO ⌘C / ⌘X / ⌘V IN v1, AND THAT IS THE USER'S OWN
+/// RULING**, given after being shown the tradeoff. It is not a default and must
+/// not be "improved" later without re-asking them. Two independent reasons stood
 /// behind it:
 ///
 ///   • **THE m17-d HAZARD, TRANSPOSED.** `Button("Copy 3 Clips") { … }
@@ -37,19 +49,24 @@ import Foundation
 /// The macOS-correct end state is to implement `copy:` / `cut:` / `paste:` on
 /// the RESPONDER CHAIN so the NATIVE pasteboard items go live per surface —
 /// which adds the keystrokes WITHOUT creating a `CommandGroup` key equivalent
-/// that outranks text fields. It is a separate item, and its precondition is
-/// m23-cf's undiagnosed DELETE key being diagnosed first: `FileCommands.swift`
-/// and `docs/ROADMAP.md` both already forbid building a second keyboard
-/// consumer on top of an unexplained keyboard-delivery bug.
+/// that outranks text fields. ✅ **THAT IS WHAT SHIPPED (m25-f-1).** Its
+/// precondition — "m23-cf's undiagnosed DELETE key being diagnosed first" — was
+/// met when the user confirmed the fix by hand 2026-08-12 ("we fixed delete
+/// button, it works ok").
 ///
-/// ⚠️ THE INERT TITLES ("Copy", "Cut", "Paste") DO COLLIDE with macOS's own
-/// pasteboard items, and unlike Delete's collision that one is not avoidable by
-/// renaming — these ARE the words. It is tolerable for the same reason
-/// `DeleteMenuPolicy.swift:40-48` keeps both Deletes: the native items come
-/// alive inside a TEXT FIELD and act on TEXT; ours act on the user's OBJECTS.
-/// With a rename field open the Edit menu honestly offers both, and what carries
-/// the disambiguation is the LIVE title ("Copy 3 Clips"), exactly as it does
-/// there.
+/// ⭐ **CONSEQUENCE FOR THIS FILE, AND IT IS THE ONLY ONE:** these functions now
+/// resolve MACOS'S OWN Edit-menu items rather than three SwiftUI `Button`s.
+/// Nothing about the decisions changed — same guards, same order, same titles —
+/// but the caller is `ClipboardResponder.validateMenuItem` on the responder
+/// chain, and it renders `title` and `isEnabled` verbatim.
+///
+/// ⭐ THE OLD SIX-ROW TITLE COLLISION IS GONE WITH THE BUTTONS. This banner used
+/// to argue that duplicate "Copy"/"Cut"/"Paste" rows were tolerable because ours
+/// acted on OBJECTS and the native ones on TEXT. There is now ONE row per verb:
+/// it acts on text when a text field owns it (reading macOS's plain word) and on
+/// the user's objects otherwise (reading this file's counted title, "Copy 3
+/// Clips"). The disambiguation the old argument leaned on is now carried by the
+/// single item itself.
 ///
 /// WHY IN DAWAppKit: `DAWApp` has no test target, so a menu policy written there
 /// is unverifiable by the Swift suite. Everything that DECIDES lives here;
@@ -58,32 +75,25 @@ public enum ClipboardMenuPolicy {
 
     /// What Edit ▸ Copy / Cut / Paste say when they are greyed.
     ///
-    /// ⚠️ **NOT BARE — and the earlier "bare, per `DeleteMenuPolicy`" comment
-    /// here MISQUOTED that precedent, which says the opposite.** `DeleteMenuPolicy`
-    /// uses `"Delete Selection"`, and its own reasoning is that the noun *teaches
-    /// the thing the disabled state exists to teach: the operation is here, and it
-    /// wants a selection.*
+    /// ⛔⛔ **DELETED 2026-08-12 ON THE USER'S WORD — `inertCopyTitle` ("Copy
+    /// Selection"), `inertCutTitle` and `inertPasteTitle` ARE GONE, AND THE
+    /// TEACHING-TITLE ARGUMENT WITH THEM.** Their words: *"we do not need to use
+    /// copy 3 clips, it should just copy anything selected to the copy buffer and
+    /// when pasted, it should use paste behavior of what is being copied. use
+    /// common logic and commonly adopted partice for such behavior."*
     ///
-    /// The concrete defect bare titles cause here: this group mounts with
-    /// `CommandGroup(after: .pasteboard)`, so AppKit's native Cut / Copy / Paste
-    /// stay above ours. With nothing selected and an empty clipboard, bare titles
-    /// render the Edit menu as **six near-identical greyed rows** — Cut, Copy,
-    /// Paste, Cut, Copy, Paste — where the user cannot tell which pair is which,
-    /// and neither pair explains what it is waiting for.
+    /// ⭐ WHAT REPLACED THEM: `ClipboardVerb.word` — the bare macOS word, greyed
+    /// when unavailable, which is what nearly every Mac app does. The defect the
+    /// teaching titles existed to fix (SIX near-identical greyed rows, because
+    /// three of our own buttons sat under macOS's native ones) is gone at the
+    /// root: m25-f-1 removed the buttons, so there is exactly ONE row per verb
+    /// and nothing left to disambiguate.
     ///
-    /// ⚠️ **`CommandGroup(replacing: .pasteboard)` IS NOT THE FIX AND MUST NOT BE
-    /// USED.** The native items are the ones the responder chain wires to text
-    /// editing; replacing the group strips Cut/Copy/Paste from every rename field
-    /// in the app — the m17-d hazard one family over. Keep both pairs; make OURS
-    /// legible. The LIVE titles ("Copy 3 Clips") already disambiguate, so only the
-    /// inert case ever needed this.
-    public static let inertCopyTitle = "Copy Selection"
-    /// See `inertCopyTitle` — same rule, same reason.
-    public static let inertCutTitle = "Cut Selection"
-    /// See `inertCopyTitle`. The object differs because the wait differs: Copy and
-    /// Cut want a SELECTION, Paste wants something ON THE CLIPBOARD, and the title
-    /// should say which is missing.
-    public static let inertPasteTitle = "Paste Clipboard"
+    /// ⚠️ DO NOT REINSTATE THEM AS A "FIX" FOR THE DELETE ITEM'S ASYMMETRY.
+    /// `DeleteMenuPolicy.inertTitle` is still "Delete Selection" and Delete still
+    /// counts ("Delete 3 Clips"); the user named COPY specifically and said
+    /// nothing about Delete, so that difference is DELIBERATELY LEFT STANDING for
+    /// them to rule on.
 
     // MARK: - Edit ▸ Copy / Edit ▸ Cut
 
@@ -309,7 +319,9 @@ public enum ClipboardMenuPolicy {
     /// The roll's own right-click Paste title — counted from the CLIPBOARD (see
     /// `pasteMenuItem`'s note on the asymmetry).
     public static func notePasteContextTitle(noteCount: Int) -> String {
-        guard noteCount > 0 else { return inertPasteTitle }
+        // The bare word when the clipboard is empty — the teaching title
+        // ("Paste Clipboard") was deleted on the user's word 2026-08-12.
+        guard noteCount > 0 else { return ClipboardVerb.paste.word }
         return EditMenuTitles.counted(verb: ClipboardVerb.paste.word, count: noteCount,
                                       singular: "Note", plural: "Notes")
     }
@@ -335,14 +347,10 @@ public enum ClipboardVerb: String, Sendable, CaseIterable, Equatable {
         }
     }
 
-    /// The bare title a DISABLED item of this verb shows.
-    public var inertTitle: String {
-        switch self {
-        case .copy: return ClipboardMenuPolicy.inertCopyTitle
-        case .cut: return ClipboardMenuPolicy.inertCutTitle
-        case .paste: return ClipboardMenuPolicy.inertPasteTitle
-        }
-    }
+    // ⛔ `inertTitle` WAS HERE AND WAS DELETED 2026-08-12 (see the banner above
+    // `copyMenuItem`'s section). A disabled item now shows `word` — the bare
+    // macOS verb, greyed — so there is nothing left for a second title property
+    // to hold. Do not re-add one without the user's word.
 }
 
 /// Which surface a clipboard operation acts on.
@@ -385,8 +393,18 @@ public enum ClipboardMenuRefusal: String, Sendable, CaseIterable, Equatable {
 public struct ClipboardMenuItem: Equatable, Sendable {
     /// Which operation this is.
     public var verb: ClipboardVerb
-    /// What the menu says. The verb's bare `inertTitle` when inert — no count,
-    /// because a disabled item must not name a blast radius it does not have.
+    /// What a menu WOULD say for this resolution: `ClipboardVerb.word` when
+    /// inert, the counted form ("Copy 3 Clips") when live.
+    ///
+    /// ⚠️⚠️ **THE EDIT MENU NO LONGER RENDERS THIS, AND MUST NOT BE WIRED BACK
+    /// TO IT.** Since m25-f-1 the Edit menu's Cut / Copy / Paste are macOS's OWN
+    /// items, and `ClipboardResponder.validateMenuItem` gives them
+    /// `ClipboardResponderRouting.plainTitle(for:)` — the bare word — on the
+    /// user's 2026-08-12 ruling that "we do not need to use copy 3 clips". What
+    /// this property still feeds: the `debug.editClipboard` echo (so a gate can
+    /// assert which guard refused) and nothing else. The right-click menus have
+    /// their own titles (`clipContextCommand` / `noteContextTitle`), which DO
+    /// still count — deliberately, because the Delete item beside them does.
     public var title: String
     /// The surface the item acts on; nil when inert.
     public var surface: ClipboardSurface?
@@ -402,7 +420,7 @@ public struct ClipboardMenuItem: Equatable, Sendable {
                 surface: ClipboardSurface? = nil,
                 refusedBy: ClipboardMenuRefusal? = nil) {
         self.verb = verb
-        self.title = title ?? verb.inertTitle
+        self.title = title ?? verb.word
         self.surface = surface
         self.refusedBy = refusedBy
     }

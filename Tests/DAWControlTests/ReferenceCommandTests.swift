@@ -132,13 +132,14 @@ struct ReferenceCommandTests {
         // m23-dl appended `ai.modelResidency` + `ai.modelUnload` after THAT,
         // making the tail EIGHTEEN. m23-di-2a appended `vc.importVoiceModel`
         // after THAT, making the tail NINETEEN.
-        let tail = Array(CommandRouter.allCommands.dropLast(19).suffix(8))
+        let tail = Array(CommandRouter.allCommands.dropLast(20).suffix(8))
         #expect(tail == ["reference.import", "reference.remove",
                          "reference.status", "reference.analyze",
                          "reference.setMonitor", "reference.setOffset",
                          "reference.setTrim", "reference.compare"])
-        #expect(CommandRouter.allCommands.count == 174)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a
-        #expect(CommandRouter.allCommands.last == "vc.importVoiceModel")  // m23-di-2a (ai.modelUnload was last at m23-dl)
+        #expect(CommandRouter.allCommands.count == 175)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d
+        #expect(CommandRouter.allCommands.dropLast().last == "vc.importVoiceModel")  // m23-di-2a (ai.modelUnload was last at m23-dl)
+        #expect(CommandRouter.allCommands.last == "transport.setStopAtContentEnd")  // m25-d
         // Additive: earlier neighbors untouched.
         #expect(CommandRouter.allCommands.contains("mixer.liveLoudness"))
         #expect(CommandRouter.allCommands.contains("clip.analyzeAudio"))

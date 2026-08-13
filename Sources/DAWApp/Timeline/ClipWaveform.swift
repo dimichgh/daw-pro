@@ -1,5 +1,6 @@
 import AVFAudio
 import SwiftUI
+import DAWAppKit
 import DAWCore
 
 /// Coarse peak data for one audio file: max-magnitude buckets at a fixed rate,
@@ -7,10 +8,26 @@ import DAWCore
 /// (`startOffsetSeconds` .. + its length) without re-reading the file. v0 is an
 /// outline, not a zoom-accurate editor — one magnitude per bucket, mirrored.
 struct WaveformPeaks: Sendable, Equatable {
-    /// Peak magnitude 0…1 per time bucket, from the file's head.
+    /// Peak magnitude 0…1 per time bucket, from the file's head. **RAW** — never
+    /// pre-scaled. Auto-fit (m25-e) is applied at DRAW time from `peakMax`, not
+    /// baked in here: baking it would make raw mode unreachable and would mean a
+    /// mode flip had to re-read the file.
     var magnitudes: [Float]
     /// How many buckets cover one second of source audio.
     var bucketsPerSecond: Double
+    /// The loudest bucket in the WHOLE file (m25-e) — the auto-fit divisor.
+    ///
+    /// ⚠️ **FILE scope, not clip scope**, and deliberately so: this cache is keyed
+    /// by URL and shared by every clip that windows the same source (splits share
+    /// a file). A per-window peak would make the two halves of a split draw at
+    /// different scales — the same relative-level lie that fit mode already has
+    /// to justify, but now WITHIN one performance. So a split covering a quiet
+    /// passage of a loud file gets the loud file's factor, and reads quiet. That
+    /// is the intended behaviour.
+    ///
+    /// Defaulted to 1 (= no boost) so previews and every existing call site keep
+    /// compiling and keep drawing exactly what they drew before.
+    var peakMax: Float = 1
 
     /// Peak magnitude at a source time (seconds), clamped to the file's extent.
     /// Out-of-range times read as silence so a clip windowed past the file end
@@ -98,7 +115,13 @@ final class WaveformStore {
         }
         if framesInBucket > 0 { magnitudes.append(min(1, bucketPeak)) }
         guard !magnitudes.isEmpty else { return nil }
-        return WaveformPeaks(magnitudes: magnitudes, bucketsPerSecond: bucketsPerSecond)
+        // m25-e: the file's loudest bucket, carried alongside the RAW magnitudes
+        // so the drawing layer can fit without re-reading and without losing the
+        // true amplitudes. Derived from the buckets we already have — one pass
+        // over an array that is ~150 floats per second, off-main like the read.
+        let peakMax = magnitudes.max() ?? 0
+        return WaveformPeaks(magnitudes: magnitudes, bucketsPerSecond: bucketsPerSecond,
+                             peakMax: peakMax)
     }
 }
 
@@ -114,6 +137,13 @@ struct ClipWaveform: View {
     var secondsPerBeat: Double
     var pixelsPerBeat: CGFloat
     var tint: Color
+    /// Auto-fit the outline to the block's height, capped (m25-e). Threaded from
+    /// `PanelLayoutStore.waveformNormalize`; the default is the app default so a
+    /// preview draws what the app draws.
+    var normalize: Bool = WaveformScale.defaultNormalize
+    /// Extra vertical magnification on top of the fit (m25-e), from
+    /// `PanelLayoutStore.waveformVerticalZoom`. 1 = none.
+    var verticalZoom: CGFloat = WaveformScale.defaultVerticalZoom
 
     var body: some View {
         // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
@@ -123,9 +153,24 @@ struct ClipWaveform: View {
         let secondsPerBeat = secondsPerBeat
         let pixelsPerBeat = pixelsPerBeat
         let tint = tint
+        // m25-e: ONE scalar, resolved from the headless rules BEFORE the closure —
+        // per-view, never per column and never per frame (the no-allocation-in-
+        // drawing rule). The Canvas below multiplies by it and does no other math.
+        let scale = WaveformScale.drawScale(peakMax: peaks.peakMax, normalize: normalize,
+                                            verticalZoom: verticalZoom)
         return Canvas { @Sendable context, size in
             let midY = size.height / 2
             let halfH = size.height / 2 - 2
+            // m25-e: zoomed past full height the drawing is TRIMMED at the block
+            // edge rather than squashed back in — the standard DAW behaviour, and
+            // the only honest one (rescaling to fit would silently undo the zoom
+            // the user just asked for). Clamping each bar's half-length to
+            // `size.height / 2` reproduces a rect clip exactly, because every bar
+            // is a vertical line centred on `midY` — and it keeps Path
+            // coordinates bounded, so a big magnification cannot hand the
+            // renderer runaway geometry. At scale 1 nothing here can trigger:
+            // `halfH < maxH`, so the drawing is byte-identical to the pre-m25-e one.
+            let maxH = size.height / 2
             // Step across the width in ~1.5 pt columns — coarse and cheap; the
             // Path is rebuilt per redraw (on data change), never per frame.
             let step: CGFloat = 1.5
@@ -135,10 +180,14 @@ struct ClipWaveform: View {
             while x <= size.width {
                 let seconds = startOffsetSeconds + Double(x / pixelsPerBeat) * secondsPerBeat
                 let mag = CGFloat(peaks.magnitude(atSeconds: seconds))
-                let bodyH = max(0.5, mag * halfH)
+                let drawn = max(0.5, mag * scale * halfH)
+                let bodyH = min(maxH, drawn)
                 body.move(to: CGPoint(x: x, y: midY - bodyH))
                 body.addLine(to: CGPoint(x: x, y: midY + bodyH))
-                let coreH = bodyH * 0.55
+                // The core is trimmed against the SAME edge, off the UNCLAMPED
+                // length — computing it from the clamped body would flatten the
+                // bright core early and make a trimmed peak read as a plateau.
+                let coreH = min(maxH, drawn * 0.55)
                 core.move(to: CGPoint(x: x, y: midY - coreH))
                 core.addLine(to: CGPoint(x: x, y: midY + coreH))
                 x += step

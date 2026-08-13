@@ -576,6 +576,26 @@ public final class AudioEngine: AudioEngineControlling {
     /// surface). The store installs this and owns the coalescing ring.
     public var engineNoticeHandler: ((EngineNoticeEvent) -> Void)?
 
+    /// END-OF-CONTENT STOP (m25-d): the linear beat past which the project has
+    /// no more clips, or nil for "run forever" (today's behaviour).
+    ///
+    /// A PRE-COMPUTED SCALAR handed over by `ProjectStore.setEndStop(beat:)` —
+    /// the playhead tick does one optional unwrap and one `>=` against it and
+    /// never calls back into the store, walks a track list, allocates, locks,
+    /// or hops actors. The store re-pushes on every transition that can change
+    /// the answer, and pushes nil at record start and at stop.
+    private var endStopBeat: Double?
+
+    /// Fired once when the playhead reaches `endStopBeat`. The engine does NOT
+    /// tear its own transport down — the store owns transport state and calls
+    /// its ordinary `stop()`, which comes straight back here as
+    /// `stopPlayback()`.
+    private var endStopHandler: (() -> Void)?
+
+    public func setEndStop(beat: Double?) { endStopBeat = beat }
+
+    public func setEndStopHandler(_ handler: (() -> Void)?) { endStopHandler = handler }
+
     /// THE session processing rate of every LIVE graph (m20-d, m19-k design
     /// §7 Phase 2). A constant, deliberately: the graph no longer follows the
     /// output device, so chain DSP, PDC, automation frame math, AU prepare
@@ -962,6 +982,11 @@ public final class AudioEngine: AudioEngineControlling {
             let beats = derivedBeats()  // modular under a loop — BEFORE the context clears
             loopContext = nil
             metronomeElapsedOffset = 0
+            // m25-d: a bound belongs to the RUN that armed it. Clearing here
+            // means no stop bound can survive into the next start (or the next
+            // TAKE) even if a caller forgets to re-push — the store clears it
+            // too, deliberately redundantly.
+            endStopBeat = nil
             lastKnownBeats = beats
             playheadTask?.cancel()
             playheadTask = nil
@@ -3837,6 +3862,41 @@ public final class AudioEngine: AudioEngineControlling {
                     // linear click run is active — loop runs unroll whole
                     // cycles inside `serviceLoop` instead, m14-c L-3).
                     self.metronome.topUp(currentBeat: beats)
+                    // END OF CONTENT (m25-d) — the load-bearing check: with an
+                    // engine attached, the store's headless ticker never runs,
+                    // so this is the only place a real playback run learns it
+                    // has passed the last clip.
+                    //
+                    // Placed in the LINEAR branch on purpose: LOOPING TAKES
+                    // PRECEDENCE. A `loopContext != nil` run (the gapless
+                    // cycling case) never reaches here at all, and the
+                    // `loopEnabled && loopEndBeat > loopStartBeat` re-check
+                    // below covers the linear-schedule-with-a-loop-cached case
+                    // that the wrap above owns — the identical condition, so
+                    // the two can never disagree about which one acts.
+                    //
+                    // ⚠️ `activeTake == nil` is the STRUCTURAL recording guard:
+                    // even handed a stale bound, a rolling take cannot be
+                    // stopped here. The store carries two more (an explicit nil
+                    // push in `record()`, and `TransportEndStop.bound` refusing
+                    // while `isRecording`).
+                    //
+                    // Cost per tick: one optional unwrap, three bool reads, two
+                    // comparisons. No allocation, no lock, no ObjC dispatch, no
+                    // actor hop — and this task is `@MainActor` on a
+                    // `@MainActor` engine, so it is not the render thread to
+                    // begin with.
+                    if let bound = self.endStopBeat, self.activeTake == nil,
+                       !(self.loopEnabled && self.loopEndBeat > self.loopStartBeat),
+                       beats >= bound {
+                        // Park EXACTLY on the content end rather than wherever
+                        // this ~33 ms tick overshot to, push it, then hand the
+                        // stop to the store (which owns transport state).
+                        self.lastKnownBeats = bound
+                        self.playheadHandler?(bound)
+                        self.endStopHandler?()
+                        return
+                    }
                 }
                 self.lastKnownBeats = beats
                 self.playheadHandler?(beats)

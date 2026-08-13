@@ -48,6 +48,14 @@ final class FakeEngine: AudioEngineControlling {
         permissionRequests += 1
     }
 
+    /// m25-d end-of-content stop: every bound the store pushed, in order.
+    /// Spying the whole sequence (not just the latest value) is what lets a
+    /// test prove a take was DISARMED rather than merely never armed.
+    private(set) var endStopPushes: [Double?] = []
+    var currentEndStop: Double? { endStopPushes.last ?? nil }
+    func clearEndStopPushes() { endStopPushes.removeAll() }
+    func setEndStop(beat: Double?) { endStopPushes.append(beat) }
+
     /// m22-c: live loudness support, so the every-command routing loop can
     /// exercise `mixer.liveLoudness` inline (the protocol DEFAULT is nil →
     /// engineUnavailable — that teaching path is pinned in
@@ -1534,6 +1542,12 @@ struct CommandRouterTests {
             // Runs before transport.record in allCommands — the metronome
             // route is refused mid-take, so ordering is load-bearing here.
             "transport.setMetronome": ["enabled": .bool(true), "countInBars": .number(1)],
+            // m25-d. Registered LAST in allCommands, so this loop reaches it
+            // mid-take — and it is deliberately ACCEPTED while recording
+            // (inert, never armed) rather than refused, which is exactly what
+            // makes it safe to exercise here instead of excluding it. Sending
+            // `true` restores the default, leaving no state behind.
+            "transport.setStopAtContentEnd": ["enabled": .bool(true)],
             "track.add": [:],
             "track.remove": ["trackId": .string(trackID)],
             "track.rename": ["trackId": .string(trackID), "name": .string("X")],

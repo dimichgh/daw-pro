@@ -757,6 +757,11 @@ struct ContentView: View {
             // Arrange zoom (m17-b): the SAME store value drives the pinned ruler
             // and the lanes, so both columns rescale in one update.
             pixelsPerBeat: model.panelLayout.arrangePPB,
+            // m25-e: waveform amplitude scaling — the SAME store values the WAVE
+            // cluster drives, so the toolbar readout and the drawn pixels are the
+            // one value (the rowHeight discipline).
+            waveformNormalize: model.panelLayout.waveformNormalize,
+            waveformVerticalZoom: model.panelLayout.waveformVerticalZoom,
             availableWidth: model.arrangeViewportWidth,
             // Pinch zoom, anchored at the pointer — the model owns the math.
             onPinchZoomChanged: { x, m in
@@ -771,11 +776,22 @@ struct ContentView: View {
             // single-clip undo entry reading exactly as it did before).
             // `trackID` is unused: the move is id-addressed and same-track by
             // construction (there is no cross-track drag — see `moveClips`).
-            onMoveClip: { _, clip, anchorOriginalStart, rawDragDeltaBeats in
-                model.dragArrangeClips(anchorClipID: clip.id,
-                                       anchorOriginalStart: anchorOriginalStart,
-                                       rawDragDeltaBeats: rawDragDeltaBeats).anchorStart
+            // m25-k: the per-frame call PREVIEWS; the release COMMITS. The store
+            // sees one move per drag, resolved against the position the user
+            // actually dropped on — not against every position they passed over.
+            onPreviewMoveClip: { _, clip, anchorOriginalStart, rawDragDeltaBeats in
+                model.previewArrangeDrag(anchorClipID: clip.id,
+                                         anchorOriginalStart: anchorOriginalStart,
+                                         rawDragDeltaBeats: rawDragDeltaBeats)
             },
+            onCommitMoveClip: { model.commitArrangeDrag() },
+            onCancelMoveClip: { model.cancelArrangeDrag() },
+            dragPreview: model.liveArrangeDragPreview,
+            // m25-m: a plain click on empty timeline space deselects. The note
+            // editor closes as a CONSEQUENCE — `openEditorClip` derives from
+            // `selectedClipID`, which mirrors the selection's focus — so there
+            // is deliberately nothing here about editor visibility.
+            onDeselectAll: { model.clearArrangeSelection() },
             onTrimClip: { trackID, clip, newStart, newLength in
                 _ = try? store.trimClip(trackId: trackID, clipId: clip.id,
                                         newStartBeat: newStart, newLengthBeats: newLength)
@@ -1053,6 +1069,19 @@ struct ContentView: View {
             // BOTH densities (zoom is view navigation, not Pro edit chrome).
             zoomCluster
                 .explainable(.arrangeZoom)
+            // Waveform height (m25-e) — the zoom cluster's VERTICAL sibling,
+            // seated immediately beside it because they are the same idea on the
+            // two axes, and shown in BOTH densities for the zoom cluster's own
+            // reason (seeing your audio is not Pro edit chrome).
+            //
+            // Rendered ONLY when the project actually contains audio (the m22-g
+            // reference-row precedent: zero chrome, zero cost, for a project the
+            // control could do nothing for). A pure-MIDI session's toolbar stays
+            // as simple as it is today.
+            if projectHasAudioClips {
+                waveformZoomControl
+                    .explainable(.arrangeWaveformZoom)
+            }
             if arrangeIsPro {
                 snapPicker
                     .explainable(.arrangeSnap)
@@ -1289,6 +1318,30 @@ struct ContentView: View {
 
     /// Themed grid-snap menu: Off / Bar / Beat / 1/2 / 1/4 / 1/8 / 1/16 (beat
     /// fractions). Bar follows the meter.
+    /// True when any track carries an audio clip — the WAVE cluster's visibility
+    /// gate (m25-e). Cheap: a short-circuiting scan over the clips already in
+    /// memory, the same shape as the sibling `selectedAudioClip` lookup.
+    private var projectHasAudioClips: Bool {
+        store.tracks.contains { $0.clips.contains { !$0.isMIDI } }
+    }
+
+    /// The arrange toolbar's waveform-height cluster (m25-e). Every action routes
+    /// through an AppModel entry point that mutates the ONE persisted
+    /// `PanelLayoutStore` slot pair — the SAME entry points the View menu's ⌥⌘
+    /// items and `debug.panelLayout` use, so toolbar, menu and wire can never
+    /// drift into three different answers.
+    private var waveformZoomControl: some View {
+        WaveformZoomControl(
+            normalize: model.panelLayout.waveformNormalize,
+            verticalZoom: model.panelLayout.waveformVerticalZoom,
+            onSetNormalize: { model.setWaveformNormalize($0) },
+            onZoomOut: { model.waveformZoomOut() },
+            onZoomIn: { model.waveformZoomIn() },
+            onSetZoom: { model.setWaveformVerticalZoom($0) },
+            onReset: { model.waveformZoomReset() }
+        )
+    }
+
     private var snapPicker: some View {
         Menu {
             ForEach(ClipSnap.allCases, id: \.self) { resolution in

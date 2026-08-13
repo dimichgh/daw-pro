@@ -237,6 +237,13 @@ public enum CopilotToolCatalog {
                     minimum: 0, maximum: 4)),
             ], required: ["enabled"])
         ),
+        CopilotTool(
+            command: "transport.setStopAtContentEnd",
+            description: "Control whether playback stops automatically when the playhead reaches the end of the last clip (the end of the song). ON by default. Turn it OFF to let the transport keep running into empty space past the last clip, which is what Logic and Live do by default. A recording take NEVER stops at the content end regardless of this setting — recording past the end of existing material is the point of recording — and an active loop takes precedence, cycling forever. This is a session preference, not project data: it is not saved with the project and edit.undo does not affect it. Returns {stopAtContentEnd, contentEndBeat}, where contentEndBeat is the measured end of the last clip across all tracks (0 when the project has no clips). On project.snapshot the setting appears under the inverted name runsPastContentEnd, and only once it has been turned off — absent there means playback stops at the content end.",
+            schema: schemaObject([
+                ("enabled", booleanSchema("True to stop playback at the end of the last clip, false to keep running past it.")),
+            ], required: ["enabled"])
+        ),
 
         // MARK: tempo (2, m12-d)
 

@@ -389,13 +389,18 @@ public struct StepSequencerGeometry: Sendable, Equatable {
 /// a note array.
 ///
 /// ⚠️ **ONE GESTURE IS BOTH ENTRY AND DELETION, and that is the reason this
-/// surface was safe to build now.** The app is sitting on an undiagnosed
+/// surface was safe to build now.** The app WAS sitting on an undiagnosed
 /// keyboard-routing report (m23-cf: a bare DELETE reported dead on notes and
-/// clips), and a second keyboard-driven editor on top of it would compound the
-/// failure. Click-to-toggle needs no key at all — which INVERTS the risk: the
-/// sequencer is a working note-deletion route that does not depend on the
-/// broken key. **A shortcut added here re-acquires exactly the risk this scoping
-/// removed, and must re-derive the m23-cf question first.**
+/// clips), and a second keyboard-driven editor on top of it would have compounded
+/// the failure. Click-to-toggle needs no key at all — which INVERTED the risk:
+/// the sequencer is a working note-deletion route that did not depend on the
+/// broken key.
+///
+/// ⭐ **m23-cf IS FIXED as of 2026-08-12 — user-confirmed by hand ("we fixed
+/// delete button, it works ok"). The instruction that used to close this
+/// paragraph — "must re-derive the m23-cf question first" — IS DISCHARGED and
+/// must not be re-quoted as a blocker.** A shortcut here is now an ordinary
+/// design decision about this surface, judged on its own merits.
 public enum StepSequencerEdit {
 
     /// Velocity a toggled-on note gets — the SAME default `PianoRollModel.addNote`

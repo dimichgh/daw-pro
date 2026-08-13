@@ -1,4 +1,5 @@
 import CoreGraphics
+import DAWAppKit
 import Foundation
 
 // Staging + refusal plumbing for the m17-c pointer affordances. Hover states are
@@ -26,6 +27,13 @@ struct ArrangePointerStage: Equatable {
     var action: Action
     var x: CGFloat
     var y: CGFloat
+    /// The chord held for this event (m25-m). A synthesized stage carries no real
+    /// `NSEvent.modifierFlags`, so the seam has to SAY what was held — the
+    /// `PianoRollView` staging precedent. Without it, ⇧/⌘-click on empty space
+    /// (which must NOT deselect, since both chords are additive) would be
+    /// unreachable from the only path that can test it, and a gate would be
+    /// measuring whatever keys the machine happened to be holding.
+    var modifiers: ArrangeClickModifiers = []
     /// Bumped per request so a repeat of the same point still fires `.onChange`.
     var nonce: Int
 }

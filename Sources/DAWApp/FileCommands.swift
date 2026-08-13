@@ -48,9 +48,10 @@ struct FileCommands: Commands {
             // oversight to be tidied up later. m23-g1: an unbundled staging
             // binary does not route real key events, so a key equivalent cannot
             // be verified by any gate here — only by `dist/DAWPro.app` and the
-            // user's hands. And m23-cf is still OPEN on an undiagnosed DELETE
-            // key that never reaches its handlers; adding a second key path
-            // before the first is understood makes both harder to diagnose. The
+            // user's hands. ⭐ (The second reason this used to give — "m23-cf is
+            // still OPEN on an undiagnosed DELETE key" — EXPIRED 2026-08-12: the
+            // key is fixed, user-confirmed by hand. The verifiability reason
+            // above is the one that still carries this decision alone.) The
             // full argument, including why the ITEM carries none of the
             // SHORTCUT's hazard, is on `ExportMenuPolicy`.
             //

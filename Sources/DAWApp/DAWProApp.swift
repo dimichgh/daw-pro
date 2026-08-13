@@ -807,6 +807,35 @@ final class AppModel {
         return intent
     }
 
+    /// The ONE arrange DESELECT handler (m25-m): a click on EMPTY timeline space
+    /// clears the clip selection, the near-universal convention (Finder, every
+    /// vector/text editor, Logic, Live, Pro Tools). User-reported 2026-08-13.
+    ///
+    /// ⭐ IT ALSO CLOSES THE NOTE EDITOR, AND DELIBERATELY ADDS NOTHING TO DO SO.
+    /// `openEditorClip` is the tree's one rule for "is the roll on screen" and it
+    /// DERIVES from `selectedClipID`, which is itself a computed mirror of
+    /// `arrangeSelection.focusID` (m23-g1). `ArrangeSelection.clear()` nils the
+    /// focus, so the editor closes as a consequence rather than as a second
+    /// instruction. The user asked for both halves — *"when clip is selected and
+    /// I click on empty side, it should hide the note editor"* — and a
+    /// visibility flag beside this call would be a SECOND home for the question
+    /// "is the roll open", which would drift the first time the two disagreed.
+    ///
+    /// ⚠️ SCOPED TO CLIPS. It does not touch `arrangeTrackSelection`: clicking
+    /// empty lane space is not obviously a statement about which TRACK you are
+    /// working on, and the arrange has no active-track concept yet to be
+    /// consistent with (roadmap m25-l). Deciding that here would be inventing
+    /// product behaviour the user has not asked for.
+    ///
+    /// Returns whether anything was actually deselected, so a seam can tell "the
+    /// click cleared a selection" from "there was nothing to clear".
+    @discardableResult
+    func clearArrangeSelection() -> Bool {
+        guard !arrangeSelection.isEmpty else { return false }
+        arrangeSelection.clear()
+        return true
+    }
+
     /// The ONE arrange TRACK-HEADER click handler (m23-y): the `TrackRow` tap and
     /// the `debug.arrangeSelection {act:"clickTrack"}` seam both land here, so the
     /// seam cannot drift from the gesture. `clickClip`'s twin, in the same shape
@@ -1527,6 +1556,122 @@ final class AppModel {
             presentArrangeDragRefusal(error, message: message, clipID: anchorClipID)
             return ArrangeGroupDragOutcome(anchorStart: anchorCurrentStart, refusal: message)
         }
+    }
+
+    // MARK: - Body-drag cadence (m25-k)
+
+    /// The in-flight arrange body drag, or nil between drags.
+    ///
+    /// ⚠️ IT LIVES HERE AND NOT IN `ClipBlock`'s `@State`, and that is a
+    /// correctness requirement rather than tidiness. The blocks are built inside
+    /// `ForEach(track.clips)`, so ANY store mutation during the gesture — an
+    /// undo, an agent's `clip.remove` over the wire, the refusal path — re-creates
+    /// them and drops their `@State`. While the drag committed on every frame
+    /// that was harmless (the work was already done); now that the release IS the
+    /// commit, a dropped `pendingCommit` would silently throw the user's whole
+    /// move away. The gesture's memory therefore outlives the view that started it.
+    private(set) var arrangeBodyDrag: ArrangeBodyDrag?
+
+    /// The ghost the lanes draw while a body drag is in flight (nil otherwise).
+    /// Set by `previewArrangeDrag`, cleared by `commitArrangeDrag` /
+    /// `cancelArrangeDrag`.
+    private(set) var arrangeDragPreview: ArrangeDragPreview?
+
+    /// The preview to RENDER — `arrangeDragPreview` filtered by whether its
+    /// anchor still exists.
+    ///
+    /// A STRUCTURAL SAFETY NET, not a nicety. SwiftUI does not guarantee
+    /// `.onEnded` for a cancelled gesture, so a preview can in principle be left
+    /// standing with no gesture behind it — clips drawn at an offset the store
+    /// never took, which the user cannot dismiss (the m23-ek-1 "ghost band"
+    /// failure, one surface over). Deriving the rendered value from live model
+    /// state means the commonest cause of that — the anchor vanishing under the
+    /// drag — heals itself without anyone remembering to clean up.
+    var liveArrangeDragPreview: ArrangeDragPreview? {
+        guard let preview = arrangeDragPreview,
+              liveClip(preview.anchorClipID) != nil else { return nil }
+        return preview
+    }
+
+    /// One update of a body drag. **PREVIEWS ONLY — TOUCHES NO CLIP** (m25-k).
+    /// Returns the anchor start the drop WOULD achieve, so the readout stays
+    /// honest about the landing rather than the request.
+    ///
+    /// The grab rule runs HERE, at preview time, not at commit: dragging a clip
+    /// that is not selected collapses the selection onto it, and the user has to
+    /// see that happen as they drag, not discover it on release. It routes
+    /// through `clickClip` exactly as `dragArrangeClips` does — selection is not
+    /// clip geometry, so moving it early destroys nothing.
+    ///
+    /// Snap and clamp keep their ONE homes: `ArrangeGroupDrag.plan` (the
+    /// anchor-snapped rigid delta plus the anchor's own beat-0 floor) and
+    /// `ProjectStore.plannedGroupBeatDelta` (the whole-group clamp, asked without
+    /// moving). Both are the same producers `dragArrangeClips` uses on commit, so
+    /// the ghost and the landing agree by construction.
+    @discardableResult
+    func previewArrangeDrag(anchorClipID: UUID, anchorOriginalStart: Double,
+                            rawDragDeltaBeats: Double) -> Double {
+        if !arrangeSelection.contains(anchorClipID) {
+            clickClip(id: anchorClipID, modifiers: [])
+        }
+        // A fresh gesture, or the pointer grabbed a different clip: start a new
+        // drag. `commit()`/`cancel()` nil this out, so a re-drag of the SAME clip
+        // can never inherit a spent session (which would preview normally and
+        // then commit nothing).
+        if arrangeBodyDrag?.anchorClipID != anchorClipID {
+            arrangeBodyDrag = ArrangeBodyDrag(anchorClipID: anchorClipID,
+                                              anchorOriginalStart: anchorOriginalStart)
+        }
+        arrangeBodyDrag?.update(rawDragDeltaBeats: rawDragDeltaBeats)
+
+        guard let anchorCurrentStart = liveClip(anchorClipID)?.startBeat else {
+            arrangeDragPreview = nil
+            return anchorOriginalStart
+        }
+        let plan = ArrangeGroupDrag.plan(
+            anchorOriginalStart: anchorOriginalStart, anchorCurrentStart: anchorCurrentStart,
+            rawDragDeltaBeats: rawDragDeltaBeats,
+            snap: effectiveClipSnap, meterMap: store.transport.meterMap)
+        let live = Set(store.tracks.flatMap { $0.clips.map(\.id) })
+        let targets = arrangeSelection.resolved(in: live)
+        guard !targets.isEmpty else {
+            arrangeDragPreview = nil
+            return anchorCurrentStart
+        }
+        let planned = store.plannedGroupBeatDelta(ids: Array(targets), byBeats: plan.deltaBeats)
+        arrangeDragPreview = ArrangeDragPreview(
+            anchorClipID: anchorClipID, movingClipIDs: targets,
+            deltaBeats: planned.effective)
+        return anchorCurrentStart + planned.effective
+    }
+
+    /// The release — **the ONE real move a body drag makes** (m25-k). Routes
+    /// through `dragArrangeClips`, so the commit is byte-identically the path the
+    /// `debug.arrangeDrag` seam and every existing test already exercise, and the
+    /// drop-time overlap policy (m11-d/m13-b) applies exactly once, to the
+    /// position the user actually chose.
+    ///
+    /// Returns nil when there was nothing to commit — no drag in flight, or one
+    /// already spent.
+    @discardableResult
+    func commitArrangeDrag() -> ArrangeGroupDragOutcome? {
+        var drag = arrangeBodyDrag
+        arrangeBodyDrag = nil
+        arrangeDragPreview = nil
+        guard let commit = drag?.commit() else { return nil }
+        return dragArrangeClips(anchorClipID: commit.anchorClipID,
+                                anchorOriginalStart: commit.anchorOriginalStart,
+                                rawDragDeltaBeats: commit.rawDragDeltaBeats)
+    }
+
+    /// The gesture died without a release. Commits NOTHING and puts the ghost
+    /// away — the `PianoRollView` `.cancelled` contract (m18-i), which likewise
+    /// swallows an in-flight gesture rather than applying it to content that may
+    /// have changed underneath.
+    func cancelArrangeDrag() {
+        arrangeBodyDrag?.cancel()
+        arrangeBodyDrag = nil
+        arrangeDragPreview = nil
     }
 
     /// The clip with this id, from whichever track holds it.
@@ -2352,7 +2497,24 @@ final class AppModel {
     /// toggle is MAIN-WINDOW-ONLY (the documented safe default): events aimed
     /// at floating plugin windows or any other panel classify as `.secondary`
     /// and pass through. Weak — a closed window never dangles.
-    @ObservationIgnored private weak var contentWindow: NSWindow?
+    ///
+    /// ⭐ NOT `private` SINCE m25-f-1: `ClipboardResponder.swift`'s `AppModel`
+    /// extension splices the clipboard responder into THIS window's responder
+    /// chain, deliberately reusing the space/delete keys' notion of "our window"
+    /// rather than resolving a second one.
+    @ObservationIgnored weak var contentWindow: NSWindow?
+
+    /// The ⌘X / ⌘C / ⌘V route (m25-f-1) — the object that claims `cut:` /
+    /// `copy:` / `paste:` on the responder chain so macOS's OWN Edit-menu
+    /// pasteboard items act on clips and notes. Created and spliced in by
+    /// `installClipboardResponder()`; see `ClipboardResponder.swift` for the
+    /// mechanism and the measurements behind it.
+    @ObservationIgnored var clipboardResponder: ClipboardResponder?
+
+    /// The once-per-app observer that re-asserts the clipboard responder's place
+    /// in the chain whenever a window becomes key (m25-f-1). Held so the arming
+    /// stays idempotent.
+    @ObservationIgnored var clipboardKeyWindowObserver: (any NSObjectProtocol)?
 
     /// Installs the space-bar monitor (m17-d). The handler body lives in
     /// `handleKeyDownEvent` so the `debug.keySpace` seam runs the SAME code
@@ -4209,7 +4371,7 @@ final class AppModel {
 
     /// `debug.panelLayout {sidebarWidth?, editorFraction?, rowHeight?,
     /// pianoRollPPB?, mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
-    /// reset?}` — stages the adjustable
+    /// waveformNormalize?, waveformVerticalZoom?, reset?}` — stages the adjustable
     /// window layout (beta m10-d)
     /// so a headless capture / E2E can drive the arrange sidebar width, the bottom
     /// editor's height fraction, the global track-row height, and (m21-c) the
@@ -4243,6 +4405,19 @@ final class AppModel {
         // the `note.audition` WIRE verb deliberately ignores it (an agent asking to
         // hear something is an explicit request, not an editing preference).
         if let a = params["auditionEnabled"]?.boolValue { panelLayout.setAuditionEnabled(a) }
+        // m25-e: the waveform's amplitude scaling — auto-fit on/off and the
+        // vertical magnification on top of it. Two more `PanelLayoutStore` slots,
+        // so they ride HERE rather than growing a `debug.waveformZoom` sibling:
+        // there is no runtime ground truth a seam of their own could tell you
+        // (unlike `debug.followPlayhead`'s scroll offsets), so the layout seam
+        // already says everything true about them. Debug tier ONLY — how tall a
+        // waveform is drawn is view chrome, and the m10-c/sp-b pure-view rule
+        // keeps chrome off `allCommands`/MCP (the `auditionEnabled` precedent,
+        // which gates actual SOUND and still stayed here).
+        if let n = params["waveformNormalize"]?.boolValue { panelLayout.setWaveformNormalize(n) }
+        if let z = params["waveformVerticalZoom"]?.doubleValue {
+            panelLayout.setWaveformVerticalZoom(CGFloat(z))
+        }
         return .object([
             "sidebarWidth": .number(Double(panelLayout.sidebarWidth)),
             "editorFraction": .number(Double(panelLayout.editorFraction)),
@@ -4251,6 +4426,8 @@ final class AppModel {
             "mixerInsertsCollapsed": .bool(panelLayout.mixerInsertsCollapsed),
             "followPlayhead": .bool(panelLayout.followPlayhead),
             "auditionEnabled": .bool(panelLayout.auditionEnabled),
+            "waveformNormalize": .bool(panelLayout.waveformNormalize),
+            "waveformVerticalZoom": .number(Double(panelLayout.waveformVerticalZoom)),
         ])
     }
 
@@ -4327,6 +4504,10 @@ final class AppModel {
         // guard (m17-d) — at first appearance the WindowGroup window is the only
         // one, so this can never latch a plugin panel.
         contentWindow = window
+        // ⌘X / ⌘C / ⌘V (m25-f-1): splice the clipboard responder into THIS
+        // window's chain now that it exists. Idempotent, and re-asserted on every
+        // key-window transition below — a chain link is not ours to own.
+        installClipboardResponder()
         // `contentMinSize` is in window CONTENT-RECT units, which include the 32 pt
         // titlebar inset SwiftUI lays the root view out below — so the height floor
         // here is `minWindowContentHeight` (672), NOT the SwiftUI layout floor
@@ -4598,6 +4779,36 @@ final class AppModel {
     func zoomPianoRollOut() { panelLayout.setPianoRollPPB(PianoRollZoom.zoomedOut(panelLayout.pianoRollPPB)) }
     func zoomPianoRollReset() { panelLayout.setPianoRollPPB(PianoRollZoom.defaultPixelsPerBeat) }
 
+    // MARK: Waveform amplitude scaling (m25-e)
+
+    /// The waveform vertical-zoom / auto-fit entry points. Every driver — the
+    /// arrange toolbar's WAVE chip, the View menu's ⌥⌘± items, and
+    /// `debug.panelLayout` — mutates the ONE persisted slot pair (clamped by the
+    /// store); the clip lanes and the take lanes re-read them and rescale
+    /// together (the `zoomPianoRoll*` discipline).
+    ///
+    /// These are DELIBERATELY not on the `zoomIn`/`zoomOut` surface router: ⌘±
+    /// means "show me more or less TIME" on whichever editor has focus, and
+    /// amplitude is a different axis on a different surface (the piano roll has
+    /// no waveform to scale). Folding them in would make one keystroke mean two
+    /// unrelated things depending on focus.
+    func waveformZoomIn() {
+        panelLayout.setWaveformVerticalZoom(WaveformScale.zoomedIn(panelLayout.waveformVerticalZoom))
+    }
+    func waveformZoomOut() {
+        panelLayout.setWaveformVerticalZoom(WaveformScale.zoomedOut(panelLayout.waveformVerticalZoom))
+    }
+    /// ⌥⌘0: back to the app default — auto-fit ON at 1×. Resets BOTH halves,
+    /// because "reset the waveform view" that left RAW latched would be a reset
+    /// the user could not see the effect of.
+    func waveformZoomReset() {
+        panelLayout.setWaveformNormalize(PanelLayoutStore.defaultWaveformNormalize)
+        panelLayout.setWaveformVerticalZoom(PanelLayoutStore.defaultWaveformVerticalZoom)
+    }
+    func setWaveformVerticalZoom(_ zoom: CGFloat) { panelLayout.setWaveformVerticalZoom(zoom) }
+    func setWaveformNormalize(_ normalize: Bool) { panelLayout.setWaveformNormalize(normalize) }
+    func toggleWaveformNormalize() { setWaveformNormalize(!panelLayout.waveformNormalize) }
+
     /// Sets the stepped track-row height (S/M/L) through the SAME
     /// `panelLayout.rowHeight` slot the m10-d splitter drags — the sidebar rows
     /// and the lanes read that one value, so both columns stay row-aligned.
@@ -4825,6 +5036,12 @@ final class AppModel {
     /// ONLY, off `allCommands`/MCP — pointer affordances ride the EXISTING
     /// `transport.seek`/`clip.split`/`clip.addMIDI` verbs, so ZERO new wire
     /// surface).
+    /// m25-m: a plain `click` on EMPTY lane space also DESELECTS (and therefore
+    /// closes the note editor — `openEditorClip` derives from the selection).
+    /// `{shift:true}` / `{command:true}` carry the chord, which is additive and
+    /// must NOT deselect; assert the outcome with `selectedClipId` +
+    /// `editorClipId`, both already in the bare echo below.
+    ///
     /// `act` is "hover" | "click" | "doubleClick" | "clear"; `x`/`y` are
     /// CONTENT-space points (x = beats · ppb — zoom-exact without knowing the
     /// scroll offset), required for all but "clear". The staged event runs
@@ -4902,9 +5119,15 @@ final class AppModel {
                 arrangeCreatedClipID = nil
                 arrangeSplitRefusal = nil
             }
+            // m25-m — the chord, in the `debug.arrangeSelection {act:"click"}`
+            // spelling (`shift`/`command` booleans) so the two seams cannot
+            // describe the same chord two ways. Absent = a plain click.
+            var mods: ArrangeClickModifiers = []
+            if params["shift"]?.boolValue == true { mods.insert(.shift) }
+            if params["command"]?.boolValue == true { mods.insert(.command) }
             let reportsBefore = arrangePointerReportSeq
             arrangePointerStage = ArrangePointerStage(
-                action: action, x: x, y: y,
+                action: action, x: x, y: y, modifiers: mods,
                 nonce: (arrangePointerStage?.nonce ?? 0) + 1)
             awaitPointerStageApplied(after: reportsBefore)
         }
@@ -5935,10 +6158,20 @@ final class AppModel {
     ///     **`deltaBeats` is the RAW, PRE-SNAP pointer translation in beats**, so
     ///     the seam exercises the snapping decision instead of bypassing it; the
     ///     anchor's drag-origin start is its CURRENT start (a staged drag starts
-    ///     from rest). It runs `AppModel.dragArrangeClips` — the SAME method the
-    ///     ClipBlock gesture runs, grab rule included, so a staged drag on an
-    ///     UNSELECTED clip collapses the selection onto it exactly as the mouse
-    ///     would.
+    ///     from rest). It runs `AppModel.previewArrangeDrag` +
+    ///     `commitArrangeDrag` — the SAME pair the ClipBlock gesture runs, grab
+    ///     rule included, so a staged drag on an UNSELECTED clip collapses the
+    ///     selection onto it exactly as the mouse would.
+    ///   - `{clipId, deltaBeats, phase:"move"|"end"}` — **m25-k**: which PART of
+    ///     the drag this call is. `"move"` PREVIEWS ONLY and leaves the project
+    ///     untouched; `"end"` (the DEFAULT, and therefore the pre-m25-k
+    ///     behaviour byte for byte) previews and then commits the one real move.
+    ///     ⭐ **THIS IS WHAT MAKES THE m25-k DEFECT REPRODUCIBLE FROM OUTSIDE THE
+    ///     APP** — the bug was that a drag PASSING OVER a clip destroyed it, and
+    ///     "passing over" needs at least two positions to express. A sequence of
+    ///     `move`s over a resident followed by an `end` clear of it must leave
+    ///     that resident untouched (`starts` proves it); a single `end` that
+    ///     LANDS on it must still trim or remove it (`trimmedIds`/`removedIds`).
     ///   - `{snap:"off"|"bar"|…}` — sets the arrange snap PICKER (the
     ///     `debug.arrangeDrop` precedent), combinable with a drag (applied first)
     ///     or alone.
@@ -5970,15 +6203,30 @@ final class AppModel {
             guard let anchor = liveClip(id) else {
                 throw DebugError("no clip \(rawID) in this project")
             }
+            // m25-k: WHICH PART of a drag this call is. Default `"end"` is the
+            // pre-m25-k one-shot — preview then commit in one call — so every
+            // existing caller keeps its exact behaviour and its exact echo.
+            let phase = params["phase"]?.stringValue ?? "end"
+            guard phase == "move" || phase == "end" else {
+                throw DebugError("unknown phase \"\(phase)\" — expected \"move\" or \"end\"")
+            }
             workspaceMode = .arrange
             let reportsBefore = arrangeClipLayoutRenderSeq
-            let result = dragArrangeClips(
-                anchorClipID: id, anchorOriginalStart: anchor.startBeat,
-                rawDragDeltaBeats: delta)
-            outcome = result
-            // Only wait when there IS a re-render coming: a drag that moved
-            // nothing would otherwise burn the full 0.30 s deadline.
-            if result.changed { awaitClipLayoutRendered(after: reportsBefore) }
+            // The anchor's drag-ORIGIN start. Correct on every `move` step of a
+            // multi-step staged drag precisely BECAUSE the preview does not move
+            // anything: the anchor is still at rest until the `end` call, so its
+            // current start and its drag origin are the same number. That
+            // identity is the item's whole claim, so a staged drag that reads it
+            // this way is asserting it rather than assuming it.
+            previewArrangeDrag(anchorClipID: id, anchorOriginalStart: anchor.startBeat,
+                               rawDragDeltaBeats: delta)
+            if phase == "end" {
+                let result = commitArrangeDrag()
+                outcome = result
+                // Only wait when there IS a re-render coming: a drag that moved
+                // nothing would otherwise burn the full 0.30 s deadline.
+                if result?.changed == true { awaitClipLayoutRendered(after: reportsBefore) }
+            }
         } else if params["deltaBeats"] != nil {
             throw DebugError("debug.arrangeDrag 'deltaBeats' needs a 'clipId' anchor")
         }
@@ -6007,6 +6255,16 @@ final class AppModel {
             "renderSeq": .number(Double(arrangeClipLayoutRenderSeq)),
             "undoDepth": .number(Double(store.undoHistory().undo.count)),
             "undoLabel": store.undoHistory().undo.first.map { .string($0) } ?? .null,
+            // m25-k — the in-flight GHOST, non-null ONLY between a `phase:"move"`
+            // and the `end` that commits it. This is the pair that makes the
+            // fix observable rather than merely asserted: `previewDeltaBeats`
+            // says the drag has travelled, `starts` says the model has not. A
+            // probe reading only one of them cannot tell a working preview from
+            // a drag that never started.
+            "previewDeltaBeats": arrangeDragPreview.map { .number($0.deltaBeats) } ?? .null,
+            "previewMovingIds": .array((arrangeDragPreview?.movingClipIDs ?? [])
+                .map { JSONValue.string($0.uuidString) }
+                .sorted { a, b in (a.stringValue ?? "") < (b.stringValue ?? "") }),
         ]
         if let outcome {
             object["anchorId"] = params["clipId"].map { $0 } ?? .null

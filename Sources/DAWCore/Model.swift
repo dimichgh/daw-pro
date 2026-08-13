@@ -2069,6 +2069,34 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
     /// the transient A/B monitor state is never snapshotted (the
     /// transient-state law; read it via `reference.status`).
     public var reference: ReferenceSlot?
+    /// End-of-content stop OVERRIDE (m25-d): present (and always `true`) only
+    /// when the user has opted OUT of stopping at the last clip, absent
+    /// otherwise. Mirrors the inverse of `ProjectStore.stopAtContentEnd`.
+    /// Session state, never persisted to disk and untouched by undo/redo (the
+    /// `engineNotices` class).
+    ///
+    /// ⚠️ **WHY THE NAME IS INVERTED RELATIVE TO THE STORE PROPERTY AND THE
+    /// WIRE VERB** (`stopAtContentEnd` / `transport.setStopAtContentEnd`).
+    /// Omit-at-default keeps a default session's snapshot byte-identical to a
+    /// pre-m25-d one (the `masterAutomation` / `markers` rule) — but that law
+    /// is only SAFE when the omitted state is the FALSE reading of the field's
+    /// own name. `markers: nil` reads "no markers": true. A field named
+    /// `stopAtContentEnd` omitted at the ON default would read "does not stop
+    /// at content end": FALSE, and an agent that reads `project.snapshot`, sees
+    /// no key, and reports "your transport won't stop" is wrong in the exact
+    /// way this app can least afford. Named for the override, absence reads
+    /// correctly with no `?? true` convention to remember: no key means the
+    /// transport does NOT run past the content end.
+    ///
+    /// So: `nil` ⇒ stops at content end (the default). `true` ⇒ free-runs past
+    /// the last clip. It is never `false`.
+    public var runsPastContentEnd: Bool?
+    /// TRUE end of content in beats (m25-d): the largest clip end across every
+    /// track — where playback stops when `stopAtContentEnd` is on. No display
+    /// padding (see `TransportEndStop.contentEndBeat`). nil (key omitted) for a
+    /// project with no clips, so an empty session's snapshot stays
+    /// byte-identical.
+    public var contentEndBeat: Double?
 
     public init(
         name: String,
@@ -2092,7 +2120,9 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         midiInputs: [MIDIInputDevice]? = nil,
         midiEventCount: Int? = nil,
         engineNotices: [EngineNotice]? = nil,
-        reference: ReferenceSlot? = nil
+        reference: ReferenceSlot? = nil,
+        stopAtContentEnd: Bool = true,
+        contentEndBeat: Double = 0
     ) {
         self.name = name
         self.transport = transport
@@ -2128,6 +2158,14 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         self.engineNotices = (engineNotices?.isEmpty ?? true) ? nil : engineNotices
         // No reference → key omitted (pre-m22-g snapshots stay byte-identical).
         self.reference = reference
+        // m25-d: the param carries the STORE'S polarity (stopAtContentEnd,
+        // default true); the FIELD carries the override's (runsPastContentEnd,
+        // present only when the user opted out). Inverting here, once, is what
+        // lets omit-at-default hold WITHOUT an absent key reading as a lie —
+        // see the property doc. Never emitted as `false`.
+        self.runsPastContentEnd = stopAtContentEnd ? nil : true
+        // No clips → key omitted (an empty session stays byte-identical).
+        self.contentEndBeat = contentEndBeat > 0 ? contentEndBeat : nil
     }
 }
 

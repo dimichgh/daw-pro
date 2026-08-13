@@ -1105,7 +1105,7 @@ struct VoiceConversionChildEnvironmentTests {
     func prependsToInherited() {
         let env = Config.childEnvironment(
             base: ["PYTHONPATH": "/user/one:/user/two"],
-            voicesDir: "/voices", mitigationDir: "/hook", outDir: "/out")
+            voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
         #expect(env["PYTHONPATH"] == "/hook:/user/one:/user/two")
     }
 
@@ -1113,14 +1113,14 @@ struct VoiceConversionChildEnvironmentTests {
     func oursIsFirst() {
         let env = Config.childEnvironment(
             base: ["PYTHONPATH": "/someone/elses/sitecustomize/home"],
-            voicesDir: "/voices", mitigationDir: "/hook", outDir: "/out")
+            voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
         #expect(env["PYTHONPATH"]?.hasPrefix("/hook:") == true)
     }
 
     @Test("no inherited PYTHONPATH -> set to ours alone, with no stray separator")
     func setsWhenAbsent() {
         let env = Config.childEnvironment(
-            base: [:], voicesDir: "/voices", mitigationDir: "/hook", outDir: "/out")
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
         #expect(env["PYTHONPATH"] == "/hook")
     }
 
@@ -1131,7 +1131,7 @@ struct VoiceConversionChildEnvironmentTests {
     @Test("inherited PYTHONPATH of \"\" -> ours alone, never a trailing colon")
     func emptyInheritedProducesNoTrailingColon() {
         let env = Config.childEnvironment(
-            base: ["PYTHONPATH": ""], voicesDir: "/voices", mitigationDir: "/hook", outDir: "/out")
+            base: ["PYTHONPATH": ""], voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
         #expect(env["PYTHONPATH"] == "/hook")
         #expect(env["PYTHONPATH"]?.hasSuffix(":") == false)
     }
@@ -1139,7 +1139,7 @@ struct VoiceConversionChildEnvironmentTests {
     @Test("nil mitigationDir leaves an inherited PYTHONPATH EXACTLY as it was")
     func nilMitigationDirLeavesInheritedUntouched() {
         let env = Config.childEnvironment(
-            base: ["PYTHONPATH": "/user/one"], voicesDir: "/voices", mitigationDir: nil,
+            base: ["PYTHONPATH": "/user/one"], voicesDir: "/voices", mitigationDir: nil, patchesDir: "/patches",
             outDir: "/out")
         #expect(env["PYTHONPATH"] == "/user/one")
     }
@@ -1147,14 +1147,14 @@ struct VoiceConversionChildEnvironmentTests {
     @Test("nil mitigationDir does not INVENT a PYTHONPATH where there was none")
     func nilMitigationDirDoesNotInvent() {
         let env = Config.childEnvironment(
-            base: [:], voicesDir: "/voices", mitigationDir: nil, outDir: "/out")
+            base: [:], voicesDir: "/voices", mitigationDir: nil, patchesDir: "/patches", outDir: "/out")
         #expect(env["PYTHONPATH"] == nil)
     }
 
     @Test("an empty-string mitigationDir is treated as absent, not joined in")
     func emptyMitigationDirIsAbsent() {
         let env = Config.childEnvironment(
-            base: ["PYTHONPATH": "/user/one"], voicesDir: "/voices", mitigationDir: "",
+            base: ["PYTHONPATH": "/user/one"], voicesDir: "/voices", mitigationDir: "", patchesDir: "/patches",
             outDir: "/out")
         #expect(env["PYTHONPATH"] == "/user/one")
     }
@@ -1162,7 +1162,7 @@ struct VoiceConversionChildEnvironmentTests {
     @Test("RVC_VOICES_DIR is still set (m23-di-2a must not regress)")
     func stillSetsVoicesDir() {
         let env = Config.childEnvironment(
-            base: [:], voicesDir: "/voices/here", mitigationDir: "/hook", outDir: "/out")
+            base: [:], voicesDir: "/voices/here", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
         #expect(env["RVC_VOICES_DIR"] == "/voices/here")
     }
 
@@ -1171,7 +1171,7 @@ struct VoiceConversionChildEnvironmentTests {
     @Test("RVC_OUT_DIR is set from outDir (m23-fp — the facade stops writing into the fence)")
     func setsOutDir() {
         let env = Config.childEnvironment(
-            base: [:], voicesDir: "/voices", mitigationDir: "/hook", outDir: "/app/out")
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/app/out")
         #expect(env["RVC_OUT_DIR"] == "/app/out")
     }
 
@@ -1182,7 +1182,7 @@ struct VoiceConversionChildEnvironmentTests {
     @Test("an empty outDir leaves RVC_OUT_DIR ABSENT, never set to \"\"")
     func emptyOutDirLeavesVariableAbsent() {
         let env = Config.childEnvironment(
-            base: [:], voicesDir: "/voices", mitigationDir: "/hook", outDir: "")
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "")
         #expect(env["RVC_OUT_DIR"] == nil)
     }
 
@@ -1190,8 +1190,121 @@ struct VoiceConversionChildEnvironmentTests {
     func inheritedOutDirIsReplaced() {
         let env = Config.childEnvironment(
             base: ["RVC_OUT_DIR": "/somewhere/else"], voicesDir: "/voices",
-            mitigationDir: "/hook", outDir: "/app/out")
+            mitigationDir: "/hook", patchesDir: "/patches", outDir: "/app/out")
         #expect(env["RVC_OUT_DIR"] == "/app/out")
+    }
+
+    // MARK: - m10-p-6 — owned-directory resolution across distribution shapes
+
+    private static func resolve(
+        name: String = "rvc-patches",
+        override: URL? = nil,
+        rvcDir: URL? = URL(fileURLWithPath: "/repo/scripts/rvc"),
+        bundles: [URL] = [URL(fileURLWithPath: "/App.app/Contents/Resources")],
+        present: [String]
+    ) -> URL? {
+        Config.resolveOwnedDir(
+            name: name, override: override, rvcDir: rvcDir,
+            bundleCandidates: bundles,
+            exists: { present.contains($0.path) })
+    }
+
+    @Test("override beats everything, even when both other candidates exist")
+    func overrideWins() {
+        let got = Self.resolve(
+            override: URL(fileURLWithPath: "/custom"),
+            present: ["/repo/scripts/rvc-patches",
+                      "/App.app/Contents/Resources/rvc-patches"])
+        #expect(got?.path == "/custom")
+    }
+
+    /// The dev-mode / repo-checkout shape — unchanged from before this item.
+    @Test("a sibling that EXISTS wins over the bundle")
+    func siblingWinsWhenPresent() {
+        let got = Self.resolve(
+            present: ["/repo/scripts/rvc-patches",
+                      "/App.app/Contents/Resources/rvc-patches"])
+        #expect(got?.path == "/repo/scripts/rvc-patches")
+    }
+
+    /// The distributed shape: the 1.7 GB runtime is installed elsewhere, so the
+    /// sibling of `rvcDir` does NOT hold our files — the bundle does.
+    @Test("a distributed build falls back to the app bundle")
+    func bundleFallback() {
+        let got = Self.resolve(
+            rvcDir: URL(fileURLWithPath: "/Users/x/Library/Application Support/DAWPro/rvc"),
+            present: ["/App.app/Contents/Resources/rvc-patches"])
+        #expect(got?.path == "/App.app/Contents/Resources/rvc-patches")
+    }
+
+    /// ⚠️ When NOTHING exists the answer must still be the sibling, so the
+    /// not-installed error names the path a developer expects to create —
+    /// not a bundle path they cannot write to.
+    @Test("nothing present -> the SIBLING, so the error message stays honest")
+    func fallsBackToSiblingPath() {
+        let got = Self.resolve(present: [])
+        #expect(got?.path == "/repo/scripts/rvc-patches")
+    }
+
+    @Test("a nil rvcDir with nothing in the bundle resolves to nil")
+    func nilWhenNothingKnown() {
+        #expect(Self.resolve(rvcDir: nil, present: []) == nil)
+    }
+
+    @Test("the mitigation dir resolves by the same rules")
+    func mitigationUsesSameResolver() {
+        let got = Self.resolve(
+            name: "rvc-mitigation",
+            rvcDir: URL(fileURLWithPath: "/Users/x/Library/Application Support/DAWPro/rvc"),
+            present: ["/App.app/Contents/Resources/rvc-mitigation"])
+        #expect(got?.path == "/App.app/Contents/Resources/rvc-mitigation")
+    }
+
+    // MARK: - m10-p-6 — the audio-correctness patches
+
+    @Test("patchesDir is published as DAWPRO_RVC_PATCHES_DIR")
+    func patchesDirIsPublished() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook",
+            patchesDir: "/repo/scripts/rvc-patches", outDir: "/out")
+        #expect(env["DAWPRO_RVC_PATCHES_DIR"] == "/repo/scripts/rvc-patches")
+    }
+
+    /// Same rule as `RVC_OUT_DIR`: absent beats `""`. The hook falls back to its
+    /// own sibling when unset, but `Path("")` would point it at the cwd — which
+    /// the facade has `chdir`'d INSIDE the fence.
+    @Test("a nil or empty patchesDir leaves the variable ABSENT, never \"\"")
+    func emptyPatchesDirLeavesVariableAbsent() {
+        for value in [nil, ""] as [String?] {
+            let env = Config.childEnvironment(
+                base: [:], voicesDir: "/voices", mitigationDir: "/hook",
+                patchesDir: value, outDir: "/out")
+            #expect(env["DAWPRO_RVC_PATCHES_DIR"] == nil)
+        }
+    }
+
+    /// ⚠️ The regression that matters: importing `sitecustomize` makes CPython
+    /// write `<mitigationDir>/__pycache__/`, which violates the one-file
+    /// invariant `gate_m23fo_mechanism.py` asserts — so every real app run
+    /// turned that gate red. It also means writing into a code-signed,
+    /// read-only Resources directory in a distributed build.
+    @Test("PYTHONDONTWRITEBYTECODE is always set — no __pycache__ beside the hook")
+    func bytecodeWritingIsDisabled() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: "/hook",
+            patchesDir: "/patches", outDir: "/out")
+        #expect(env["PYTHONDONTWRITEBYTECODE"] == "1")
+    }
+
+    /// It is set BEFORE the `guard let mitigationDir` early return, so an
+    /// unarmed hook still cannot litter. Easy to regress by moving the line.
+    @Test("…including when the hook is UNARMED and the function returns early")
+    func bytecodeDisabledEvenWithoutMitigation() {
+        let env = Config.childEnvironment(
+            base: [:], voicesDir: "/voices", mitigationDir: nil,
+            patchesDir: nil, outDir: "/out")
+        #expect(env["PYTHONDONTWRITEBYTECODE"] == "1")
+        #expect(env["PYTHONPATH"] == nil)
     }
 
     /// The whole reason this merges onto the inherited environment instead of
@@ -1201,7 +1314,7 @@ struct VoiceConversionChildEnvironmentTests {
     func preservesTheRestOfTheEnvironment() {
         let env = Config.childEnvironment(
             base: ["PATH": "/usr/bin", "HOME": "/Users/tester", "ANTHROPIC_API_KEY": "sk-x"],
-            voicesDir: "/voices", mitigationDir: "/hook", outDir: "/out")
+            voicesDir: "/voices", mitigationDir: "/hook", patchesDir: "/patches", outDir: "/out")
         #expect(env["PATH"] == "/usr/bin")
         #expect(env["HOME"] == "/Users/tester")
         #expect(env["ANTHROPIC_API_KEY"] == "sk-x")

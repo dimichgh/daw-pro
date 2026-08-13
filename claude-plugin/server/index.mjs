@@ -44396,6 +44396,19 @@ registerTool(
   async ({ enabled, countInBars }) => toToolResult(() => bridge.send("transport.setMetronome", { enabled, countInBars }))
 );
 registerTool(
+  "transport_set_stop_at_content_end",
+  {
+    title: "Stop playback at the end of the song",
+    description: "Control whether playback stops automatically when the playhead reaches the end of the last clip (the end of the song). ON by default. Turn it OFF to let the transport keep running into empty space past the last clip, which is what Logic and Live do by default. A recording take NEVER stops at the content end regardless of this setting \u2014 recording past the end of existing material is the point of recording \u2014 and an active loop takes precedence, cycling forever rather than stopping. This is a session preference, not project data: it is not saved with the project, edit_undo does not affect it, and it resets to on when the app restarts. Returns `{stopAtContentEnd, contentEndBeat}`, where `contentEndBeat` is the measured end of the last clip across all tracks (0 when the project has no clips). On project_snapshot the setting appears under the INVERTED name `runsPastContentEnd`, and only when it has been turned off: absent means playback stops at the content end (the default), `true` means it free-runs past the last clip. It is never `false`. Read the snapshot key by its own name and it is never misleading \u2014 do not look for `stopAtContentEnd` there.",
+    inputSchema: {
+      enabled: external_exports.boolean().describe(
+        "True to stop playback at the end of the last clip, false to keep running past it."
+      )
+    }
+  },
+  async ({ enabled }) => toToolResult(() => bridge.send("transport.setStopAtContentEnd", { enabled }))
+);
+registerTool(
   "track_add",
   {
     title: "Add a track",

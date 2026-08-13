@@ -122,6 +122,43 @@ else
     exit 1
 fi
 
+# Voice-conversion correctness patches + the facade hook (m10-p-6, 2026-08-13).
+#
+# These are OURS and tiny (~55 KB together). They are NOT optional: without them
+# the RVC sidecar produces wrong audio (MLX's broken conv_transpose1d on long
+# outputs, and the fork's flow noise_scale shipped at 0.0). The ~1.7 GB vendored
+# runtime they patch canNOT ship in a signed bundle and installs separately into
+# Application Support — which is exactly why these must be bundled: with the
+# runtime living elsewhere, `rvcDir`'s sibling is NOT where our files are, so
+# Configuration.resolveOwnedDir falls through to Contents/Resources for them.
+#
+# Like the weights above, this MUST run before `codesign`.
+for owned in rvc-patches rvc-mitigation; do
+    src="scripts/$owned"
+    if [[ ! -d "$src" ]]; then
+        echo "error: $src not found — the sidecar would produce WRONG AUDIO" >&2
+        exit 1
+    fi
+    dest="$APP/Contents/Resources/$owned"
+    mkdir -p "$dest"
+    # No __pycache__: it would break the mitigation dir's one-file invariant and
+    # is dead weight inside a read-only, signed bundle anyway.
+    find "$src" -type f -name '*.py' -not -path '*__pycache__*' -exec cp {} "$dest/" \;
+    find "$src" -type f \( -name '*.md' -o -name '*.patch' \) -exec cp {} "$dest/" \;
+done
+
+# ⚠️ scripts/rvc-mitigation/ goes on sys.path AHEAD of site-packages, so a second
+# module there would shadow a same-named module for the whole interpreter. The
+# invariant is asserted by gate_m23fo_mechanism.py at the source; assert it again
+# on what actually LANDED, because a bundling bug is exactly how a copy diverges
+# from its source.
+hook_files=$(find "$APP/Contents/Resources/rvc-mitigation" -type f -name '*.py' | wc -l | tr -d ' ')
+if [[ "$hook_files" != "1" ]]; then
+    echo "error: rvc-mitigation must bundle EXACTLY ONE .py, found $hook_files" >&2
+    exit 1
+fi
+echo "==> bundled voice-conversion patches + hook (one-file invariant holds)"
+
 # Speech-model weights (m23-n1, 2026-07-27) — OPT-IN, off by default.
 #
 # The default ships a SMALL app and the weights are installed separately into

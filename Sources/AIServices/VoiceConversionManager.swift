@@ -774,10 +774,8 @@ extension VoiceConversionManager {
         public var mitigationDirOverride: URL?
 
         public var mitigationDirURL: URL? {
-            if let mitigationDirOverride { return mitigationDirOverride }
-            return rvcDir?
-                .deletingLastPathComponent()
-                .appendingPathComponent("rvc-mitigation")
+            Self.resolveOwnedDir(
+                name: "rvc-mitigation", override: mitigationDirOverride, rvcDir: rvcDir)
         }
         /// The hook file itself. ⚠️ `scripts/rvc-mitigation/` holds EXACTLY
         /// ONE file by design — it goes on `sys.path` ahead of site-packages,
@@ -785,6 +783,67 @@ extension VoiceConversionManager {
         /// whole interpreter.
         public var mitigationModuleURL: URL? {
             mitigationDirURL?.appendingPathComponent("sitecustomize.py")
+        }
+
+        /// m10-p-6 — `scripts/rvc-patches/`, holding the two corrected engine
+        /// modules the hook binds before the engine loads (MLX's broken
+        /// `conv_transpose1d` on long outputs, and the fork's flow
+        /// `noise_scale` shipped at 0.0). Without them a conversion does not
+        /// produce a voice at all.
+        ///
+        /// `DAWPRO_RVC_PATCHES_DIR` wins if set; otherwise the SIBLING of
+        /// `rvcDir`, exactly like `mitigationDirURL` — derived, so the three
+        /// directories cannot be misconfigured apart from each other.
+        ///
+        /// ⚠️ Unlike `rvc-mitigation/`, this directory is NOT on `sys.path`:
+        /// the hook loads `shadow.py` by path. It therefore has no one-file
+        /// rule, which is exactly why the patch modules live here — their
+        /// names (`generators`, `synthesizers`) are far too generic to expose
+        /// to the whole interpreter.
+        public var patchesDirOverride: URL?
+
+        public var patchesDirURL: URL? {
+            Self.resolveOwnedDir(
+                name: "rvc-patches", override: patchesDirOverride, rvcDir: rvcDir)
+        }
+
+        /// Ordered resolution for a small directory WE own that has to survive
+        /// distribution. PURE given its three injected inputs, so the order is
+        /// testable without a bundle or a filesystem.
+        ///
+        /// 1. explicit override (`DAWPRO_RVC_*_DIR`)
+        /// 2. the sibling of `rvcDir` **if it exists** — the repo checkout, and
+        ///    any install that keeps the three directories co-located
+        /// 3. the app bundle's resources — a distributed `.app`, where the
+        ///    1.7 GB vendored runtime CANNOT ship inside the bundle and so
+        ///    `rvcDir` points somewhere else entirely (an installed runtime
+        ///    under Application Support). ⚠️ This is exactly why (2) cannot be
+        ///    trusted unconditionally: deriving these from `rvcDir` is right in
+        ///    a checkout and wrong in a bundle.
+        /// 4. the sibling again, existing or not — so a missing directory still
+        ///    produces the SAME "restore it / set the env var" error naming the
+        ///    SAME path it always named, rather than a confusing bundle path.
+        static func resolveOwnedDir(
+            name: String,
+            override: URL?,
+            rvcDir: URL?,
+            bundleCandidates: [URL]? = nil,
+            exists: ((URL) -> Bool)? = nil
+        ) -> URL? {
+            if let override { return override }
+            let doesExist = exists ?? { FileManager.default.fileExists(atPath: $0.path) }
+            let sibling = rvcDir?.deletingLastPathComponent()
+                .appendingPathComponent(name)
+            if let sibling, doesExist(sibling) { return sibling }
+            let bundles = bundleCandidates ?? [
+                Bundle.main.resourceURL,
+                Bundle.main.bundleURL.appendingPathComponent("Contents/Resources"),
+            ].compactMap { $0 }
+            for base in bundles {
+                let candidate = base.appendingPathComponent(name)
+                if doesExist(candidate) { return candidate }
+            }
+            return sibling
         }
 
         /// PURE — no process, no I/O. The child environment for the facade,
@@ -823,11 +882,34 @@ extension VoiceConversionManager {
             base: [String: String],
             voicesDir: String,
             mitigationDir: String?,
+            patchesDir: String?,
             outDir: String
         ) -> [String: String] {
             var environment = base
             environment["RVC_VOICES_DIR"] = voicesDir
             if !outDir.isEmpty { environment["RVC_OUT_DIR"] = outDir }
+
+            // m10-p-6 — where the audio-correctness patch modules live. The hook
+            // derives this from its own location when unset, but a BUNDLED build
+            // has no such sibling relationship to rely on, so the app states it.
+            if let patchesDir, !patchesDir.isEmpty {
+                environment["DAWPRO_RVC_PATCHES_DIR"] = patchesDir
+            }
+
+            // ⚠️ Set UNCONDITIONALLY, not only when the hook is armed.
+            //
+            // Importing `sitecustomize` makes CPython write
+            // `<mitigationDir>/__pycache__/`. Two consequences, both real:
+            //  1. `gate_m23fo_mechanism.py` asserts no `__pycache__` beside the
+            //     hook (the one-file invariant), so any real app run turned that
+            //     gate RED until now — a latent defect this item reproduced.
+            //  2. In a distributed .app the hook ships inside a code-signed,
+            //     read-only Resources directory. Writing there is at best a
+            //     no-op and at worst a signature problem.
+            // Bytecode caching buys nothing for one small module on a process
+            // that already takes seconds to boot.
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+
             guard let mitigationDir, !mitigationDir.isEmpty else { return environment }
             let inherited = base["PYTHONPATH"] ?? ""
             environment["PYTHONPATH"] =
@@ -851,6 +933,7 @@ extension VoiceConversionManager {
                 base: base,
                 voicesDir: VoiceModelImport.voicesDirectory.path,
                 mitigationDir: mitigationDirURL?.path,
+                patchesDir: patchesDirURL?.path,
                 outDir: VoiceConversionOutput.sidecarOutputDirectory.path)
         }
 
@@ -930,6 +1013,11 @@ extension VoiceConversionManager {
                 config.mitigationDirOverride =
                     URL(fileURLWithPath: override).standardizedFileURL
             }
+            // m10-p-6 — same shape again.
+            if let override = environment["DAWPRO_RVC_PATCHES_DIR"], !override.isEmpty {
+                config.patchesDirOverride =
+                    URL(fileURLWithPath: override).standardizedFileURL
+            }
             return config
         }
 
@@ -948,7 +1036,30 @@ extension VoiceConversionManager {
                     return found
                 }
             }
+            // A DISTRIBUTED build has no `Package.swift` to walk up to, so every
+            // anchor above fails and the sidecar was previously unreachable
+            // outside a repo checkout. The vendored runtime is ~1.7 GB (venv +
+            // fork + weights) and cannot live inside a code-signed bundle, so
+            // the shipped location is an INSTALLED one under Application
+            // Support. Returned only when it is actually there, so a checkout
+            // that simply has not run install.sh still reports the same
+            // not-installed error against the same path it always named.
+            if let installed = installedRuntimeDir(),
+               FileManager.default.fileExists(atPath: installed.path) {
+                return installed
+            }
             return nil
+        }
+
+        /// `<Application Support>/DAWPro/rvc` — the per-machine home for the
+        /// vendored runtime in a distributed build. Deliberately NOT under the
+        /// bundle: it is large, it is written during install, and a bundle is
+        /// read-only and signed.
+        static func installedRuntimeDir() -> URL? {
+            guard let base = try? FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: false) else { return nil }
+            return base.appendingPathComponent("DAWPro/rvc")
         }
 
         private static func walkUpForScriptsDir(from start: URL) -> URL? {

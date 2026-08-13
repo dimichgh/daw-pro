@@ -1,4 +1,15 @@
-r"""m23-fo mitigation hook — `mx.clear_cache()` before every RVC inference.
+r"""RVC facade hook — two INDEPENDENT corrections, both applied before the bind.
+
+1. **m23-fo** — `mx.clear_cache()` before every inference, so repeated
+   conversions in one long-lived sidecar do not degrade to saturation.
+2. **m10-p-6** — binds the audio-CORRECTNESS patches from
+   `scripts/rvc-patches/` (MLX's broken `conv_transpose1d` on long outputs, and
+   the fork's flow `noise_scale` shipped at 0.0 instead of 0.66666). Without
+   these a SINGLE conversion does not produce a voice at all. See that
+   directory's README.md. The patch modules deliberately live THERE, not here —
+   see the one-file rule below.
+
+Original m23-fo notes follow.
 
 ⚠️⚠️ **THIS DIRECTORY MUST CONTAIN EXACTLY ONE FILE, FOREVER.**  It is placed on
 `PYTHONPATH`, i.e. on `sys.path` *ahead of* site-packages, so any second module
@@ -92,6 +103,7 @@ import sys
 
 HOOK_VERSION = "1.0.0"
 DEFECT = "m23-fo"
+PATCH_DEFECT = "m10-p-6"   # the audio-correctness patches; independent of DEFECT
 ROUTE_PATH = "/v1/_dawpro/mitigation"
 TARGET = "rvc_mlx.infer.infer_mlx.RVC_MLX.infer"
 
@@ -111,6 +123,12 @@ STATE = {
     "facadeModuleAliases": None,
     "facadeResolvedBy": None,  # "identity" | "fallbackMain" | "unresolved"
     "routeAdded": False,
+    # m10-p-6 — the audio-CORRECTNESS patches (see scripts/rvc-patches/README.md).
+    # Independent of m23-fo above: that one stops repeated conversions degrading,
+    # these two make a SINGLE conversion produce a voice at all.
+    "patchesBound": False,
+    "patchesDir": None,
+    "patchesError": None,
 }
 
 _clear_cache = None       # resolved AT PATCH TIME, not at call time
@@ -122,6 +140,20 @@ def _loud(message: str) -> None:
     try:
         print("[dawpro-" + DEFECT + "] " + message, flush=True)
     except Exception:  # noqa: BLE001 — stdout is closed; nothing sane to do
+        pass
+
+
+def _loud_patches(message: str) -> None:
+    """Same channel, but tagged `m10-p-6`, NOT `m23-fo`.
+
+    The two corrections are independent and fail independently, so they must be
+    greppable apart in the facade log. Reusing the m23-fo tag also made the
+    mechanism gate's fail-safe check DISPLAY this line as if it were the
+    mitigation's own.
+    """
+    try:
+        print("[dawpro-" + PATCH_DEFECT + "] " + message, flush=True)
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -183,6 +215,54 @@ def _resolve_facade_module(app):
 # ---------------------------------------------------------------------------
 
 
+def _patches_dir() -> str:
+    """Where `scripts/rvc-patches/` is at runtime.
+
+    `DAWPRO_RVC_PATCHES_DIR` wins (the app sets it, and a bundled build needs
+    it); otherwise it is OUR OWN SIBLING, derived rather than an independent
+    default so the two directories cannot be misconfigured apart from each
+    other -- the same rule `mitigationDirURL` follows on the Swift side.
+    """
+    env = os.environ.get("DAWPRO_RVC_PATCHES_DIR", "")
+    if env:
+        return os.path.abspath(env)
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.path.join(here, os.pardir, "rvc-patches"))
+
+
+def _bind_patches() -> None:
+    """Bind the m10-p-6 audio-correctness patches BEFORE the engine is imported.
+
+    Loads `shadow.py` BY PATH and does NOT put the patches directory on
+    `sys.path`. That directory holds `generators.py` and `synthesizers.py` --
+    generic top-level names that would shadow same-named modules for the whole
+    interpreter, which is exactly the hazard the one-file rule on THIS
+    directory exists to prevent. Reusing `shadow.install()` rather than
+    re-implementing the load also keeps one guard and one place drift can hide.
+
+    Raises on failure; the caller degrades to "unpatched but running".
+    """
+    import importlib.util
+
+    directory = _patches_dir()
+    STATE["patchesDir"] = directory
+    shadow_py = os.path.join(directory, "shadow.py")
+    if not os.path.isfile(shadow_py):
+        raise RuntimeError("no shadow.py at " + shadow_py)
+
+    spec = importlib.util.spec_from_file_location("dawpro_rvc_shadow", shadow_py)
+    shadow = importlib.util.module_from_spec(spec)
+    # Namespaced module key: "shadow" is far too generic to put in sys.modules.
+    sys.modules["dawpro_rvc_shadow"] = shadow
+    spec.loader.exec_module(shadow)
+
+    # install() raises if either patch fails to bind, INCLUDING the case where the
+    # fenced module was imported first -- which is the one failure that would
+    # otherwise look identical to success while serving broken audio.
+    shadow.install(verbose=False)
+    STATE["patchesBound"] = True
+
+
 def _patch_engine() -> None:
     """Import MLX + the vendored engine and wrap `RVC_MLX.infer`.
 
@@ -190,6 +270,26 @@ def _patch_engine() -> None:
     once, before the port binds.
     """
     global _clear_cache, _get_cache_memory
+
+    # FIRST -- must precede the `from rvc_mlx.infer.infer_mlx import RVC_MLX`
+    # below, which is the first thing in the process to pull the engine's import
+    # chain (`server.py:102` is lazy, so nothing has imported it yet).
+    #
+    # A failure here must NOT cost the user their sidecar: /health, voice listing
+    # and the m23-fo mitigation all work without these patches. So it degrades to
+    # "running, audio uncorrected" and says so loudly, per this hook's standing
+    # never-fail-the-boot contract.
+    try:
+        _bind_patches()
+        _loud_patches(
+            "audio patches BOUND (m10-p-6: mlx conv_transpose1d chunking + flow "
+            "noise_scale) from " + str(STATE["patchesDir"])
+        )
+    except Exception as exc:  # noqa: BLE001 — never fail the boot
+        STATE["patchesError"] = repr(exc)
+        _loud_patches(
+            "NOT APPLIED — conversions will be WRONG: " + repr(exc)
+        )
 
     import mlx.core as mx
 

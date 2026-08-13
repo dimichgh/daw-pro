@@ -71,6 +71,15 @@ public final class PanelLayoutStore {
     /// making an explicit request, and this switch means "don't sound notes
     /// while I edit", not "never make sound").
     public static let auditionEnabledKey = "auditionEnabled"
+    /// Waveform auto-fit (m25-e) — whether an audio clip's peak outline is scaled
+    /// up to fill its block (capped) or drawn at raw amplitude. Stored in the
+    /// shared `Double` backing as 1 = fit / 0 = raw, the `followPlayhead`
+    /// encoding; the public API is a `Bool`.
+    public static let waveformNormalizeKey = "waveformNormalize"
+    /// Waveform vertical zoom (m25-e) — the magnification applied ON TOP of the
+    /// fit (or of raw amplitude), so a user can push a quiet passage's shape up
+    /// until the pattern reads. The `arrangePPB` slot's VERTICAL sibling.
+    public static let waveformVerticalZoomKey = "waveformVerticalZoom"
 
     // MARK: - Defaults (today's hardcoded values — the pre-m10-d look)
 
@@ -96,6 +105,14 @@ public final class PanelLayoutStore {
     /// feature, and the switch exists as an escape hatch for a user who finds
     /// it noisy — not as an opt-in that leaves the item invisible by default.
     public static let defaultAuditionEnabled = true
+    /// Waveform auto-fit starts ON (m25-e) — the `auditionEnabled` rationale, not
+    /// the `followPlayhead` one. The reported defect IS the un-normalised look, so
+    /// an opt-in default would ship the fix invisible; the switch is the escape
+    /// hatch back to true amplitude. Reason in full: `WaveformScale`.
+    public static let defaultWaveformNormalize = WaveformScale.defaultNormalize
+    /// Waveform vertical zoom starts at 1× (m25-e) — no magnification on top of
+    /// the fit, the ⌥⌘0 reset target.
+    public static let defaultWaveformVerticalZoom = WaveformScale.defaultVerticalZoom
 
     // MARK: - Clamp ranges
     //
@@ -126,6 +143,9 @@ public final class PanelLayoutStore {
     public static let arrangePPBRange: ClosedRange<CGFloat> = ArrangeZoom.pixelsPerBeatRange
     /// Piano-roll zoom bounds (m21-c) — one source of truth in `PianoRollZoom`.
     public static let pianoRollPPBRange: ClosedRange<CGFloat> = PianoRollZoom.pixelsPerBeatRange
+    /// Waveform vertical-zoom bounds (m25-e) — one source of truth in
+    /// `WaveformScale`, the `ArrangeZoom`/`PianoRollZoom` discipline.
+    public static let waveformVerticalZoomRange: ClosedRange<CGFloat> = WaveformScale.verticalZoomRange
 
     // MARK: - Live values (observed)
 
@@ -150,6 +170,15 @@ public final class PanelLayoutStore {
     /// Whether a piano-roll drag / keyboard-gutter click sounds the pitch on
     /// the track's instrument (m23-d). ONE value for both audition surfaces.
     public private(set) var auditionEnabled: Bool
+    /// Whether audio waveforms are scaled up to fill their block (m25-e). ONE
+    /// value for every waveform in the arrange workspace — the clip blocks AND
+    /// the take lanes read it, so the two surfaces can never draw the same file
+    /// at different scales.
+    public private(set) var waveformNormalize: Bool
+    /// Extra vertical magnification applied to every audio waveform (m25-e),
+    /// on top of the fit. Shares `waveformNormalize`'s one-value-both-surfaces
+    /// discipline.
+    public private(set) var waveformVerticalZoom: CGFloat
 
     @ObservationIgnored private let backing: PanelLayoutBacking
 
@@ -175,6 +204,11 @@ public final class PanelLayoutStore {
             .map { $0 != 0 } ?? Self.defaultFollowPlayhead
         self.auditionEnabled = backing.loadValue(forKey: Self.auditionEnabledKey)
             .map { $0 != 0 } ?? Self.defaultAuditionEnabled
+        self.waveformNormalize = backing.loadValue(forKey: Self.waveformNormalizeKey)
+            .map { $0 != 0 } ?? Self.defaultWaveformNormalize
+        self.waveformVerticalZoom = Self.loaded(backing, Self.waveformVerticalZoomKey,
+                                                default: Self.defaultWaveformVerticalZoom,
+                                                range: Self.waveformVerticalZoomRange)
     }
 
     private static func loaded(_ backing: PanelLayoutBacking, _ key: String,
@@ -240,6 +274,24 @@ public final class PanelLayoutStore {
         backing.storeValue(enabled ? 1 : 0, forKey: Self.auditionEnabledKey)
     }
 
+    /// Turns waveform auto-fit on (FIT) or off (RAW) (m25-e). Write-throughs like
+    /// every other dimension, so a user who went back to true amplitude is still
+    /// there after relaunch.
+    public func setWaveformNormalize(_ normalize: Bool) {
+        waveformNormalize = normalize
+        backing.storeValue(normalize ? 1 : 0, forKey: Self.waveformNormalizeKey)
+    }
+
+    /// Sets the waveform vertical zoom (m25-e). Clamped like every dimension, so
+    /// the view layer can hand a raw stepper/wire value straight through. No
+    /// anchor recompute rides along (unlike `setArrangePPB`): the vertical axis
+    /// has no scroll offset to preserve — the clip block's height never changes,
+    /// only what is drawn inside it.
+    public func setWaveformVerticalZoom(_ zoom: CGFloat) {
+        waveformVerticalZoom = zoom.clamped(to: Self.waveformVerticalZoomRange)
+        backing.storeValue(Double(waveformVerticalZoom), forKey: Self.waveformVerticalZoomKey)
+    }
+
     /// Restores every dimension to its default (and persists the reset).
     public func reset() {
         setSidebarWidth(Self.defaultSidebarWidth)
@@ -250,6 +302,8 @@ public final class PanelLayoutStore {
         setMixerInsertsCollapsed(Self.defaultMixerInsertsCollapsed)
         setFollowPlayhead(Self.defaultFollowPlayhead)
         setAuditionEnabled(Self.defaultAuditionEnabled)
+        setWaveformNormalize(Self.defaultWaveformNormalize)
+        setWaveformVerticalZoom(Self.defaultWaveformVerticalZoom)
     }
 }
 

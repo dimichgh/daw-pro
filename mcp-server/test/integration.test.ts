@@ -318,12 +318,14 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // hold; unload one or all WITH evidence that it stopped) took it 174 -> 176.
   // m23-di-2a's vc_import_voice_model (third-party RVC voice-model import —
   // a mutating tool, so it joined the strict-schema wrapper count) took it
-  // 176 -> 177.
+  // 176 -> 177. m25-d's transport_set_stop_at_content_end (stop the transport
+  // at the end of the last clip — a mutating tool, so it joined the strict-schema
+  // wrapper count) took it 177 -> 178.
   // ⚠️ The DECOMPOSITION, because the total on its own has rotted before:
   // 34 `server.registerTool(` (pure reads, deliberately exempt from `.strict()`)
-  // + 143 `registerTool(` (the strict-schema wrappers — `vc_import_voice_model`
-  // joined those) = 177.
-  assert.equal(result.tools.length, 177);
+  // + 144 `registerTool(` (the strict-schema wrappers — `vc_import_voice_model`
+  // and `transport_set_stop_at_content_end` joined those) = 178.
+  assert.equal(result.tools.length, 178);
 });
 
 // ---------------------------------------------------------------------------

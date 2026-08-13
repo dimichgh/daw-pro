@@ -487,4 +487,54 @@ struct ClipGroupMoveTests {
         let moved = try store.moveClips(ids: [b.id], byBeats: 0.5)
         #expect(moved.trimmedClipIDs == [a.id])
     }
+
+    // MARK: - The non-mutating plan query (m25-k)
+
+    @Test("plannedGroupBeatDelta answers the clamp WITHOUT moving anything")
+    func plannedDeltaMovesNothing() throws {
+        let (store, _, clips) = try self.store(clipsAt: [4, 12])
+        let snapshot = store.tracks
+        let depth = undoDepth(store)
+
+        let planned = store.plannedGroupBeatDelta(ids: clips.map(\.id), byBeats: -100)
+
+        #expect(planned.effective == -4)   // the leftmost mover's start
+        #expect(planned.clamped)
+        #expect(store.tracks == snapshot)
+        #expect(undoDepth(store) == depth)
+    }
+
+    @Test("plannedGroupBeatDelta agrees with moveClips — one clamp, asked twice")
+    func plannedDeltaAgreesWithTheMove() throws {
+        // The whole reason the query routes through `clampedGroupBeatDelta`
+        // rather than restating `max(delta, -minStart)`: a preview that
+        // disagreed with its own commit would put the ghost somewhere the drop
+        // does not land, and the two could agree BY LUCK on most inputs (m23-f).
+        for requested in [-100.0, -4, -3.5, 0, 2, 37] {
+            let (store, _, clips) = try self.store(clipsAt: [4, 12])
+            let planned = store.plannedGroupBeatDelta(ids: clips.map(\.id), byBeats: requested)
+            let moved = try store.moveClips(ids: clips.map(\.id), byBeats: requested)
+
+            #expect(planned.effective == moved.effectiveDeltaBeats)
+            #expect(planned.clamped == moved.clamped)
+        }
+    }
+
+    @Test("plannedGroupBeatDelta SKIPS stale ids instead of throwing — a live drag must not refuse")
+    func plannedDeltaSkipsStaleIDs() throws {
+        let (store, _, clips) = try self.store(clipsAt: [4, 12])
+
+        // A vanished id contributes no start (the `resolved(in:)` silent-skip
+        // policy). `moveClips` would THROW `clipNotFound` here, and a throw once
+        // per pointer frame would turn cosmetic staleness into a refused drag.
+        let planned = store.plannedGroupBeatDelta(
+            ids: [clips[1].id, UUID()], byBeats: -100)
+        #expect(planned.effective == -12)   // clamped on the SURVIVOR's start
+        #expect(planned.clamped)
+
+        // …and an all-stale set reports no travel rather than pretending.
+        let none = store.plannedGroupBeatDelta(ids: [UUID()], byBeats: -100)
+        #expect(none.effective == 0)
+        #expect(!none.clamped)
+    }
 }

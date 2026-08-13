@@ -171,7 +171,7 @@ struct TrackReorderCommandTests {
         // install/status pair landed after THAT; count 159 -> 161 —
         // clip.transcribe is no longer last (see
         // SpeechModelInstallCommandTests for that leg).
-        #expect(CommandRouter.allCommands.count == 174)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a
+        #expect(CommandRouter.allCommands.count == 175)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d
         // Additive: every pre-existing track.* verb is untouched, in place.
         for name in ["track.add", "track.remove", "track.rename", "track.setVolume",
                      "track.setPan", "track.setMute", "track.setSolo", "track.setOutput",

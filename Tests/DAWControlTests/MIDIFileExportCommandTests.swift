@@ -45,7 +45,7 @@ struct MIDIFileExportCommandTests {
     /// command was renamed or reordered and HEAD's list stays an exact PREFIX.
     @Test("both verbs are registered, at the END of the command list")
     func commandsAreRegisteredAtTheEnd() {
-        #expect(CommandRouter.allCommands.count == 174)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a
+        #expect(CommandRouter.allCommands.count == 175)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d
         // m23-n2b appended `clip.transcribe`, m23-n3b appended
         // `ai.installSpeechModel`/`ai.speechModelInstallStatus`, m23-r4
         // appended `fx.spectrum` after THAT, m23-o1 appended
@@ -57,12 +57,13 @@ struct MIDIFileExportCommandTests {
         // up, not the tail itself.
         // …and m23-dl appended `ai.modelResidency`/`ai.modelUnload` after
         // THAT, so both suffix windows widen by two. m23-di-2a then appended
-        // `vc.importVoiceModel` after THAT, widening both by one more.
-        #expect(Array(CommandRouter.allCommands.suffix(15).prefix(2))
+        // `vc.importVoiceModel` after THAT, and m25-d appended
+        // `transport.setStopAtContentEnd` after THAT, each widening both by one.
+        #expect(Array(CommandRouter.allCommands.suffix(16).prefix(2))
                 == ["project.exportMIDI", "track.exportMIDI"])
         // The k3 pair is still where it was, one rung further up — the
         // exact-prefix claim, asserted rather than assumed.
-        #expect(Array(CommandRouter.allCommands.suffix(17).prefix(2))
+        #expect(Array(CommandRouter.allCommands.suffix(18).prefix(2))
                 == ["project.importMIDI", "clip.importMIDI"])
     }
 

@@ -433,6 +433,15 @@ public final class CommandRouter {
         // sidecar HTTP call. STRICTLY ADDITIVE, appended at the end per the
         // additive-at-end law.
         "vc.importVoiceModel",
+        // m25-d: the end-of-content stop preference — stop the transport when
+        // the playhead reaches the point past which there are no more clips.
+        // A SESSION preference (ON by default), never project data, so it is a
+        // verb of its own rather than a field on transport.setLoop/setPunch.
+        // NOTE: no quoted string in this comment, deliberately — the array body
+        // already costs the naive quoted-string count one false positive
+        // (docs/ARCHITECTURE.md), and a second would compound the trap.
+        // STRICTLY ADDITIVE, appended at the end per the additive-at-end law.
+        "transport.setStopAtContentEnd",
     ]
 
     public init(
@@ -702,6 +711,25 @@ public final class CommandRouter {
             let countInBars = params["countInBars"]?.doubleValue.map { Int($0) }
             try store.setMetronome(enabled: metronomeEnabled, countInBars: countInBars)
             return .success(request.id, try JSONValue(encoding: store.transport))
+
+        case "transport.setStopAtContentEnd":
+            // m25-d. params: enabled bool (required). Allowed in every
+            // transport state — including mid-record, where it is inert by
+            // construction (a take NEVER stops at content end) rather than
+            // refused, so an agent flipping a preference can't fail a call for
+            // reasons that have nothing to do with the preference.
+            //
+            // Returns BOTH the preference and the measured `contentEndBeat`
+            // (0 for a project with no clips), because the second is what makes
+            // the first legible: an agent can see where the stop will land.
+            try params.rejectUnknownKeys(
+                ["enabled"], verb: "transport.setStopAtContentEnd")
+            let stopAtEnd = try params.require("enabled", \.boolValue)
+            store.setStopAtContentEnd(stopAtEnd)
+            return .success(request.id, JSONValue.object([
+                "stopAtContentEnd": .bool(store.stopAtContentEnd),
+                "contentEndBeat": .number(store.contentEndBeat),
+            ]))
 
         case "track.add":
             // F5 HARDENING (m16-e, audit F5): the audit's measured wrong-object-

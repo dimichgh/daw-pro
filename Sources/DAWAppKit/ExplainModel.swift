@@ -144,6 +144,11 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// (its ⌘ shortcuts and the pinch gesture included — the honest-scope rule
     /// for gesture chrome).
     case arrangeZoom
+    /// The arrange-toolbar WAVE cluster (m25-e): the −/state/+ waveform-height
+    /// chip and the menu it opens. One card for the whole cluster (the
+    /// `arrangeZoom` honest-scope precedent) — it covers BOTH halves, the auto-fit
+    /// mode and the magnification, because they compose into one drawn height.
+    case arrangeWaveformZoom
     /// The arrange-toolbar FOLLOW chip (m23-c2). One card for the whole feature:
     /// it governs the timeline AND the note editor, so its scope is both surfaces
     /// (the `arrangeZoom` honest-scope precedent).
@@ -493,6 +498,9 @@ public enum ExplainCatalog {
         .arrangeZoom: ExplainEntry(
             title: "Zoom",
             body: "Zooms the timeline in for fine edits or out to see the whole song — the view holds its place around the playhead so nothing jumps. You can also pinch the timeline, and S, M, L set how tall each track row is."),
+        .arrangeWaveformZoom: ExplainEntry(
+            title: "Waveform Height",
+            body: "Sets how tall the sound shapes are drawn inside your audio clips. Fit stretches quiet material up to fill the block so its pattern shows; True Level draws every clip at its real loudness so you can see which are louder. Use − and + to magnify further."),
         .arrangeFollow: ExplainEntry(
             title: "Follow the Playhead",
             body: "Keeps the playing position in view: as the song plays past the right edge, the timeline and the note editor turn to the next page on their own. Scroll somewhere yourself and following steps aside so it never fights you — press play again, or click FOLLOW, to hand it back."),

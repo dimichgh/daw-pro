@@ -89,10 +89,10 @@ struct MIDIFileImportCommandTests {
         // `clip.moveManyByTracks`/`clip.moveManyToTrack` AFTER this pair —
         // the additive-at-end law working, not a regression: the k3 verbs did
         // not move, they are simply no longer last.
-        #expect(CommandRouter.allCommands.count == 174)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a
+        #expect(CommandRouter.allCommands.count == 175)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d
         // …and m23-dl appended `ai.modelResidency`/`ai.modelUnload` after
         // THAT, then m23-di-2a appended `vc.importVoiceModel` after that.
-        #expect(Array(CommandRouter.allCommands.suffix(17).prefix(2))
+        #expect(Array(CommandRouter.allCommands.suffix(18).prefix(2))
                 == ["project.importMIDI", "clip.importMIDI"])
     }
 

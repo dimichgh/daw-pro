@@ -37,6 +37,35 @@ struct ViewCommands: Commands {
                     }
                 }
             }
+            // Waveform height (m25-e) — the ⌘± items' VERTICAL sibling, on ⌥⌘±
+            // so the two axes read as one family. DELIBERATELY off the
+            // `zoomIn`/`zoomOut` surface router: ⌘± means "more or less TIME" on
+            // whichever editor has focus, and the piano roll has no waveform to
+            // scale, so routing these would make one keystroke mean two unrelated
+            // things. They always address the arrange waveforms.
+            Divider()
+            Menu("Waveform Height") {
+                Button("Fit to Clip Height") { model.setWaveformNormalize(true) }
+                Button("True Level") { model.setWaveformNormalize(false) }
+                Divider()
+                // ⚠️ `=`, NOT `+`, and the difference is load-bearing. A SwiftUI
+                // key equivalent matches a CHARACTER: `+` is physically ⇧=, so
+                // the zoom-in chord here would be ⌥⇧⌘=, which on a US layout
+                // emits `±` rather than `+` — a dead menu item, and the one that
+                // matters most (this is the fast path the feature exists for).
+                // ⌥⌘= carries no Shift, so the character is unambiguously `=`.
+                // The sibling ⌘+ item above gets away with `+` only because
+                // ContentView:326 carries a hidden bare-⌘= alias for exactly this
+                // reason; a submenu item cannot host a second equivalent, so this
+                // one takes the unambiguous key directly. ⌥⌘− and ⌥⌘0 are
+                // unaffected — Option does not remap those.
+                Button("Taller Waveforms") { model.waveformZoomIn() }
+                    .keyboardShortcut("=", modifiers: [.command, .option])
+                Button("Shorter Waveforms") { model.waveformZoomOut() }
+                    .keyboardShortcut("-", modifiers: [.command, .option])
+                Button("Reset Waveform View") { model.waveformZoomReset() }
+                    .keyboardShortcut("0", modifiers: [.command, .option])
+            }
         }
     }
 

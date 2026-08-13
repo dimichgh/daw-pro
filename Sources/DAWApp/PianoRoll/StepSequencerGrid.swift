@@ -13,8 +13,12 @@ import DAWAppKit
 /// ⚠️ **MOUSE-ONLY. NO keyboard shortcut belongs on this surface** — not DELETE,
 /// not arrows, not space. The click is simultaneously the entry path and the
 /// deletion path, which is the property that made the surface safe to build
-/// while m23-cf (a bare DELETE reported dead on notes and clips) is still
-/// undiagnosed. See `StepSequencerEdit`.
+/// while m23-cf (a bare DELETE reported dead on notes and clips) was still
+/// undiagnosed. ⭐ **m23-cf IS FIXED as of 2026-08-12** (user-confirmed by hand),
+/// so the ORIGINAL reason for the mouse-only scoping has expired — but the
+/// scoping itself is kept on its own merits: one gesture that is both entry and
+/// deletion needs no key, and adding one now would be a new design decision
+/// rather than the removal of a workaround. See `StepSequencerEdit`.
 struct StepSequencerBand: View {
     /// The resolved grid — lanes, columns, cell size. Built by the parent from
     /// the live draft so the drawing, the hit test and the edit share one value.

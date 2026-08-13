@@ -41,8 +41,10 @@ struct VoiceModelImportCommandTests {
     @Test("vc.importVoiceModel is in the canonical command list, additive at the end; count 173 -> 174")
     func commandIsCanonical() {
         #expect(CommandRouter.allCommands.contains("vc.importVoiceModel"))
-        #expect(CommandRouter.allCommands.last == "vc.importVoiceModel")
-        #expect(CommandRouter.allCommands.count == 174)
+        #expect(CommandRouter.allCommands.dropLast().last == "vc.importVoiceModel")
+        // m25-d appended transport.setStopAtContentEnd at the END (same law).
+        #expect(CommandRouter.allCommands.last == "transport.setStopAtContentEnd")
+        #expect(CommandRouter.allCommands.count == 175)
         // Additive: the rest of the vc.* family is untouched.
         for name in ["vc.sidecarStatus", "vc.sidecarStart", "vc.sidecarStop",
                      "vc.convertVocals", "vc.trainVoice", "vc.listVoices"] {

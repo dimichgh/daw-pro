@@ -41,9 +41,10 @@ struct ExplainCatalogTests {
         // arrange toolbar's FOLLOW chip (.arrangeFollow) → 90; m23-m3 added the
         // export dialog (.exportDialog) → 91; m23-cq-1 added the step sequencer's
         // three (.stepSequencerMode / .stepSequencerGrid / .stepSequencerStep)
-        // → 94.
-        #expect(ExplainID.allCases.count >= 94,
-                "explain coverage shrank below the m23-cq-1 floor: \(ExplainID.allCases.count)")
+        // → 94; m25-e added the arrange toolbar's WAVE cluster
+        // (.arrangeWaveformZoom) → 95.
+        #expect(ExplainID.allCases.count >= 95,
+                "explain coverage shrank below the m25-e floor: \(ExplainID.allCases.count)")
     }
 
     @Test("ExplainID round-trips its raw value; unknown raw is nil (debug.explainMode focus)")

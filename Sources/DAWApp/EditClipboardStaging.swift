@@ -153,6 +153,18 @@ extension AppModel {
             "cut": describe(cutMenuItem),
             "paste": describe(pasteMenuItem),
         ])
+        // THE KEYSTROKE ROUTE'S RAW WIRING (m25-f-1), so the one thing about
+        // ⌘X/⌘C/⌘V that IS machine-observable can be observed: whether the
+        // responder exists, whether it sits in the content window's chain, and
+        // what AppKit resolves `copy:` to right now.
+        //
+        // ⚠️⚠️ RAW FACTS, NEVER A VERDICT, AND NEVER A GATE ASSERTION ON ITS OWN.
+        // A keystroke is still invisible to every gate in this tree; and on a
+        // staging binary the content window is frequently not key, where
+        // `NSApp.target(forAction:)` answers nil for reasons that have nothing to
+        // do with this code. A leg that read `targetForCopy == null` as "broken"
+        // would be measuring the harness.
+        object["responder"] = clipboardResponderFacts
         // The CONTEXT a red leg needs to read as a sentence rather than a
         // mystery: which workspace, whether a roll is open, how many tracks, and
         // where the playhead — the anchor every paste is resolved against.

@@ -837,6 +837,34 @@ public protocol AudioEngineControlling: AnyObject {
     /// main actor is about to stop being able to send note-offs.
     func stopAllAudition()
 
+    /// END-OF-CONTENT STOP BOUND (m25-d): the linear beat at which playback
+    /// should stop because there is no more material past it, or `nil` for
+    /// "run linearly forever" (today's behaviour, and the value during a
+    /// recording take or an active loop).
+    ///
+    /// **A PRE-COMPUTED SCALAR ON PURPOSE.** `ProjectStore` derives the value
+    /// off the playhead path — walking every track's clips — and hands the
+    /// engine one `Double?`. The engine's playhead tick then does a single
+    /// optional unwrap and one `>=` comparison per tick: no allocation, no
+    /// lock, no ObjC dispatch, no actor hop, and no call back into the store.
+    /// The store re-pushes on every transition that can change the answer
+    /// (play / seek / loop change / preference toggle / record / stop).
+    ///
+    /// Optional capability: the default discards, so fakes and headless
+    /// engines compile and behave exactly as before.
+    func setEndStop(beat: Double?)
+
+    /// Sink invoked once when the playhead reaches the `setEndStop` bound.
+    /// The engine does NOT tear its own transport down — `ProjectStore` owns
+    /// transport state and calls its ordinary `stop()`, so the end stop lands
+    /// on exactly the same path as a user pressing stop (no new semantics, no
+    /// journal entry: this is transport state, not an edit).
+    ///
+    /// A function rather than a `var` because a protocol property requirement
+    /// cannot carry a default implementation, and every existing conformer
+    /// must keep compiling untouched (the `setAuditionPitches` precedent).
+    func setEndStopHandler(_ handler: (() -> Void)?)
+
     /// PANIC (m23-af): all-notes-off on EVERY instrument renderer, whatever the
     /// transport is doing. Returns how many renderers were asked.
     ///
@@ -962,6 +990,18 @@ extension AudioEngineControlling {
     /// The audition all-stop is optional capability (m23-d): an engine with no
     /// audition support holds no voices, so the default is a no-op.
     public func stopAllAudition() {}
+
+    /// The end-of-content stop bound is optional capability (m25-d, the
+    /// `stopAllAudition` precedent). An engine that ignores it simply never
+    /// stops itself — and that is SAFE by construction, because the store's
+    /// headless ticker carries the same policy for the engine-less case and
+    /// `ProjectStore.stop()` remains the only thing that ends a take. A
+    /// silent default here can lose the feature, never a recording.
+    public func setEndStop(beat: Double?) {}
+
+    /// The end-stop sink is optional capability (m25-d): an engine that never
+    /// evaluates a bound never fires one, so the default discards.
+    public func setEndStopHandler(_ handler: (() -> Void)?) {}
 
     /// Output-device enumeration is optional capability (m20-j, the
     /// `availableMIDIInputs` shape): fakes and headless engines drive no

@@ -175,17 +175,39 @@ try {
   //
   // ⚠️ THE REAL LESSON, and why this comment is long: the SAME decision was
   // pinned in TWO homes and only ONE was updated. `ClipboardMenuPolicyTests`
-  // (Swift) already asserts "Copy Selection" and has been green all along; this
+  // (Swift) already asserted "Copy Selection" and had been green all along; this
   // `.mjs` gate kept asserting the superseded convention and nobody re-ran it.
-  // Only the LIVE title carries a count ("Copy 3 Clips") — the inert title is
-  // the one that had to become legible.
-  const INERT = { copy: "Copy Selection", cut: "Cut Selection", paste: "Paste Clipboard" };
+  //
+  // ⭐⭐ REVERSED AGAIN 2026-08-12 (m25-f-1), BY THE USER, AND BOTH HOMES WERE
+  // UPDATED TOGETHER THIS TIME — that is the whole point of the paragraph above.
+  // Their words: "we do not need to use copy 3 clips, it should just copy
+  // anything selected to the copy buffer and when pasted, it should use paste
+  // behavior of what is being copied. use common logic and commonly adopted
+  // partice for such behavior". The teaching titles ("Copy Selection" and its
+  // two siblings) are DELETED from `ClipboardMenuPolicy`; a refused item now
+  // carries the BARE macOS word, which is what the six-near-identical-rows
+  // defect had originally forced us away from — and that defect is itself gone,
+  // because m25-f-1 removed the three duplicate buttons and the Edit menu's
+  // Cut/Copy/Paste are now macOS's OWN items, driven by the responder chain.
+  //
+  // ⚠️ THE LIVE TITLE STILL COUNTS ("Copy 3 Clips") IN THIS ECHO, and that is
+  // not a contradiction: `ClipboardMenuItem.title` is what the POLICY resolved,
+  // and the Edit menu no longer renders it (`ClipboardResponderRouting`
+  // .presentation builds the title from the VERB). Legs below that assert a
+  // counted title are asserting about the policy, not about the menu bar.
+  // ⚠️ THE NAME `INERT` IS HISTORICAL — it once held the teaching titles
+  // ("Copy Selection" / "Nothing to Paste"). Those were DELETED 2026-08-12 on
+  // the user's ruling ("we do not need to use copy 3 clips… use common logic and
+  // commonly adopted partice"), so a REFUSED item now reads the bare verb, same
+  // as a live one — only `enabled`/`refusedBy` distinguish them. The name is
+  // left alone so this edit stays a value change nobody has to re-verify.
+  const INERT = { copy: "Copy", cut: "Cut", paste: "Paste" };
   check("C1 an empty clipboard: kind null, and PASTE names the empty-clipboard guard",
         e.kind === null && e.menu.paste.enabled === false
         && e.menu.paste.refusedBy === "empty-clipboard" && e.menu.paste.title === INERT.paste,
         `kind=${e.kind} paste=${JSON.stringify(e.menu.paste)}`);
-  check("C1b nothing selected: COPY and CUT name the empty-selection guard, and the "
-        + "INERT title names what the item is waiting for (not a bare verb)",
+  check("C1b nothing selected: COPY and CUT name the empty-selection guard, and a "
+        + "refused item reads the BARE VERB (the teaching title is gone — m25-f-1)",
         e.menu.copy.refusedBy === "empty-selection" && e.menu.copy.title === INERT.copy
         && e.menu.cut.refusedBy === "empty-selection" && e.menu.cut.title === INERT.cut,
         `copy=${JSON.stringify(e.menu.copy)} cut=${JSON.stringify(e.menu.cut)}`);

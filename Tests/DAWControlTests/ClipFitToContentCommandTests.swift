@@ -166,7 +166,7 @@ struct ClipFitToContentCommandTests {
         // m23-n2b's clip.transcribe; count 158 -> 159. Then m23-n3b's
         // install/status pair; count 159 -> 161 — clip.transcribe is no
         // longer last (see SpeechModelInstallCommandTests for that leg).
-        #expect(CommandRouter.allCommands.count == 174)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a
+        #expect(CommandRouter.allCommands.count == 175)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d
         // The verb is additive: its clip.* neighbors are untouched.
         #expect(CommandRouter.allCommands.contains("clip.trim"))
         #expect(CommandRouter.allCommands.contains("clip.split"))

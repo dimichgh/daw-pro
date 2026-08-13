@@ -1,5 +1,283 @@
 # Changelog
 
+## 2026-08-13 — Voice conversion actually works now, and the fix travels with the app
+
+Voice conversion has been producing noise instead of a voice. Two separate bugs, neither of them
+in our code:
+
+**One is in Apple's MLX itself.** Its `conv_transpose1d` silently leaves a large chunk of its
+output blank when the output is long — about half the samples wrong on a 46-second clip. Short
+clips are fine, which is why the library we build on advertises "perceptually identical" results
+in good faith: they tested on 13.5 seconds, below where it breaks. We work around it by splitting
+each call into shorter pieces.
+
+**The other is in that library.** It multiplies a random-noise term by zero where the reference
+implementation uses 0.66666. That noise is what gives a converted voice its breath and texture;
+without it you get the conditional average of a voice, which sounds metallic and rings. The
+comment directly above the line says "expanding with noise" — someone almost certainly zeroed it
+to get repeatable numbers while debugging and never put it back.
+
+With both fixed, conversion runs in **1.7 seconds for 46 seconds of audio** — about 26× realtime,
+and 10× faster than the PyTorch path we were going to fall back to.
+
+Until today those fixes only worked from the command line: the app's own voice sidecar still ran
+the broken code on every machine. It now applies them at startup and reports whether they took, so
+a silently-unpatched sidecar can't masquerade as a healthy one. The fixes also ship inside the app
+bundle, so they travel to another laptop or a packaged build rather than only existing in a
+developer's checkout.
+
+Not fixed: the Mac App Store. The voice engine is a 1.7 GB Python process, which the App Store
+sandbox does not permit. Direct distribution works.
+
+## 2026-08-11 — A test that can now say "I don't know" instead of quietly saying "fine"
+
+Our automated checks had a blind spot. Some of them are *preconditions* — they confirm the world is
+in the state a later check assumes. One test restarts the app and then confirms your "follow the
+playhead" preference survived. Before it can claim that, it has to know the old copy of the app
+really shut down. If it hadn't, the test could reconnect to the *old* app and read the setting out
+of the process that never restarted — and report a pass.
+
+Until now, a failed precondition just got recorded and the test carried on, reporting the later
+checks as passes. Anyone reading the results would see one failure and have no way to know it made
+four other passes meaningless.
+
+Checks can now declare what they depend on. If a precondition fails, everything resting on it is
+reported as **UNKNOWN** rather than passed or failed — with a note saying which precondition
+invalidated it. A check that depends on two things names both. Genuine failures are still reported
+as failures; this only affects results we can no longer vouch for.
+
+While doing this we also found that a separate long-standing complaint — that this same test had
+been failing for an unknown number of cycles — has been fixed by earlier work, and confirmed it now
+passes completely.
+
+
+## 2026-08-11 — Adding a track while the song plays got about 50 ms faster, and we can prove it
+
+Adding a new track in the middle of playback is one of the more expensive things the app does: it
+has to rebuild the audio graph and hand every currently-playing clip back to the sound engine. We
+have measured that cost for a while, and a note in one of our timing checks suggested it had
+quietly improved. That was a single measurement, so it was written down as a suspicion rather than
+a fact.
+
+It is now a fact. Across eight fresh runs, the cost of that mid-playback track add has dropped by
+roughly 50 ms compared with every measurement taken in mid-July — and the old and new sets of
+numbers do not overlap at all, with a clear gap between them. The per-track part of the cost is
+unchanged; it is the fixed overhead that got cheaper. The runs were also taken on a *busier*
+machine than the original ones, so if anything the improvement is understated.
+
+We did not change any behaviour here and we did not loosen any of the limits the check enforces —
+this was a measurement, and the only edits were to the explanatory notes. One of those notes had
+been quietly comparing two different things: a number this check can calculate, and a different
+number measured a different way. They were never the same quantity and never should have been
+compared. That is now spelled out, so the next person to read it is not misled.
+
+## 2026-08-11 — A test that now re-checks its own assumptions instead of trusting a note
+
+One of our visual checks watches the piano roll scroll to follow the playhead. To do that it looks
+at the pixels and decides "there is a note here" by whether the ink is dark enough — a sensitivity
+setting. Two different parts of that check share one sensitivity number, but they look at strips of
+very different heights, so they have very different amounts of room to spare before a real note
+stops registering.
+
+That mattered for a practical reason. If a note ever *did* slip below the sensitivity threshold, the
+check would fail with a message about a completely different mechanism — one that filters out the
+playhead line — and send whoever read it to the wrong setting entirely.
+
+The check now measures its own margin on every run and prints the result, and fails with a message
+that names the sensitivity setting directly if the margin ever disappears. While adding that, the
+measurement turned up a small correction: an older note in the code said notes stop registering
+past a certain sensitivity, and they don't — they survive noticeably further, and the falloff is
+gradual rather than a clean edge. The margin is about two and a half times the shipped setting
+rather than one and a half. We corrected the note where it was written rather than only where it
+had been quoted, and because the numbers are now re-derived on every run, that particular figure
+can't quietly go stale again.
+
+No behaviour changed: the sensitivity setting itself is untouched, and nothing about how the app
+plays or draws is different.
+
+## 2026-08-11 — The doubled note we were hunting cannot happen on the sound the test uses
+
+Yesterday's entry ended by saying our loudness meter was blind to the thing we were trying to
+detect — two copies of one note playing at once — and that we'd need to add new machinery deep in
+the audio engine to see it. We went to build that machinery. It turned out not to be needed, and
+the reason is more interesting than the fix would have been.
+
+Two things were true at once, and together they looked like a single mystery.
+
+First: the sound the test plays is a General MIDI instrument, which is handled by Apple's built-in
+sampler rather than by our own synthesizer. When a MIDI instrument is told to play a note it is
+already playing, the standard behaviour is to *restart* that note, not to stack a second copy on
+top of it. So on the exact sound our test uses, the doubling we were hunting cannot occur at all.
+We measured this directly: two copies on two separate tracks light up every meter we have, and two
+copies on one track are indistinguishable from a single note.
+
+Second: on our own built-in synthesizer, two copies of one note genuinely *do* play together — and
+the loudness meter still often can't see them. Two identical notes reinforce or cancel depending on
+how their waveforms line up, and at one particular alignment they sum to exactly the original
+loudness. That's why the earlier measurement kept reading "no change" even in setups where a second
+note was definitely sounding. Loudness was simply the wrong thing to look at. The *brightness*
+reading we already publish sees it immediately — it nearly doubles.
+
+One detail decides whether the first point actually applies to the engine rebuild, so we checked it
+rather than assuming: a note only retriggers instead of stacking if both instructions reach the
+*same* sampler. They do. The component that owns loaded instruments is deliberately kept outside
+the audio engine's lifetime — it survives a rebuild by design, and a rebuild changes nothing that
+would cause an instrument to be reloaded — so the rebuilt engine is handed back the very same
+sampler, with its sound and its plugin state intact.
+
+The practical upshot for anyone using DAW Pro: the failure that would actually hurt you is a held
+note going silent when the engine rebuilds, and that has always been plainly visible to the checks
+we run. The doubled-note scenario turns out to be unreachable on the standard sounds. No engine
+changes were made, and none are needed.
+
+## 2026-08-11 — Ten measurements that turned out to be measuring nothing
+
+There's a known race deep in the audio engine: when the engine is torn down and rebuilt while
+music is playing, the "stop all notes" signal sent to the old engine may not be consumed before
+that engine is thrown away. If it loses that race, a note that was sounding survives into the new
+engine. On the current build we believed this was harmless, and we wanted to check one specific
+way it could bite: if the old note survives *and* the rebuild re-starts the same note, you'd have
+two copies of one note playing at once, which would be about 3–6 dB louder.
+
+The plan was ten runs of the existing test, comparing the loudness before and after. Ten runs, all
+clean, all reading exactly the same level — no doubling. Which looked like an answer, and wasn't.
+
+Every one of the ten runs produced byte-identical numbers. A measurement that never moves is
+indistinguishable from an instrument that can't move, so before trusting it we checked the
+loudness meter could actually see a doubled note. It can: two notes of the same pitch on two
+separate tracks read 6.0 dB louder, right where the theory says they should.
+
+But the same two notes on *one* track read 0.0 dB louder — no change at all, across sixteen
+thousand samples. And one track is exactly the situation this race creates. So the flat reading we
+got ten times over carries no information: "the signal was flushed correctly" and "the signal was
+missed and the extra note vanished into the mix" produce the identical number. The test we ran
+could never have told them apart.
+
+We don't yet know what makes the second note disappear — the obvious explanation, the sampler
+running out of voices and reusing one, is ruled out by the code, which has 64 voices and only
+needed 2. That's now filed as its own piece of work, along with what it would actually take to
+answer the original question: a way to count the notes the engine is really playing, rather than
+inferring it from how loud things are.
+
+## 2026-08-11 — Checking that the view scrolls the right way, and the note our own test was wrong about
+
+When you press play with "follow the playhead" on, the arrangement and the piano roll scroll along to
+keep the playhead in view. Our tests checked that the view moved, and that the playhead stayed on
+screen. They did not check which *direction* it moved. The test counted how many different scroll
+positions it saw — and a set of positions has no order, so a view that scrolled *backwards* through
+the song while the music played forwards would have passed every single check.
+
+Two new checks read the scroll positions in the order they were captured and assert they never go
+backwards. On their own those would be almost worthless: a view that never moved at all also never
+goes backwards. So each one sits directly under the existing "it actually moved" check and says in
+writing that it is meaningless without it — if someone ever weakens that neighbour, they take this
+one down with it, and now they'll know.
+
+Which raised the harder question: if the scroll position *couldn't* report going backwards, the new
+checks would pass on a broken build forever. So two more checks rewind the song to the start while
+it's still playing and assert both views page back — which is what the code is documented to do, and
+what nothing had ever actually driven end to end. That doubles as proof the new checks can fail.
+
+One correction worth recording: the note that opened this work claimed *nothing anywhere* checked
+scroll direction. It was written after searching for the words "monotonic", "increasing", "forward" —
+and there was a direction check sitting there all along, written as a bare `>` comparison, which no
+word search can see. The check was real but narrow (one surface, two points, buried in an unrelated
+test), so the work still needed doing — but the claim that justified it was false.
+
+## 2026-08-11 — A check that would have passed on an empty screenshot, and then passed by one pixel
+
+One of the visual checks watches the piano keyboard strip down the left of the editor and asserts it
+stays byte-for-byte identical while the view scrolls — that strip shouldn't move when the music
+scrolls horizontally. Correct as far as it goes, but it was the wrong shape: a screenshot window
+aimed at blank background is *also* identical every time. It would have passed more reliably on
+nothing than on the real thing, and nothing anywhere checked the window was pointed at the keyboard
+at all.
+
+It now also asserts that the strip contains something — specifically the small cyan keyboard icon in
+the editor header — and, in the same breath, that a deliberately blank slice of the same screenshot
+contains nothing. Both halves are one check on purpose: a separate "the blank bit is blank" check
+would have been another thing that passes on nothing, which is the problem we were fixing.
+
+Then the interesting part. That new check passed, and it passed by one pixel. Sweeping the
+measurement window down the image shows the icon registers from 110 pixels to 152, and the window
+had been placed at exactly 110 — one pixel higher and it reads as empty. It would have gone green
+today and started failing on any small change in how the header is laid out, for no reason connected
+to the thing it is meant to catch. It has been moved to 131, the middle of that range, where it
+reads nearly three times the detection threshold with about twenty pixels of room in each direction.
+
+The general lesson is one we keep re-learning in a new costume: knowing a check passes tells you
+nothing about how close it came to failing, and only a sweep tells you that. A margin is part of a
+measurement, not a detail of it.
+
+One of the visual checks looks at the piano roll and asks whether the little markers in the
+controller lane line up with where the notes actually start. It reads both straight off the screen
+by finding coloured stripes, which is a good way to catch the two halves of the display drifting
+apart.
+
+The trouble is that the playhead — the line showing where you are in the song — is drawn in the same
+colour as the notes, and it crosses the row the check reads. So the list of "note starts" quietly
+included one thing that wasn't a note start. Nothing failed because of it, but the check had become
+easier to pass than intended: a marker that happened to line up with the playhead would have counted
+as correct.
+
+The fix is to tell them apart by width. A note is about 177 pixels wide on screen; the playhead is
+two. That gap is wide enough that a cutoff of eight sits comfortably clear of both.
+
+Two other ways of solving it were considered and rejected on measurement rather than taste. Ignoring
+anything touching the edge of the screenshot sounds safer, but it would have thrown away a real note
+that was half off-screen — and a real marker depends on that note, so the check would have started
+failing for a reason that had nothing to do with the app. Working out where notes *ought* to be from
+the scroll position also fails, because the scroll position lands somewhere different every run; the
+playhead was the only thing standing still.
+
+The check now also refuses to pass if the filter ever removes so much that there is nothing left to
+verify, and it prints the unfiltered stripes next to the filtered ones — so if it ever does fail,
+it's immediately obvious whether the filter was too greedy or the stripe was never detected at all.
+
+That safety net needed a second attempt, and the reason is worth recording. The first version asked
+"are there still at least as many note starts as there are markers to explain?" — which sounds like
+it would catch the filter eating something. It doesn't. The note at the very start of the visible
+area is half off-screen, and so is its marker, so losing that note removes one from each side of the
+comparison and the totals still match. A deliberately over-greedy filter was run to test this, and
+that check stayed green while printing the very note it had just eaten. It now also asserts that one
+specific note is present by name, rather than relying on counting alone.
+
+## 2026-08-11 — Held notes: the last untested path, and a bug we nearly deleted by mistake
+
+Some time ago a note that was already sounding could go silent for good if the app rebuilt its audio
+setup underneath it — hit a certain kind of change while the music was playing and a held pad would
+just stop. That was fixed a while back. What has been happening since is slower and less glamorous:
+proving the fix actually holds at every place in the code that can trigger such a rebuild, one at a
+time, with a test that fails if you break it.
+
+Four of those places are now covered by tests that play real audio and listen to the result. The
+fifth is covered only by a check on the source code, and that is deliberate — the code path in
+question looks unreachable, and a test that pretends to exercise an unreachable path is worse than
+no test, because it reads like coverage. The test says so on its own label rather than in a comment
+someone has to go find.
+
+Two things came out of the work that were not what we went looking for.
+
+The first is a genuine loose end in how the app tears down and rebuilds its audio engine. When the
+engine is replaced, it sends a "stop all notes" message to the old one — but it can then throw that
+old engine away before the message has been acted on. A note that was sounding can survive into the
+new engine. Today nothing bad comes of it, because the same rebuild also re-starts the note properly
+including its ending. It is written down rather than fixed, because changing teardown ordering in
+real-time audio code is not something to do casually or as a side errand.
+
+The second is a correction worth being blunt about. The original report behind all this said a pad
+went silent "when I switched audio devices" — and it turned out that sentence was never something a
+person said. It was our own summary of a measurement, written in quotation marks, and then quoted
+back as though it were a user's words for the next nine days. Finding that out, we came close to
+throwing the whole device-switch question away on the grounds that nobody could reproduce it. That
+was the wrong conclusion: knowing who said something tells you nothing about whether it is true. The
+measurement was real, it was never explained, and switching between two different audio devices
+remains the one version of this that has never actually been tested. It is now its own open item.
+
+Testing it properly turns out to need a second silent audio device to switch to, and this machine
+only has one that is safe to touch — everything else would play sound out loud, and some of it
+belongs to other apps. So that one is waiting on a decision rather than on work.
+
 ## 2026-08-11 — A test that was measuring the machine, not the app
 
 The same follow-the-playhead check had a rule reading "the view must have scrolled to at least three

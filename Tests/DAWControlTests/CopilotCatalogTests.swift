@@ -72,7 +72,9 @@ struct CopilotCatalogTests {
         // group delete/move, and strictly better undo atomicity for a
         // capability (clip.remove/clip.move) already IN the catalog — took it
         // 69 -> 71.
-        #expect(CopilotToolCatalog.v1.count == 74)   // 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack)
+        #expect(CopilotToolCatalog.v1.count == 75)   // 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd)
+        #expect(CopilotToolCatalog.tool(command: "transport.setStopAtContentEnd") != nil,
+                "transport.setStopAtContentEnd missing from the catalog — m21-b2: a new\n                 user-facing capability must be visible to the in-app copilot")
         #expect(CopilotToolCatalog.tool(command: "clip.removeMany") != nil,
                 "clip.removeMany missing from the catalog")
         #expect(CopilotToolCatalog.tool(command: "clip.moveMany") != nil,

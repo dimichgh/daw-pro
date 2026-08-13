@@ -26,8 +26,11 @@ struct ClipboardMenuPolicyTests {
         #expect(item.surface == nil)
         #expect(item.refusedBy == .workspace)
         // A DISABLED ITEM MUST NOT NAME A BLAST RADIUS — every surface above is
-        // richly populated and the title still carries no count.
-        #expect(item.title == ClipboardMenuPolicy.inertCopyTitle)
+        // richly populated and the title still carries no count. ⭐ RETARGETED
+        // 2026-08-12: the title is the BARE macOS word, not the old teaching
+        // string ("Copy Selection"), on the user's ruling that a plain greyed
+        // "Copy" is the commonly adopted practice.
+        #expect(item.title == "Copy")
     }
 
     @Test("a blocking modal refuses Copy — no acting behind a scrimmed panel")
@@ -36,7 +39,7 @@ struct ClipboardMenuPolicyTests {
             verb: .copy, arrangeWorkspace: true, isModalPresented: true,
             pianoRollHasNoteSelection: true, automationPointCount: 1, arrangeClipCount: 4)
         #expect(item.refusedBy == .modal)
-        #expect(item.title == "Copy Selection")
+        #expect(item.title == "Copy")
     }
 
     @Test("the roll holding a note selection takes Copy, ahead of the arrange")
@@ -73,7 +76,7 @@ struct ClipboardMenuPolicyTests {
             verb: .copy, arrangeWorkspace: true, isModalPresented: false,
             pianoRollHasNoteSelection: false, automationPointCount: 0, arrangeClipCount: 0)
         #expect(item.refusedBy == .emptySelection)
-        #expect(item.title == "Copy Selection")
+        #expect(item.title == "Copy")
     }
 
     @Test("the arrange owns Copy when it has a selection, and the title names the count")
@@ -157,7 +160,7 @@ struct ClipboardMenuPolicyTests {
             clipboardKind: nil, clipCount: 0, noteCount: 0,
             arrangeWorkspace: true, isModalPresented: false, rollOpen: true, trackCount: 4)
         #expect(item.refusedBy == .emptyClipboard)
-        #expect(item.title == "Paste Clipboard")
+        #expect(item.title == "Paste")
         #expect(item.isEnabled == false)
     }
 
@@ -280,7 +283,7 @@ struct ClipboardMenuPolicyTests {
         // it needs a selection" is exactly what the reported bug denied users.
         #expect(ClipboardMenuPolicy.noteContextTitle(verb: .copy, selectedNoteCount: 0) == "Copy Notes")
         #expect(ClipboardMenuPolicy.notePasteContextTitle(noteCount: 4) == "Paste 4 Notes")
-        #expect(ClipboardMenuPolicy.notePasteContextTitle(noteCount: 0) == "Paste Clipboard")
+        #expect(ClipboardMenuPolicy.notePasteContextTitle(noteCount: 0) == "Paste")
     }
 
     // MARK: - EditMenuTitles — the ONE plural producer

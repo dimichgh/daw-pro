@@ -204,6 +204,8 @@ struct PanelLayoutStoreTests {
 
         store.setMixerInsertsCollapsed(true)
         store.setFollowPlayhead(true)
+        store.setWaveformNormalize(false)
+        store.setWaveformVerticalZoom(4)
 
         store.reset()
         #expect(store.sidebarWidth == 260)
@@ -220,6 +222,65 @@ struct PanelLayoutStoreTests {
         #expect(backing.storage[PanelLayoutStore.rowHeightKey] == 34)
         #expect(backing.storage[PanelLayoutStore.mixerInsertsCollapsedKey] == 0)
         #expect(backing.storage[PanelLayoutStore.followPlayheadKey] == 0)
+        // m25-e: the waveform's two slots are dimensions too — same half-reset
+        // guard. BOTH halves come back, which is what ⌥⌘0 promises: a reset that
+        // left RAW latched would be one the user could not see the effect of.
+        #expect(store.waveformNormalize == true)
+        #expect(store.waveformVerticalZoom == 1)
+        #expect(backing.storage[PanelLayoutStore.waveformNormalizeKey] == 1)
+        #expect(backing.storage[PanelLayoutStore.waveformVerticalZoomKey] == 1)
+    }
+
+    // MARK: - Waveform height (m25-e)
+
+    @Test("waveform auto-fit defaults ON, round-trips, persists as 1/0, and is sticky")
+    func waveformNormalize() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        // NOT opt-in — the reported defect IS the un-normalised look, so the fix
+        // has to be on by default (the `auditionEnabled` rationale).
+        #expect(store.waveformNormalize == true)
+        #expect(PanelLayoutStore.defaultWaveformNormalize == true)
+
+        store.setWaveformNormalize(false)
+        #expect(store.waveformNormalize == false)
+        #expect(backing.storage[PanelLayoutStore.waveformNormalizeKey] == 0)
+
+        // Sticky across a store rebuild — a user who went back to true amplitude
+        // is still there after relaunch. This is the leg that proves RAW is
+        // REACHABLE AND PERSISTENT, i.e. that relative level is genuinely
+        // recoverable rather than nominally so.
+        #expect(PanelLayoutStore(backing: backing).waveformNormalize == false)
+
+        store.setWaveformNormalize(true)
+        #expect(backing.storage[PanelLayoutStore.waveformNormalizeKey] == 1)
+        #expect(PanelLayoutStore(backing: backing).waveformNormalize == true)
+    }
+
+    @Test("waveform vertical zoom defaults to 1×, clamps to 1–8, and persists")
+    func waveformVerticalZoom() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        #expect(store.waveformVerticalZoom == 1)
+        #expect(PanelLayoutStore.defaultWaveformVerticalZoom == 1)
+
+        store.setWaveformVerticalZoom(2.5)
+        #expect(store.waveformVerticalZoom == 2.5)
+        #expect(backing.storage[PanelLayoutStore.waveformVerticalZoomKey] == 2.5)
+
+        // The store CLAMPS, it does not snap: a between-rungs value is legal.
+        store.setWaveformVerticalZoom(99)
+        #expect(store.waveformVerticalZoom == 8)
+        store.setWaveformVerticalZoom(0.01)
+        #expect(store.waveformVerticalZoom == 1)          // never shrinks below 1×
+        store.setWaveformVerticalZoom(-4)
+        #expect(store.waveformVerticalZoom == 1)
+
+        // Sticky, and an out-of-range STORED value is re-clamped on load.
+        store.setWaveformVerticalZoom(3)
+        #expect(PanelLayoutStore(backing: backing).waveformVerticalZoom == 3)
+        backing.storeValue(500, forKey: PanelLayoutStore.waveformVerticalZoomKey)
+        #expect(PanelLayoutStore(backing: backing).waveformVerticalZoom == 8)
     }
 
     // MARK: - Follow the playhead (m23-c2)
