@@ -29,32 +29,48 @@ struct ClipboardResponderRoutingTests {
     ///
     /// `delete:` would put a SECOND live Delete row in the Edit menu and a second
     /// route into the ⌫ fix the user confirmed by hand on 2026-08-12.
-    /// `selectAll:` would take ⌘A off text. `pasteAsPlainText:` is a TEXT verb
-    /// with no meaning for clips. And `copy` WITHOUT THE COLON is
-    /// `NSObject.copy()` — an argument-less selector every object in the process
-    /// responds to, which a name-based matcher can claim by accident.
+    /// `pasteAsPlainText:` is a TEXT verb with no meaning for clips. And `copy`
+    /// WITHOUT THE COLON is `NSObject.copy()` — an argument-less selector every
+    /// object in the process responds to, which a name-based matcher can claim by
+    /// accident.
+    ///
+    /// ⚠️ `selectAll:` IS STILL HERE AND ITS MEANING CHANGED AT m25-s. It is now
+    /// CLAIMED by the responder (⌘A selects the roll's notes) but it is still not
+    /// a CLIPBOARD VERB, so this mapper must still answer nil for it. That gap is
+    /// exactly why `ClipboardResponder.validateMenuItem` dispatches on the
+    /// selector before reaching this function — see
+    /// `ClipboardResponderSiteTests.selectAllIsDispatchedBeforeTheVerbLookup`.
     @Test("Neighbouring selectors are refused, including the colon-less one")
     func neighbouringSelectorsAreRefused() {
         for name in ["delete:", "selectAll:", "pasteAsPlainText:", "copy", "cut",
                      "paste", "undo:", "redo:", "", "copy::"] {
             #expect(ClipboardResponderRouting.verb(forSelectorName: name) == nil,
-                    "\(name) must not be claimed by the clipboard responder")
+                    "\(name) must not resolve to a clipboard verb")
         }
     }
 
-    @Test("The claimed list is exactly three, in menu order")
+    /// ⭐ SPLIT AT m25-s. `claimedSelectorNames` is what the responder IMPLEMENTS
+    /// (four since ⌘A); `clipboardSelectorNames` is the subset that maps onto a
+    /// `ClipboardVerb`, and the round-trip invariant holds over that.
+    @Test("The claimed list is the clipboard three plus select-all, in menu order")
     func claimedListIsPinned() {
-        #expect(ClipboardResponderRouting.claimedSelectorNames == ["cut:", "copy:", "paste:"])
-        // Every claimed name must resolve — a list entry the mapper does not know
-        // would be a selector the responder implements and then ignores.
-        for name in ClipboardResponderRouting.claimedSelectorNames {
+        #expect(ClipboardResponderRouting.clipboardSelectorNames == ["cut:", "copy:", "paste:"])
+        #expect(ClipboardResponderRouting.claimedSelectorNames
+                == ["cut:", "copy:", "paste:", "selectAll:"])
+        // Every CLIPBOARD name must resolve — a list entry the mapper does not
+        // know would be a selector the responder implements and then ignores.
+        for name in ClipboardResponderRouting.clipboardSelectorNames {
             #expect(ClipboardResponderRouting.verb(forSelectorName: name) != nil)
         }
         // …and every verb must be claimed, so a fourth verb cannot be added to
         // the policy while quietly having no keystroke.
         for verb in ClipboardVerb.allCases {
+            #expect(ClipboardResponderRouting.clipboardSelectorNames.contains("\(verb.rawValue):"))
             #expect(ClipboardResponderRouting.claimedSelectorNames.contains("\(verb.rawValue):"))
         }
+        // ⚠️ `delete:` STAYS OUT — m25-s admitted `selectAll:` and is not a
+        // precedent for it.
+        #expect(!ClipboardResponderRouting.claimedSelectorNames.contains("delete:"))
     }
 
     // MARK: - What the native item says

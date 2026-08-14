@@ -3478,8 +3478,37 @@ public final class ProjectStore {
     /// for an unknown id and `notAMIDIClip` for an audio clip. Notes are
     /// re-clamped and canonically ordered; the edit coalesces per-clip so a
     /// drag of one note is a single undo step. Returns the updated clip.
+    ///
+    /// **`extendToCover` (m25-a) — AUTO-EXTEND, one undo step.** Names the notes
+    /// the CURRENT gesture placed or moved. If one of them lands past the clip's
+    /// end, the clip GROWS to cover it (`ClipAutoExtend` decides how far) inside
+    /// THE SAME `performEdit` as the note write, so a double-click that both
+    /// adds a note and lengthens the clip is ONE undoable action — not two. The
+    /// default `[]` is the pre-m25-a behaviour byte for byte: the wire verb
+    /// `clip.setNotes`, paste, quantize and every other caller keep writing
+    /// past-the-end notes as latent data.
+    ///
+    /// ⚠️ **WHY IDS AND NOT A BOOL.** This verb is handed the roll's WHOLE
+    /// draft, which can already contain latent notes far past the end (m18-f:
+    /// store-legal, engine-windowed). "Extend to fit the notes" would therefore
+    /// mean "adding a note at bar 2 stretches the clip to a forgotten note at
+    /// bar 20". Only the ids named here can move the clip's edge.
+    ///
+    /// ⚠️ **THE GROW NEVER EATS A NEIGHBOUR.** Its ceiling is the distance to
+    /// the next clip on the track (`trailingHeadroom`), because a grow is routed
+    /// through `resolvingOverlaps` like every other edge move — and that choke
+    /// point resolves an overlap by TRIMMING OR DELETING the stationary clip.
+    /// Silently destroying part of a clip the user is not even looking at is a
+    /// far worse surprise than the silent note this item exists to fix, so when
+    /// there is no room the note simply stays latent.
+    ///
+    /// Comp members never reach any of this: `requireNotCompMember` throws
+    /// first, which is exactly right — their geometry is rebuilt from the take
+    /// group's comp on every comp edit, so a length this verb wrote would be
+    /// silently overwritten.
     @discardableResult
-    public func setClipNotes(clipID: UUID, notes: [MIDINote]) throws -> Clip {
+    public func setClipNotes(clipID: UUID, notes: [MIDINote],
+                             extendToCover: Set<UUID> = []) throws -> Clip {
         guard let (t, c) = locateClip(clipID) else {
             throw ProjectError.clipNotFound(clipID)
         }
@@ -3493,11 +3522,76 @@ public final class ProjectStore {
             MIDINote(id: $0.id, pitch: $0.pitch, velocity: $0.velocity,
                      startBeat: $0.startBeat, lengthBeats: $0.lengthBeats)
         }
-        performEdit("Edit Notes", key: "clip.notes:\(clipID.uuidString)") {
-            tracks[t].clips[c].notes = MIDINote.canonicallyOrdered(reclamped)
+        let ordered = MIDINote.canonicallyOrdered(reclamped)
+
+        // Decide the grow BEFORE the edit opens — `ClipAutoExtend` is pure, and
+        // the meter is sampled at the clip's start exactly as the piano roll
+        // samples it for its own bar lines (`ContentView`: `beatsPerBar(atBeat:
+        // clip.startBeat)`), so the new end lands on a line the user can see.
+        let clip = tracks[t].clips[c]
+        let grownLength: Double? = ClipAutoExtend.coverage(of: ordered, ids: extendToCover)
+            .flatMap { span in
+                ClipAutoExtend.extendedLength(
+                    currentLengthBeats: clip.lengthBeats,
+                    coveringOnsetBeat: span.onsetBeat,
+                    coveringEndBeat: span.endBeat,
+                    beatsPerBar: transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
+                    maxLengthBeats: trailingHeadroom(trackIndex: t, clipIndex: c))
+            }
+
+        // ONE `performEdit`. `performEdit` is NOT re-entrant (it captures
+        // before-state and journals unconditionally, with no depth counter), so
+        // the length is written by mutating `tracks` in place here rather than
+        // by calling `trimClip`/`fitClipToContent` — the group-verb precedent.
+        //
+        // ⚠️ It also deliberately does NOT route through `applyTrimWindow`, and
+        // that is a CORRECTNESS point, not a style one: that helper re-windows
+        // the note list and DROPS every note whose start is past the new length
+        // (`guard shiftedStart < newLength`). On a grow that is capped — by
+        // `maxGrowthBars` or by a neighbour — the notes beyond the cap are
+        // precisely the legal-but-latent data m18-f promises to keep, and
+        // running them through the trim window would silently delete them. Its
+        // other work is a no-op on a trailing-edge grow anyway: `delta` is 0, so
+        // `startOffsetSeconds` is unchanged, and fades / gain envelope /
+        // controller lanes only ever re-clamp DOWNWARD to a shorter window.
+        let label = grownLength == nil ? "Edit Notes" : "Edit Notes & Extend Clip"
+        performEdit(label, key: "clip.notes:\(clipID.uuidString)") {
+            tracks[t].clips[c].notes = ordered
+            if let grownLength {
+                tracks[t].clips[c].lengthBeats = grownLength
+                // The no-silent-overlap choke point (m13-b) is honoured even
+                // though `trailingHeadroom` has already made this a no-op by
+                // construction. Belt and braces in the safe direction: if the
+                // headroom math is ever wrong, the invariant still holds.
+                tracks[t].clips = Self.resolvingOverlaps(
+                    in: tracks[t].clips, activeIDs: [clipID],
+                    start: clip.startBeat, end: clip.startBeat + grownLength,
+                    tempoMap: transport.tempoMap).clips
+            }
             engine?.tracksDidChange(tracks)
         }
-        return tracks[t].clips[c]
+        // Re-find by id: `resolvingOverlaps` can remove clips and shift indices.
+        return tracks[t].clips.first { $0.id == clipID } ?? tracks[t].clips[c]
+    }
+
+    /// How long `clips[c]` may become before its trailing edge reaches the next
+    /// clip on the same track — the ceiling an auto-extend (m25-a) must respect
+    /// so a grow never trims a neighbour. nil when nothing follows it.
+    ///
+    /// A clip starting at exactly the same beat counts as zero headroom (that is
+    /// an overlap that already exists; an auto-extend is not the place to
+    /// resolve it). Take-group members count as blockers like any other clip:
+    /// `resolvingOverlaps` exempts them from TRIMMING, which means growing over
+    /// one would leave a genuine silent overlap rather than a trimmed neighbour
+    /// — the worse of the two outcomes.
+    func trailingHeadroom(trackIndex t: Int, clipIndex c: Int) -> Double? {
+        let start = tracks[t].clips[c].startBeat
+        var nearest: Double?
+        for (i, other) in tracks[t].clips.enumerated()
+        where i != c && other.startBeat >= start {
+            nearest = Swift.min(nearest ?? .infinity, other.startBeat)
+        }
+        return nearest.map { Swift.max(0, $0 - start) }
     }
 
     // MARK: - MIDI time-range editing (beta m10-h)
@@ -4493,8 +4587,31 @@ public final class ProjectStore {
     /// keeps the no-skip rule true: `byTracks: 5` on a 3-track project clamps to
     /// the last track and the caller then kind-checks THAT landing. It does not
     /// hunt for a landing that works.
-    static func clampedTrackDelta(requested: Int, minTrackIndex: Int, maxTrackIndex: Int,
-                                  trackCount: Int) -> (effective: Int, clamped: Bool) {
+    /// ⚠️ PUBLIC AS OF m25-l-2, AND THE VISIBILITY IS THE POINT — NOT A
+    /// CONVENIENCE. The cross-track DRAG must draw a ghost on the lane the drop
+    /// will actually reach, and `ArrangeDragPreview`'s own contract forbids
+    /// promising a landing the commit then refuses. The preview therefore needs
+    /// THIS clamp, and the only alternatives were a second copy of the formula in
+    /// the app layer (the drift surface this codebase keeps paying for) or a
+    /// preview that lies at the top and bottom of the track list. Exposing the
+    /// ONE home is the cheaper correctness: `ArrangeVerticalDrag.effectiveDelta`
+    /// calls exactly this function, so the ghost and the landing agree by
+    /// construction rather than by two authors agreeing.
+    ///
+    /// Still PURE and still not an operation — it reads nothing and mutates
+    /// nothing. No behaviour changed here; only who may ask.
+    ///
+    /// `nonisolated` for exactly that reason: `ProjectStore` is `@MainActor`, so
+    /// its statics inherit that isolation, but this function reads no stored
+    /// property and touches no reference type — every input arrives as a
+    /// parameter. Opting it out is a statement of that fact, not a concurrency
+    /// escape hatch (contrast `@unchecked Sendable`, which asserts something the
+    /// compiler cannot see; here the compiler can see everything). It lets the
+    /// headless `ArrangeVerticalDrag` — and its tests — call the one home
+    /// without hopping the main actor.
+    nonisolated public static func clampedTrackDelta(
+        requested: Int, minTrackIndex: Int, maxTrackIndex: Int,
+        trackCount: Int) -> (effective: Int, clamped: Bool) {
         guard trackCount > 0 else { return (0, requested != 0) }
         let lower = -minTrackIndex                    // topmost mover lands on track 0
         let upper = (trackCount - 1) - maxTrackIndex  // bottommost lands on the last track

@@ -80,6 +80,32 @@ public final class PanelLayoutStore {
     /// fit (or of raw amplitude), so a user can push a quiet passage's shape up
     /// until the pattern reads. The `arrangePPB` slot's VERTICAL sibling.
     public static let waveformVerticalZoomKey = "waveformVerticalZoom"
+    /// Bottom-editor MAXIMIZED mode (m25-b-1) — whether the note editor is
+    /// currently suspending the `editorFraction` clamp and filling the window.
+    /// Stored in the shared `Double` backing as 1 = maximized / 0 = normal, the
+    /// `followPlayhead` encoding; the public API is a `Bool`.
+    ///
+    /// ⚠️⚠️ **THIS SLOT AND `editorFraction` ARE INDEPENDENT ON PURPOSE.**
+    /// Maximizing NEVER writes `editorFraction` — the mode is a render-time
+    /// override (`EditorMaximize.effectiveFraction`), so the dragged height is
+    /// still sitting in its own slot, unclamped-by-nothing and unchanged, and
+    /// leaving the mode restores the USER'S previous height rather than a
+    /// default. Anything that "helpfully" writes the maximized fraction back into
+    /// `editorFraction` destroys that and would be clamped to 0.55 on the way in
+    /// anyway, silently changing the user's layout.
+    public static let editorMaximizedKey = "editorMaximized"
+    /// Piano-roll VIEWPORT MINIMAP (m25-b-2) — whether the corner navigator is
+    /// shown over the note grid. Stored in the shared `Double` backing as
+    /// 1 = shown / 0 = collapsed, the `followPlayhead` encoding; the public API is
+    /// a `Bool`.
+    ///
+    /// ⚠️ **It is persisted rather than view `@State` for a structural reason, not
+    /// for tidiness.** `PianoRollView` is mounted `.id(clip.id)`, so it — and every
+    /// piece of `@State` it owns — is destroyed and rebuilt on a clip switch. A
+    /// dismissal held in the view would resurrect itself the next time the user
+    /// opened a different clip, which is the "I turned this off and it keeps coming
+    /// back" class of defect.
+    public static let pianoRollMinimapKey = "pianoRollMinimap"
 
     // MARK: - Defaults (today's hardcoded values — the pre-m10-d look)
 
@@ -113,6 +139,21 @@ public final class PanelLayoutStore {
     /// Waveform vertical zoom starts at 1× (m25-e) — no magnification on top of
     /// the fit, the ⌥⌘0 reset target.
     public static let defaultWaveformVerticalZoom = WaveformScale.defaultVerticalZoom
+    /// The editor starts NORMAL (m25-b-1) — the `followPlayhead` rationale, not
+    /// the `auditionEnabled` one. Maximized is a MODE the user asks for; a
+    /// persisted default of "on" would open every existing session with the
+    /// arrange collapsed to a ruler strip, which reads as a broken window rather
+    /// than as a mode. It is still STICKY once chosen (every dimension here is):
+    /// a user who quit maximized reopens maximized, with the toggle lit and
+    /// Escape live.
+    public static let defaultEditorMaximized = false
+    /// The minimap starts SHOWN (m25-b-2) — the `auditionEnabled` rationale, not
+    /// the `followPlayhead` one. The user ASKED for this map to exist; shipping it
+    /// opt-in would ship it invisible, and a navigator nobody can find is worth
+    /// nothing. It costs no layout (it floats over the grid's corner) and it
+    /// collapses to a 22×22 chip in that same corner, so the escape hatch is one
+    /// click away and in the place the eye is already looking.
+    public static let defaultPianoRollMinimap = true
 
     // MARK: - Clamp ranges
     //
@@ -179,6 +220,17 @@ public final class PanelLayoutStore {
     /// on top of the fit. Shares `waveformNormalize`'s one-value-both-surfaces
     /// discipline.
     public private(set) var waveformVerticalZoom: CGFloat
+    /// Whether the bottom note editor is MAXIMIZED (m25-b-1) — suspending the
+    /// `editorFraction` clamp for as long as the mode is on. Read by the pane's
+    /// height expression, by the arrange row's pinned height, and by the roll's
+    /// header toggle; written by that toggle and by Escape. `editorFraction` is
+    /// untouched throughout, which is what makes the restore land on the user's
+    /// own height (see `editorMaximizedKey`).
+    public private(set) var editorMaximized: Bool
+    /// Whether the piano roll shows its corner viewport minimap (m25-b-2). Read by
+    /// the roll's overlay; written by the map's own collapse chip and by the chip
+    /// that brings it back.
+    public private(set) var pianoRollMinimap: Bool
 
     @ObservationIgnored private let backing: PanelLayoutBacking
 
@@ -209,6 +261,10 @@ public final class PanelLayoutStore {
         self.waveformVerticalZoom = Self.loaded(backing, Self.waveformVerticalZoomKey,
                                                 default: Self.defaultWaveformVerticalZoom,
                                                 range: Self.waveformVerticalZoomRange)
+        self.editorMaximized = backing.loadValue(forKey: Self.editorMaximizedKey)
+            .map { $0 != 0 } ?? Self.defaultEditorMaximized
+        self.pianoRollMinimap = backing.loadValue(forKey: Self.pianoRollMinimapKey)
+            .map { $0 != 0 } ?? Self.defaultPianoRollMinimap
     }
 
     private static func loaded(_ backing: PanelLayoutBacking, _ key: String,
@@ -292,6 +348,28 @@ public final class PanelLayoutStore {
         backing.storeValue(Double(waveformVerticalZoom), forKey: Self.waveformVerticalZoomKey)
     }
 
+    /// Maximizes or restores the bottom note editor (m25-b-1). Write-throughs
+    /// like every other dimension, so the mode survives relaunch.
+    ///
+    /// ⚠️ **DELIBERATELY DOES NOT TOUCH `editorFraction`.** That is the whole
+    /// restore mechanism: the user's dragged height stays where it is and comes
+    /// back untouched when the mode ends. Two callers converge here — the roll's
+    /// header toggle and the Escape route — and both SET rather than toggle, so a
+    /// double-delivered Escape cannot re-maximize.
+    public func setEditorMaximized(_ maximized: Bool) {
+        editorMaximized = maximized
+        backing.storeValue(maximized ? 1 : 0, forKey: Self.editorMaximizedKey)
+    }
+
+    /// Shows or collapses the piano roll's viewport minimap (m25-b-2).
+    /// Write-throughs like every other dimension, so a user who dismissed the map
+    /// stays dismissed across a clip switch AND across a relaunch — the clip switch
+    /// being the one that a view-local flag could not have survived.
+    public func setPianoRollMinimap(_ shown: Bool) {
+        pianoRollMinimap = shown
+        backing.storeValue(shown ? 1 : 0, forKey: Self.pianoRollMinimapKey)
+    }
+
     /// Restores every dimension to its default (and persists the reset).
     public func reset() {
         setSidebarWidth(Self.defaultSidebarWidth)
@@ -304,6 +382,8 @@ public final class PanelLayoutStore {
         setAuditionEnabled(Self.defaultAuditionEnabled)
         setWaveformNormalize(Self.defaultWaveformNormalize)
         setWaveformVerticalZoom(Self.defaultWaveformVerticalZoom)
+        setEditorMaximized(Self.defaultEditorMaximized)
+        setPianoRollMinimap(Self.defaultPianoRollMinimap)
     }
 }
 

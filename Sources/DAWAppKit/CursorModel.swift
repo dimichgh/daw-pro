@@ -27,6 +27,34 @@ public enum CursorKind: String, CaseIterable, Sendable, Equatable {
     /// A precise place/paint surface — click empty automation space to add a
     /// breakpoint, drag a take lane to paint a comp range. macOS crosshair.
     case crosshair
+    /// **PLACE / MOVE THE TRANSPORT POSITION** — ⌘ over the piano-roll grid, where
+    /// a click seeks the playhead to the pointer's snapped beat (m25-o). A
+    /// vertical bar under a small downward cap: a miniature of the scrub ruler's
+    /// own playhead handle, so the pointer says exactly what it is about to place.
+    ///
+    /// ⚠️ **A NEW FAMILY, ADDED TO docs/DESIGN-LANGUAGE.md RATHER THAN
+    /// HAND-CODED, and the doc's own rule is why**: *"Cursors follow ONE
+    /// convention per control family; pick the family, never hand-code a
+    /// per-control cursor."* The transport position had no family and had
+    /// accreted two — the arrange playhead grab strip took `grab`/`grabbing`
+    /// (`CursorAffordance.playhead`), the roll's scrub strip took
+    /// `resizeLeftRight` — so adding a third SILENT convention was the one option
+    /// the doc forbids outright. Naming the family instead makes the existing two
+    /// visible as migrations to file, not as precedent to copy.
+    ///
+    /// ⚠️ **NEUTRAL, NOT CYAN, AND THAT IS THE DESIGN-LANGUAGE RULE NOT A
+    /// PREFERENCE.** Cyan is earned active transport state; the hover-ghost-line
+    /// rule spells out the consequence — a hover hint *"must never be confusable
+    /// with the cyan playhead"*. This pointer is a hint about a playhead that does
+    /// not exist yet, so it stays white-on-dark like every system cursor. The
+    /// SHAPE carries the meaning; the COLOR would be a claim.
+    ///
+    /// There is no `CursorAffordance` case for it: `CursorAffordance` catalogs
+    /// surfaces that advertise a cursor AT REST, and this one is modifier-gated
+    /// (the roll's grid at rest is still the arrow). Adding one would also move
+    /// `CursorModelTests`' `allCases.count == 16`, which guards that catalog — the
+    /// same argument that kept the m25-g group handle out of it.
+    case verticalBar
 }
 
 /// The interactive surface families in the app, each mapped to the pointer it
@@ -58,6 +86,12 @@ public enum CursorAffordance: String, CaseIterable, Sendable {
     case automationPoint   // automation breakpoint
     case playhead          // arrange playhead grab strip (m17-c) — drag scrub-seeks
     case trackHeader       // arrange track header (m23-h) — drag reorders the list
+    /// The piano roll's viewport minimap (m25-b-2) — press or drag to aim the
+    /// editor. A MOVABLE BODY rather than a place/paint surface: the thing under
+    /// the pointer is the viewport rectangle, an existing object being carried, and
+    /// nothing is authored here (the map has no edit gestures at all). The user's
+    /// own words for it were "drag the area", which is the open hand exactly.
+    case minimapViewport
     // Place / paint.
     case automationField   // empty automation lane (click adds a point)
     case takeLanePaint     // take lane comp paint / select
@@ -76,7 +110,8 @@ public enum CursorAffordance: String, CaseIterable, Sendable {
             return .resizeUpDown
         case .horizontalFader, .trimEdge, .fadeGrip:
             return .resizeLeftRight
-        case .clipBody, .noteBody, .automationPoint, .playhead, .trackHeader:
+        case .clipBody, .noteBody, .automationPoint, .playhead, .trackHeader,
+             .minimapViewport:
             return .grab
         case .automationField, .takeLanePaint, .stepCell:
             return .crosshair
@@ -88,7 +123,8 @@ public enum CursorAffordance: String, CaseIterable, Sendable {
     /// cursor for the whole drag (a resize stays a resize, a fader stays a fader).
     public var dragCursor: CursorKind {
         switch self {
-        case .clipBody, .noteBody, .automationPoint, .playhead, .trackHeader:
+        case .clipBody, .noteBody, .automationPoint, .playhead, .trackHeader,
+             .minimapViewport:
             return .grabbing
         default:
             return restCursor

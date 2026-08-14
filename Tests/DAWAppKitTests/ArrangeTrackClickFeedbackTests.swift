@@ -27,6 +27,25 @@ import Testing
 // blocks are visibly selected and the state matches the intent. D1 is the row a
 // careless widening breaks worst: dropping the `!changedSelection` term puts
 // "nothing to select" on top of the largest visible change this surface has.
+//
+// ═══ m25-l-1 DEFECT ②: THE PREDICATE IS UNCHANGED, AND THAT IS DERIVED ════════
+//
+// A plain header click now CLEARS the clip selection instead of selecting the
+// track's clips (USER RULING 2026-08-13; argument in `ArrangeTrackSelection`'s
+// banner). **Every plain click's verdict is BIT-IDENTICAL across that change:**
+// on a zero-clip track the old `replace(with: [])` and the new `clear()` are the
+// same mutation, so D1/D2 are untouched; on a populated track `clipIDs` is
+// non-empty, so the first term is false and the verdict is `.notNeeded` either
+// way. (The REJECTED alternative — leaving the selection standing — would have
+// flipped D1 to `.noClipsToSelect`.)
+//
+// ⚠️ **D6 IS THE ONE ROW WHOSE FIXTURE CHANGED, AND ITS JOB DID NOT.** "PLAIN
+// repeated on the SAME 3-clip header" needed the FIRST plain click to select the
+// three. One plain click on a populated header with nothing selected is now
+// silent by itself, so the row is REACHED SOONER; what changed is why the verdict
+// is right — no longer "three blocks are visibly selected" but "the track HAS
+// clips, so *No clips to select* would be false". The measured table above is a
+// record and is deliberately NOT rewritten. Test 5 below carries the restatement.
 
 @Suite("ArrangeTrackClickFeedback")
 struct ArrangeTrackClickFeedbackTests {
@@ -127,22 +146,44 @@ struct ArrangeTrackClickFeedbackTests {
         #expect(verdict(out) == .noClipsToSelect)
     }
 
-    // 5. D6 — THE TOO-BROAD ROW. Nothing changed, but the track HAS clips and
-    //    they are visibly selected: the state matches the intent, so there is
-    //    nothing to explain. This is why the predicate needs its first term.
-    @Test("D6 PLAIN repeated on the same 3-clip header: nothing changes, still NO acknowledgement")
-    func d6RepeatedPlainClickOnPopulatedTrackNeedsNoWord() {
+    // 5. D6 — THE TOO-BROAD ROW: nothing changed, but the track HAS clips, so the
+    //    sentence "No clips to select" would simply be false. This is why the
+    //    predicate needs its first term.
+    //
+    //    ⚠️ **RESTATED AT m25-l-1 DEFECT ② (USER RULING 2026-08-13).** The measured
+    //    row was "PLAIN repeated on the SAME 3-clip header", whose first click did
+    //    the selecting; a plain click now clears, so a SINGLE plain click on a
+    //    populated header with nothing selected is already the silent case. The
+    //    ASSERTIONS that carry the row's job are kept verbatim — `!changed` and
+    //    `.notNeeded`, i.e. the one-term predicate must not fire here. The one
+    //    assertion that could not survive is `sel.count == 3` (there is now
+    //    nothing selected), and it is replaced by the term that actually decides
+    //    the verdict: `clipIDs.count == 3`.
+    //
+    //    ⭐ THE COMBINATION `changedSelection == false` WITH A NON-EMPTY `clipIDs`
+    //    WAS UNREACHABLE BEFORE THE RULING (the plain branch always ended up
+    //    holding the track's clips), and it is the exact case the "the feedback
+    //    module needs no change" argument rests on. Both clicks are swept so the
+    //    repeat gesture stays covered too.
+    @Test("D6 PLAIN on a populated header with nothing selected: silent, still NO acknowledgement")
+    func d6PlainClickOnPopulatedTrackNeedsNoWord() {
         let ids = [UUID(), UUID(), UUID()]
         let t = track(ids)
         var sel = ArrangeSelection()
-        click(t, .none, &sel)
         let before = sel
-        let out = click(t, .none, &sel)
-        #expect(!out.changedSelection, "the fixture's whole point: a repeat click is a no-op")
+        let first = click(t, .none, &sel)
+        #expect(!first.changedSelection, "nothing was selected and nothing is now: a no-op")
         #expect(sel == before)
-        #expect(sel.count == 3, "three blocks are visibly selected — there is nothing to explain")
-        #expect(verdict(out) == .notNeeded,
+        #expect(first.clipIDs.count == 3,
+                "the track HAS clips — the predicate's first term is what makes this silent click fine")
+        #expect(verdict(first) == .notNeeded,
                 "a bare \"did the selection change?\" predicate fires HERE — it must not")
+
+        // …and the repeat click the row was originally measured with.
+        let again = click(t, .none, &sel)
+        #expect(!again.changedSelection)
+        #expect(sel == before)
+        #expect(verdict(again) == .notNeeded)
     }
 
     // MARK: - The two terms, isolated
@@ -157,13 +198,15 @@ struct ArrangeTrackClickFeedbackTests {
         let d1Out = click(track([]), .none, &d1)
         var d6Sel = ArrangeSelection()
         let populated = track([UUID(), UUID(), UUID()])
-        click(populated, .none, &d6Sel)
         let d6Out = click(populated, .none, &d6Sel)
 
         // "no clips" alone would acknowledge D1 (a cleared selection, a closed editor).
         #expect(d1Out.clipIDs.isEmpty && verdict(d1Out) == .notNeeded)
-        // "did not change" alone would acknowledge D6 (three visibly selected blocks).
-        #expect(!d6Out.changedSelection && verdict(d6Out) == .notNeeded)
+        // "did not change" alone would acknowledge D6 — a silent click on a track
+        // that plainly HAS clips. (⚠️ The D6 fixture is one plain click since
+        // defect ②; it used to need two. See test 5.)
+        #expect(!d6Out.changedSelection && !d6Out.clipIDs.isEmpty
+                && verdict(d6Out) == .notNeeded)
     }
 
     // 7. The predicate is TOTAL over the four effects, and the acknowledged set
@@ -175,7 +218,9 @@ struct ArrangeTrackClickFeedbackTests {
         let empty = track([])
         var seen: [ArrangeTrackClickEffect: ArrangeTrackClickAcknowledgement] = [:]
 
-        // .replace over a NON-empty result
+        // .replace on a track that HAS clips. ⚠️ Since defect ② this leaves the
+        // selection EMPTY (a plain click is a cursor move); the verdict is
+        // `.notNeeded` for the same reason it always was — `clipIDs` is non-empty.
         var s1 = ArrangeSelection()
         seen[.replace] = verdict(click(populated, .none, &s1))
         // .add
@@ -252,14 +297,20 @@ struct ArrangeTrackClickFeedbackTests {
     //    change. Under INV1 that is unreachable today (the focus is always a
     //    member of `ids`), and this pins the stronger reading so a later
     //    invariant change cannot silently narrow it.
+    //
+    //    ⚠️ INPUT RESTATED AT m25-l-1 DEFECT ② (USER RULING 2026-08-13): the click
+    //    is ⇧ now. A plain one no longer grows a selection at all, so it could not
+    //    reach the "grew, and the focus survived" shape this test is about. Every
+    //    ASSERTION is kept verbatim; `formUnion` keeps a member focus exactly as
+    //    `replace(with:)` did.
     @Test("changedSelection compares the whole selection value, focus included")
     func changedSelectionIncludesTheFocus() {
         let a = UUID(), b = UUID()
         let t = track([a, b])
         var sel = ArrangeSelection()
         sel.selectOnly(a)            // ids {a}, focus a
-        let out = ArrangeTrackSelection.apply(click: t, modifiers: .none, to: &sel)
-        // ids {a,b}: grew, and the focus SURVIVED (replace keeps a member focus).
+        let out = ArrangeTrackSelection.apply(click: t, modifiers: .shift, to: &sel)
+        // ids {a,b}: grew, and the focus SURVIVED (the set paths keep a member focus).
         #expect(out.changedSelection)
         #expect(sel.focusID == a)
         #expect(sel.ids == [a, b])

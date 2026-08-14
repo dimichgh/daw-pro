@@ -9,6 +9,14 @@ import Foundation
 // THE RULE, in one line: **a body drag PREVIEWS on every update and COMMITS
 // exactly once, on release.**
 //
+// ⚠️⚠️ THE RULE COVERS BOTH AXES, AND THE VERTICAL ONE RAISED THE STAKES
+// (m25-l-2). Cross-track drag rides this same split rather than getting its own:
+// a land-time overlap policy run per frame ACROSS LANES would be the m25-k
+// defect with a wider blast radius — it would eat clips on every lane the
+// pointer passed over, not just on one. That is why the vertical request lives
+// in this type beside the horizontal one and reaches the store only through
+// `commit()`.
+//
 // WHY IT EXISTS — the defect this type makes unreachable (USER-REPORTED
 // 2026-08-13). `TimelineLanesView.clipDrag` used to call the real store move on
 // EVERY `.onChanged` frame and commit nothing on `.onEnded`. The store move
@@ -43,12 +51,20 @@ public struct ArrangeBodyDrag: Equatable, Sendable {
         public var anchorClipID: UUID
         public var anchorOriginalStart: Double
         public var rawDragDeltaBeats: Double
+        /// The VERTICAL half (m25-l-2), in whole track rows — the pointer's RAW
+        /// request, not the achieved one, exactly as `rawDragDeltaBeats` is the
+        /// raw horizontal request. Clamping and the compatibility back-off are
+        /// `ArrangeVerticalDrag.effectiveDelta`'s job and run identically on the
+        /// preview and on this commit, which is what makes the ghost and the
+        /// landing the same number rather than two numbers that agree.
+        public var requestedTrackDelta: Int
 
         public init(anchorClipID: UUID, anchorOriginalStart: Double,
-                    rawDragDeltaBeats: Double) {
+                    rawDragDeltaBeats: Double, requestedTrackDelta: Int = 0) {
             self.anchorClipID = anchorClipID
             self.anchorOriginalStart = anchorOriginalStart
             self.rawDragDeltaBeats = rawDragDeltaBeats
+            self.requestedTrackDelta = requestedTrackDelta
         }
     }
 
@@ -61,22 +77,35 @@ public struct ArrangeBodyDrag: Equatable, Sendable {
     /// `commit()` will hand over — the LAST one, never an accumulation, because
     /// SwiftUI's `translation` is already measured from the gesture's start.
     public private(set) var rawDragDeltaBeats: Double
+    /// The most recent RAW vertical request, in whole track rows (m25-l-2), on
+    /// the same terms as `rawDragDeltaBeats`: the LAST one, never an
+    /// accumulation, because it is derived from the ABSOLUTE row under the
+    /// pointer rather than from a per-frame movement.
+    public private(set) var requestedTrackDelta: Int
     /// True once this drag has produced its one commit (or been cancelled).
     /// A spent drag previews nothing and commits nothing.
     public private(set) var isSpent: Bool
 
     public init(anchorClipID: UUID, anchorOriginalStart: Double,
-                rawDragDeltaBeats: Double = 0) {
+                rawDragDeltaBeats: Double = 0, requestedTrackDelta: Int = 0) {
         self.anchorClipID = anchorClipID
         self.anchorOriginalStart = anchorOriginalStart
         self.rawDragDeltaBeats = rawDragDeltaBeats
+        self.requestedTrackDelta = requestedTrackDelta
         self.isSpent = false
     }
 
     /// One pointer update. PREVIEW ONLY — returns nothing, reaches nothing.
-    public mutating func update(rawDragDeltaBeats delta: Double) {
+    ///
+    /// ⚠️ BOTH AXES TRAVEL TOGETHER, IN ONE CALL, ON PURPOSE (m25-l-2). A
+    /// separate `update(trackDelta:)` would make it possible for a frame to
+    /// carry a stale value on one axis, and the store applies them as a SINGLE
+    /// edit — so the two numbers must be a single observation of one pointer.
+    public mutating func update(rawDragDeltaBeats delta: Double,
+                                requestedTrackDelta trackDelta: Int = 0) {
         guard !isSpent else { return }
         rawDragDeltaBeats = delta
+        requestedTrackDelta = trackDelta
     }
 
     /// The release. Returns the ONE commit payload the first time it is called
@@ -92,7 +121,8 @@ public struct ArrangeBodyDrag: Equatable, Sendable {
         isSpent = true
         return Commit(anchorClipID: anchorClipID,
                       anchorOriginalStart: anchorOriginalStart,
-                      rawDragDeltaBeats: rawDragDeltaBeats)
+                      rawDragDeltaBeats: rawDragDeltaBeats,
+                      requestedTrackDelta: requestedTrackDelta)
     }
 
     /// The gesture died without a release — SwiftUI cancellation, or the anchor
@@ -128,15 +158,38 @@ public struct ArrangeDragPreview: Equatable, Sendable {
     public var movingClipIDs: Set<UUID>
     /// The achieved translation, in beats.
     public var deltaBeats: Double
+    /// The ACHIEVED vertical translation, in whole track rows (m25-l-2) — the
+    /// output of `ArrangeVerticalDrag.effectiveDelta`, so it is already past the
+    /// whole-group clamp AND the compatibility back-off. Same honesty rule as
+    /// `deltaBeats`: the ghost sits where the drop will land, never where the
+    /// pointer merely asked.
+    ///
+    /// RIGID BY TYPE — one `Int` for the whole gesture, not a per-clip map,
+    /// which is what makes "the selection keeps its vertical shape" a fact about
+    /// the value rather than a promise about the loop that consumes it.
+    public var deltaTracks: Int
 
-    public init(anchorClipID: UUID, movingClipIDs: Set<UUID>, deltaBeats: Double) {
+    public init(anchorClipID: UUID, movingClipIDs: Set<UUID>, deltaBeats: Double,
+                deltaTracks: Int = 0) {
         self.anchorClipID = anchorClipID
         self.movingClipIDs = movingClipIDs
         self.deltaBeats = deltaBeats
+        self.deltaTracks = deltaTracks
     }
 
     /// The beat offset to draw `id` at. Zero for anything not in the drag.
     public func offsetBeats(for id: UUID) -> Double {
         movingClipIDs.contains(id) ? deltaBeats : 0
+    }
+
+    /// The ROW offset to draw `id` at. Zero for anything not in the drag.
+    ///
+    /// ⚠️ The consumer must still CLAMP `sourceRow + offsetTracks(for:)` into its
+    /// own track array. This value is clamped against the tracks as they were
+    /// when the preview was computed, and a track can be removed mid-drag (an
+    /// undo, an agent's `track.remove`) — `TimelineLanesView.laneTop` subscripts
+    /// `tracks[i]`, so a stale row is a trap, not a cosmetic glitch.
+    public func offsetTracks(for id: UUID) -> Int {
+        movingClipIDs.contains(id) ? deltaTracks : 0
     }
 }

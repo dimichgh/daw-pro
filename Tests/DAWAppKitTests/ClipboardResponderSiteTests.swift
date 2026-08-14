@@ -113,22 +113,124 @@ struct ClipboardResponderSiteTests {
 
     // MARK: - Which selectors are claimed
 
-    /// The claimed set is exactly the three. `delete:` is the one that matters:
-    /// claiming it would light a SECOND live Delete row beside the app's own and
-    /// put a second route into the ⌫ fix the user confirmed by hand 2026-08-12.
-    @Test("Exactly three @objc verbs, and delete:/selectAll: are not among them")
+    /// The claimed set is the clipboard three PLUS `selectAll:`. `delete:` is the
+    /// one that matters: claiming it would light a SECOND live Delete row beside
+    /// the app's own and put a second route into the ⌫ fix the user confirmed by
+    /// hand 2026-08-12.
+    ///
+    /// ⭐⭐ **3 → 4 AT m25-s, AND THIS PIN IS EXACTLY THE MECHANISM THAT MADE THAT
+    /// A DECISION.** `selectAll` moved from the BANNED list to the REQUIRED list
+    /// on the user's own request (2026-08-13: *"when in node editor and user uses
+    /// keyboard shortcut \"select all\"/cmd+A - it should select all the notes in
+    /// the editor"*). `ClipboardResponderRouting.claimedSelectorNames` carries the
+    /// full decision, including how the two recorded objections now stand — one
+    /// answered structurally and MEASURED for this selector (P4 reproduced:
+    /// field editor focused ⇒ target `NSTextView`, our `validateMenuItem` not
+    /// called), the other kept as the feature's SCOPE (roll only; no arrange-wide
+    /// select-all was invented).
+    ///
+    /// ⚠️ IF YOU ARE HERE BECAUSE THIS WENT RED AT 5, STOP. A fifth `@objc`
+    /// verb is a product decision about a keystroke, not a refactor.
+    @Test("Exactly four @objc verbs, and delete: is not among them")
     func claimedSelectorsArePinned() {
         let source = Self.code(Self.responderFile)
+        // ⚠️ `selectAll(_:)` IS `override func`, NOT `@objc func`, and the
+        // difference is AppKit's not ours: `NSResponder` DECLARES `selectAll:`
+        // (informal NSStandardKeyBindingMethods) and does not declare
+        // copy:/cut:/paste:, so the compiler REQUIRES `override` here and REJECTS
+        // it there. Counting only `@objc func` would silently stop seeing this
+        // verb, so both spellings are counted.
         let objcCount = source.components(separatedBy: "@objc func").count - 1
-        #expect(objcCount == 3, "expected exactly cut/copy/paste, found \(objcCount)")
+        let overrideCount = source.components(separatedBy: "override func").count - 1
+        #expect(objcCount == 3, "expected exactly cut/copy/paste as @objc, found \(objcCount)")
+        #expect(overrideCount == 1,
+                "expected exactly selectAll as override, found \(overrideCount)")
         for name in ["cut", "copy", "paste"] {
             #expect(source.contains("@objc func \(name)(_ sender: Any?)"),
                     "\(name): must be claimed")
         }
-        for banned in ["func delete(_ sender", "func selectAll(_ sender",
-                       "func pasteAsPlainText(_ sender"] {
+        #expect(source.contains("override func selectAll(_ sender: Any?)"),
+                "selectAll: must be claimed (m25-s) — and as an override")
+        for banned in ["func delete(_ sender", "func pasteAsPlainText(_ sender"] {
             #expect(!source.contains(banned), "must not claim \(banned)")
         }
+        // ⚠️ AN UNRECOGNIZED-SELECTOR CRASH, NOT A NO-OP: `NSResponder` declares
+        // `selectAll:` without implementing it (measured — class_getInstanceMethod
+        // is nil), so there is nothing to call up to.
+        #expect(!source.contains("super.selectAll("),
+                "super.selectAll(_:) has no implementation behind it — it would crash")
+    }
+
+    // MARK: - ⌘A (m25-s)
+
+    /// ⚠️⚠️ **THE ORDERING BUG THIS FEATURE ALMOST SHIPPED, PINNED.**
+    /// `ClipboardResponderRouting.verb(forSelectorName:)` answers nil for
+    /// `selectAll:` — it is claimed, but it is not a clipboard verb. The previous
+    /// `validateMenuItem` shape resolved the verb FIRST and returned `true` from
+    /// its `else`. Leave that order and Select All is PERMANENTLY ENABLED in every
+    /// state while its action quietly returns false: a row that never greys and
+    /// never does anything.
+    @Test("validateMenuItem dispatches selectAll: BEFORE the clipboard-verb lookup")
+    func selectAllIsDispatchedBeforeTheVerbLookup() {
+        guard let body = Self.body(of: "validateMenuItem",
+                                   in: Self.code(Self.responderFile)) else {
+            Issue.record("validateMenuItem(_:) not found"); return
+        }
+        let flat = Self.normalized(body)
+        guard let selectAllBranch = flat.range(of: "ClipboardResponderRouting.selectAllSelectorName"),
+              let verbLookup = flat.range(of: "ClipboardResponderRouting.verb(forSelectorName:") else {
+            Issue.record("both the select-all branch and the verb lookup must be present")
+            return
+        }
+        #expect(selectAllBranch.upperBound <= verbLookup.lowerBound,
+                "selectAll: must be handled before the verb lookup that answers nil for it")
+        #expect(flat.contains("model.selectAllMenuItem"),
+                "the enabled state must come from the policy, never a literal")
+    }
+
+    /// The verb is a ROUTE to the app's action, never its own implementation.
+    @Test("selectAll: funnels into performMenuSelectAll")
+    func selectAllFunnelsIntoTheModel() {
+        guard let body = Self.body(of: "selectAll",
+                                   in: Self.code(Self.responderFile)) else {
+            Issue.record("selectAll(_:) not found in \(Self.responderFile)"); return
+        }
+        #expect(Self.normalized(body).contains("model?.performMenuSelectAll()"))
+    }
+
+    /// ⚠️ **⌘A MUST NOT RIDE THE m23-x DEBUG SEAM.** `stage(selectAll:)` already
+    /// selects every note, so routing the keystroke through it would have been the
+    /// two-line change — and would have made a user-facing feature depend on a
+    /// test affordance that also carries m23-ak's production CLEAR. The app must
+    /// reach the roll through the m25-s nonce instead.
+    @Test("performMenuSelectAll asks the roll through its OWN nonce, not the staging seam")
+    func performMenuSelectAllUsesTheProductionNonce() {
+        guard let body = Self.body(of: "performMenuSelectAll",
+                                   in: Self.code(Self.appFile)) else {
+            Issue.record("performMenuSelectAll() not found in \(Self.appFile)"); return
+        }
+        let flat = Self.normalized(body)
+        #expect(flat.contains("pianoRollNoteSelection.requestSelectAll()"),
+                "the roll owns the draft; the app asks")
+        #expect(!flat.contains("stage(selectAll:"),
+                "a user keystroke must not depend on the m23-x staging seam")
+        #expect(flat.contains("selectAllMenuItem.surface"),
+                "re-resolved at click time, so what was offered and what runs cannot diverge")
+    }
+
+    /// The roll applies the request through the EXTRACTED verb, so the keystroke
+    /// and the staging seam can never select different things — and applies it
+    /// WITHOUT a commit, because selecting is not editing.
+    @Test("the roll routes selectAllNonce into the shared verb, with no commit")
+    func rollAppliesSelectAllThroughTheSharedVerb() {
+        let roll = Self.normalized(Self.code("DAWApp/PianoRoll/PianoRollView.swift"))
+        #expect(roll.contains(".onChange(of: noteSelection.selectAllNonce) { _, _ in model.selectAllNotes() }"),
+                "the ⌘A nonce must apply the extracted verb")
+        // The staging seam runs the SAME verb rather than a second copy of it.
+        #expect(roll.contains("if noteSelection.stagedSelectAll { model.selectAllNotes() }"),
+                "the seam must share the verb, not re-spell it")
+        #expect(!roll.contains("model.selection = Set(model.draft.map(\\.id))"),
+                "the inline expression was extracted at m25-s; a second copy would be free to drift")
     }
 
     /// Each verb is a ROUTE to the app's existing action, never its own

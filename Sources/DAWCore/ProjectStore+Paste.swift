@@ -254,9 +254,48 @@ extension ProjectStore {
     /// negative starts would not error — it would silently weld every early note
     /// onto beat 0.
     ///
+    /// **`extendToCover` (m25-f-2) — AUTO-EXTEND, still ONE undo step.** Names
+    /// the notes THIS PASTE placed. If one of them lands past the clip's end the
+    /// clip GROWS to cover it (`ClipAutoExtend` decides how far) inside THE SAME
+    /// `performEdit` as the note write, so a paste that both adds notes and
+    /// lengthens the clip is ONE undoable action. This is the defect the user
+    /// reported on 2026-08-13: *"when I paste to the clip which is smaller then
+    /// selected notes, it does not expand automatically to accomodate pasted
+    /// notes"*. The default `[]` is the pre-m25-f-2 behaviour byte for byte.
+    ///
+    /// ⚠️ **WHY THIS VERB GROWS RATHER THAN THE PASTE ROUTING THROUGH
+    /// `setClipNotes`.** The obvious "simplification" — send the paste down
+    /// `setClipNotes(clipID:notes:extendToCover:)`, which already has this
+    /// logic — reintroduces the exact trap the banner above exists to close:
+    /// that verb journals under `clip.notes:<id>`, and one ⌘Z would undo the
+    /// paste TOGETHER WITH whatever note edit preceded it inside 800 ms. The
+    /// grow rule is duplicated here deliberately; the coalescing key is not.
+    /// `ClipAutoExtend` being a pure `DAWCore` namespace is what keeps the two
+    /// copies from drifting — the POLICY lives in one place, only the call does
+    /// not.
+    ///
+    /// ⚠️ **IDS, NOT A BOOL — AND ON THIS PATH THE IDS ARE THE SAFETY.** The
+    /// submission handed here is the roll's WHOLE draft, which can already hold
+    /// legal-but-latent notes far past the clip end (m18-f: store-legal, drawn,
+    /// engine-windowed by strict `<`). `ClipAutoExtend.coverage` takes the MAX
+    /// end over the ids it is given, so deriving the span from all notes would
+    /// mean a two-note paste at bar 2 resurrects a forgotten note at bar 20 and
+    /// stretches the clip to it. Because `PasteAnchorPolicy.translatedNotes`
+    /// mints a fresh `UUID()` per pasted note, this id set is DISJOINT from
+    /// every pre-existing note by construction — which is how paste gets, by a
+    /// different mechanism, the guarantee m25-f-3's `moveIDsStartingAudible`
+    /// baseline filter buys for a drag. (That filter is inapplicable here: it
+    /// keys off a PRE-gesture onset, and a pasted note has no prior position.)
+    ///
+    /// ⚠️ **THE GROW NEVER EATS A NEIGHBOUR** — same ceiling as `setClipNotes`:
+    /// `trailingHeadroom`, because a grow is routed through `resolvingOverlaps`
+    /// and that choke point resolves an overlap by TRIMMING OR DELETING the
+    /// stationary clip. With no room the pasted notes simply stay latent.
+    ///
     /// - Returns: the updated clip.
     @discardableResult
-    public func pasteNotes(clipID: UUID, notes: [MIDINote]) throws -> Clip {
+    public func pasteNotes(clipID: UUID, notes: [MIDINote],
+                           extendToCover: Set<UUID> = []) throws -> Clip {
         guard let t = tracks.firstIndex(where: { $0.clips.contains { $0.id == clipID } }),
               let c = tracks[t].clips.firstIndex(where: { $0.id == clipID }) else {
             throw ProjectError.clipNotFound(clipID)
@@ -269,11 +308,49 @@ extension ProjectStore {
             MIDINote(id: $0.id, pitch: $0.pitch, velocity: $0.velocity,
                      startBeat: $0.startBeat, lengthBeats: $0.lengthBeats)
         }
-        // NO `key:`. See the banner — this is the entire point of the method.
-        performEdit("Paste Notes") {
-            tracks[t].clips[c].notes = MIDINote.canonicallyOrdered(reclamped)
+        let ordered = MIDINote.canonicallyOrdered(reclamped)
+
+        // Decide the grow BEFORE the edit opens — `ClipAutoExtend` is pure, and
+        // the meter is sampled at the clip's start exactly as `setClipNotes`
+        // and the piano roll's own bar lines sample it, so the new end lands on
+        // a line the user can already see.
+        let clip = tracks[t].clips[c]
+        let grownLength: Double? = ClipAutoExtend.coverage(of: ordered, ids: extendToCover)
+            .flatMap { span in
+                ClipAutoExtend.extendedLength(
+                    currentLengthBeats: clip.lengthBeats,
+                    coveringOnsetBeat: span.onsetBeat,
+                    coveringEndBeat: span.endBeat,
+                    beatsPerBar: transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
+                    maxLengthBeats: trailingHeadroom(trackIndex: t, clipIndex: c))
+            }
+
+        // ONE `performEdit`, and NO `key:`. See the banner — the missing key is
+        // the entire point of the method, and the single edit is what keeps a
+        // grown paste one ⌘Z rather than two. `performEdit` is NOT re-entrant
+        // (it captures before-state and journals unconditionally, with no depth
+        // counter), so the length is written by mutating `tracks` in place here
+        // rather than by calling `trimClip` — `setClipNotes`' group-verb
+        // precedent, including its reason for NOT routing through
+        // `applyTrimWindow`: that helper DROPS every note starting past the new
+        // length, which on a capped grow is precisely the legal-but-latent data
+        // m18-f promises to keep.
+        let label = grownLength == nil ? "Paste Notes" : "Paste Notes & Extend Clip"
+        performEdit(label) {
+            tracks[t].clips[c].notes = ordered
+            if let grownLength {
+                tracks[t].clips[c].lengthBeats = grownLength
+                // The no-silent-overlap choke point (m13-b), honoured even
+                // though `trailingHeadroom` has already made it a no-op by
+                // construction. Belt and braces in the safe direction.
+                tracks[t].clips = Self.resolvingOverlaps(
+                    in: tracks[t].clips, activeIDs: [clipID],
+                    start: clip.startBeat, end: clip.startBeat + grownLength,
+                    tempoMap: transport.tempoMap).clips
+            }
             engine?.tracksDidChange(tracks)
         }
-        return tracks[t].clips[c]
+        // Re-find by id: `resolvingOverlaps` can remove clips and shift indices.
+        return tracks[t].clips.first { $0.id == clipID } ?? tracks[t].clips[c]
     }
 }

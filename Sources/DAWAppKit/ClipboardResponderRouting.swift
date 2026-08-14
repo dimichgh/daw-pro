@@ -1,6 +1,14 @@
 import Foundation
 
-// m25-f-1 — THE ELIGIBILITY HALF OF ⌘X / ⌘C / ⌘V.
+// m25-f-1 — THE ELIGIBILITY HALF OF ⌘X / ⌘C / ⌘V, and since m25-s ⌘A.
+//
+// ⚠️ THE FILE AND ITS TYPE ARE STILL NAMED "Clipboard" WHILE ONE OF THE FOUR
+// SELECTORS IS NOT A CLIPBOARD VERB. Deliberate, and cheaper than the
+// alternative: the rename would touch `ClipboardResponder`, three site tests
+// that anchor on the type name, and the `debug.editClipboard` echo, to buy a
+// better noun. `claimedSelectorNames` vs `clipboardSelectorNames` carries the
+// distinction where it actually matters — in the code. Revisit if a THIRD
+// non-clipboard selector is ever admitted.
 //
 // ═══ WHY THE RESPONDER CHAIN, AND NOT `.keyboardShortcut` ═══
 //
@@ -78,23 +86,68 @@ public enum ClipboardResponderRouting {
     public static let copySelectorName = "copy:"
     /// `paste:` — the native Edit ▸ Paste item's action (⌘V).
     public static let pasteSelectorName = "paste:"
+    /// `selectAll:` — the native Edit ▸ Select All item's action (⌘A). CLAIMED
+    /// SINCE m25-s; see `claimedSelectorNames` for the decision that admitted it.
+    public static let selectAllSelectorName = "selectAll:"
 
-    /// Exactly the three selectors this app's clipboard responder implements, in
-    /// menu order.
+    /// The three CLIPBOARD selectors, in menu order — the subset that maps onto a
+    /// `ClipboardVerb`.
+    ///
+    /// SPLIT OUT AT m25-s so `verb(forSelectorName:)`'s round-trip invariant
+    /// ("every name here resolves to a verb, and every verb spells a name here")
+    /// still has a set it holds over. It does NOT hold over
+    /// `claimedSelectorNames` any more: `selectAll:` is claimed and is not a
+    /// clipboard verb.
+    public static let clipboardSelectorNames: [String] =
+        [cutSelectorName, copySelectorName, pasteSelectorName]
+
+    /// Exactly the selectors this app's Edit-menu responder implements, in menu
+    /// order.
     ///
     /// ⚠️ **A LIST, SO THAT ADDING A FOURTH IS A DECISION RATHER THAN A DIFF.**
-    /// Two neighbours are deliberately absent and each would be a real defect:
     ///
-    ///   • `delete:` — the ⌫ key already routes through
-    ///     `DeleteKeyMonitorRouting` → `DeleteMenuPolicy` (m23-cf-3), and the
-    ///     Edit menu already carries our own Delete item. Claiming `delete:`
-    ///     would light a SECOND live Delete row beside it and put a second route
-    ///     into a fix the user only just confirmed by hand.
-    ///   • `selectAll:` — ⌘A inside a rename field must keep selecting TEXT.
-    ///     There is no arrange-wide "select all clips" verb in this app yet, and
-    ///     inventing one here would ship it through a keystroke nobody reviewed.
+    /// ═══ THE FOURTH WAS ADDED 2026-08-13 (m25-s), AND HERE IS THE DECISION ═══
+    ///
+    /// THE USER ASKED FOR IT, VERBATIM: *"One small feature to add when in node
+    /// editor and user uses keyboard shortcut \"select all\"/cmd+A - it should
+    /// select all the notes in the editor"* ("node editor" = the piano roll).
+    ///
+    /// This entry previously read as an exclusion with two reasons. Both were
+    /// good, and NEITHER WAS WITHDRAWN — one is now answered structurally and the
+    /// other now BOUNDS the feature instead of blocking it:
+    ///
+    ///   1. *"⌘A inside a rename field must keep selecting TEXT."* ⭐ ANSWERED BY
+    ///      THE MECHANISM, AND MEASURED FOR THIS SELECTOR RATHER THAN INHERITED.
+    ///      P4 was taken for `copy:`; m25-s re-ran the same probe for
+    ///      `selectAll:` and got the same answer — with a field editor focused
+    ///      the target became `NSTextView` and our `validateMenuItem` was NOT
+    ///      CALLED AT ALL (0 calls), with `copy:` alongside it as the positive
+    ///      control. Text keeps ⌘A for free, exactly as it keeps ⌘C.
+    ///   2. *"There is no arrange-wide 'select all clips' verb in this app yet,
+    ///      and inventing one here would ship it through a keystroke nobody
+    ///      reviewed."* ⭐⭐ STILL TRUE, STILL OBEYED, AND IT IS NOW THE FEATURE'S
+    ///      SCOPE. `SelectAllMenuPolicy` returns a surface for the PIANO ROLL
+    ///      ONLY and refuses everywhere else. No arrange-wide select-all was
+    ///      invented; the user asked for the note editor and got the note editor.
+    ///
+    /// ⚠️ AND `delete:` IS STILL EXCLUDED — the exclusion this list was really
+    /// protecting. The ⌫ key already routes through `DeleteKeyMonitorRouting` →
+    /// `DeleteMenuPolicy` (m23-cf-3), and the Edit menu already carries our own
+    /// Delete item. Claiming `delete:` would light a SECOND live Delete row
+    /// beside it and put a second route into a fix the user confirmed by hand.
+    /// Do not read m25-s as a precedent for it: `selectAll:` was admitted
+    /// because NOTHING else in this app claims it (measured — see below), which
+    /// is the opposite of `delete:`'s situation.
+    ///
+    /// ⭐ MEASURED 2026-08-13, AND IT IS WHY CLAIMING THIS COSTS NOTHING: with no
+    /// responder claiming `selectAll:`, `NSApp.target(forAction:)` answered
+    /// **nil** and the native Select All item was ALREADY DISABLED. Nothing
+    /// behind our splice point implements it either —
+    /// `class_getInstanceMethod(_, "selectAll:")` is nil on `NSResponder`,
+    /// `NSWindow`, `NSWindowController` and `NSApplication`. So the item we take
+    /// over was inert, and the app has no other ⌘A handler to displace.
     public static let claimedSelectorNames: [String] =
-        [cutSelectorName, copySelectorName, pasteSelectorName]
+        clipboardSelectorNames + [selectAllSelectorName]
 
     /// Maps a responder-chain selector NAME onto the clipboard verb it performs,
     /// or nil when the selector is none of ours.
@@ -108,6 +161,14 @@ public enum ClipboardResponderRouting {
     /// — a completely different, argument-less selector that every object in the
     /// process responds to. Matching it would claim a method AppKit calls for
     /// object duplication.
+    ///
+    /// ⚠️⚠️ **RETURNS nil FOR `selectAll:`, WHICH IS CLAIMED BUT IS NOT A
+    /// CLIPBOARD VERB (m25-s).** A caller that treats nil as "not ours" is
+    /// therefore WRONG since m25-s — it must dispatch on the selector FIRST and
+    /// reach this only for the clipboard three. `ClipboardResponder
+    /// .validateMenuItem` does exactly that, and the ordering is load-bearing:
+    /// its old `else { return true }` fallback would leave a claimed Select All
+    /// permanently ENABLED in every state while its action quietly did nothing.
     public static func verb(forSelectorName name: String) -> ClipboardVerb? {
         switch name {
         case cutSelectorName: return .cut
@@ -149,6 +210,18 @@ public enum ClipboardResponderRouting {
     /// capability exists and is deliberately unused.
     public static func presentation(for item: ClipboardMenuItem) -> ClipboardItemPresentation {
         ClipboardItemPresentation(title: plainTitle(for: item.verb), isEnabled: item.isEnabled)
+    }
+
+    /// What the native Edit ▸ Select All item should read, and whether it should
+    /// be clickable, once `SelectAllMenuPolicy` has resolved it (m25-s).
+    ///
+    /// SAME SHAPE AS ITS CLIPBOARD TWIN — title from the item, enabled state from
+    /// the policy — so `ClipboardResponder.validateMenuItem` renders both
+    /// branches identically and neither can grow a hand-built string. The title
+    /// here is the bare "Select All" in every state; `SelectAllMenuPolicy.title`
+    /// carries the user's ruling that put it there.
+    public static func presentation(for item: SelectAllMenuItem) -> ClipboardItemPresentation {
+        ClipboardItemPresentation(title: item.title, isEnabled: item.isEnabled)
     }
 
     // MARK: - Where the responder sits

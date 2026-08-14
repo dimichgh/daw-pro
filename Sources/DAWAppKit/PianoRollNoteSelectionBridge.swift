@@ -394,4 +394,47 @@ public final class PianoRollNoteSelectionBridge {
         stagedClipboardVerb = verb
         clipboardNonce += 1
     }
+
+    // MARK: - The SELECT ALL seam (m25-s)
+
+    /// ASKED OF THE ROLL by ⌘A / Edit ▸ Select All: select every note you are
+    /// drawing.
+    ///
+    /// ⚠️⚠️ **A FIFTH NONCE, AND IT IS NOT `stageNonce` — THIS IS THE WHOLE
+    /// DESIGN OF m25-s, NOT HOUSEKEEPING.** `stage(selectAll: true)` above
+    /// already selects every note in the open roll, and routing the user's
+    /// keystroke through it would have been a two-line change. It is refused for
+    /// two independent reasons:
+    ///
+    ///   • `stageNonce` IS A TEST AFFORDANCE. It exists so `debug.arrangeSelection
+    ///     {act:"pianoRollNotes"}` can reach a `@State private PianoRollModel`
+    ///     that nothing outside can otherwise touch. A USER KEYSTROKE MUST NOT
+    ///     DEPEND ON A DEBUG SEAM: the day that seam is gated, renamed or
+    ///     compiled out, ⌘A would go with it, and nothing would say so.
+    ///   • IT ALREADY MEANS THREE THINGS. Its `stagedSelectAll == false` branch
+    ///     routes straight to `model.clearSelection()`, AND it is bumped by the
+    ///     PRODUCTION path `dropForWidenedArrangeSelection()` (m23-ak) meaning
+    ///     "your clip is no longer the whole selection". A fourth meaning on one
+    ///     number is exactly the confusion `deleteNonce`, `marqueeStageNonce` and
+    ///     `clipboardNonce` were each given their own name to avoid — with the
+    ///     added twist that a ⌘A and a gate's staged CLEAR would be
+    ///     indistinguishable at the receiving `.onChange`.
+    ///
+    /// ⭐ **THE VERB IS SHARED, THE MECHANISM IS NOT.** Both this nonce and
+    /// `stageNonce`'s select-all branch land on `PianoRollModel.selectAllNotes()`
+    /// — extracted at m25-s from the inline expression that used to live in the
+    /// view — so the seam and the keystroke can never select different things.
+    /// Sharing the RULE while separating the ROUTE is the m23-cf shape.
+    ///
+    /// CARRIES NO PAYLOAD, like `deleteNonce`: WHAT gets selected is the roll's
+    /// own draft, so the menu cannot name a target the roll disagrees with.
+    ///
+    /// INERT WITH NO ROLL MOUNTED (`.onChange` without `initial: true` — every
+    /// other nonce's behaviour), and that is correct rather than merely
+    /// tolerable: `SelectAllMenuPolicy` refuses unless the roll is the ACTIVE
+    /// surface, which already implies a mounted roll.
+    public private(set) var selectAllNonce = 0
+
+    /// Ask the roll to SELECT ALL of its notes.
+    public func requestSelectAll() { selectAllNonce += 1 }
 }

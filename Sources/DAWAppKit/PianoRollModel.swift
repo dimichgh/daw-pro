@@ -115,6 +115,23 @@ public final class PianoRollModel {
     /// `beginMove(anchorID:)`, read by `moveSelection`.
     @ObservationIgnored private var moveAnchorID: UUID?
 
+    /// Per-note snapshot captured at the start of a GROUP SCALE (m25-g), so each
+    /// tick maps off the original timing rather than compounding the last tick's
+    /// factor — the `moveBaseline` rule, one gesture over.
+    ///
+    /// ⚠️ **A SECOND BASELINE RATHER THAN A WIDER `moveBaseline`, deliberately.**
+    /// A scale needs `lengthBeats` (it scales durations) and does not touch
+    /// pitch; widening the move's tuple would drag `moveSelection` — whose
+    /// single-note byte-identity is pinned across the whole snap ladder by
+    /// `PianoRollModelTests` — into this item's blast radius for no gain. The two
+    /// gestures are mutually exclusive at the view (`ActiveDrag` is one value),
+    /// so two baselines can never both be live.
+    @ObservationIgnored
+    private var scaleBaseline: [UUID: (startBeat: Double, lengthBeats: Double)] = [:]
+    /// Which handle the live group scale is being dragged by; nil when none is
+    /// in flight. Captured by `beginGroupScale(edge:)`, read by `scaleSelection`.
+    @ObservationIgnored private var scaleEdge: PianoRollGroupScale.Edge?
+
     public init(
         notes: [MIDINote] = [],
         clipLengthBeats: Double = 4,
@@ -283,6 +300,17 @@ public final class PianoRollModel {
         draft.map { ($0.id, rect(for: $0)) }
     }
 
+    /// The SELECTED notes' hit rects — `noteRects()` filtered, never a second
+    /// derivation, for the reason spelled out above.
+    ///
+    /// ⚠️ It filters the DRAFT by the selection rather than mapping the
+    /// selection to notes, so an id in `selection` that no longer exists in the
+    /// draft contributes nothing. `PianoRollGroupScale.frame` counts what comes
+    /// out of here precisely because `selection.count` can outrun reality.
+    public func selectedRects() -> [(id: UUID, rect: CGRect)] {
+        noteRects().filter { selection.contains($0.id) }
+    }
+
     // MARK: - Snap
 
     /// Snaps `beat` to the nearest grid line (>= 0). `off` passes the value
@@ -290,6 +318,26 @@ public final class PianoRollModel {
     public func snap(beat: Double, resolution: SnapResolution) -> Double {
         guard let grid = resolution.beats, grid > 0 else { return max(0, beat) }
         return max(0, (beat / grid).rounded() * grid)
+    }
+
+    /// Snaps `beat` UP to the next grid line at or after it (>= 0). `off` passes
+    /// the value through, exactly as `snap` does.
+    ///
+    /// ⚠️ **A SEPARATE VERB RATHER THAN A FLAG ON `snap`, because rounding to
+    /// NEAREST is wrong for a whole class of caller and silently so.** m25-f-2's
+    /// cross-clip paste anchors on the viewport's LEADING EDGE, and `snap` there
+    /// rounds BACKWARD by up to half a grid — at `.bar` in 4/4 that is 2 beats
+    /// off the left edge of the screen, so the group the user was promised
+    /// *"in visible area … ready to be dragged"* lands partly or wholly OUTSIDE
+    /// the viewport. Any anchor that means "at or after this point" needs this
+    /// one; anchors that mean "closest grid line to where the user pointed" (the
+    /// playhead paste, every note drag) keep `snap`.
+    ///
+    /// It lives HERE, beside `snap`, so the roll keeps ONE home for grid
+    /// arithmetic — `PasteAnchorPolicy` deliberately does not re-derive it.
+    public func snapUp(beat: Double, resolution: SnapResolution) -> Double {
+        guard let grid = resolution.beats, grid > 0 else { return max(0, beat) }
+        return max(0, (beat / grid).rounded(.up) * grid)
     }
 
     /// Length a freshly-added note gets: one grid cell, or 1 beat when snapping
@@ -389,6 +437,40 @@ public final class PianoRollModel {
                         < (b.startBeat, b.pitch, b.id.uuidString)
                 }?.id
         }
+    }
+
+    /// Of the notes in the current move, those that were **AUDIBLE when the
+    /// gesture began** — i.e. whose captured onset was strictly inside the clip.
+    ///
+    /// ⚠️⚠️ **THE ONLY NOTES A DRAG MAY GROW THE CLIP FOR (m25-f-3), and the
+    /// reason is the defect this closes.** `ClipAutoExtend.coverage` takes the
+    /// MAX end over the ids it is given, and the roll's draft can already hold
+    /// legal-but-latent notes far past the clip end (m18-f — authored by an AI,
+    /// arriving in a paste, or stranded by an earlier trim). Handing it the raw
+    /// selection therefore means: select all, nudge everything one 16th to fix
+    /// the timing, and the clip silently grows toward a forgotten note at bar 20
+    /// — up to `maxGrowthBars` or the next clip. m25-a names that exact surprise
+    /// for the double-click path (*"adding one note at bar 2 resurrects a
+    /// forgotten note at bar 20"*) and calls the id set "the whole reason this is
+    /// safe"; arriving through the drag door does not make it a different
+    /// surprise.
+    ///
+    /// A note whose onset was ALREADY past the end was already silent before the
+    /// user touched it. Dragging it does not make it the gesture's business to
+    /// resize the clip for — it stays latent, exactly as m18-f promises.
+    ///
+    /// **STRICT `<`, matching engine truth** (`playableEndBeat`,
+    /// `MIDISchedule.buildEvents`): an onset exactly AT the clip end is latent,
+    /// not audible.
+    ///
+    /// Empty when no move is in flight, which makes it safe to call from any
+    /// gesture-end branch.
+    public func moveIDsStartingAudible() -> Set<UUID> {
+        var ids: Set<UUID> = []
+        for (id, base) in moveBaseline where base.startBeat < clipLengthBeats {
+            ids.insert(id)
+        }
+        return ids
     }
 
     /// Moves every note in the move baseline by a raw (unsnapped) beat/pitch
@@ -494,6 +576,141 @@ public final class PianoRollModel {
         }
     }
 
+    // MARK: - Group compress / extend (m25-g)
+
+    /// The selection's bounding box, or nil when it is too small to carry a
+    /// group handle. One composition, spelled once, for the three consumers that
+    /// need it (rest cursor, handle overlay, press router).
+    public func groupScaleFrame() -> CGRect? {
+        PianoRollGroupScale.frame(selectedRects: selectedRects())
+    }
+
+    /// Freezes the selection's timing for a group scale and records which handle
+    /// is being dragged. Every subsequent `scaleSelection` maps off THIS
+    /// snapshot, so a drag that goes out and comes back lands exactly where it
+    /// started rather than accumulating a product of factors.
+    public func beginGroupScale(edge: PianoRollGroupScale.Edge) {
+        scaleBaseline = [:]
+        for note in draft where selection.contains(note.id) {
+            scaleBaseline[note.id] = (note.startBeat, note.lengthBeats)
+        }
+        scaleEdge = edge
+    }
+
+    /// Puts the frozen selection back exactly as it was at press, discarding a
+    /// scale in flight.
+    ///
+    /// ⭐ **WHY THIS EXISTS: A PRESS THAT NEVER TRAVELLED IS A CLICK, NOT A
+    /// GESTURE.** `PianoRollView` applies a scale on EVERY pointer tick, so a
+    /// 1-pt twitch on the handle deforms the draft and then commits nothing
+    /// (`didMove` is false below `moveCommitSlop`) — leaving the roll showing a
+    /// scale the store does not have until something reseeds it. `.move` and
+    /// `.resize` have carried that same shape since long before m25-g and are
+    /// left alone here, but a scale is the one gesture where it MATTERS: a
+    /// sub-slop move shifts the figure by a hair, while a sub-slop scale with
+    /// snapping off multiplies every onset and length in the selection.
+    ///
+    /// Restores from the baseline rather than re-scaling by factor 1, so the
+    /// restoration is byte-exact rather than merely close. Pitch and velocity
+    /// come from the LIVE note — cancelling a scale must not also undo a
+    /// velocity edit that landed during it.
+    public func cancelGroupScale() {
+        for (id, base) in scaleBaseline {
+            guard let index = draft.firstIndex(where: { $0.id == id }) else { continue }
+            let live = draft[index]
+            draft[index] = MIDINote(
+                id: id, pitch: live.pitch, velocity: live.velocity,
+                startBeat: base.startBeat, lengthBeats: base.lengthBeats
+            )
+        }
+    }
+
+    /// Of the notes in the current group scale, those that were **AUDIBLE when
+    /// the gesture began** — the only ones allowed to grow the clip.
+    ///
+    /// The `moveIDsStartingAudible` rule, verbatim and for the same reason: the
+    /// draft can hold legal-but-latent notes far past the clip end (m18-f), and
+    /// a gesture that touched them must not drag the clip's edge out to them.
+    /// STRICT `<`, matching engine truth (`playableEndBeat`): an onset exactly
+    /// AT the clip end was already silent.
+    ///
+    /// ⚠️ A stretch legitimately pushes notes past the end — that is the point
+    /// of the gesture — and how far the clip may then GROW is not decided here.
+    /// `ClipAutoExtend` owns that (`maxGrowthBars`, the next clip's edge).
+    public func scaleIDsStartingAudible() -> Set<UUID> {
+        var ids: Set<UUID> = []
+        for (id, base) in scaleBaseline where base.startBeat < clipLengthBeats {
+            ids.insert(id)
+        }
+        return ids
+    }
+
+    /// Scales the frozen selection so its dragged edge lands on `targetBeat` —
+    /// onsets AND lengths, about the far edge (m25-g). `PianoRollGroupScale`
+    /// carries the reasoning for all three of those choices.
+    ///
+    /// ⭐⭐ **EXACTLY ONE NUMBER SNAPS: the dragged edge.** This is the m23-ek-2
+    /// law (`moveSelection`) in its sharper form — *snapping and clamping are
+    /// properties of the GESTURE, not of each note.* Snapping each note's scaled
+    /// onset would WELD a figure whose notes sit at different sub-grid phases: a
+    /// swung or triplet passage scaled against a 1/16 grid would come out
+    /// straight, silently, and the user's only evidence would be that their
+    /// groove died. And a scale multiplies phase error where a move merely
+    /// translates it, so the same mistake is strictly worse here.
+    /// `PianoRollGroupScaleModelTests.compressedTripletKeepsItsPhase` is the
+    /// mutant-tested guard: plant a per-note snap and it reddens.
+    ///
+    /// ⚠️ **THE TWO EXACTNESS PINS ARE ASYMMETRIC, and that is arithmetic, not
+    /// taste.** A note's end is `start + length`, so an edge made of ENDS can
+    /// only be pinned through a length. Dragging the TRAILING handle, the
+    /// stationary edge is an onset (exact for free: `anchor + 0 * factor`) and
+    /// the moving edge is an end (pinned via `length`). Dragging the LEADING
+    /// handle the roles swap: the moving edge is an onset (assigned outright)
+    /// and the STATIONARY edge is an end (pinned via `length`), because
+    /// `span * (delta / span)` is not reliably `delta` in binary floating point
+    /// — and the one place a user can SEE a stray 2.8e-16 is the edge they are
+    /// holding, or the one they were promised would not move.
+    ///
+    /// Pitch and velocity are read from the LIVE note, never the baseline, so a
+    /// velocity-lane edit landing mid-gesture is not clobbered by a stale copy
+    /// (`resizeNote`'s rule).
+    ///
+    /// ⚠️ The `>= 2 notes` rule is an AFFORDANCE rule — it decides where a
+    /// handle appears (`PianoRollGroupScale.minimumNotes`) — and is deliberately
+    /// NOT re-asserted here. A headless caller (a test, a future AI verb) may
+    /// scale any group with a positive span; duplicating the gate would make the
+    /// model refuse work the UI merely does not offer.
+    public func scaleSelection(toBeat targetBeat: Double, resolution: SnapResolution) {
+        guard let edge = scaleEdge, !scaleBaseline.isEmpty else { return }
+        let bases = scaleBaseline.values
+        guard let minStart = bases.map(\.startBeat).min(),
+              let maxEnd = bases.map({ $0.startBeat + $0.lengthBeats }).max(),
+              let plan = PianoRollGroupScale.plan(
+                  startBeat: minStart, endBeat: maxEnd, edge: edge,
+                  // THE one snap of this gesture.
+                  targetBeat: snap(beat: targetBeat, resolution: resolution),
+                  minSpanBeats: minResizeLength(for: resolution))
+        else { return }
+        for (id, base) in scaleBaseline {
+            guard let index = draft.firstIndex(where: { $0.id == id }) else { continue }
+            let live = draft[index]
+            let baseEnd = base.startBeat + base.lengthBeats
+            var start = plan.anchorBeat + (base.startBeat - plan.anchorBeat) * plan.factor
+            var length = base.lengthBeats * plan.factor
+            switch edge {
+            case .trailing:
+                if baseEnd == maxEnd { length = plan.edgeBeat - start }
+            case .leading:
+                if base.startBeat == minStart { start = plan.edgeBeat }
+                if baseEnd == maxEnd { length = plan.anchorBeat - start }
+            }
+            draft[index] = MIDINote(
+                id: id, pitch: live.pitch, velocity: live.velocity,
+                startBeat: start, lengthBeats: length
+            )
+        }
+    }
+
     // MARK: - Rubber band (m23-ek-1)
 
     /// Apply a rubber band's outcome to the selection: REPLACE with what the
@@ -554,6 +771,33 @@ public final class PianoRollModel {
     }
 
     public func clearSelection() { selection = [] }
+
+    /// Selects EVERY note in the draft — the ⌘A verb (m25-s).
+    ///
+    /// ⭐ **EXTRACTED, NOT INVENTED.** This body used to be one inline expression
+    /// in `PianoRollView`'s `.onChange(of: noteSelection.stageNonce)`
+    /// (`model.selection = Set(model.draft.map(\.id))`), reachable only through
+    /// the m23-x DEBUG staging seam. m25-s gives the user a keystroke that means
+    /// the same thing, and the rule this tree already paid for (m23-x → m23-al)
+    /// is that a second spelling of one rule is free to drift. So the VERB moved
+    /// here, where it can be tested headlessly, and BOTH routes call it: the
+    /// staging nonce and the user's ⌘A. A user keystroke must not depend on a
+    /// test affordance, but it may — and should — share the verb.
+    ///
+    /// ⚠️ **THE DRAFT, NOT THE CLIP.** The draft is what the grid is drawing, so
+    /// this selects exactly what the user can see, including notes added in this
+    /// session and not yet committed. `Set` of ids rather than indices for the
+    /// reason every other selection here is: the draft is re-ordered by edits.
+    ///
+    /// ⚠️ **NOT AN EDIT — DO NOT `commit()` AFTER IT.** It touches `selection`
+    /// and never `draft`, so there is nothing to journal and nothing for undo to
+    /// restore. `PianoRollView`'s `commit(` occurrence count is pinned by
+    /// `EditorSurfaceOwnershipSiteTests` precisely so that a selection change
+    /// cannot quietly acquire a store write.
+    ///
+    /// EMPTY DRAFT SELECTS NOTHING, harmlessly: the result is an empty set, which
+    /// is the state the roll was already in.
+    public func selectAllNotes() { selection = Set(draft.map(\.id)) }
 
     // MARK: - Submission
 

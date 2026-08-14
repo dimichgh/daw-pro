@@ -281,4 +281,145 @@ struct ArrangeBodyDragTests {
         #expect(clip(store, clips[0].id)?.startBeat == 0)
         #expect(clip(store, clips[1].id)?.startBeat == 8)
     }
+
+    // MARK: - The SECOND axis (m25-l-2)
+
+    /// Three instrument lanes. The MOVER sits on lane 0 at beat 0; lanes 1 and 2
+    /// each hold a 4-beat resident at beat 8, so a drag that travels +8 beats and
+    /// down 2 rows LANDS on lane 2's resident and merely PASSES OVER lane 1's.
+    /// Every clip carries a note, so a casualty is observable as data loss.
+    private func laddered() throws -> (ProjectStore, mover: Clip, residents: [Clip]) {
+        let store = ProjectStore()
+        let lanes = (0..<3).map { _ in store.addTrack(kind: .instrument) }
+        let mover = try store.addMIDIClip(
+            toTrack: lanes[0].id, name: "mover", atBeat: 0, lengthBeats: 4,
+            notes: [MIDINote(pitch: 60, startBeat: 0, lengthBeats: 2)])
+        let residents = try [lanes[1], lanes[2]].map {
+            try store.addMIDIClip(
+                toTrack: $0.id, name: "resident", atBeat: 8, lengthBeats: 4,
+                notes: [MIDINote(pitch: 72, startBeat: 0, lengthBeats: 2)])
+        }
+        return (store, mover, residents)
+    }
+
+    private func row(_ store: ProjectStore, _ id: UUID) -> Int? {
+        store.tracks.firstIndex { $0.clips.contains { $0.id == id } }
+    }
+
+    /// The gesture as SHIPPED, both axes: preview every frame (touching nothing),
+    /// commit once through the cross-track verb.
+    @discardableResult
+    private func dragThroughLanes(_ store: ProjectStore, anchor: Clip,
+                                  selection: Set<UUID>,
+                                  path: [(beats: Double, rows: Int)]) throws
+        -> ClipsTrackMoveResult? {
+        var drag = ArrangeBodyDrag(anchorClipID: anchor.id,
+                                   anchorOriginalStart: anchor.startBeat)
+        for frame in path {
+            drag.update(rawDragDeltaBeats: frame.beats, requestedTrackDelta: frame.rows)
+            // The preview asks; it never writes. Both axes, same frame.
+            _ = ArrangeVerticalDrag.effectiveDelta(
+                requested: frame.rows, movingClipIDs: selection, tracks: store.tracks)
+            _ = store.plannedGroupBeatDelta(ids: Array(selection), byBeats: frame.beats)
+        }
+        guard let commit = drag.commit() else { return nil }
+        let rows = ArrangeVerticalDrag.effectiveDelta(
+            requested: commit.requestedTrackDelta, movingClipIDs: selection,
+            tracks: store.tracks)
+        return try store.moveClips(ids: Array(selection), byTracks: rows,
+                                   byBeats: commit.rawDragDeltaBeats)
+    }
+
+    // 12.
+    @Test("the vertical request travels with the drag — commit carries the LAST row, never a sum")
+    func commitCarriesTheFinalRow() {
+        let id = UUID()
+        var drag = ArrangeBodyDrag(anchorClipID: id, anchorOriginalStart: 0)
+        drag.update(rawDragDeltaBeats: 2, requestedTrackDelta: 1)
+        drag.update(rawDragDeltaBeats: 5, requestedTrackDelta: 2)
+        drag.update(rawDragDeltaBeats: 9, requestedTrackDelta: 3)
+        let commit = drag.commit()
+        // 3, not 1 + 2 + 3 — the row is derived from the ABSOLUTE row under the
+        // pointer, so accumulating it would multiply the user's intent.
+        #expect(commit?.requestedTrackDelta == 3)
+        #expect(commit?.rawDragDeltaBeats == 9)
+    }
+
+    // 13.
+    @Test("a cancelled cross-track drag commits no row at all")
+    func cancelledCrossTrackDragCommitsNothing() {
+        let id = UUID()
+        var drag = ArrangeBodyDrag(anchorClipID: id, anchorOriginalStart: 0)
+        drag.update(rawDragDeltaBeats: 4, requestedTrackDelta: 2)
+        drag.cancel()
+        #expect(drag.commit() == nil)
+    }
+
+    // 14.
+    @Test("a drag with no vertical request is unchanged — the same-track path is untouched")
+    func noVerticalRequestLeavesTheSameTrackPathAlone() {
+        let id = UUID()
+        var drag = ArrangeBodyDrag(anchorClipID: id, anchorOriginalStart: 0)
+        drag.update(rawDragDeltaBeats: 4)
+        #expect(drag.requestedTrackDelta == 0)
+        #expect(drag.commit()?.requestedTrackDelta == 0)
+    }
+
+    /// ⭐⭐ **THE WHOLE POINT OF THIS ITEM RIDING m25-k's SPLIT.** A cross-lane
+    /// drag passes over EVERY lane between its start and its landing. If the
+    /// land-time overlap policy ran per frame, each of those lanes would be
+    /// resolved against — the m25-k defect with a wider blast radius.
+    // 15.
+    @Test("a drag PASSING OVER a lane leaves that lane's clips untouched")
+    func passingOverALaneLeavesItUntouched() throws {
+        let (store, mover, residents) = try laddered()
+        try dragThroughLanes(store, anchor: mover, selection: [mover.id],
+                             path: [(2, 0), (5, 1), (8, 1), (8, 2)])
+
+        #expect(row(store, mover.id) == 2)
+        #expect(clip(store, mover.id)?.startBeat == 8)
+        // Lane 1 was crossed, never dropped on — its clip is whole.
+        #expect(clip(store, residents[0].id)?.lengthBeats == 4)
+        #expect(clip(store, residents[0].id)?.notes?.count == 1)
+        // Lane 2 was LANDED on, fully covered — drop-time overwrite still applies.
+        #expect(clip(store, residents[1].id) == nil)
+    }
+
+    /// THE POSITIVE CONTROL — without it the test above cannot tell "the split
+    /// works" from "nothing was ever at risk on that lane". This is the naive
+    /// per-frame cross-track cadence: every frame moves the clip to the row the
+    /// pointer is over, so every intermediate lane gets the landing treatment.
+    // 16.
+    @Test("POSITIVE CONTROL: a per-frame cross-track cadence eats the lane it passes over")
+    func perFrameCrossTrackCadenceEatsThePassedLane() throws {
+        let (store, mover, residents) = try laddered()
+        let path: [(beats: Double, rows: Int)] = [(2, 0), (5, 1), (8, 1), (8, 2)]
+        for frame in path {
+            let here = row(store, mover.id) ?? 0
+            _ = try store.moveClips(ids: [mover.id], byTracks: frame.rows - here,
+                                    byBeats: frame.beats - (clip(store, mover.id)?.startBeat ?? 0))
+        }
+        // BOTH residents die — the crossed one as well as the landed-on one.
+        #expect(clip(store, residents[0].id) == nil)
+        #expect(clip(store, residents[1].id) == nil)
+    }
+
+    /// The vertical twin of `previewedDeltaIsTheCommittedDelta`: the number the
+    /// ghost draws is the number the drop achieves, at the bottom wall too.
+    // 17.
+    @Test("the previewed row is the one the commit achieves — including at the last lane")
+    func previewedRowIsTheCommittedRow() throws {
+        let (store, mover, _) = try laddered()
+        // Ask to travel far past the last lane; the whole-group clamp answers.
+        let previewed = ArrangeVerticalDrag.effectiveDelta(
+            requested: 99, movingClipIDs: [mover.id], tracks: store.tracks)
+        #expect(previewed == 2)
+        // The query MOVED NOTHING…
+        #expect(row(store, mover.id) == 0)
+        // …and the commit lands exactly where the preview promised.
+        let result = try store.moveClips(ids: [mover.id], byTracks: previewed)
+        #expect(result.effectiveTrackDelta == previewed)
+        #expect(result.clampedTracks == false)   // the gesture pre-clamped it
+        #expect(row(store, mover.id) == 2)
+    }
 }

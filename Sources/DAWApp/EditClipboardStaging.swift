@@ -183,6 +183,32 @@ extension AppModel {
         object["selectedClipIds"] =
             .array(arrangeSelection.ids.map(\.uuidString).sorted().map { .string($0) })
         object["focusClipId"] = arrangeSelection.focusID.map { .string($0.uuidString) } ?? .null
+        // m25-l-1 — WHERE THE PASTE WAS AIMED. `activeTrackId` is the RESOLVED
+        // value `pasteClipsFromClipboard` actually hands to `PasteAnchorPolicy`,
+        // read off the same `AppModel.activeTrack` resolution, so a leg asserting
+        // a landing can name the intended target instead of inferring it from
+        // where the clips ended up (which is the thing under test).
+        //
+        // ⚠️ Exactly the same value while `pasteClipsFromClipboard(intoTrack:)`
+        // is nil, which every shipped caller is. When m25-f-4 starts passing a
+        // per-gesture destination, that paste's target will NOT be this field —
+        // the menu item will have to echo its own.
+        //
+        // ⭐⭐ **m25-l-3 REVERSED WHAT THIS FIELD MEANS FOR A LEG, BY USER RULING
+        // (2026-08-13).** The note here used to read: *"A LEG MUST NOT EXPECT
+        // THIS TO STEER AN ORDINARY PASTE … a leg that copies from a live track
+        // and expects the active track to win is measuring its own premise."*
+        // That is now backwards — such a leg is measuring the fix. A copy from a
+        // LIVE track pasted after a HEADER CLICK lands on the clicked track.
+        // What still does not steer is an INFERRED destination (no header click;
+        // the field merely names the focused clip's owner), which is why
+        // `activeTrackOrigin` is echoed beside it: a leg cannot tell the two
+        // cases apart from the id, and they now have different outcomes.
+        object["activeTrackId"] = activeTrackID.map { .string($0.uuidString) } ?? .null
+        object["activeTrackOrigin"] =
+            activeTrack.map { .string($0.origin.rawValue) } ?? .null
+        object["explicitActiveTrackId"] =
+            explicitActiveTrackID.map { .string($0.uuidString) } ?? .null
         // Every clip in the project, with its track and beat — so a leg can
         // DERIVE the expected landing from the echoed playhead and then check it,
         // instead of hardcoding beats the fixture cannot know.

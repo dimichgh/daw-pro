@@ -206,6 +206,7 @@ struct PanelLayoutStoreTests {
         store.setFollowPlayhead(true)
         store.setWaveformNormalize(false)
         store.setWaveformVerticalZoom(4)
+        store.setEditorMaximized(true)
 
         store.reset()
         #expect(store.sidebarWidth == 260)
@@ -229,6 +230,65 @@ struct PanelLayoutStoreTests {
         #expect(store.waveformVerticalZoom == 1)
         #expect(backing.storage[PanelLayoutStore.waveformNormalizeKey] == 1)
         #expect(backing.storage[PanelLayoutStore.waveformVerticalZoomKey] == 1)
+        // m25-b-1: the maximized MODE is a dimension too — same half-reset guard.
+        // A reset that left the editor maximized would hand the user a window with
+        // the arrange collapsed to a ruler strip and no memory of asking for it.
+        #expect(store.editorMaximized == false)
+        #expect(backing.storage[PanelLayoutStore.editorMaximizedKey] == 0)
+    }
+
+    // MARK: - Maximized editor (m25-b-1)
+
+    @Test("the maximized mode defaults OFF, round-trips, persists as 1/0, and is sticky")
+    func editorMaximized() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        // Default OFF — the `followPlayhead` rationale: a mode that collapses the
+        // arrange must be asked for, never inherited.
+        #expect(store.editorMaximized == false)
+        #expect(PanelLayoutStore.defaultEditorMaximized == false)
+
+        store.setEditorMaximized(true)
+        #expect(store.editorMaximized == true)
+        // The shared Double backing's 1/0 encoding, like every other Bool slot.
+        #expect(backing.storage[PanelLayoutStore.editorMaximizedKey] == 1)
+
+        store.setEditorMaximized(false)
+        #expect(store.editorMaximized == false)
+        #expect(backing.storage[PanelLayoutStore.editorMaximizedKey] == 0)
+
+        // Sticky: a fresh store over the same backing reads the mode back.
+        store.setEditorMaximized(true)
+        let reopened = PanelLayoutStore(backing: backing)
+        #expect(reopened.editorMaximized == true)
+    }
+
+    /// ⭐⭐ THE RESTORE CONTRACT, PINNED WHERE IT LIVES: maximizing must not
+    /// disturb `editorFraction`, because leaving the mode is nothing more than
+    /// dropping the override — there is no stash to put back. If a future change
+    /// ever "helpfully" writes the maximized fraction into the slot, the value
+    /// would be clamped to 0.55 on the way in and the user's own height would be
+    /// gone. That is the whole reason this item ships no `previousFraction` slot,
+    /// so it is a test and not a comment.
+    @Test("maximizing NEVER writes editorFraction — the restore is the untouched slot")
+    func maximizeLeavesFractionAlone() {
+        let backing = SpyBacking()
+        let store = PanelLayoutStore(backing: backing)
+        store.setEditorFraction(0.38)          // the user's dragged height
+        #expect(store.editorFraction == 0.38)
+
+        store.setEditorMaximized(true)
+        #expect(store.editorFraction == 0.38)  // untouched while maximized
+        #expect(backing.storage[PanelLayoutStore.editorFractionKey] == 0.38)
+
+        store.setEditorMaximized(false)
+        #expect(store.editorFraction == 0.38)  // and the restore lands on it
+
+        // Belt and braces: not one write to the fraction key rode along with the
+        // two mode writes. Equal VALUES could hide a write-then-rewrite; the write
+        // LOG cannot.
+        let fractionWrites = backing.writes.filter { $0.key == PanelLayoutStore.editorFractionKey }
+        #expect(fractionWrites.count == 1, "maximize wrote editorFraction: \(fractionWrites)")
     }
 
     // MARK: - Waveform height (m25-e)

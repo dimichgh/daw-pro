@@ -61,15 +61,18 @@ final class ClipboardResponder: NSResponder, NSMenuItemValidation {
         fatalError("ClipboardResponder is not archivable")
     }
 
-    // MARK: - The three verbs
+    // MARK: - The four verbs
 
-    // ⚠️ THESE THREE ARE THE ONLY SELECTORS THIS OBJECT MAY CLAIM, and
+    // ⚠️ THESE FOUR ARE THE ONLY SELECTORS THIS OBJECT MAY CLAIM, and
     // `ClipboardResponderRouting.claimedSelectorNames` is where that list lives
-    // with its reasons — notably why `delete:` and `selectAll:` are excluded.
+    // with its reasons — notably why `delete:` is STILL excluded, and what
+    // decision admitted `selectAll:` at m25-s.
     //
-    // ⚠️ NO `override`. `NSResponder` declares none of these (measured: the
-    // compiler rejects `override` on `copy(_:)`), so they are plain `@objc`
-    // methods whose selectors happen to be the ones AppKit's menu items send.
+    // ⚠️ NO `override` ON THE CLIPBOARD THREE. `NSResponder` declares none of
+    // them (measured: the compiler rejects `override` on `copy(_:)`), so they are
+    // plain `@objc` methods whose selectors happen to be the ones AppKit's menu
+    // items send. ⚠️ `selectAll(_:)` IS THE EXCEPTION and DOES need `override` —
+    // see its own note; do not "make them consistent".
 
     @objc func cut(_ sender: Any?) {
         model?.performMenuCut()
@@ -81,6 +84,31 @@ final class ClipboardResponder: NSResponder, NSMenuItemValidation {
 
     @objc func paste(_ sender: Any?) {
         model?.performMenuPaste()
+    }
+
+    /// ⌘A / Edit ▸ Select All (m25-s) — selects every note in the piano roll, and
+    /// ONLY there. `SelectAllMenuPolicy` decides; this routes.
+    ///
+    /// ⚠️⚠️ **`override` IS REQUIRED HERE AND IS REJECTED ON THE THREE ABOVE.
+    /// MEASURED, and the asymmetry is real rather than a style slip** — a reader
+    /// who "fixes" this to match its neighbours gets a compile error, and one who
+    /// makes the neighbours match this gets three. `NSResponder.h` declares
+    /// `selectAll:` (in the informal `NSStandardKeyBindingMethods` category) and
+    /// does NOT declare `copy:` / `cut:` / `paste:`, so Swift imports the former
+    /// as an overridable member of `NSResponder` and the latter as nothing at all.
+    ///
+    /// ⭐ IT DECLARES IT WITHOUT IMPLEMENTING IT, WHICH IS WHY CLAIMING IT IS SAFE:
+    /// `class_getInstanceMethod(NSResponder.self, "selectAll:")` is **nil**
+    /// (measured 2026-08-13), as it is on `NSWindow`, `NSWindowController` and
+    /// `NSApplication`. So no object behind our splice point responds to it, the
+    /// chain walk cannot be intercepted between us and NSApp, and — measured in
+    /// the same probe — the native item was ALREADY DISABLED before we claimed it.
+    ///
+    /// ⚠️ NEVER CALL `super.selectAll(sender)`. The superclass declaration has no
+    /// implementation behind it; that is an unrecognized-selector crash, not a
+    /// polite no-op.
+    override func selectAll(_ sender: Any?) {
+        model?.performMenuSelectAll()
     }
 
     // MARK: - Validation
@@ -104,14 +132,28 @@ final class ClipboardResponder: NSResponder, NSMenuItemValidation {
     /// means the plain word is RESTORED rather than merely never set, so a future
     /// retitle from anywhere else cannot leave a stale count on the item.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        guard let model,
-              let action = menuItem.action,
-              let verb = ClipboardResponderRouting.verb(
-                  forSelectorName: NSStringFromSelector(action))
-        else {
+        guard let model, let action = menuItem.action else { return true }
+        let name = NSStringFromSelector(action)
+
+        // ⚠️⚠️ **SELECT ALL IS DISPATCHED BEFORE THE CLIPBOARD LOOKUP, AND THE
+        // ORDER IS THE BUG THIS AVOIDS.** `ClipboardResponderRouting.verb`
+        // answers nil for `selectAll:` — it is claimed, but it is not a clipboard
+        // verb — so resolving it through that lookup first would drop it into the
+        // fallback below and return `true`. The item would be PERMANENTLY LIVE in
+        // every state while `performMenuSelectAll()` quietly returned false: a
+        // menu row that is never greyed and never does anything, which is exactly
+        // the "silently nothing" this feature was required not to ship.
+        if name == ClipboardResponderRouting.selectAllSelectorName {
+            let presentation = ClipboardResponderRouting.presentation(
+                for: model.selectAllMenuItem)
+            menuItem.title = presentation.title
+            return presentation.isEnabled
+        }
+
+        guard let verb = ClipboardResponderRouting.verb(forSelectorName: name) else {
             // Unreachable in practice: AppKit only routes here for a selector
-            // this object implements, and it implements exactly the three.
-            // `true` rather than `false` so a hypothetical fourth selector is
+            // this object implements, and every one of them is handled above.
+            // `true` rather than `false` so a hypothetical fifth selector is
             // left alone rather than silently disabled.
             return true
         }

@@ -124,6 +124,17 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// chip — one card summarizes the whole affordance (its ⌘ shortcuts and the
     /// pinch gesture included, the `arrangeZoom` honest-scope precedent).
     case pianoRollZoom
+    /// The piano-roll header's MAXIMIZE toggle (m25-b-1) — one card for the whole
+    /// mode, its two exits included (the `pianoRollZoom` honest-scope precedent:
+    /// a card describes the affordance, not one of its buttons).
+    case pianoRollMaximize
+    /// The piano roll's corner VIEWPORT MINIMAP (m25-b-2) — one card for the whole
+    /// navigator, its click AND its drag included (the `pianoRollZoom` honest-scope
+    /// precedent: a card describes the affordance, not one of its gestures). The
+    /// card is anchored on the map itself, so it is reachable in the collapsed
+    /// state too — a control you cannot see is exactly the one a beginner needs
+    /// explained.
+    case pianoRollMinimap
     /// The NOTES | STEPS chip pair (m23-cq-1) — which editor the pane shows for
     /// this clip. One card for the whole pair (the `referenceABToggle` shared-
     /// control rule): the two halves are one control, not two.
@@ -481,6 +492,12 @@ public enum ExplainCatalog {
         .pianoRollZoom: ExplainEntry(
             title: "Editor Zoom",
             body: "Zooms the note grid in for detailed edits or out to see the whole part. Use the magnifier buttons, pinch on the grid, or press the zoom keys while the editor is focused; your zoom is remembered."),
+        .pianoRollMaximize: ExplainEntry(
+            title: "Maximize Editor",
+            body: "Fills the window with the note editor when you need room to work, leaving only the ruler strip of the track area above it. Press it again to go back, or press Escape — either way you land on the editor height you had before."),
+        .pianoRollMinimap: ExplainEntry(
+            title: "Part Map",
+            body: "A small map of the whole part, with a box showing the slice you are looking at. Click anywhere on it to jump the editor there, or drag to slide through the part. Tap the corner button to tuck it away."),
         .stepSequencerMode: ExplainEntry(
             title: "Notes / Steps",
             body: "Two ways to edit the same part. Notes is the piano roll for melodies; Steps is a drum-machine grid of boxes, which is far quicker for a kick, snare and hats pattern. Drum parts open in Steps."),

@@ -44,7 +44,15 @@ struct PianoRollView: View {
     /// following surfaces.
     var follow: FollowPlayheadModel
     /// Submits the whole note array (wired to `ProjectStore.setClipNotes`).
-    var onCommit: ([MIDINote]) -> Void
+    ///
+    /// `extendToCover` (m25-a) names the notes THIS gesture placed or moved, and
+    /// is the auto-extend request: if one of them lands past the clip's end the
+    /// store grows the clip to cover it, in the SAME undo step as the note
+    /// write. Empty (the usual case) = the pre-m25-a behaviour exactly. The set
+    /// travels as a second ARGUMENT rather than as a second closure precisely
+    /// because it must not become a second store call — two calls would be two
+    /// undo entries.
+    var onCommit: (_ notes: [MIDINote], _ extendToCover: Set<UUID>) -> Void
     /// Seeks the transport to a PROJECT beat (wired to `ProjectStore.seek`) — the
     /// scrub's only side effect. Kept a closure so the view stays store-free and
     /// previewable (the `onCommit` precedent).
@@ -61,6 +69,13 @@ struct PianoRollView: View {
     /// own density, so this affordance shows in both piano-roll modes (tightening
     /// timing is a beginner action; the panel's Simple mode is grid + strength).
     var onOpenQuantize: () -> Void
+    /// Opens the Humanize panel for this clip (m25-c) — the QUANTIZE chip's
+    /// sibling, and its inverse: quantize pulls onsets toward the grid, humanize
+    /// nudges them (and velocities) off it. Shown in BOTH densities for the same
+    /// reason quantize is: "make this sound less robotic" is a beginner action.
+    /// Store-free closure (the `onOpenQuantize` precedent) so the view stays
+    /// previewable.
+    var onOpenHumanize: () -> Void = {}
     /// Commits the visible controller lane (m16-b4) through
     /// `ProjectStore.setControllerLane` — the SAME store call the
     /// `clip.setControllerLane` wire verb uses — and returns the updated clip so
@@ -91,7 +106,18 @@ struct PianoRollView: View {
     /// `onCommit` within 800 ms of a note drag on this clip would FOLD INTO IT,
     /// and one ⌘Z would undo both. `pasteNotes` passes no key, so it never
     /// merges in either direction.
-    var onPasteNotes: ([MIDINote]) -> Void
+    ///
+    /// **`extendToCover` (m25-f-2) — THE IDS THIS PASTE PLACED, not the
+    /// selection.** A paste landing past the clip's end grows the clip to cover
+    /// it, inside the SAME undo step as the note write. The two arguments look
+    /// redundant (the ids are all in the array) and are not: the store must be
+    /// told WHICH notes this gesture placed, because the array is the whole
+    /// draft and may already hold legal-but-latent notes far past the end that
+    /// must NOT move the clip's edge (m18-f / m25-a). They coincide with
+    /// `model.selection` today only because the paste selects what it pasted —
+    /// the invariant being encoded is "what this gesture placed", so the call
+    /// site passes an explicit set rather than reading the selection back.
+    var onPasteNotes: (_ notes: [MIDINote], _ extendToCover: Set<UUID>) -> Void
     /// m23-ek-3 — the notes currently on `AppModel.clipboard`, clip-local and
     /// UNTRANSLATED, or empty when the clipboard holds clips or nothing.
     ///
@@ -103,6 +129,14 @@ struct PianoRollView: View {
     /// that entry disabled until an Edit ▸ Paste had already run.
     var clipboardNotes: [MIDINote]
     var onClose: () -> Void
+    /// ESCAPE reaching the roll (m25-b-1) — asks the APP whether the keystroke
+    /// leaves the MAXIMIZED editor mode, and reports whether it was consumed.
+    /// A closure, not a `layout` read, for the reason the DELETE route is one:
+    /// the decision needs app-level facts this view has no business knowing (is a
+    /// modal up, is a rename field live), and both of Escape's mounts must reach
+    /// the SAME decision. Defaulted so previews stay one-liner-simple; a preview
+    /// that never maximizes never needs it.
+    var onEscape: () -> Bool
     /// Sounds EXACTLY these pitches on the clip's track right now — SET
     /// semantics, so an empty array is "stop" (m23-d). Called on every gesture
     /// tick; the controller below diffs, so this view neither throttles nor
@@ -200,6 +234,48 @@ struct PianoRollView: View {
     @State private var snap: SnapResolution = .beat
     @State private var activeDrag: ActiveDrag = .none
     @State private var didMove = false
+    /// ⭐ THE ROLL'S HOVER FACILITY (m25-g) — the live pointer position over the
+    /// note grid, in grid CONTENT coordinates, or nil when the pointer is away.
+    ///
+    /// Before this the roll tracked no hover at all: `hoverCursor(resolve:)`
+    /// resolved a cursor per point through an `NSTrackingArea` and threw the
+    /// point away, so nothing here could DRAW at the pointer. **One reader feeds
+    /// every consumer** — the roadmap's *"Shares the hover facility with m25-o
+    /// and m25-g — build ONE, not three"* — and the precedence between what
+    /// those consumers can be over lives in `PianoRollHover.target`, not here.
+    @State private var hoverPoint: CGPoint?
+    /// Whether ⌘ is down RIGHT NOW (m25-o) — the roll's only piece of live
+    /// modifier state, and the only reason it exists is that the affordance the
+    /// user asked for has to appear WITHOUT the mouse moving: *"cursor turns into
+    /// some vertical sign signaling that it is ready to move play head."*
+    /// `.onContinuousHover` and the `hoverCursor` tracking area are both driven by
+    /// pointer MOVEMENT, so neither can see a key press. Fed by `flagsMonitor`.
+    @State private var commandHeld = false
+    /// Whether ⇧ is down RIGHT NOW (m25-x), from the SAME monitor.
+    ///
+    /// ⭐ **ADDED BECAUSE THE COMMENT THAT REFUSED IT BECAME MEASURABLY FALSE.**
+    /// `pointerModifiers` used to carry a note reading *"tracking ⇧ would buy no
+    /// pixel and would double the monitor's wake-ups"*. Both halves are now
+    /// wrong. It buys a pixel: `PianoRollHover.target` suppresses the group-scale
+    /// bar under any TOGGLING chord, and ⇧ is one, so without this flag the bar
+    /// would keep advertising a scale ⇧-click refuses — the same lie m25-x
+    /// exists to remove, one degree quieter. And it doubles nothing: the monitor
+    /// matches `.flagsChanged`, which already fires on every ⇧ press and release;
+    /// the handler already ran and simply threw the ⇧ bit away.
+    @State private var shiftHeld = false
+    /// The `.flagsChanged` monitor behind `commandHeld`/`shiftHeld` (m25-o,
+    /// m25-x), alive ONLY while the pointer is over the note grid.
+    ///
+    /// ⚠️ **A LOCAL MONITOR THAT OUTLIVES ITS VIEW IS A LEAK, so this has three
+    /// independent teardowns and needs all three.** The pointer leaving the grid
+    /// (`hoverPoint` going nil) stops it — that is also what makes the affordance
+    /// revert when the user moves off the surface. `.onDisappear` stops it — a
+    /// clip switch recreates this view (`.id(clip.id)`), and hover-exit is NOT
+    /// guaranteed to fire when a view is torn down under the pointer, so without
+    /// this one every clip switch made during a hover would strand a monitor.
+    /// And `startFlagsMonitor` is idempotent, so a doubled start cannot orphan the
+    /// first registration behind an overwritten handle.
+    @State private var flagsMonitor: Any?
     /// The rubber band the grid is DRAWING right now, in grid content
     /// coordinates (m23-ek-1) — nil at rest, which is the only honest way to say
     /// "no band is in flight". This one `@State` feeds both the overlay and the
@@ -242,11 +318,31 @@ struct PianoRollView: View {
     /// bands' `ScrollViewReader`s watch the nonce; the markers size off the x.
     @State private var followTargetX: CGFloat = 0
     @State private var followNonce = 0
+    /// Live VERTICAL scroll offset of the editor, and its viewport height (m25-b-2).
+    /// The `gridScrollX` / `panelWidth` siblings for the pitch axis — read from the
+    /// scroller's own geometry, so the minimap's viewport rectangle is drawn from
+    /// where the editor ACTUALLY sits and never from a predicted value. Both change
+    /// only on a scroll or a resize, never on a transport tick.
+    @State private var gridScrollY: CGFloat = 0
+    @State private var editorViewportHeight: CGFloat = 0
+    /// The content y the VERTICAL scroller is being asked to put at its top, plus
+    /// the nonce that makes a repeat of the same y still apply (the
+    /// `followTargetX`/`followNonce` idiom, one axis over). Written ONLY by a
+    /// minimap jump — follow never touches the pitch axis (`:1598-1606`).
+    @State private var verticalTargetY: CGFloat = 0
+    @State private var verticalNonce = 0
     @FocusState private var isFocused: Bool
 
     private static let keyboardWidth: CGFloat = 54
     /// Height of the frozen scrub strip pinned to the top of the note grid.
-    private static let scrubStripHeight: CGFloat = 18
+    ///
+    /// m25-f-5 moved the number itself into `DAWAppKit.PianoRollScrubRuler.height`
+    /// — the ONE home, beside the tick/label geometry that has to fit inside it,
+    /// where a test can assert the ladder still clears the band. It is unchanged
+    /// at 18: the ruler treatment had to fit the vertical budget already spent,
+    /// because `PanelLayoutStore.editorFractionRange` caps the editor pane at 0.55
+    /// and m25-b contests every point of it.
+    private static let scrubStripHeight: CGFloat = PianoRollScrubRuler.height
     /// Stable density key for this panel. Internal (the `MixerView.panelID`
     /// shape) since m23-t so `debug.pianoRollBarOps` reports the density from
     /// the SAME constant the view reads, never a re-typed `"pianoRoll"`.
@@ -261,21 +357,28 @@ struct PianoRollView: View {
     /// would otherwise break the moment follow moved only one of them).
     private static let gridFollowMarkerID = "pianoRollGridFollowMarker"
     private static let velocityFollowMarkerID = "pianoRollVelocityFollowMarker"
+    /// Coordinate space naming the editor's VERTICAL scroll viewport (m25-b-2), and
+    /// the anchor a minimap jump scrolls that axis to.
+    private static let editorVerticalScrollSpace = "pianoRollEditorVerticalScroll"
+    private static let verticalJumpMarkerID = "pianoRollVerticalJumpMarker"
 
     init(clip: Clip, beatsPerBar: Int, positionBeats: Double, isPlaying: Bool,
          densityStore: PanelDensityStore,
          layout: PanelLayoutStore, follow: FollowPlayheadModel,
-         onCommit: @escaping ([MIDINote]) -> Void, onSeek: @escaping (Double) -> Void,
+         onCommit: @escaping (_ notes: [MIDINote], _ extendToCover: Set<UUID>) -> Void,
+         onSeek: @escaping (Double) -> Void,
          onDeleteTimeRange: @escaping (_ startBeat: Double, _ lengthBeats: Double) -> Clip?,
          onInsertTimeRange: @escaping (_ atBeat: Double, _ lengthBeats: Double) -> Clip?,
          onOpenQuantize: @escaping () -> Void,
+         onOpenHumanize: @escaping () -> Void = {},
          onCommitControllerLane: @escaping (_ type: MIDIControllerType, _ points: [MIDIControllerPoint]) -> Clip?,
          onCopyNotes: @escaping ([MIDINote]) -> Void = { _ in },
          onCutNotes: @escaping (_ copied: [MIDINote], _ remaining: [MIDINote]) -> Bool
              = { _, _ in false },
-         onPasteNotes: @escaping ([MIDINote]) -> Void = { _ in },
+         onPasteNotes: @escaping ([MIDINote], Set<UUID>) -> Void = { _, _ in },
          clipboardNotes: [MIDINote] = [],
          onClose: @escaping () -> Void,
+         onEscape: @escaping () -> Bool = { false },
          onAudition: @escaping (_ pitches: [Int], _ velocity: Int) -> Void = { _, _ in },
          onFocusChange: @escaping (Bool) -> Void = { _ in },
          onEngage: @escaping () -> Void = {},
@@ -297,12 +400,14 @@ struct PianoRollView: View {
         self.onDeleteTimeRange = onDeleteTimeRange
         self.onInsertTimeRange = onInsertTimeRange
         self.onOpenQuantize = onOpenQuantize
+        self.onOpenHumanize = onOpenHumanize
         self.onCommitControllerLane = onCommitControllerLane
         self.onCopyNotes = onCopyNotes
         self.onCutNotes = onCutNotes
         self.onPasteNotes = onPasteNotes
         self.clipboardNotes = clipboardNotes
         self.onClose = onClose
+        self.onEscape = onEscape
         self.onAudition = onAudition
         self.onFocusChange = onFocusChange
         self.onEngage = onEngage
@@ -432,6 +537,41 @@ struct PianoRollView: View {
         /// `.click` branch is `break`" — no longer describes the code, but the
         /// property it asserted still holds and is what `base` depends on.)
         case marquee(origin: CGPoint, base: Set<UUID>, additive: Bool)
+        /// GROUP COMPRESS / EXTEND (m25-g) — the selection's timing is being
+        /// scaled by the handle at `edge`, anchored on the opposite edge.
+        ///
+        /// ⚠️ A STATE OF `gridDrag`, NOT A NEW GESTURE, and that is the m23-ek-1
+        /// precedent rather than a shortcut: `gridDrag` is a
+        /// `DragGesture(minimumDistance: 0)` that already claims every press on
+        /// this surface, so a second gesture would run CONCURRENTLY with it and
+        /// both `onEnded` bodies would fire — one committing a scale, the other
+        /// clearing the selection — at an ordering this tree cannot observe
+        /// (m23-bw). It also keeps `EditorSurfaceOwnershipSiteTests`'
+        /// gesture-attachment count at 8, and means the staging seam
+        /// (`applyMarqueeStage`) drives this gesture through the SAME handlers
+        /// the mouse does, for free.
+        case groupScale(PianoRollGroupScale.Edge)
+        /// SCRUB BY THE LINE (m25-o-2) — the transport playhead was grabbed
+        /// where it is drawn, and the drag moves it. `scrubbing` goes true once
+        /// the press crosses `PianoRollPlayhead.scrubSlop` and STAYS true, so a
+        /// drag that wanders back under the slop keeps seeking.
+        ///
+        /// ⚠️ A STATE OF `gridDrag`, for the same reason `.groupScale` and
+        /// `.marquee` are: a second gesture would run CONCURRENTLY with the
+        /// `minimumDistance: 0` drag that already claims every press here, and
+        /// both `onEnded` bodies would fire at an ordering this tree cannot
+        /// observe (m23-bw). It also holds the gesture-attachment count at 8.
+        ///
+        /// ⚠️⚠️ **THE SLOP LIVES IN THE PAYLOAD, NOT IN A `@State` FLAG, AND THAT
+        /// IS DELIBERATE.** The arrange keeps the equivalent in
+        /// `@State playheadScrubbing`, which it must then remember to reset —
+        /// and this view has a `.cancelled` path (m18-i) the arrange does not,
+        /// where a mid-gesture reseed swallows the rest of the drag. A separate
+        /// flag could strand itself true there and make the NEXT press seek
+        /// without travelling. Carried in the case, it cannot outlive the
+        /// gesture: `activeDrag = .none` erases it by construction, exactly as
+        /// `.marquee`'s frozen origin is erased.
+        case playheadDrag(scrubbing: Bool)
         /// An external mutation reseeded the models mid-gesture (m18-i): the
         /// rest of the drag is swallowed — no apply, no commit, and no restart
         /// (`onChanged` only begins a gesture from `.none`) — so a half-dragged
@@ -508,6 +648,21 @@ struct PianoRollView: View {
                     phases: [.down]) { _ in
             onDeleteKey() ? .handled : .ignored
         }
+        // ESCAPE leaves the MAXIMIZED editor mode (m25-b-1) — the PRIMARY mount,
+        // because this view asserts focus on appear and is where the user's eyes
+        // are when the mode is on. It routes to the app's ONE decision
+        // (`AppModel.handleEditorEscape`), which the arrange workspace's backstop
+        // mount also calls; a mode that fills the window must not have exactly one
+        // way out, and the header toggle is the other.
+        //
+        // ⚠️ `.ignored` UNLESS THE DECISION CONSUMED IT — outside the maximized
+        // mode this view claims nothing new, so Escape propagates exactly as it
+        // did before. ⚠️ `.escape` needs no `\u{1B}` companion: unlike ⌫ (0x08 vs
+        // 0x7F, the m23-fk trap two lines up), `KeyEquivalent.escape` IS 0x1B, so
+        // the spelling and the key agree.
+        .onKeyPress(.escape) {
+            onEscape() ? .handled : .ignored
+        }
         .onAppear { isFocused = true }
         // m21-c: report key focus so the app routes ⌘+/⌘−/⌘0 to THIS editor's
         // zoom while it is focused (the View-menu key equivalents fire before
@@ -543,12 +698,42 @@ struct PianoRollView: View {
         // as "gate-only" would be wrong, and a stale doc comment on the seam
         // that gates a keyboard path is the kind of defect this file has paid
         // for before.
+        //
+        // ⭐ THE SELECT-ALL BRANCH IS NOW A CALL, NOT AN EXPRESSION (m25-s). It
+        // used to spell `model.selection = Set(model.draft.map(\.id))` inline;
+        // that rule moved to `PianoRollModel.selectAllNotes()` so the user's ⌘A
+        // (`selectAllNonce`, below) executes the SAME verb rather than a second
+        // copy of it. Behaviour here is unchanged, character for character.
         .onChange(of: noteSelection.stageNonce) { _, _ in
             if noteSelection.stagedSelectAll {
-                model.selection = Set(model.draft.map(\.id))
+                model.selectAllNotes()
             } else {
                 model.clearSelection()
             }
+        }
+        // m25-s: ⌘A / EDIT ▸ SELECT ALL reaching the roll. The user asked for it
+        // 2026-08-13 ("when in node editor and user uses keyboard shortcut
+        // 'select all'/cmd+A - it should select all the notes in the editor").
+        //
+        // ⚠️ A SEPARATE NONCE FROM `stageNonce` ABOVE, THOUGH THEY NOW RUN THE
+        // SAME LINE. That one is the m23-x DEBUG seam and also carries m23-ak's
+        // production "give the keys back" clear; a user keystroke must not depend
+        // on a test affordance, and a ⌘A must not be indistinguishable from a
+        // staged CLEAR at this `.onChange`. The bridge's `selectAllNonce` doc
+        // carries the full argument.
+        //
+        // ⚠️ NO `commit()`, AND NOT AN OVERSIGHT. Selecting touches `selection`
+        // and never `draft`, so there is nothing to journal — an undo entry for
+        // "I selected some notes" would be noise the user has to step back
+        // through. `EditorSurfaceOwnershipSiteTests` pins this file's `commit(`
+        // count at 7 partly so that a selection path cannot quietly acquire one.
+        //
+        // ⚠️ NO `onEngage()` EITHER. Engagement is what ROUTED this keystroke
+        // here in the first place (`SelectAllMenuPolicy` reads
+        // `activeEditorSurface`); reporting it back would be a feedback loop, and
+        // the same site test pins the `onEngage()` count.
+        .onChange(of: noteSelection.selectAllNonce) { _, _ in
+            model.selectAllNotes()
         }
         // m23-cf: EDIT ▸ DELETE reaching the roll — and, since the second pass,
         // THE DELETE KEY TOO. Neither can call `model.deleteSelection()` itself
@@ -649,6 +834,10 @@ struct PianoRollView: View {
             // m23-d: a clip switch recreates this view (`.id(clip.id)`), so the
             // disappearing instance must release whatever it was sounding.
             onAudition([], 0)
+            // m25-o: and the same clip switch must not strand the ⌘ monitor. A
+            // hover-exit is not guaranteed for a view torn down under the pointer,
+            // so this is the teardown that actually holds.
+            stopFlagsMonitor()
         }
         // m21-c: ONE persisted zoom value (`panelLayout.pianoRollPPB`) feeds
         // every band's beat→x mapping — the note grid + velocity lane via
@@ -746,6 +935,155 @@ struct PianoRollView: View {
         .allowsHitTesting(false)
     }
 
+    // MARK: - Viewport minimap (m25-b-2)
+
+    /// Aims the editor at a point the user pressed on the corner map.
+    ///
+    /// ⭐⭐ **THE FOLLOW-PLAYHEAD PRECEDENCE DECISION LIVES ON THIS LINE: the
+    /// horizontal jump is delivered through `scrollExternally`, the MANUAL-SCROLL
+    /// seam — so a minimap jump IS a manual scroll and follow stands down.**
+    ///
+    /// Nothing new was invented for it. `FollowPlayheadModel`'s shipped policy
+    /// already reads "a manual scroll during playback SUSPENDS follow on that
+    /// surface until the transport is started again (or the chip is clicked)", and
+    /// this seam produces exactly the signature that triggers it: an offset the
+    /// scroller reports back that follow never asked for, with no issue in flight.
+    /// The chip drops to its PAUSED face, so the stand-down is VISIBLE rather than
+    /// a silent tug-of-war between the map and the transport.
+    ///
+    /// ⚠️ **`layout.followPlayhead` is deliberately NOT toggled off.** That flag is
+    /// the single persisted ENABLE the arrange lanes read too — switching it to win
+    /// a piano-roll gesture would stand follow down on a surface the user never
+    /// touched, and would outlive the gesture by every future session. Suspension
+    /// is per-surface runtime state that re-arms on the next play, which is what
+    /// "the user wins THIS scroll" ought to mean and all it ought to mean.
+    ///
+    /// ⚠️ While STOPPED nothing is suspended: `reportOffset` is armed only during
+    /// playback, so a jump with the transport parked simply re-baselines. There is
+    /// no fight to win.
+    ///
+    /// The VERTICAL half cannot travel that seam — follow has no pitch axis
+    /// (`:1598-1606` scopes it out on purpose) — so it rides its own target+nonce
+    /// pair to the vertical scroller.
+    private func jumpToMinimapTarget(_ target: CGPoint) {
+        follow.scrollExternally(to: target.x)
+        verticalTargetY = target.y
+        verticalNonce += 1
+    }
+
+    /// The playhead's x for the MAP, which is the grid's own producer and the
+    /// grid's own off-clip rule (`playheadLineX`) — so the map cannot claim a
+    /// transport position the grid is not drawing.
+    private var minimapPlayheadX: CGFloat? { playheadLineX }
+
+    /// The map, or the chip that brings it back, in the editor's bottom-trailing
+    /// corner. Inset clear of the scrollers' indicator overlays.
+    @ViewBuilder
+    private var minimapOverlay: some View {
+        if layout.pianoRollMinimap {
+            PianoRollMinimapView(
+                notes: model.draft,
+                rowHeight: model.rowHeight,
+                pixelsPerBeat: model.pixelsPerBeat,
+                contentWidth: gridDrawnWidth,
+                contentHeight: model.contentHeight,
+                scrollX: gridScrollX,
+                scrollY: gridScrollY,
+                viewportWidth: bandViewportWidth,
+                // ⚠️ KNOWN, BOUNDED OVERSTATEMENT — recorded so it is not
+                // rediscovered as a bug: this is the SCROLLER's height, and the
+                // frozen scrub strip covers its top `scrubStripHeight` (18 pt), so
+                // the rectangle claims ~18 pt more visible pitch than there is.
+                // Deliberately NOT "corrected" by subtracting the strip: the clamp
+                // ceiling must stay the scroller's OWN max offset, and a map that
+                // clamped to a shorter viewport would ask for offsets the scroller
+                // refuses at the bottom edge — trading 18 pt of overstatement for a
+                // rectangle that disagrees with the editor about where it is. 18 pt
+                // of 1792 is the cheaper error, and it is an error in the safe
+                // direction (the box is never smaller than what you can see).
+                viewportHeight: editorViewportHeight,
+                playheadContentX: minimapPlayheadX,
+                noteColor: noteColor,
+                onJump: jumpToMinimapTarget,
+                onCollapse: { layout.setPianoRollMinimap(false) })
+                .padding(.trailing, 14)
+                .padding(.bottom, 14)
+        } else {
+            PianoRollMinimapChip(onExpand: { layout.setPianoRollMinimap(true) })
+                .padding(.trailing, 14)
+                .padding(.bottom, 14)
+        }
+    }
+
+    /// Reads the editor's VERTICAL scroll offset and viewport height (m25-b-2) —
+    /// the `gridScrollReader` idiom on the pitch axis. A background inside the
+    /// vertical scroll content (never hit-tested), updated only when the offset
+    /// actually moves.
+    ///
+    /// ⚠️ It reports to `gridScrollY` ONLY — never to `follow.reportOffset`. Follow
+    /// is a horizontal mechanism here (its whole runtime is one offset against one
+    /// content width), and feeding it a second axis' reports would make every
+    /// pitch scroll look like a manual horizontal scroll and suspend follow for a
+    /// gesture that never contested it.
+    private var editorVerticalScrollReader: some View {
+        GeometryReader { geo in
+            let topY = geo.frame(in: .named(Self.editorVerticalScrollSpace)).minY
+            Color.clear
+                .onChange(of: topY, initial: true) { _, newValue in
+                    gridScrollY = -newValue
+                }
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// Reads the editor's visible HEIGHT — the viewport the minimap's rectangle is
+    /// sized from. Changes on a window/splitter resize (and on entering the m25-b-1
+    /// maximized mode), never on a playback tick.
+    private var editorHeightReader: some View {
+        GeometryReader { geo in
+            Color.clear
+                .onChange(of: geo.size.height, initial: true) { _, newValue in
+                    editorViewportHeight = newValue
+                }
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// The vertical jump's anchor: the `followMarker` idiom on the pitch axis — a
+    /// 1 pt, layout-real, hit-test-inert marker whose TOP edge sits at
+    /// `verticalTargetY`, so `scrollTo(..., anchor: .top)` lands the viewport's top
+    /// exactly on it.
+    ///
+    /// ⚠️⚠️ **IT IS MOUNTED ON THE KEYBOARD GUTTER, AND THAT PLACEMENT IS THE WHOLE
+    /// SAFETY ARGUMENT — do not "tidy" it into the grid.** `:1598-1606` records why
+    /// follow's `ScrollViewReader` wraps only the horizontal scroller: a reader
+    /// resolves `scrollTo` against EVERY scroll view inside its content, and an
+    /// `.leading` anchor carries a y of 0.5, so a reader spanning both axes would
+    /// yank the pitch view on every page turn. The vertical jump needs a reader
+    /// that DOES span both axes (the horizontal scroller is inside the vertical
+    /// one), so it avoids the symmetric failure by putting the anchor where the
+    /// horizontal scroller cannot see it — the gutter is a SIBLING of that
+    /// scroller, so only the vertical scroller can resolve this id, and being
+    /// `.vertical`-only it has no horizontal axis for the `.top` anchor's x = 0.5
+    /// to disturb. The grid's own follow marker stays exactly where it is.
+    ///
+    /// ⚠️ An `.overlay` is sized to its PARENT's bounds, so a marker taller than
+    /// the gutter would be compressed and `scrollTo` would land somewhere other
+    /// than `verticalTargetY`. It cannot happen here, by construction rather than
+    /// by luck: the gutter is laid out at exactly `model.contentHeight`
+    /// (`KeyboardSidebar.swift:125`), `verticalTargetY` has exactly ONE writer
+    /// (`jumpToMinimapTarget`), and the value it writes is
+    /// `PianoRollMinimap.scrollTarget`'s y — clamped to
+    /// `contentHeight − viewportHeight`, hence always strictly inside the gutter.
+    /// If a second writer ever appears, that argument dies with it.
+    private var verticalJumpMarker: some View {
+        VStack(spacing: 0) {
+            Color.clear.frame(width: 1, height: max(0, verticalTargetY))
+            Color.clear.frame(width: 1, height: 1).id(Self.verticalJumpMarkerID)
+        }
+        .allowsHitTesting(false)
+    }
+
     /// Reseeds the edit models from an externally mutated clip value (m18-i).
     /// CANCEL-THEN-RESEED for an in-flight grid gesture: the drag parks in
     /// `.cancelled` (remaining ticks swallowed — no apply, no commit, no
@@ -784,9 +1122,16 @@ struct PianoRollView: View {
     /// which has no other route out). All four are user gestures and there is no
     /// non-gesture caller, so this cannot FALSE-engage — which is the property
     /// that makes it safe to put the call here rather than at four sites.
-    private func commit() {
+    ///
+    /// m25-a — `extendToCover` is the AUTO-EXTEND request, and it is a parameter
+    /// of the funnel rather than a fifth caller so that the two gestures that
+    /// need it (double-click-to-create here, and m25-f-3's edge drag) submit
+    /// through the same single store call. Default `[]` keeps the other four
+    /// callers byte-identical: DELETE and the velocity lane cannot push a note
+    /// past the clip end, so neither should be able to grow the clip.
+    private func commit(extendToCover: Set<UUID> = []) {
         onEngage()
-        onCommit(model.buildSubmission())
+        onCommit(model.buildSubmission(), extendToCover)
     }
 
     // MARK: - Clipboard (m23-ek-3)
@@ -848,6 +1193,21 @@ struct PianoRollView: View {
         case .paste:
             let payload = clipboardNotes
             guard !payload.isEmpty else { return }
+            // m25-f-2 — WHERE IT LANDS IS `PasteAnchorPolicy.resolveNotePaste`'s
+            // decision, not this view's. Three rules: on the playhead when the
+            // transport is inside this clip, else ABOVE the notes it was copied
+            // from when those are still here, else at the start of the visible
+            // area. Read that function's banner before changing anything here.
+            let landing = PasteAnchorPolicy.resolveNotePaste(
+                payload: payload,
+                playheadProjectBeat: positionBeats,
+                clipStartBeat: clip.startBeat,
+                clipLengthBeats: clip.lengthBeats,
+                // THE DRAFT, not the store's notes: a paste must sit above what
+                // the user can SEE, and an uncommitted edit is on screen.
+                existingNotes: model.draft,
+                visibleStartLocalBeat: model.beat(forX: gridScrollX),
+                visiblePitches: visiblePitchWindow)
             // ⚠️ SNAP THE ANCHOR **ONCE**, THEN TRANSLATE RIGIDLY. Snapping each
             // pasted note's absolute start instead WELDS notes sitting at
             // different sub-grid phases — a swung or triplet figure pasted onto a
@@ -855,29 +1215,77 @@ struct PianoRollView: View {
             // defect verbatim: snapping is a property of the GESTURE, not of each
             // element. With snap off, `model.snap` passes through (floored at 0),
             // so this same path is correct there too.
-            let anchor = model.snap(
-                beat: PasteAnchorPolicy.noteLocalAnchor(
-                    playheadProjectBeat: positionBeats,
-                    clipStartBeat: clip.startBeat,
-                    clipLengthBeats: clip.lengthBeats),
-                resolution: effectiveSnap)
-            let pasted = PasteAnchorPolicy.translatedNotes(payload, toAnchor: anchor)
+            //
+            // ⚠️⚠️ AND `landing.snap` DECIDES WHICH WAY, WHICH IS NOT A BOOL.
+            // An above-the-source paste re-uses the payload's OWN start, so
+            // snapping it at all would drag a swung figure onto the grid — the
+            // same weld, one level up, against an anchor that was never the
+            // user's to move. A visible-area paste must snap UP: `model.snap`
+            // rounds to NEAREST, which at `.bar` in 4/4 rounds the viewport's
+            // leading edge BACKWARD by up to 2 beats and puts the group off the
+            // left of the screen — defeating the one branch whose whole purpose
+            // is that the user can see it.
+            let anchor: Double
+            switch landing.snap {
+            case .nearest: anchor = model.snap(beat: landing.localBeat, resolution: effectiveSnap)
+            case .upward: anchor = model.snapUp(beat: landing.localBeat, resolution: effectiveSnap)
+            case .none: anchor = max(0, landing.localBeat)
+            }
+            let pasted = PasteAnchorPolicy.translatedNotes(
+                payload, toAnchor: anchor, pitchOffset: landing.pitchOffset)
             guard !pasted.isEmpty else { return }
             onEngage()   // m23-al R9 — clipboard paste
             // Canonically ordered so the store's own ordering matches and
             // `needsReseed` stays false — which is what keeps the selection below
             // from being wiped by the reseed the commit triggers.
             model.draft = MIDINote.canonicallyOrdered(model.draft + pasted)
+            // m25-f-2 — THE NOTES THIS GESTURE PLACED. Named once, used twice,
+            // and deliberately NOT read back off `model.selection` at the call
+            // below: the store is being told which notes may move the clip's
+            // trailing edge, and "what this paste placed" is the invariant that
+            // has to hold there — not "what happens to be selected", which the
+            // next line makes equal only incidentally.
+            let pastedIDs = Set(pasted.map(\.id))
             // The pasted notes become the selection, so the user can drag them
             // immediately (the double-tap-add precedent, `model.selectOnly`).
-            model.selection = Set(pasted.map(\.id))
-            onPasteNotes(model.buildSubmission())
+            model.selection = pastedIDs
+            // ⚠️ `extendToCover:` IS NOT A `commit(` CALL. The paste stays on
+            // the UNCOALESCED `pasteNotes` route (see `onPasteNotes`' banner);
+            // it merely gained the same auto-extend rule `commit(extendToCover:)`
+            // already applies to note creation and note drags. The R6
+            // false-engage guard in `EditorSurfaceOwnershipSiteTests` counts
+            // `commit(` occurrences in this file — this line must not become one.
+            onPasteNotes(model.buildSubmission(), pastedIDs)
         }
     }
 
     /// The draft notes the user has selected, in draft order.
     private func selectedNotes() -> [MIDINote] {
         model.draft.filter { model.selection.contains($0.id) }
+    }
+
+    /// The pitch rows currently ON SCREEN, or nil before the editor has been
+    /// measured (m25-f-2).
+    ///
+    /// It bounds the paste nudge: the user's reason for wanting the group offset
+    /// at all is that they can *"immediately capture them with mouse"*, so a
+    /// nudge that pushed the copy off the top of the view would defeat the whole
+    /// feature. `pitch(forY:)` is the model's own affine mapping (row 0 is pitch
+    /// 127, y grows as pitch falls), consumed rather than re-derived — so the
+    /// window can never disagree with the rows being drawn.
+    ///
+    /// ⚠️ `editorViewportHeight` is the SCROLLER's height and is documented on
+    /// `minimapOverlay` as overstating the visible pitch by the ~18 pt frozen
+    /// scrub strip. That error is in the safe direction here too: the window is
+    /// never claimed SMALLER than it is, so a nudge this bounds is never pushed
+    /// off screen by the discrepancy — at worst a row at the very top edge is
+    /// considered visible when it is under the strip.
+    private var visiblePitchWindow: ClosedRange<Int>? {
+        guard editorViewportHeight > 0 else { return nil }
+        let top = model.pitch(forY: gridScrollY)
+        let bottom = model.pitch(forY: gridScrollY + editorViewportHeight)
+        guard bottom <= top else { return nil }
+        return bottom...top
     }
 
     // MARK: - Header
@@ -926,11 +1334,14 @@ struct PianoRollView: View {
             }
             quantizeChip
                 .explainable(.quantize)
+            humanizeChip
             barOpsCluster
                 .explainable(.pianoRollBarOps)
             if editorMode == .notes {
                 controllerLaneSummaryChip
             }
+            maximizeToggle
+                .explainable(.pianoRollMaximize)
             closeButton
         }
         .padding(.horizontal, 12)
@@ -1333,6 +1744,34 @@ struct PianoRollView: View {
         .help("Tighten this part's timing to a grid, or apply a groove")
     }
 
+    /// Opens the Humanize panel for this clip (m25-c) — the QUANTIZE chip's
+    /// sibling and its inverse. Neutral create-chrome (Rule 3 — `textPrimary`, no
+    /// earned accent at rest); the same chip idiom, never a stock control.
+    ///
+    /// Shown in BOTH densities, like QUANTIZE: this chip is the ONLY thing a
+    /// human can click to reach `humanizeClipNotes` (the capability shipped with
+    /// a wire command and an MCP tool and no UI at all), so hiding it behind Pro
+    /// would leave the beginner exactly where m25-c found them.
+    private var humanizeChip: some View {
+        Button(action: onOpenHumanize) {
+            HStack(spacing: 4) {
+                Image(systemName: "hand.draw")
+                    .font(.system(size: 9, weight: .semibold))
+                Text("HUMANIZE")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .tracking(0.6)
+            }
+            .foregroundStyle(DAWTheme.textPrimary)
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Loosen this part's timing and velocity so it sounds played, not programmed")
+    }
+
     /// Simple / Pro segmented chip — the shared `SimpleProToggle` component bound
     /// to this panel's density (docs/DESIGN-LANGUAGE.md density modes).
     private var modeToggle: some View {
@@ -1446,6 +1885,58 @@ struct PianoRollView: View {
         .help("Grid snap resolution")
     }
 
+    /// MAXIMIZE / RESTORE (m25-b-1) — the mode that suspends the editor's 0.30–0.55
+    /// height clamp and gives the pane the window, minus the fixed chrome and the
+    /// arrange's pinned ruler strip.
+    ///
+    /// ⭐ **SIZED LIKE `closeButton`, DELIBERATELY.** The roll header already
+    /// carries density, editor mode, zoom, snap, quantize, bar-ops and the
+    /// controller chip inside a window whose floor is 1208 pt wide; m25-e shipped a
+    /// ~104 pt toolbar addition on an unverified estimate and recorded that as a
+    /// risk. A 22×22 icon square in the established `panelRaised` / corner-5
+    /// grammar is the cheapest footprint the header has, and it sits immediately
+    /// before CLOSE because "make it big / put it away" are the same family of
+    /// pane-level action.
+    ///
+    /// ⭐ **TWO FACES, AND THE STATE IS READABLE AT A GLANCE** (Rule 3 — accent is
+    /// earned by state, and maximized is an earned active state the user chose):
+    /// neutral `textDim`-on-`panelRaised` at rest, `playback` cyan + fill + glow
+    /// while maximized, with the glyph flipping outward/inward. Cyan, never violet
+    /// — nothing here is AI-touched. The tooltip names the Escape exit in the
+    /// maximized face, so the second way out is discoverable from the first.
+    private var maximizeToggle: some View {
+        let maximized = layout.editorMaximized
+        return Button {
+            // ⭐ m23-al R10 — THE MAXIMIZE FUNNEL (new at m25-b-1), and it is a
+            // funnel rather than an exception for a reason worth stating: the
+            // rule these sites obey is "a gesture that CHANGES something", which
+            // R5 (the zoom cluster) already shows includes a VIEW change and not
+            // only an edit — the excluded case is a pure READ, which is why COPY
+            // is deliberately not a site. Maximizing changes the view, and it is
+            // the strongest possible statement that the roll is where the user is
+            // working, so ⌘+/⌘−/⌘0 must follow it here. Without this, maximizing
+            // would leave the zoom keys aimed at an arrange that is now an 86 pt
+            // ruler strip. (CLOSE is the counter-example that is NOT a site: it
+            // ends the surface rather than claiming it.)
+            onEngage()   // m23-al R10 — maximize toggle
+            // Straight to the shared store, exactly as the zoom cluster writes
+            // `pianoRollPPB`. The STATE is the funnel — this toggle and the Escape
+            // route are two drivers of one persisted slot, and neither owns it.
+            layout.setEditorMaximized(!maximized)
+        } label: {
+            Image(systemName: EditorMaximize.toggleSymbol(maximized: maximized))
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(maximized ? DAWTheme.playback : DAWTheme.textDim)
+                .frame(width: 22, height: 22)
+                .background(maximized ? DAWTheme.playback.opacity(0.14) : DAWTheme.panelRaised)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .glow(DAWTheme.playback, radius: 5, intensity: maximized ? 0.5 : 0)
+        }
+        .buttonStyle(.plain)
+        .help(EditorMaximize.toggleHelp(maximized: maximized))
+        .accessibilityLabel(EditorMaximize.toggleAccessibilityLabel(maximized: maximized))
+    }
+
     private var closeButton: some View {
         Button(action: onClose) {
             Image(systemName: "xmark")
@@ -1486,6 +1977,11 @@ struct PianoRollView: View {
     // MARK: - Editor (keyboard + grid), vertically scrolled together
 
     private var editor: some View {
+        // m25-b-2 — the VERTICAL reader, added for the minimap's pitch-axis jump.
+        // It necessarily spans both axes (the horizontal scroller is inside the
+        // vertical one); what keeps that safe is WHERE its anchor is mounted, and
+        // the argument is written out on `verticalJumpMarker`.
+        ScrollViewReader { verticalProxy in
         ScrollView(.vertical, showsIndicators: true) {
             HStack(alignment: .top, spacing: 0) {
                 // m23-al R8 — the gutter keyboard. Its gesture lives in another
@@ -1500,6 +1996,11 @@ struct PianoRollView: View {
                                     onEngage()
                                     onAudition(pitches, velocity)
                                 })
+                    // m25-b-2: the minimap's vertical-jump anchor. Mounted HERE —
+                    // outside the horizontal scroller — on purpose; see
+                    // `verticalJumpMarker`. An overlay, so the gutter's own layout
+                    // is untouched and the marker can never change its width.
+                    .overlay(alignment: .topLeading) { verticalJumpMarker }
                 // The follow reader (m23-c2) wraps ONLY this horizontal scroller,
                 // NOT the vertical one above it. A `ScrollViewReader` resolves
                 // `scrollTo` against every scroll view inside ITS content, and
@@ -1530,6 +2031,10 @@ struct PianoRollView: View {
                         // The rubber band (m23-ek-1), in the SAME content space
                         // the gesture reports its points in.
                         .overlay(alignment: .topLeading) { marqueeBandView }
+                        // m25-g — the group compress/extend handle, same space.
+                        .overlay(alignment: .topLeading) { groupScaleHandleView }
+                        // m25-o — the ⌘ playhead-place preview, same space again.
+                        .overlay(alignment: .topLeading) { playheadPlaceGhost }
                         .overlay(alignment: .topLeading) {
                             followMarker(Self.gridFollowMarkerID)
                         }
@@ -1537,7 +2042,59 @@ struct PianoRollView: View {
                         // Pointer affordances (docs/DESIGN-LANGUAGE.md): a note body
                         // grabs, its right-edge resize handle (Pro) resizes, empty
                         // grid keeps the arrow. Mirrors `gridDrag`'s hit routing.
-                        .hoverCursor(resolve: gridCursor)
+                        // m25-o — the tracking area re-resolves on pointer
+                        // MOVEMENT only, so a ⌘ press with the mouse still would
+                        // never reach `gridCursor`. Bumping this token on the
+                        // modifier's edge is what makes the affordance appear the
+                        // instant ⌘ goes down and vanish the instant it comes up.
+                        //
+                        // m25-x — THE TOKEN IS THE CHORD ITSELF, not a ⌘ bit.
+                        // `pointerModifiers` is what `gridCursor` reasons from,
+                        // so making its raw value the token means the overlay
+                        // re-asks on exactly the transitions that can change its
+                        // answer and on no others. A `commandHeld ? 1 : 0` token
+                        // would leave the cursor stale over the group-scale band
+                        // when ⇧ went down alone — a cursor that promises an edge
+                        // drag ⇧-click refuses, which is the defect this item is
+                        // about, surviving in the one layer that caches.
+                        .hoverCursor(resolve: gridCursor,
+                                     refresh: pointerModifiers.rawValue)
+                        // ⭐ m25-g — THE hover reader, and there is exactly one.
+                        //
+                        // ⚠️ `.local`, NOT the `.named(contentSpace)` idiom the
+                        // timeline uses (`TempoLaneBand`, `TimelineLanesView`),
+                        // and the difference is correctness rather than taste.
+                        // A hover that disagrees with the press by even a scroll
+                        // offset would draw the handle somewhere the click does
+                        // not start it. Attached HERE, adjacent to
+                        // `.gesture(gridDrag)`, `.local` is the same space
+                        // `gridDrag` reports its points in — which is the grid's
+                        // CONTENT space, and the evidence is shipped rather than
+                        // asserted: `hoverCursor(resolve:)` resolves points at
+                        // this same position in the chain straight through
+                        // `model.hitTest`, and note hover cursors are correct.
+                        // The timeline's named space is right for ITS readers,
+                        // which hang off a different view than their gesture.
+                        //
+                        // NOT an extra gesture: `.onContinuousHover` is not in
+                        // `rollGestureCountIsPinned`'s needle set, and it takes
+                        // no press — hover and the drag coexist, exactly as the
+                        // `hoverCursor` overlay already does.
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let point): hoverPoint = point
+                            case .ended: hoverPoint = nil
+                            @unknown default: hoverPoint = nil
+                            }
+                        }
+                        // m25-o — the ⌘ monitor's LIFETIME is the hover, derived
+                        // from the one reader above rather than from a second one.
+                        // Off-surface there is nothing for ⌘ to mean here, and a
+                        // global monitor that ran while the user typed ⌘S in
+                        // another panel would be pure cost.
+                        .onChange(of: hoverPoint != nil) { _, overGrid in
+                            if overGrid { startFlagsMonitor() } else { stopFlagsMonitor() }
+                        }
                         .gesture(gridDrag)
                         // Pinch-to-zoom (m21-c) — simultaneous so it never
                         // steals the drag/tap routing.
@@ -1551,7 +2108,12 @@ struct PianoRollView: View {
                                     resolution: effectiveSnap
                                 )
                                 model.selectOnly(note.id)
-                                commit()
+                                // m25-a — the note the user just placed is the
+                                // ONLY one allowed to grow the clip. Naming it
+                                // (rather than asking for "fit the notes") is
+                                // what stops a click at bar 2 from stretching
+                                // the clip out to a latent note at bar 20.
+                                commit(extendToCover: [note.id])
                             }
                         )
                         // m23-cf: THE ROLL'S FIRST CONTEXT MENU. Before this the
@@ -1592,8 +2154,26 @@ struct PianoRollView: View {
                 }
                 }
             }
+            // m25-b-2: reads the CONTENT's position → the live vertical scroll
+            // offset. A background on the scroll content, the `gridScrollReader`
+            // shape one axis over.
+            .background { editorVerticalScrollReader }
         }
         .defaultScrollAnchor(.center)   // open near middle C, full 0-127 scrollable
+        .coordinateSpace(name: Self.editorVerticalScrollSpace)
+        // m25-b-2 — the vertical half of a minimap jump. Same non-animated,
+        // deferred-re-issue shape as the horizontal one above (m17-b durability):
+        // a `scrollTo` not re-issued on a fresh main-actor turn moves layout
+        // without durably updating the scroller's position.
+        .onChange(of: verticalNonce) { _, _ in
+            verticalProxy.scrollTo(Self.verticalJumpMarkerID, anchor: .top)
+            Task { @MainActor in
+                verticalProxy.scrollTo(Self.verticalJumpMarkerID, anchor: .top)
+            }
+        }
+        // m25-b-2: the VIEWPORT height (outside the scroll content — this is the
+        // visible box, not the 128-row stack).
+        .background { editorHeightReader }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Off-clip cue (m23-c1): the complement of `gridPlayhead` — it draws
         // exactly when the line does not. Overlaid on the EDITOR (not on the
@@ -1608,6 +2188,13 @@ struct PianoRollView: View {
         // seeks the transport (m10-e). Sits over the grid area only, past the
         // keyboard gutter.
         .overlay(alignment: .topLeading) { scrubStrip }
+        // m25-b-2 — the viewport minimap, floating in the corner. Placed on the
+        // EDITOR rather than on the grid content for the `offClipCueBand` reason:
+        // it is viewport furniture, not a timeline object, so it must not scroll
+        // away with the notes it maps. Topmost of the editor's overlays — it is the
+        // only one here that takes a gesture from a corner nothing else claims.
+        .overlay(alignment: .bottomTrailing) { minimapOverlay }
+        }
     }
 
     /// The note grid's right-click menu (m23-cf) — one destructive entry.
@@ -1719,6 +2306,131 @@ struct PianoRollView: View {
         }
     }
 
+    // MARK: - Group compress / extend handle (m25-g)
+
+    /// Width of the DRAWN bar, as distinct from `PianoRollGroupScale.grabWidth`,
+    /// which is the 12-pt zone that ROUTES the press. Deliberately different
+    /// numbers: an affordance you can hit from further away than it looks is
+    /// forgiving, one you can only hit exactly where it looks is a test of aim
+    /// (the arrange's trim edges make the same split).
+    private static let groupScaleHandleBarWidth: CGFloat = 4
+
+    /// Which handle to draw, or nil for none.
+    ///
+    /// Two sources, and the second one matters: while a scale is IN FLIGHT the
+    /// handle is drawn from `activeDrag`, not from hover — SwiftUI suspends
+    /// hover updates under a captured pointer, so a hover-only rule would make
+    /// the handle vanish the instant the user grabbed it.
+    private var visibleGroupScaleEdge: PianoRollGroupScale.Edge? {
+        if case .groupScale(let edge) = activeDrag { return edge }
+        guard activeDrag == .none, let point = hoverPoint else { return nil }
+        // m25-x — the LIVE chord, so the bar retracts the instant ⇧ or ⌘ goes
+        // down. `pointerModifiers` is `@State`-backed, so this re-evaluates on
+        // the modifier's edge with no pointer movement, which is the whole
+        // reason the flags monitor exists.
+        if case .groupScaleHandle(let edge) = hoverTarget(at: point,
+                                                          modifiers: pointerModifiers) {
+            return edge
+        }
+        return nil
+    }
+
+    /// The handle: a short vertical bar hugging the selection's edge, in the
+    /// note's own accent (cyan, or violet for AI-generated material) with the
+    /// core+bloom glow — docs/DESIGN-LANGUAGE.md's rule that nothing static ever
+    /// glows is respected, since this exists only while the pointer is on it or
+    /// the gesture is live.
+    ///
+    /// It sits INSIDE the grab band, hugging the selection: the leading bar at
+    /// the band's right edge, the trailing bar at its left. So the bar is always
+    /// the nearest thing to the notes it will scale, while the forgiving 12-pt
+    /// zone extends away from them into empty grid.
+    ///
+    /// Hit-test-inert, like every other overlay on this surface: the press it
+    /// advertises is routed by `beginGesture`, and an overlay that ate presses
+    /// would break `.contextMenu` and the double-tap add for the same points
+    /// (the m23-cf measurement).
+    @ViewBuilder
+    private var groupScaleHandleView: some View {
+        if let edge = visibleGroupScaleEdge, let frame = model.groupScaleFrame() {
+            let band = PianoRollGroupScale.handleRect(frame: frame, edge: edge)
+            RoundedRectangle(cornerRadius: 2)
+                .fill(noteColor.opacity(0.9))
+                .frame(width: Self.groupScaleHandleBarWidth, height: band.height)
+                .glow(noteColor, radius: 5, intensity: 0.5)
+                .frame(width: band.width, height: band.height,
+                       alignment: edge == .leading ? .trailing : .leading)
+                .offset(x: band.minX, y: band.minY)
+                // NO `.help` — a `.allowsHitTesting(false)` view has no hit
+                // region for AppKit to hang a tooltip on, so one here would be
+                // dead text. The affordance speaks through the cursor
+                // (`PianoRollHover.cursor`) instead, which is the same way the
+                // arrange's trim edges announce themselves.
+                .allowsHitTesting(false)
+        }
+    }
+
+    // MARK: - Playhead-place ghost line (m25-o)
+
+    /// Where the ⌘-click would land, previewed as the house **hover ghost line**:
+    /// docs/DESIGN-LANGUAGE.md's *"1 pt `textSecondary` line at 0.35 opacity
+    /// marking the snapped beat under the pointer — deliberately NO glow"*.
+    ///
+    /// ⭐ **THIS IS WHERE "respect snap model" BECOMES VISIBLE.** The user asked
+    /// for the snap and for an affordance; the cursor can say *a playhead is what
+    /// this click places*, but only the line can say *and it lands HERE, on this
+    /// grid line, not under your pointer*. With snap on it visibly jumps between
+    /// lines as the pointer crosses the midpoint, which teaches the snap setting
+    /// better than any label.
+    ///
+    /// ⚠️ **NO GLOW, AND NOT CYAN — the rule is quoted above and it is load
+    /// bearing.** Glow is earned by transport state, and cyan IS the transport in
+    /// this view. A glowing cyan line at the pointer would be pixel-indistinguishable
+    /// from the real playhead, so the preview would be claiming the transport had
+    /// already moved. Neutral + flat is the difference between a hint and a lie.
+    ///
+    /// Gated on `activeDrag == .none` (the `visibleGroupScaleEdge` precedent — a
+    /// preview during a live gesture is stale by definition) and on the same
+    /// resolver the click obeys, so the line appears exactly when the click would
+    /// act. Hit-test-inert, like every other overlay here.
+    ///
+    /// ⚠️ **KNOWN LIMIT, STATED BECAUSE THE COMMENT ABOVE ARGUES PREVIEWS MUST
+    /// NOT LIE: `hoverPoint` needs pointer MOVEMENT.** It is written only by
+    /// `.onContinuousHover`, so if the content scrolls under a motionless
+    /// ⌘-holding pointer — follow-playhead during playback, or an edge-drag
+    /// auto-scroll — the stored content x names a beat the pointer is no longer
+    /// over, and this line drifts away from the cursor until the mouse moves
+    /// again. **The CLICK stays correct regardless**: `endGesture` reads the live
+    /// press point and never consults `hoverPoint`, so the divergence is
+    /// cosmetic and self-heals on the next pointer event. It is inherited from
+    /// the m25-g hover facility rather than introduced here (`visibleGroupScaleEdge`
+    /// has the identical exposure), and fixing it means giving the roll a
+    /// scroll-aware hover reader — a change to the ONE reader every consumer
+    /// shares, which is more than this item should spend.
+    @ViewBuilder
+    private var playheadPlaceGhost: some View {
+        // ⚠️ `commandHeld` IS TESTED FIRST, AND IT IS NOT A SECOND DECISION.
+        // `pointerModifiers` is derived from this same flag, so `!commandHeld`
+        // ⟹ empty chord ⟹ `placesPlayhead` is false — a PROVEN-NECESSARY
+        // precondition, not a competing rule, and the resolver below is still the
+        // only thing that decides. What it buys is real: `model.hitTest` walks
+        // `noteRects()`, which ALLOCATES AN ARRAY, and this body re-evaluates on
+        // the transport tick. Without the short-circuit every playing frame pays
+        // for a hit test whose answer cannot matter (docs/DESIGN-LANGUAGE.md's
+        // no-allocation-per-frame rule).
+        if commandHeld, activeDrag == .none, let point = hoverPoint,
+           PianoRollGridPress.placesPlayhead(noteID: model.hitTest(point)?.id,
+                                             modifiers: pointerModifiers) {
+            Rectangle()
+                .fill(DAWTheme.textSecondary.opacity(0.35))
+                .frame(width: 1)
+                .offset(x: CGFloat(placementLocalBeat(atContentX: point.x,
+                                                      snapBypassed: snapBypassHeld))
+                    * model.pixelsPerBeat)
+                .allowsHitTesting(false)
+        }
+    }
+
     // MARK: - Off-clip edge cue (m23-c1)
 
     /// The off-clip cue value — non-nil EXACTLY when the playhead line is absent
@@ -1800,17 +2512,50 @@ struct PianoRollView: View {
         .allowsHitTesting(false)
     }
 
-    /// The frozen scrub band: a transparent strip over the top of the grid (past
-    /// the keyboard gutter) whose drag SEEKS the transport. Click jumps, drag
-    /// scrubs continuously — free (unsnapped), the deliberate pro default. Works
-    /// while playing and stopped (mid-play seek is supported engine behavior). The
+    /// The frozen scrub band: a RULER over the top of the grid (past the keyboard
+    /// gutter) whose drag SEEKS the transport. Click jumps, drag scrubs
+    /// continuously — **ON THE SNAP GRID, with ⌥ for a free fine scrub (m25-o-2,
+    /// user ruling 2026-08-13).** ⚠️ This line read *"free (unsnapped), the
+    /// deliberate pro default"* for four milestones and that stance is now
+    /// SUPERSEDED, not merely unimplemented: the user ruled that one snap model
+    /// governs playhead positioning in the roll and the arrange alike. Works while
+    /// playing and stopped (mid-play seek is supported engine behavior). The
     /// `resizeLeftRight` cursor advertises it (a horizontal position drag), held
     /// through the drag by `DragCursor` (docs/DESIGN-LANGUAGE.md pointer family).
+    ///
+    /// ⚠️ **m25-f-5 CHANGED THE LOOK, NOT THE BEHAVIOUR.** The band was
+    /// `Color.clear` for four milestones and a user reported *"I can't position
+    /// the playhead in the note editor"* — the feature worked, and nothing on
+    /// screen said it existed. A hover cursor and a `.help` tooltip only reach a
+    /// pointer that is already inside the strip, which is not the state the report
+    /// came from. It now draws a ground, clip-local bar/beat numbers and a visible
+    /// cyan playhead handle (`PianoRollScrubRulerBand`). The gesture below is
+    /// untouched, `onSeek` is still the scrub's ONLY side effect, and nothing
+    /// about it reached the wire (the m10-c/sp-b pure-view rule).
+    ///
+    /// The ruler is a BACKGROUND of the hit area rather than an overlay on it, so
+    /// the `contentShape`/`hoverCursor`/`gesture` chain still owns every point of
+    /// the band — a ruler drawn over the gesture would be a decoration that ate
+    /// the drag it advertises.
+    ///
+    /// **Shown in both densities.** A ruler is navigation, not edit chrome (the
+    /// arrange zoom cluster's rule), and Simple is precisely the density the user
+    /// who could not find this was working in.
     private var scrubStrip: some View {
         HStack(spacing: 0) {
             Color.clear.frame(width: Self.keyboardWidth)   // gutter — no scrub here
             Color.clear
                 .frame(maxWidth: .infinity)
+                .background {
+                    PianoRollScrubRulerBand(
+                        lengthBeats: clip.lengthBeats,
+                        beatsPerBar: beatsPerBar,
+                        pixelsPerBeat: model.pixelsPerBeat,
+                        contentWidth: gridDrawnWidth,
+                        scrollX: gridScrollX,
+                        positionBeats: positionBeats,
+                        clipStartBeat: clip.startBeat)
+                }
                 .contentShape(Rectangle())
                 .hoverCursor(.resizeLeftRight)
                 .gesture(scrubDrag)
@@ -1819,17 +2564,29 @@ struct PianoRollView: View {
         .frame(height: Self.scrubStripHeight)
     }
 
+    /// ⭐⭐ **m25-o-2 — THE SCRUB NOW SNAPS, BY USER RULING (2026-08-13).** It ran
+    /// free for four milestones; the user ruled that one snap model governs
+    /// playhead positioning on both surfaces, so this drag routes through the
+    /// SAME `placementLocalBeat` the ⌘-click and the line drag use, with ⌥ as the
+    /// arrange's fine escape. `PianoRollPlayhead.scrubProjectBeat` — the old
+    /// unsnapped mapping — is deliberately no longer called from here; see its
+    /// doc for why it survives and must not be wired back.
     private var scrubDrag: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
                 onEngage()   // m23-al R2 — ruler scrub
                 DragCursor.set(.resizeLeftRight)
                 // Strip-local x=0 is the grid's left edge (unscrolled); add the
-                // live scroll offset to recover the content beat.
+                // live scroll offset to recover the content beat. ⚠️ This is the
+                // ONE place `gridScrollX` belongs — the strip does not scroll
+                // with the content, while every grid point already is content
+                // space (`placementLocalBeat`'s own warning).
                 let contentX = value.location.x + gridScrollX
-                onSeek(PianoRollPlayhead.scrubProjectBeat(
-                    localX: contentX, clipStartBeat: clip.startBeat,
-                    lengthBeats: clip.lengthBeats, pixelsPerBeat: model.pixelsPerBeat))
+                onSeek(PianoRollPlayhead.projectBeat(
+                    localBeat: placementLocalBeat(atContentX: contentX,
+                                                  snapBypassed: snapBypassHeld),
+                    clipStartBeat: clip.startBeat,
+                    lengthBeats: clip.lengthBeats))
             }
             .onEnded { _ in DragCursor.clear() }
     }
@@ -1841,9 +2598,171 @@ struct PianoRollView: View {
     /// handle resizes, empty grid keeps the arrow — double-click-to-add doesn't
     /// warrant a crosshair on a single hover).
     private func gridCursor(at point: CGPoint) -> CursorKind? {
-        guard let hit = model.hitTest(point) else { return nil }
-        let zone: NoteZone = (hit.zone == .resizeHandle && mode == .pro) ? .resizeHandle : .body
-        return CursorAffordance.forNoteZone(zone)
+        let hit = model.hitTest(point)
+        // m25-o — ⌘ over anything that is not a note turns the pointer into the
+        // playhead-place bar. Asked of the SAME resolver `endGesture` obeys, with
+        // the same two inputs, so the promise and the performance are literally
+        // one function's answer (`PianoRollHover`'s one-resolver argument, applied
+        // to the chord instead of the geometry).
+        if PianoRollGridPress.placesPlayhead(noteID: hit?.id, modifiers: pointerModifiers) {
+            return .verticalBar
+        }
+        return PianoRollHover.cursor(for: hoverTarget(at: point, hit: hit,
+                                                     modifiers: pointerModifiers))
+    }
+
+    /// The chord the HOVER AFFORDANCES are allowed to reason about (m25-o, and
+    /// widened to ⇧ by m25-x) — the cursor, the group-scale bar and the playhead
+    /// ghost line all reason from this one value.
+    ///
+    /// ⭐ **⇧ IS TRACKED SINCE m25-x, AND THE NOTE THAT USED TO REFUSE IT IS
+    /// RECORDED ON `shiftHeld` RATHER THAN DELETED.** Short version: ⇧ is a
+    /// TOGGLING chord (`ArrangeClickIntent`), so `PianoRollHover.target` retracts
+    /// the group-scale handle under it; without ⇧ in this set the bar would keep
+    /// drawing while ⇧-click did nothing.
+    ///
+    /// ⚠️ **WIDENING THIS CHANGED NOTHING ELSE, AND THAT WAS CHECKED CHORD BY
+    /// CHORD against `PianoRollGridPress.release`:** `[.shift]` on empty is
+    /// `.doNothing` and on a note is `.toggle`, so `placesPlayhead` stays false
+    /// and neither the ⌘ cursor nor the ghost line appears; `[.shift, .command]`
+    /// resolves `.positionPlayhead` exactly as the bare `[.command]` this used to
+    /// report for that same physical chord. The only pixel that moves is the
+    /// group-scale bar.
+    private var pointerModifiers: ArrangeClickModifiers {
+        var chord: ArrangeClickModifiers = []
+        if commandHeld { chord.insert(.command) }
+        if shiftHeld { chord.insert(.shift) }
+        return chord
+    }
+
+    // MARK: - ⌘ tracking (playhead-place affordance, m25-o)
+
+    /// Mirrors `TimelineLanesView.ClipBlock`'s ⌥ tracking, including its first
+    /// line: the CURRENT flags are read at start, because entering the grid with ⌘
+    /// ALREADY down produces no `.flagsChanged` event at all — without this the
+    /// affordance would appear only after the user released and re-pressed ⌘,
+    /// which reads as "it works sometimes".
+    private func startFlagsMonitor() {
+        commandHeld = NSEvent.modifierFlags.contains(.command)
+        shiftHeld = NSEvent.modifierFlags.contains(.shift)
+        guard flagsMonitor == nil else { return }
+        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            commandHeld = event.modifierFlags.contains(.command)
+            // m25-x — read from the SAME event. `.flagsChanged` already fires on
+            // every ⇧ transition, so this costs one `contains` and no wake-ups.
+            shiftHeld = event.modifierFlags.contains(.shift)
+            return event
+        }
+    }
+
+    /// Removes the monitor and drops the affordance. Safe to call when none is
+    /// installed, which is what lets the three teardown paths overlap freely.
+    private func stopFlagsMonitor() {
+        if let monitor = flagsMonitor { NSEvent.removeMonitor(monitor); flagsMonitor = nil }
+        commandHeld = false
+        shiftHeld = false
+    }
+
+    /// ⭐ **THE ONE PRODUCER OF "where a ⌘-click puts the playhead" (m25-o)** — the
+    /// clip-local beat, snapped and clamped, for a grid CONTENT x.
+    ///
+    /// Both consumers go through here: the ghost line the user sees BEFORE
+    /// clicking, and the seek the click performs. That is the whole reason it is a
+    /// function — a preview computed by different arithmetic than the action is a
+    /// preview that lies, and on a snapping surface it would lie by up to half a
+    /// grid cell, which is exactly the error the user would notice.
+    ///
+    /// ⚠️ **`x` IS ALREADY GRID CONTENT SPACE — DO NOT ADD `gridScrollX`.**
+    /// `gridDrag` and `.onContinuousHover` both report in the grid's content
+    /// coordinates (the same points `model.hitTest` consumes, which is why note
+    /// clicks land). The scroll offset is added only by `scrubDrag`, whose strip
+    /// does not scroll with the content. Adding it here would put the playhead one
+    /// viewport-width off at any scrolled position.
+    ///
+    /// ⚠️ **SNAPPED ONCE, HERE, IN CLIP-LOCAL SPACE.** Snapping is a property of
+    /// the GESTURE (m23-g2), not of the click site, and `effectiveSnap` already
+    /// carries Simple's forced `.beat`. `model.snap` passes the value straight
+    /// through (floored at 0) when snapping is off — which IS the user's ruling
+    /// verbatim: *"snap it to the position of the grid when snap is on, and
+    /// anywhere in clip when it is [off]"* — so there is no second "is snapping
+    /// on?" branch anywhere in this feature.
+    ///
+    /// ⭐⭐ **m25-o-2 MADE THIS THE ONE PRODUCER FOR ALL THREE PLAYHEAD GESTURES**
+    /// — the ⌘-click, the new line drag, AND the 18 pt scrub strip. The strip
+    /// scrubbed FREE (unsnapped) for four milestones as "the deliberate pro
+    /// default"; the user overruled that on 2026-08-13 (*"it should follow the
+    /// same rules"*), so the roll now has ONE snap behaviour instead of a click
+    /// that snapped and a drag beside it that did not.
+    ///
+    /// ⚠️ **`snapBypassed` IS ⌥, AND IT IS INHERITED FROM THE ARRANGE, NOT
+    /// INVENTED.** `TimelineLanesView.pointerBeat(forX:)` reads
+    /// `NSEvent.modifierFlags.contains(.option)` for exactly this, on exactly
+    /// these gestures (its ghost line, its empty-lane click-seek and its playhead
+    /// scrub alike). Shipping the snap WITHOUT the hatch would make the roll's
+    /// scrub strictly coarser than the arrange's — the one regression the item
+    /// that deferred this work named in advance. It is read live per tick rather
+    /// than tracked in a monitor, again as the arrange does: `commandHeld` exists
+    /// only because a modifier must be visible BEFORE a press for the ⌘
+    /// affordance, and ⌥ here changes a value mid-drag, where the live read is
+    /// both correct and free.
+    private func placementLocalBeat(atContentX x: CGFloat,
+                                    snapBypassed: Bool = false) -> Double {
+        let raw = model.beat(forX: x)
+        let snapped = snapBypassed ? raw : model.snap(beat: raw, resolution: effectiveSnap)
+        return min(max(0, snapped), max(0, clip.lengthBeats))
+    }
+
+    /// ⌥ held right now — the arrange's fine-scrub escape hatch, read the same
+    /// way `TimelineLanesView.pointerBeat(forX:)` reads it.
+    ///
+    /// ⚠️ NOT routed through `ArrangeClickModifiers`: that OptionSet carries only
+    /// `.shift` and `.command`, and widening it would touch every chord table in
+    /// the app (`ArrangeClickIntent`, `PianoRollGridPress`, the arrange's own
+    /// click routing) to serve one modifier that no selection rule reads.
+    private var snapBypassHeld: Bool {
+        NSEvent.modifierFlags.contains(.option)
+    }
+
+    /// THE ONE hover resolution for this surface (m25-g) — what is under a point
+    /// on the note grid. The rest cursor, the group handle overlay and
+    /// `beginGesture`'s press routing all come through here, so the affordance
+    /// the surface ADVERTISES and the gesture it PERFORMS cannot disagree.
+    ///
+    /// ⚠️ The Pro gate is NOT applied here: `PianoRollHover.target` owns it, for
+    /// both note resize handles and the group handle, precisely so this file
+    /// stops carrying two copies of it.
+    private func hoverTarget(at point: CGPoint,
+                             modifiers: ArrangeClickModifiers) -> PianoRollHoverTarget {
+        hoverTarget(at: point, hit: model.hitTest(point), modifiers: modifiers)
+    }
+
+    /// The same resolution for a caller that has ALREADY hit-tested — every
+    /// press has — so a press does not pay for a second `hitTest`.
+    ///
+    /// ⚠️ **`modifiers` IS CALLER-SUPPLIED AND THE TWO CALLERS PASS DIFFERENT
+    /// THINGS ON PURPOSE (m25-x).** Hover passes `pointerModifiers` (the
+    /// flags-monitor state — the only way to know a modifier is down with the
+    /// mouse still); `beginGesture` passes the gesture's OWN chord. See
+    /// `PianoRollHover`'s "the chord is an input" note for why unifying them
+    /// would be a regression rather than a cleanup.
+    private func hoverTarget(at point: CGPoint,
+                             hit: (id: UUID, zone: NoteZone)?,
+                             modifiers: ArrangeClickModifiers) -> PianoRollHoverTarget {
+        PianoRollHover.target(
+            at: point,
+            hit: hit,
+            selectionFrame: model.groupScaleFrame(),
+            proDensity: mode == .pro,
+            // m25-x — the chord, so the drawn handle and the cursor cannot
+            // advertise a group scale the chord has already taken away.
+            modifiers: modifiers,
+            // m25-o-2 — the DRAWN line's x, nil when the transport is outside
+            // the clip. The grab band is therefore gated on the same predicate
+            // the pixels are (`PianoRollPlayhead.isVisible`, via `lineX`), so
+            // the roll can never offer a grab on a line it is not drawing.
+            playheadX: PianoRollPlayhead.lineX(
+                position: positionBeats, clipStartBeat: clip.startBeat,
+                lengthBeats: clip.lengthBeats, pixelsPerBeat: model.pixelsPerBeat))
     }
 
     private var gridDrag: some Gesture {
@@ -1856,7 +2775,25 @@ struct PianoRollView: View {
                     // moving a note, resize while dragging its right edge).
                     switch activeDrag {
                     case .move: DragCursor.set(.grabbing)
-                    case .resize: DragCursor.set(.resizeLeftRight)
+                    // m25-g — the group handle is an edge drag, so it holds the
+                    // same cursor a note resize does.
+                    case .resize, .groupScale: DragCursor.set(.resizeLeftRight)
+                    // m25-o-2 — the playhead scrub HOLDS the vertical bar for
+                    // the whole drag, rather than closing a hand the way a
+                    // movable body does.
+                    //
+                    // ⚠️ **THIS DIVERGES FROM THE ARRANGE, WHICH CLOSES THE HAND**
+                    // (`CursorAffordance.playhead.dragCursor == .grabbing`), and
+                    // the divergence is chosen, not overlooked. `CursorAffordance`'s
+                    // own convention is that only movable BODIES close the hand
+                    // while POSITION surfaces keep their cursor through the drag
+                    // (the fader and trim-edge families), and the transport
+                    // position is a position, not a body. The user also named
+                    // this shape twice — "cursor turns into some vertical sign",
+                    // then "the vertical visual element". Consolidating the
+                    // arrange onto it is filed, not done: it would change a
+                    // shipped surface this item has no mandate over.
+                    case .playheadDrag: DragCursor.set(.verticalBar)
                     // `.marquee` sets NO drag cursor: the arrow is correct for a
                     // sweep (`DragCursor` is the grab/resize family), and this
                     // branch cannot be reached at press anyway — promotion
@@ -1912,7 +2849,54 @@ struct PianoRollView: View {
         onEngage()
         let toggling = ArrangeClickIntent.intent(for: modifiers) == .toggle
         let hit = model.hitTest(start)
-        if let hit, !toggling, hit.zone == .resizeHandle, mode == .pro {
+        // m25-g — ONE resolution for cursor and press. `.groupScaleHandle` can
+        // only come back when the point is over NO note (`PianoRollHover`
+        // ranks notes above it), outside the selection's box
+        // (`PianoRollGroupScale` decision 4), and — since m25-x — under a
+        // NON-toggling chord, so no press that routed to a move or a resize
+        // before this item routes anywhere else now.
+        // m25-x — the GESTURE'S own chord, not the hover monitor's. Same
+        // function, caller-supplied truth (`PianoRollHover`'s "the chord is an
+        // input" note): this is the chord the press will actually be routed
+        // with, and it is right even when the pointer entered the surface with a
+        // modifier already down.
+        let target = hoverTarget(at: start, hit: hit, modifiers: modifiers)
+        // m25-o-2 — GRAB THE PLAYHEAD LINE. Gated on `!toggling` HERE rather
+        // than in the resolver, and m25-x made that a deliberate split rather
+        // than a coincidence: `.playhead` SURVIVES ⌘ in `PianoRollHover.target`,
+        // because under ⌘ this press falls through to `.click(nil)` and releases
+        // into `.positionPlayhead` — the transport still moves, just TO the
+        // pointer rather than WITH it. Both show the same `.verticalBar` cursor,
+        // so the affordance never disagrees with the gesture across the two, and
+        // this gate is the only thing choosing between them.
+        //
+        // `.playhead` can only come back over bare grid — notes and the group
+        // handle both outrank it (`PianoRollHover`'s ranking, which IS the
+        // user's "no other elements under the mouse") — so no press that started
+        // a move, a resize or a scale before this item routes anywhere else now.
+        if !toggling, target == .playhead {
+            activeDrag = .playheadDrag(scrubbing: false)
+        } else if case .groupScaleHandle(let edge) = target {
+            // ⭐ **NO `!toggling` HERE, AND THE ASYMMETRY WITH THE ARM ABOVE IS
+            // THE WHOLE OF m25-x.** The RESOLVER now owns this rule: `target`
+            // cannot return `.groupScaleHandle` under a toggling chord at all,
+            // so a second gate here would be a second source of truth for one
+            // rule — the exact shape that let the bar advertise a scale this
+            // branch would refuse.
+            //
+            // The `.playhead` arm above KEEPS its gate because the resolver does
+            // NOT own that one: `.playhead` survives ⌘ deliberately (⌘-click
+            // still moves the transport, just TO the pointer rather than WITH
+            // it), so `!toggling` there is load-bearing, not belt-and-braces.
+            // Same for the two `.note` arms below — a ⌘-press on a note must
+            // toggle rather than move it, and `.note` survives every chord.
+            //
+            // NO selection change: the group being scaled is the group the user
+            // already selected, and a handle press that quietly re-selected
+            // something would be the one way this gesture could lose notes.
+            model.beginGroupScale(edge: edge)
+            activeDrag = .groupScale(edge)
+        } else if let hit, !toggling, case .note(_, .resizeHandle) = target {
             if !model.isSelected(hit.id) { model.selectOnly(hit.id) }
             activeDrag = .resize(hit.id)
         } else if let hit, !toggling {
@@ -1957,6 +2941,32 @@ struct PianoRollView: View {
         modifiers: ArrangeClickModifiers
     ) {
         switch activeDrag {
+        case .playheadDrag(let scrubbing):
+            // ⭐ m25-o-2 — THE SLOP GATE, AND IT IS THE ARRANGE'S RULE INHERITED
+            // RATHER THAN A TUNING CHOICE: "grabbing the playhead without moving
+            // must not jump it to a snapped beat" (`ArrangePointer.scrubSlop`).
+            // On a snapping surface a press with no travel would displace the
+            // transport by up to half a grid cell — the user reaches for the
+            // line, touches it, and it leaves. Sticky once crossed, so a drag
+            // that wanders back inside the slop keeps scrubbing.
+            guard scrubbing || abs(translation.width) > PianoRollPlayhead.scrubSlop else { return }
+            if !scrubbing { activeDrag = .playheadDrag(scrubbing: true) }
+            // The SAME producer the ⌘-click and the ruler scrub use, so all
+            // three playhead gestures land on the same beat for the same x.
+            onSeek(PianoRollPlayhead.projectBeat(
+                localBeat: placementLocalBeat(atContentX: location.x,
+                                              snapBypassed: snapBypassHeld),
+                clipStartBeat: clip.startBeat,
+                lengthBeats: clip.lengthBeats))
+            // ⚠️ NO `autoScroll(towards:)`, unlike every other branch here, and
+            // that is deliberate. The playhead is being dragged to a beat the
+            // user can SEE; auto-scrolling would move the content under a
+            // gesture whose whole purpose is to aim at a visible line, and the
+            // seek is clamped to the clip anyway, so the edge case it would
+            // serve — scrubbing past the viewport — has nowhere to go.
+            //
+            // ⚠️ NO `didMove` either: `didMove` gates `commit(`, and moving the
+            // playhead is not an edit. It owes the undo journal nothing.
         case .move:
             let deltaBeats = model.beat(forX: translation.width)
             let deltaPitch = -Int((translation.height / model.rowHeight).rounded())
@@ -1969,9 +2979,25 @@ struct PianoRollView: View {
             // behavior, and intended. A no-change tick is free: the controller
             // below diffs, so no events are pushed when the set is unchanged.
             onAudition(selectedPitches, anchorVelocity)
+            autoScroll(towards: location.x)
         case .resize(let id):
             model.resizeNote(id: id, toEndBeat: model.beat(forX: location.x), resolution: effectiveSnap)
             if abs(translation.width) > PianoRollMarquee.moveCommitSlop { didMove = true }
+            autoScroll(towards: location.x)
+        case .groupScale:
+            // m25-g — the pointer's x IS the dragged edge's asked-for beat. It
+            // goes in RAW: `scaleSelection` performs this gesture's one snap
+            // (m23-ek-2 — snapping is a property of the gesture), and every
+            // clamp is computed once over the whole group inside it.
+            //
+            // ⚠️ NO `onAudition` here, and that is a decision rather than an
+            // omission. A move sounds the pitch you are dragging because the
+            // gesture CHANGES pitch; a scale never touches pitch, so the only
+            // honest audition would be to replay the whole scaled figure, which
+            // is a transport job, not a drag job.
+            model.scaleSelection(toBeat: model.beat(forX: location.x), resolution: effectiveSnap)
+            if abs(translation.width) > PianoRollMarquee.moveCommitSlop { didMove = true }
+            autoScroll(towards: location.x)
         case .click, .marquee:
             // m23-ek-1: the ONE home for promote-then-apply. The live gesture and
             // the staging seam both arrive here, so the threshold and the band
@@ -1980,6 +3006,52 @@ struct PianoRollView: View {
         case .none, .cancelled:
             break
         }
+    }
+
+    /// EDGE-DRAG AUTO-SCROLL (m25-f-3) — drag a note towards the edge of the
+    /// grid and the grid comes with you. The user's words: *"as user moves close
+    /// to the edge of the note, it should expand/scroll the note area as well as
+    /// auto extend clip if it reaches the edge."* This is the scroll half; the
+    /// extend half is `endGesture`'s `commit(extendToCover:)`.
+    ///
+    /// ⭐⭐ **THE FOLLOW-PLAYHEAD PRECEDENCE DECISION IS THIS ONE LINE, and it is
+    /// `jumpToMinimapTarget`'s decision re-used rather than a second policy: the
+    /// scroll is delivered through `scrollExternally`, the MANUAL-SCROLL seam,
+    /// so an edge drag IS a manual scroll and follow stands down on this surface
+    /// for the rest of the take.** Dragging a note is unambiguously the user
+    /// steering the viewport, so the alternative — follow yanking the grid back
+    /// under a live gesture on the next transport tick — is not a tie that needs
+    /// breaking. The chip drops to its PAUSED face, so the stand-down is VISIBLE
+    /// rather than a silent tug-of-war.
+    ///
+    /// ⚠️ **`layout.followPlayhead` IS NOT WRITTEN**, for the reason recorded on
+    /// `jumpToMinimapTarget`: that flag is the single PERSISTED enable the
+    /// arrange lanes read too, so winning a piano-roll gesture with it would
+    /// stand follow down on a surface the user never touched, and would outlive
+    /// the gesture by every future session. Suspension is per-surface runtime
+    /// state that re-arms on the next play. While STOPPED nothing is suspended
+    /// at all — `reportOffset` is armed only during playback — so a drag with
+    /// the transport parked simply re-baselines, which is the common case.
+    ///
+    /// ⚠️ All THREE horizontally scrolling bands move together and cannot
+    /// desync: `scrollExternally` bumps ONE nonce that sets ONE `followTargetX`,
+    /// and the grid, the velocity lane and the controller strip each scroll to
+    /// their own marker sized off that same x. A velocity lane sliding out from
+    /// under the note being dragged is therefore not reachable from here. None
+    /// of the three animates ("a page turn must not glide"), so a per-tick
+    /// re-issue cannot accumulate half-finished animations.
+    ///
+    /// The policy returns nil for "no scroll", which is what keeps the nonce
+    /// quiet for the overwhelming majority of drag ticks — see
+    /// `PianoRollAutoScroll` for why that matters and for the deliberate
+    /// no-timer scope line.
+    private func autoScroll(towards contentX: CGFloat) {
+        guard let next = PianoRollAutoScroll.nextOffset(
+            pointerContentX: contentX,
+            currentOffset: gridScrollX,
+            viewportWidth: bandViewportWidth,
+            contentWidth: gridDrawnWidth) else { return }
+        follow.scrollExternally(to: next)
     }
 
     /// Promote a TRAVELLED empty-grid press into a rubber band, then apply the
@@ -2007,7 +3079,34 @@ struct PianoRollView: View {
             return updateMarquee(origin: origin, to: point, base: base, additive: additive)
         case .marquee(let origin, let base, let additive):
             return updateMarquee(origin: origin, to: point, base: base, additive: additive)
-        case .move, .resize, .none, .cancelled:
+        // m25-g: a group scale can no more promote into a band than a move or a
+        // resize can — promotion is gated on `.click(nil)`, and a handle press
+        // never enters that state.
+        //
+        // ⚠️⚠️ **m25-o-2 — AND THIS IS THE ITEM'S REAL COST, NAMED RATHER THAN
+        // DISCOVERED NEXT CYCLE: A MARQUEE CAN NO LONGER BE STARTED FROM THE
+        // PLAYHEAD'S 8 pt STRIPE.** A band promotes out of `.click(nil)`, and a
+        // press on the line is now `.playheadDrag` instead, so the stripe is
+        // dead to rubber-banding — the same "dead stripe" shape m25-g accepted
+        // for its handle band, here 8 pt wide and MOVING with the transport.
+        //
+        // ⚠️⚠️ **AND ITS DEFAULT HOME IS THE GRID'S LEFT EDGE, WHICH IS WHERE A
+        // USER IS MOST LIKELY TO MEET IT.** With the transport stopped at 0 on a
+        // clip starting at 0, `lineX` is 0 — so out of the box the stripe sits
+        // at content x 0…4, and a band started by pressing exactly on the grid's
+        // left edge will not promote. This is stated because "8 pt around the
+        // playhead" reads as an exotic case and the x≈0 instance is the common
+        // one; a reader who knows only the general statement will not think to
+        // look here when a band near the origin does not start.
+        //
+        // Accepted, with the tradeoff stated: the band is startable one pixel
+        // either side, the stripe is exactly where the user is aiming at the
+        // playhead rather than at empty grid, and the arrange makes the
+        // identical trade (its grab strip is a separate view that eats presses
+        // outright). The alternative — demote a `.playheadDrag` into a band on
+        // vertical travel — would invent a promotion rule neither surface has,
+        // to serve a gesture the user can start a pixel away.
+        case .move, .resize, .groupScale, .playheadDrag, .none, .cancelled:
             return []
         }
     }
@@ -2134,16 +3233,106 @@ struct PianoRollView: View {
         let outgoing = activeDrag
         activeDrag = .none
         switch outgoing {
-        case .move, .resize:
-            if didMove { commit() }   // else it was a plain click; selection already set
+        case .playheadDrag(let scrubbing):
+            // ⭐⭐ m25-o-2 — A NO-TRAVEL GRAB IS A CLICK ON EMPTY GRID, AND MUST
+            // DESELECT LIKE ONE. This is m25-g's group-handle argument verbatim,
+            // and it is the same bug both times: the grab band lies over empty
+            // grid by construction (notes outrank the playhead), so before this
+            // item EVERY press here was `.click(nil)` and released into
+            // `clearSelection()`. Claiming the press for a scrub and then doing
+            // nothing on a no-travel release would silently delete
+            // click-to-deselect from an 8 pt stripe — which is m25-m's bug, a
+            // fix a human confirmed by hand, reintroduced in a moving stripe.
+            //
+            // ⚠️ The RELEASE CHORD IS NOT CONSULTED, following `.groupScale`
+            // exactly: `beginGesture` gates this state on `!toggling`, so the
+            // press began with no ⌘/⇧, and re-reading the chord at release would
+            // give this arm a second, differently-timed rule for no benefit.
+            //
+            // ⚠️ NO `onSeek` HERE — the seek already happened, per tick, in
+            // `advanceGesture`. A trailing seek would also re-snap the landing
+            // beat with a chord that may have changed mid-flight, and
+            // `PianoRollPlayheadPlaceSiteTests` pins this body at exactly ONE
+            // seek so the roll keeps one way to move the playhead.
+            if !scrubbing { model.clearSelection() }
+        case .move, .resize, .groupScale:
+            // m25-f-3 — AUTO-EXTEND. `else` it was a plain click; selection
+            // already set. See `autoExtendIDs(for:)` for what may grow the clip.
+            //
+            // ⚠️ m25-g's group scale joins this EXISTING branch rather than
+            // adding its own `commit(` — `EditorSurfaceOwnershipSiteTests` pins
+            // this file's `commit(` count as its R6 false-engage guard, and a
+            // gesture that is already a `gridDrag` state has nothing new to say
+            // about engagement.
+            if didMove {
+                commit(extendToCover: autoExtendIDs(for: outgoing))
+            } else if case .groupScale = outgoing {
+                // ⭐⭐ m25-g — A HANDLE PRESS THAT NEVER TRAVELLED IS A CLICK ON
+                // EMPTY GRID, AND MUST BEHAVE LIKE ONE. The handle band lies
+                // over empty grid by construction, so before this feature every
+                // press there was `.click(nil)` and released into
+                // `clearSelection()`. Claiming the press for a scale and then
+                // doing nothing on a no-travel release would silently delete
+                // click-to-deselect from a 12-pt strip running the full height
+                // of the selection's bounding box — which is m25-m's bug
+                // ("clicking empty space does not deselect"), reintroduced in a
+                // stripe, days after a human confirmed it fixed.
+                //
+                // Two halves, both needed: put the draft back (a sub-slop drag
+                // has already scaled it per tick, and nothing is about to commit
+                // that), then clear, exactly as the `.click(nil)` branch does.
+                // A ⇧/⌘ press never reaches here — `beginGesture` gates the
+                // handle on `!toggling` — so the toggle chord keeps its
+                // selection, byte-identically to before.
+                model.cancelGroupScale()
+                model.clearSelection()
+            }
         case .click(let id):
-            let toggling = ArrangeClickIntent.intent(for: modifiers) == .toggle
-            if let id {
-                if toggling { model.toggle(id) } else { model.selectOnly(id) }
-            } else if !toggling {
+            // ⭐ m25-o — THE FOUR-ARM TABLE, AND IT IS AN EXHAUSTIVE `switch` OVER
+            // A HEADLESS RESOLVER RATHER THAN THE `if`/`else if` CHAIN IT REPLACES.
+            //
+            // The user anticipated the conflict this item creates — ⌘-click here
+            // already means "add/remove from selection" — and asked for the guard
+            // themselves. Their guard needs one more term (the HIT TEST), and the
+            // resulting table has three arms that were already shipped and must
+            // not move, so the shape of this code is doing real work: a chain of
+            // `if`s can fire two arms or, worse, none, and it was a MISSING arm
+            // that deleted click-to-deselect in m25-m. A `switch` over
+            // `PianoRollGridRelease` cannot compile with a case unhandled and
+            // cannot run two.
+            //
+            // ⚠️ NOT A SECOND CHORD READ: `modifiers` is the same value the old
+            // `ArrangeClickIntent.intent(for:)` line consumed, now read once
+            // inside the resolver. The two note arms and the plain-empty arm are
+            // byte-equivalent to what shipped; only the ⌘-on-empty arm is new,
+            // and it lands where NOTHING happened before.
+            switch PianoRollGridPress.release(noteID: id, modifiers: modifiers) {
+            case .selectOnly(let noteID):
+                model.selectOnly(noteID)
+            case .toggle(let noteID):
+                model.toggle(noteID)
+            case .deselect:
                 // A press that never travelled `dragSlop` is still a CLICK, so
                 // an empty-grid release clears — byte-identically to pre-ek-1.
                 model.clearSelection()
+            case .positionPlayhead:
+                // ⭐ THE ONE SIDE EFFECT, AND IT IS THE SHIPPED ONE. `onSeek` is
+                // the roll's documented single route to the transport; a direct
+                // store call here would give this view two ways to move the
+                // playhead and break the store-free rule the `onCommit`
+                // precedent holds it to. NO `commit(` — placing the playhead
+                // edits nothing, so it owes the undo journal nothing.
+                // m25-o-2 — ⌥ bypasses the snap here too, so the ⌘-click and the
+                // line drag beside it obey ONE rule. A click that snapped while
+                // the drag two pixels away did not would be the same split the
+                // user's ruling closed between the roll and the arrange.
+                onSeek(PianoRollPlayhead.projectBeat(
+                    localBeat: placementLocalBeat(atContentX: point.x,
+                                                  snapBypassed: snapBypassHeld),
+                    clipStartBeat: clip.startBeat,
+                    lengthBeats: clip.lengthBeats))
+            case .doNothing:
+                break
             }
         case .marquee(let bandOrigin, let base, let additive):
             // The band's OWN origin (frozen at promotion), not the parameter:
@@ -2162,6 +3351,69 @@ struct PianoRollView: View {
         // `onEnded`-shaped end. A branch that forgot this is exactly how a stuck
         // note ships.
         onAudition([], 0)
+    }
+
+    /// Which notes THIS ending gesture may grow the clip for (m25-f-3).
+    ///
+    /// ⚠️ **A SET OF IDS, NEVER "EXTEND TO FIT", and the reason is on the store
+    /// verb**: `setClipNotes` receives the roll's WHOLE draft, which can already
+    /// hold legal-but-latent notes far past the end (m18-f — authored by an AI,
+    /// a paste, or an earlier trim). Only the notes the gesture just touched may
+    /// move the clip's edge, or nudging one note at bar 2 would resurrect a
+    /// forgotten note at bar 20 and stretch the clip to it.
+    ///
+    /// ⚠️⚠️ **AND "TOUCHED" IS NOT ENOUGH — IT MUST ALSO HAVE STARTED AUDIBLE.**
+    /// A rigid group drag moves the WHOLE selection, so a ⌘A + one-16th nudge
+    /// "touches" any latent note in the clip and would drag the clip's end out
+    /// to it. That is the very surprise the id set exists to prevent, arriving
+    /// through a different door. Both branches below therefore ask the same
+    /// question — *was this note's onset inside the clip before the gesture?* —
+    /// and a note that was already silent stays latent, exactly as m18-f
+    /// promises. `moveIDsStartingAudible` carries the move's captured baseline;
+    /// a resize never moves an onset, so its current onset IS its baseline.
+    ///
+    /// **RESIZE IS INCLUDED, and that is a decision.** m25-a justified
+    /// `commit`'s empty default with *"DELETE and the velocity lane cannot push
+    /// a note past the clip end, so neither should be able to grow the clip"* —
+    /// and dragging a note's right handle plainly CAN, so the same reasoning
+    /// puts it in. It is also the safe direction: a resize never moves the
+    /// ONSET, so `ClipAutoExtend.extendedLength`'s strict-onset audibility test
+    /// is already satisfied and the grow can only ever be the tail the user is
+    /// actively dragging.
+    ///
+    /// A resize names ONLY the note being resized, never the selection: the
+    /// other selected notes did not move, and m25-a's rule is that a stationary
+    /// note must not move the clip's edge.
+    ///
+    /// ⚠️ ONE CALL SITE, DELIBERATELY. `EditorSurfaceOwnershipSiteTests` pins
+    /// the number of `commit(` occurrences in this file as its R6 false-engage
+    /// guard; splitting this switch across two `commit(` calls would have moved
+    /// that count for a reason that has nothing to do with engagement. Deciding
+    /// the id SET here and committing once keeps the pin measuring what it was
+    /// built to measure.
+    private func autoExtendIDs(for drag: ActiveDrag) -> Set<UUID> {
+        switch drag {
+        case .move: return model.moveIDsStartingAudible()
+        // m25-g — a group STRETCH is the one gesture on this surface whose whole
+        // purpose can be to push notes past the clip end, so it is the strongest
+        // case for auto-extend there is. It asks the SAME question the other two
+        // do — *was this note audible before the gesture?* — through the scale's
+        // own captured baseline, so a ⌘A stretch still cannot drag the clip's
+        // edge out to a latent note at bar 20. How far the clip may then grow
+        // stays `ClipAutoExtend`'s decision, not this file's.
+        case .groupScale: return model.scaleIDsStartingAudible()
+        case .resize(let id):
+            guard let note = model.draft.first(where: { $0.id == id }),
+                  note.startBeat < model.clipLengthBeats else { return [] }
+            return [id]
+        // m25-o-2 — a playhead scrub extends nothing: it moves the transport,
+        // which is not an edit and cannot make a note audible. It never reaches
+        // here anyway (`endGesture` handles `.playheadDrag` in its own arm,
+        // before the auto-extend branch), and it is listed explicitly rather
+        // than folded into a `default` so a future gesture cannot inherit
+        // "extends nothing" by silence.
+        case .none, .click, .marquee, .playheadDrag, .cancelled: return []
+        }
     }
 
     /// Distinct pitches of the current selection, ascending (m23-d) — the set the
@@ -2194,7 +3446,13 @@ struct PianoRollView: View {
             // same nonce, its own marker.
             ScrollViewReader { velocityProxy in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    VelocityLane(model: model, noteColor: noteColor, onCommit: commit)
+                    // `{ commit() }`, not a bare `commit`: Swift drops default
+                    // arguments when a method is used as a function VALUE, so
+                    // since m25-a gave `commit` an `extendToCover:` default the
+                    // bare reference has type `(Set<UUID>) -> Void` and no
+                    // longer converts to this lane's `() -> Void`.
+                    VelocityLane(model: model, noteColor: noteColor,
+                                 onCommit: { commit() })
                         // Width-identical with the note grid (same beat→x space),
                         // so the m18-f viewport extension rides along.
                         .frame(width: gridDrawnWidth)

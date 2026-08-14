@@ -33,6 +33,24 @@ struct PasteAnchorPolicyTests {
         ClipboardClip(clip: clip, sourceTrackID: track.id, sourceTrackIndex: index)
     }
 
+    /// An INFERRED destination — "the focused clip happens to live here", which
+    /// is what every fixture in this suite meant before m25-l-3 gave the value a
+    /// provenance. Every relocation case below has a DEAD SOURCE TRACK, so it
+    /// reaches `.relocated` on its own and the origin cannot change its verdict;
+    /// spelling them `.inferred` therefore keeps them measuring exactly what they
+    /// measured, AND makes them the regression guard for the half of the m25-l-3
+    /// rule that must not move — an inferred destination still bases a relocated
+    /// paste, exactly as it always did.
+    private func inferred(_ track: Track) -> ArrangeActiveTrack.Resolution {
+        ArrangeActiveTrack.Resolution(id: track.id, origin: .inferred)
+    }
+
+    /// An EXPLICIT destination — "the user clicked this track's header". The only
+    /// origin that overrides the in-place rule (m25-l-3).
+    private func explicit(_ track: Track) -> ArrangeActiveTrack.Resolution {
+        ArrangeActiveTrack.Resolution(id: track.id, origin: .explicit)
+    }
+
     // MARK: - The anchor and rigid translation
 
     @Test("the EARLIEST member lands on the playhead and the rest keep their offsets")
@@ -45,7 +63,7 @@ struct PasteAnchorPolicyTests {
             payload: [entry(c, track: track, index: 0),
                       entry(a, track: track, index: 0),
                       entry(b, track: track, index: 0)],
-            anchorBeat: 100, tracks: [track], focusTrackID: nil)
+            anchorBeat: 100, tracks: [track], activeTrack: nil)
 
         #expect(plan.refusedBy == nil)
         #expect(plan.mode == .inPlace)
@@ -69,7 +87,7 @@ struct PasteAnchorPolicyTests {
         let early = midiClip("lower-early", start: 4)
         let plan = PasteAnchorPolicy.resolveClipPaste(
             payload: [entry(late, track: upper, index: 0), entry(early, track: lower, index: 1)],
-            anchorBeat: 50, tracks: [upper, lower], focusTrackID: nil)
+            anchorBeat: 50, tracks: [upper, lower], activeTrack: nil)
 
         let byName = Dictionary(uniqueKeysWithValues: plan.landings.map { ($0.clip.name, $0) })
         #expect(byName["lower-early"]?.startBeat == 50)
@@ -86,9 +104,9 @@ struct PasteAnchorPolicyTests {
         let payload = [entry(midiClip("a", start: 0), track: track, index: 0),
                        entry(midiClip("b", start: 6), track: track, index: 0)]
         let first = PasteAnchorPolicy.resolveClipPaste(
-            payload: payload, anchorBeat: 32, tracks: [track], focusTrackID: nil)
+            payload: payload, anchorBeat: 32, tracks: [track], activeTrack: nil)
         let second = PasteAnchorPolicy.resolveClipPaste(
-            payload: payload, anchorBeat: 32, tracks: [track], focusTrackID: nil)
+            payload: payload, anchorBeat: 32, tracks: [track], activeTrack: nil)
         #expect(first.landings.map(\.startBeat) == second.landings.map(\.startBeat))
         #expect(first.landings.map(\.startBeat) == [32, 38])
     }
@@ -106,7 +124,7 @@ struct PasteAnchorPolicyTests {
                        entry(midiClip("b", start: 3, length: 1), track: track, index: 0),
                        entry(midiClip("c", start: 7, length: 1), track: track, index: 0)]
         let plan = PasteAnchorPolicy.resolveClipPaste(
-            payload: payload, anchorBeat: -5, tracks: [track], focusTrackID: nil)
+            payload: payload, anchorBeat: -5, tracks: [track], activeTrack: nil)
 
         #expect(plan.anchorBeat == 0, "the plan reports the CLAMPED anchor it used")
         #expect(plan.landings.map(\.startBeat) == [0, 3, 7])
@@ -126,7 +144,7 @@ struct PasteAnchorPolicyTests {
                        entry(midiClip("b", start: 3, length: 1), track: track, index: 0),
                        entry(midiClip("c", start: 7, length: 1), track: track, index: 0)]
         let plan = PasteAnchorPolicy.resolveClipPaste(
-            payload: payload, anchorBeat: 16, tracks: [track], focusTrackID: nil)
+            payload: payload, anchorBeat: 16, tracks: [track], activeTrack: nil)
         #expect(plan.anchorBeat == 16)
         #expect(plan.landings.map(\.startBeat) == [16, 19, 23])
     }
@@ -143,7 +161,7 @@ struct PasteAnchorPolicyTests {
                       track: track, index: 0)
             }
             let plan = PasteAnchorPolicy.resolveClipPaste(
-                payload: payload, anchorBeat: anchor, tracks: [track], focusTrackID: nil)
+                payload: payload, anchorBeat: anchor, tracks: [track], activeTrack: nil)
             #expect(plan.landings.allSatisfy { $0.startBeat >= 0 })
         }
     }
@@ -154,11 +172,11 @@ struct PasteAnchorPolicyTests {
     func refusals() {
         let track = midiTrack("Keys")
         #expect(PasteAnchorPolicy.resolveClipPaste(
-            payload: [], anchorBeat: 0, tracks: [track], focusTrackID: nil)
+            payload: [], anchorBeat: 0, tracks: [track], activeTrack: nil)
             .refusedBy == .emptyPayload)
         #expect(PasteAnchorPolicy.resolveClipPaste(
             payload: [entry(midiClip("a", start: 0), track: track, index: 0)],
-            anchorBeat: 0, tracks: [], focusTrackID: nil)
+            anchorBeat: 0, tracks: [], activeTrack: nil)
             .refusedBy == .noTracks)
     }
 
@@ -171,7 +189,7 @@ struct PasteAnchorPolicyTests {
         let live = audioTrack("Audio")
         let plan = PasteAnchorPolicy.resolveClipPaste(
             payload: [entry(midiClip("a", start: 0), track: gone, index: 0)],
-            anchorBeat: 8, tracks: [live], focusTrackID: nil)
+            anchorBeat: 8, tracks: [live], activeTrack: nil)
         #expect(plan.refusedBy == .noCompatibleTrack)
         #expect(plan.mode == .relocated)
         #expect(plan.isEmpty)
@@ -190,7 +208,7 @@ struct PasteAnchorPolicyTests {
             // Note the focus points at a THIRD track — an in-place paste ignores
             // it entirely, which is the half of the all-or-nothing rule that is
             // easy to get wrong.
-            tracks: [one, two, midiTrack("Three")], focusTrackID: nil)
+            tracks: [one, two, midiTrack("Three")], activeTrack: nil)
         #expect(plan.mode == .inPlace)
         let byName = Dictionary(uniqueKeysWithValues: plan.landings.map { ($0.clip.name, $0) })
         #expect(byName["a"]?.targetTrackID == one.id)
@@ -207,7 +225,7 @@ struct PasteAnchorPolicyTests {
         let plan = PasteAnchorPolicy.resolveClipPaste(
             payload: [entry(midiClip("a", start: 0), track: alive, index: 0),
                       entry(midiClip("b", start: 0), track: gone, index: 1)],
-            anchorBeat: 0, tracks: [base, alive], focusTrackID: base.id)
+            anchorBeat: 0, tracks: [base, alive], activeTrack: inferred(base))
         #expect(plan.mode == .relocated)
         let byName = Dictionary(uniqueKeysWithValues: plan.landings.map { ($0.clip.name, $0) })
         // Base index 0 + (0 − 0) = 0 → base; + (1 − 0) = 1 → alive. NEITHER went
@@ -226,7 +244,7 @@ struct PasteAnchorPolicyTests {
                                     sourceTrackIndex: 3),
                       ClipboardClip(clip: midiClip("lo", start: 0), sourceTrackID: gone.id,
                                     sourceTrackIndex: 5)],
-            anchorBeat: 0, tracks: t, focusTrackID: t[1].id)
+            anchorBeat: 0, tracks: t, activeTrack: inferred(t[1]))
         let byName = Dictionary(uniqueKeysWithValues: plan.landings.map { ($0.clip.name, $0) })
         #expect(byName["hi"]?.targetTrackID == t[1].id)   // 1 + (3−3)
         #expect(byName["lo"]?.targetTrackID == t[3].id)   // 1 + (5−3)
@@ -239,7 +257,7 @@ struct PasteAnchorPolicyTests {
         let midi = midiTrack("Midi")
         let plan = PasteAnchorPolicy.resolveClipPaste(
             payload: [entry(midiClip("a", start: 0), track: gone, index: 0)],
-            anchorBeat: 0, tracks: [audio, midi], focusTrackID: nil)
+            anchorBeat: 0, tracks: [audio, midi], activeTrack: nil)
         // Index 0 is audio and cannot hold a MIDI clip, so the base is index 1.
         #expect(plan.landings.first?.targetTrackID == midi.id)
     }
@@ -257,7 +275,7 @@ struct PasteAnchorPolicyTests {
                                     sourceTrackID: gone.id, sourceTrackIndex: 1),
                       ClipboardClip(clip: midiClip("c", start: 8, length: 2),
                                     sourceTrackID: gone.id, sourceTrackIndex: 2)],
-            anchorBeat: 0, tracks: t, focusTrackID: t[2].id)
+            anchorBeat: 0, tracks: t, activeTrack: inferred(t[2]))
         // All three fold onto the last track — and because their windows do NOT
         // overlap (2-beat clips at 0, 4, 8) all three still land.
         #expect(plan.landings.count == 3)
@@ -280,7 +298,7 @@ struct PasteAnchorPolicyTests {
                                     sourceTrackID: gone.id, sourceTrackIndex: 0),
                       ClipboardClip(clip: midiClip("lower", start: 2, length: 4),
                                     sourceTrackID: gone.id, sourceTrackIndex: 1)],
-            anchorBeat: 0, tracks: [only], focusTrackID: only.id)
+            anchorBeat: 0, tracks: [only], activeTrack: inferred(only))
         #expect(plan.landings.count == 1)
         #expect(plan.landings.first?.clip.name == "upper")
         #expect(plan.skipped.count == 1)
@@ -297,7 +315,7 @@ struct PasteAnchorPolicyTests {
                                     sourceTrackID: gone.id, sourceTrackIndex: 0),
                       ClipboardClip(clip: midiClip("second", start: 4, length: 4),
                                     sourceTrackID: gone.id, sourceTrackIndex: 1)],
-            anchorBeat: 0, tracks: [only], focusTrackID: only.id)
+            anchorBeat: 0, tracks: [only], activeTrack: inferred(only))
         // Half-open windows, the same form `resolvingOverlaps` uses — so the two
         // layers agree at the boundary instead of one of them rejecting a flush
         // landing the other would have accepted.
@@ -319,7 +337,7 @@ struct PasteAnchorPolicyTests {
                                     sourceTrackIndex: 0),
                       ClipboardClip(clip: audioClip("a", start: 0), sourceTrackID: gone.id,
                                     sourceTrackIndex: 1)],
-            anchorBeat: 0, tracks: [midi, audio], focusTrackID: midi.id)
+            anchorBeat: 0, tracks: [midi, audio], activeTrack: inferred(midi))
         // m → index 0 (midi, ok); a → index 1 (audio, ok). Both land.
         #expect(plan.landings.count == 2)
         #expect(plan.skipped.isEmpty)
@@ -330,7 +348,7 @@ struct PasteAnchorPolicyTests {
                                     sourceTrackIndex: 0),
                       ClipboardClip(clip: audioClip("a", start: 0), sourceTrackID: gone.id,
                                     sourceTrackIndex: 1)],
-            anchorBeat: 0, tracks: [audio, midi], focusTrackID: audio.id)
+            anchorBeat: 0, tracks: [audio, midi], activeTrack: inferred(audio))
         #expect(flipped.landings.isEmpty)
         #expect(flipped.skipped.count == 2)
         #expect(flipped.skipped.allSatisfy { $0.reason == .trackKindMismatch })
@@ -347,33 +365,45 @@ struct PasteAnchorPolicyTests {
         let bus = Track(name: "Bus", kind: .bus)
         let plan = PasteAnchorPolicy.resolveClipPaste(
             payload: [entry(midiClip("m", start: 0), track: gone, index: 0)],
-            anchorBeat: 0, tracks: [bus], focusTrackID: bus.id)
+            anchorBeat: 0, tracks: [bus], activeTrack: inferred(bus))
         #expect(plan.skipped.first?.reason == .trackKindMismatch)
     }
 
     // MARK: - Notes
 
-    @Test("the note anchor is the playhead's CLIP-LOCAL beat when the transport is inside")
+    @Test("the insertion point is the playhead's CLIP-LOCAL beat when the transport is inside")
     func noteAnchorInsideTheClip() {
-        #expect(PasteAnchorPolicy.noteLocalAnchor(
+        #expect(PasteAnchorPolicy.noteInsertionPoint(
             playheadProjectBeat: 18, clipStartBeat: 12, clipLengthBeats: 16) == 6)
         // Both edges inclusive, matching `PianoRollPlayhead.isVisible` — the ONE
         // predicate the line and the off-clip cue are complementary on.
-        #expect(PasteAnchorPolicy.noteLocalAnchor(
+        #expect(PasteAnchorPolicy.noteInsertionPoint(
             playheadProjectBeat: 12, clipStartBeat: 12, clipLengthBeats: 16) == 0)
-        #expect(PasteAnchorPolicy.noteLocalAnchor(
+        #expect(PasteAnchorPolicy.noteInsertionPoint(
             playheadProjectBeat: 28, clipStartBeat: 12, clipLengthBeats: 16) == 16)
     }
 
-    @Test("outside the clip the note anchor is 0 — never a clamp to the nearer edge")
-    func noteAnchorOutsideTheClipIsZero() {
-        // 0 is the roll's own shipped rule for playhead-relative operations
-        // (`PianoRollBarOps.targetBarStartBeat` — "the bar under the playhead,
-        // else bar 0"). Parking at the nearer EDGE is refused by m23-c1.
-        #expect(PasteAnchorPolicy.noteLocalAnchor(
-            playheadProjectBeat: 4, clipStartBeat: 12, clipLengthBeats: 16) == 0)
-        #expect(PasteAnchorPolicy.noteLocalAnchor(
-            playheadProjectBeat: 400, clipStartBeat: 12, clipLengthBeats: 16) == 0)
+    @Test("outside the clip there is NO insertion point — nil, never a clamp to the nearer edge")
+    func noteAnchorOutsideTheClipIsNil() {
+        // ⚠️ THIS ASSERTED `== 0` UNTIL m25-f-2. The old rule borrowed
+        // `PianoRollBarOps.targetBarStartBeat`'s "else bar 0", which is still
+        // right for BAR OPS and is still what that function does. It was wrong
+        // for PASTE, which has two better referents than bar 0 — the notes it
+        // came from, and what the user is looking at — and sending a paste to
+        // bar 0 put it somewhere the user often could not see. `nil` is this
+        // predicate declining to answer; `resolveNotePaste` decides instead.
+        //
+        // ⚠️ The inside case above must keep returning 0 at the clip's own
+        // start, so this pair is also the anti-vacuity control for the change:
+        // 0-the-beat and nil-the-absence are now distinguishable, and a
+        // regression that revived `return 0` would collapse them again.
+        #expect(PasteAnchorPolicy.noteInsertionPoint(
+            playheadProjectBeat: 4, clipStartBeat: 12, clipLengthBeats: 16) == nil)
+        #expect(PasteAnchorPolicy.noteInsertionPoint(
+            playheadProjectBeat: 400, clipStartBeat: 12, clipLengthBeats: 16) == nil)
+        // Parking at the nearer EDGE is still refused by m23-c1: neither of the
+        // two answers an edge-clamp would give (0 for the first, 16 for the
+        // second) is produced.
     }
 
     @Test("notes translate RIGIDLY to the anchor — every internal offset survives")

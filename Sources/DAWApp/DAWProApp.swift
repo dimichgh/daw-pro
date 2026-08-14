@@ -220,6 +220,24 @@ final class AppModel {
     /// `debug.quantizePanel` command; the panel renders as a centered overlay.
     var quantizePanelClipID: UUID?
 
+    /// The Humanize panel's headless model (m25-c): the timing/velocity amounts
+    /// and the beginner-readable descriptions beside them. Owned here (like
+    /// `quantizeModel`) so `debug.captureUI` renders the SAME instance the live
+    /// overlay shows. Apply converges on `ProjectStore.humanizeClipNotes` — the
+    /// SAME method the `clip.humanize` wire uses (UI-only; NO new wire surface,
+    /// because the capability already had a command and an MCP tool and only the
+    /// human-clickable half was missing).
+    let humanizeModel: HumanizeModel
+
+    /// The clip the Humanize panel is open for (nil = closed). Set by the
+    /// piano-roll header HUMANIZE chip and the arrange clip context menu; the
+    /// panel renders as a centered overlay.
+    ///
+    /// ⚠️ THIS IS A BLOCKING MODAL — it is listed in `isModalPresented` below,
+    /// and that is not optional bookkeeping: without it a DELETE keypress while
+    /// this panel is up would destroy the arrange selection behind the scrim.
+    var humanizePanelClipID: UUID?
+
     /// The Export (bounce) dialog's headless model (m23-m3): the output format
     /// (`DeliveryFormat`), the tracks to leave out, and the loudness target —
     /// plus the ONE place that state becomes `ProjectStore.renderBounce`
@@ -401,6 +419,84 @@ final class AppModel {
         get { arrangeSelection.focusID }
         set { arrangeSelection.focus(newValue) }
     }
+
+    /// The last header-clicked track (m25-l-1) — the EXPLICIT half of "where I
+    /// am". Written only by `clickTrack`; read only by `activeTrackID` below.
+    ///
+    /// STORED RAW, never validated on write, and that is deliberate: staleness is
+    /// handled at RESOLUTION (`ArrangeActiveTrack.resolve` checks it against the
+    /// live tracks on every read), so removing the active track needs no
+    /// observer, no notification and no cleanup pass. It is the same discipline
+    /// the focus term has always used — a focus id whose clip is gone simply
+    /// stops resolving — and it is why `removeTrack` has no new obligation.
+    ///
+    /// ═══ EXACTLY THREE THINGS MOVE IT, AND THE LIST IS THE DESIGN ═══
+    ///
+    ///   • **A header click SETS it** (`clickTrack`) — the explicit statement.
+    ///   • **A CLIP click RELEASES it to nil** (`clickClip`), handing the question
+    ///     to the focus term so the cursor follows the clip just clicked. Without
+    ///     this the explicit term is sticky and outranks the focus forever, and
+    ///     clicking a clip on another track leaves the rail — and the paste
+    ///     target — behind on the last header clicked. That is worse than the
+    ///     pre-m25-l-1 behaviour; the full argument is at the call site.
+    ///   • **Deleting the track RETIRES it**, implicitly, at resolution time.
+    ///
+    /// ⚠️ **NOTHING ELSE CLEARS IT — in particular NOT a deselect, on purpose.** A
+    /// cursor is not a selection: clicking empty lane space deselects clips
+    /// (m25-m) and leaves "where I am" exactly where it was, the way a text caret
+    /// survives clicking away from a highlighted run. Clearing it there would
+    /// make the empty-track paste target evaporate on the next stray click — the
+    /// very bug m25-l-1 exists to close. A MARQUEE likewise leaves it standing: a
+    /// band adopts no anchor clip, so it says nothing about where the user is.
+    ///
+    /// ⚠️ **THE LIST IS UNCHANGED BY m25-l-1 DEFECT ②, AND ONE READING OF IT IS
+    /// NOW A TRAP.** A plain header click also DESELECTS every clip since that
+    /// ruling — but it is still bullet one (a header click SETS this), not the
+    /// "not a deselect" exclusion. The exclusion is about gestures that ONLY
+    /// deselect (empty lane space, a marquee that catches nothing); a header click
+    /// deselects *and* states a track, and the statement is what this property
+    /// records. If those two ever have to come apart, the split belongs in
+    /// `ArrangeTrackSelection` where a test can see it, not here.
+    ///
+    /// ⚠️ The set/release pair is app-tier composition and so is invisible to
+    /// `Tests/` (`DAWApp` has no test target) — but both are OBSERVABLE, because
+    /// `debug.arrangeSelection` echoes `explicitActiveTrackId` beside the
+    /// resolved `activeTrackId`. A gate can therefore see a header click set it
+    /// and a clip click release it. The decidable half — what the click's outcome
+    /// NAMES, and how the two terms resolve — lives headless and is tested.
+    var explicitActiveTrackID: UUID?
+
+    /// ⭐ **THE ACTIVE TRACK — the ONE answer to "which track am I on" (m25-l-1).**
+    ///
+    /// Two inputs, one resolution point, precedence documented on
+    /// `ArrangeActiveTrack.resolve`: an explicit header click wins, else the
+    /// track owning the focused CLIP, else nil. **Do not add a second lookup
+    /// beside this.** Before m25-l-1 the paste path derived its target inline
+    /// (`store.tracks.first { $0.clips.contains { $0.id == focusID } }`); that
+    /// expression now lives once, in `ArrangeActiveTrack`, and both the paste
+    /// target and the sidebar's active-track rail read THIS property — so the
+    /// mark on screen and the track a paste lands on cannot disagree.
+    ///
+    /// COMPUTED, not stored, for `selectedClipID`'s reason one property up:
+    /// stored state derived from two other pieces of state is state that can
+    /// drift from both. The cost is a `tracks` scan per read; the explicit term
+    /// is O(tracks) and short-circuits, and the clip scan only runs when no
+    /// header has ever been clicked.
+    ///
+    /// ⭐ **CARRIES ITS PROVENANCE SINCE m25-l-3** — `.explicit` (a header click)
+    /// vs `.inferred` (the focused clip's owner). The paste steers on that
+    /// distinction, so it must survive the trip; `activeTrackID` below is the
+    /// id-only projection for the callers that only draw a rail.
+    var activeTrack: ArrangeActiveTrack.Resolution? {
+        ArrangeActiveTrack.resolve(explicit: explicitActiveTrackID,
+                                   focusClipID: arrangeSelection.focusID,
+                                   tracks: store.tracks)
+    }
+
+    /// The active track's id — a PROJECTION of `activeTrack`, never a second
+    /// lookup. Read by the sidebar's active-track rail and both debug seams,
+    /// which care only *which* track is marked and not how it was decided.
+    var activeTrackID: UUID? { activeTrack?.id }
 
     /// Bumped every time the LANES have re-rendered with a new selection — the
     /// `arrangeDropReportSeq` contract (m23-e echo-seam law). Not state anyone
@@ -792,6 +888,32 @@ final class AppModel {
     @discardableResult
     func clickClip(id: UUID, modifiers: ArrangeClickModifiers) -> ArrangeClickIntent {
         let intent = arrangeSelection.apply(click: id, modifiers: modifiers)
+        // ⭐ m25-l-1 — A CLIP CLICK RELEASES THE EXPLICIT CURSOR, and this line is
+        // a REGRESSION FIX, not a refinement. Without it the header click's
+        // explicit term is sticky and outranks the focus forever: click track A's
+        // header, then click a clip on track B, and "where I am" stays A — so the
+        // cyan rail sits on A while the user works on B, and a relocated paste
+        // follows the rail rather than the clip. That is WORSE than the
+        // pre-m25-l-1 behaviour, which resolved through the focused clip's owner
+        // and would have answered B.
+        //
+        // Releasing to nil hands the question back to `ArrangeActiveTrack`'s
+        // SECOND term, which resolves the clicked clip's owner — restoring the
+        // old answer exactly, with no second owner-lookup written here (that
+        // expression stays in its one home). The precedence therefore reads: an
+        // explicit header click wins UNTIL you say otherwise by clicking a clip.
+        //
+        // ⚠️ A ⌘-click that DESELECTS its clip can leave both terms empty, so the
+        // cursor becomes nil and the rail goes dark. That is not a regression —
+        // it is precisely what the old focus-derived target did in that state —
+        // and it is honest: nothing is selected, so there is nowhere to be.
+        //
+        // ⚠️ A MARQUEE does NOT come through here and deliberately does not
+        // release the cursor: a band adopts no anchor clip (`replace(with:)`), so
+        // it makes no statement about where the user is, and the last statement
+        // that WAS made should stand. Nor does m25-m's click-empty-to-deselect —
+        // see `explicitActiveTrackID`'s own doc for the caret argument.
+        explicitActiveTrackID = nil
         // Move keyboard focus onto the arrange so DELETE reaches it. Bumped on
         // EVERY click, including a plain re-click of an already-selected clip:
         // opening the piano roll steals focus back (its `.onAppear`), so a
@@ -855,18 +977,30 @@ final class AppModel {
     ///
     /// THE NONCE BUMP IS LOAD-BEARING, exactly as it is on `clickClip`: it is what
     /// moves keyboard focus onto the arrange workspace (`ArrangeDeleteKey`'s
-    /// `.onChange(of: model.arrangeKeyFocusNonce)`), so DELETE reaches the clips
-    /// the header click just selected with no separate "click the background
-    /// first" step. Bumped on EVERY header click, including one that changed
-    /// nothing, for `clickClip`'s stated reason — opening the piano roll steals
-    /// focus back, so a one-shot flag would leave the arrange permanently
+    /// `.onChange(of: model.arrangeKeyFocusNonce)`), so the arrange's own keys
+    /// reach the surface the user just clicked with no separate "click the
+    /// background first" step. Bumped on EVERY header click, including one that
+    /// changed nothing, for `clickClip`'s stated reason — opening the piano roll
+    /// steals focus back, so a one-shot flag would leave the arrange permanently
     /// unfocused.
     ///
-    /// A CONSEQUENCE THIS MAKES NEWLY REACHABLE, stated because it is a real
-    /// arbitration and not an accident: `ArrangeSelection.replace(with:)` KEEPS a
-    /// focus that survives into the new set, so clicking the header of the track
-    /// holding the open editor clip leaves the piano roll OPEN while this bump
-    /// moves key focus to the arrange. DELETE then has two candidate consumers.
+    /// ⚠️ **ITS JUSTIFICATION NARROWED AT m25-l-1 DEFECT ② AND THE BUMP STAYS.**
+    /// This used to read "so DELETE reaches the clips the header click just
+    /// selected" — but a PLAIN click now selects nothing (it is a cursor move), so
+    /// on that branch there are no clips for DELETE to reach. The bump is still
+    /// owed on every click, for two live reasons and one standing one: a ⇧/⌘ click
+    /// DOES build a selection DELETE must reach; ⌘V pastes at the cursor this
+    /// click just moved (m25-l-3) and needs the arrange focused to be heard at
+    /// all; and the surface claim below must not depend on which modifier was
+    /// down.
+    ///
+    /// A CONSEQUENCE, stated because it is a real arbitration and not an accident.
+    /// **Since defect ② it is reached by a ⇧/⌘ click, not a plain one** — a plain
+    /// click now empties the selection, so INV2 drops the focus and the roll
+    /// CLOSES. `ArrangeSelection.formUnion` touches no focus, so ⇧-clicking the
+    /// header of the track holding the open editor clip leaves the piano roll OPEN
+    /// while this bump moves key focus to the arrange. DELETE then has two
+    /// candidate consumers.
     /// The arbitration is SwiftUI's and is structural — `PianoRollView` owns
     /// `.onKeyPress(.delete)` as a DESCENDANT of `ArrangeDeleteKey`, so a focused
     /// roll with notes selected consumes the key first and this path never runs.
@@ -893,6 +1027,15 @@ final class AppModel {
         guard let track = store.tracks.first(where: { $0.id == id }) else { return nil }
         let outcome = ArrangeTrackSelection.apply(
             click: track, modifiers: modifiers, to: &arrangeSelection)
+        // m25-l-1: the click also moves the CURSOR — "where I am" — which is what
+        // gives a paste a target when nothing is selected. CARRIED OFF THE
+        // OUTCOME, never assigned `id` here: the rule ("every header click, any
+        // chord, any clip count") is the headless type's and is pinned in
+        // `Tests/DAWAppKitTests`, so a seam and a mouse click cannot diverge and
+        // a mutation to the rule is visible to a test. Placed AFTER the nil guard
+        // for the nonce bump's stated reason — an unknown id selected nothing, so
+        // it may not move the cursor either.
+        explicitActiveTrackID = outcome.activeTrackID
         arrangeKeyFocusNonce &+= 1
         // m23-al, `clickClip`'s twin: a header click is unambiguously an ARRANGE
         // gesture. Placed AFTER the nil guard above for the same reason the nonce
@@ -1261,6 +1404,65 @@ final class AppModel {
         }
     }
 
+    // MARK: - Select All (m25-s)
+
+    /// Edit ▸ Select All / ⌘A — which surface it targets and whether it is live.
+    ///
+    /// ⚠️ THE POLICY LIVES IN `DAWAppKit.SelectAllMenuPolicy`, NOT HERE, and its
+    /// banner carries the user's 2026-08-13 words, the scope they set (the ROLL
+    /// only — no arrange-wide select-all was invented) and the measurement that
+    /// answers the rename-field objection.
+    ///
+    /// ⚠️⚠️ **THIS IS THE ONE EDIT-MENU ITEM THAT ROUTES ON `activeEditorSurface`,
+    /// AND THE DIVERGENCE FROM ITS TWO SIBLINGS IS DELIBERATE.**
+    /// `deleteMenuItem` and `clipboardItem` route on `pianoRollWouldConsumeKey`
+    /// and this property's own doc explains why they must: engagement comes apart
+    /// from "would the roll consume this", and routing DELETE by engagement would
+    /// delete clips while notes sat selected. **That term cannot express THIS
+    /// question at all** — `pianoRollWouldConsumeKey` requires a note selection to
+    /// already exist, and a select-all is pressed precisely when one does not. So
+    /// this reads the engagement verdict, which is the tree's one home for "which
+    /// surface is the user working in". Three items, three questions, three terms.
+    ///
+    /// EVERY INPUT IS `@Observable` (`editorEngagement.lastEngaged`,
+    /// `workspaceMode`, `selectedClipID`, `store.tracks`, `isModalPresented`), so
+    /// the item cannot go stale.
+    var selectAllMenuItem: SelectAllMenuItem {
+        SelectAllMenuPolicy.editMenuItem(
+            activeSurface: activeEditorSurface.surface,
+            isModalPresented: isModalPresented,
+            // ⚠️ STORE TRUTH, NOT THE ROLL'S DRAFT — the policy's parameter doc
+            // names the one state where they differ and why it is unreachable
+            // outside a live gesture. The roll's `draft` is `@State private`.
+            rollNoteCount: openEditorClip?.notes?.count ?? 0)
+    }
+
+    /// Edit ▸ Select All fired.
+    ///
+    /// RE-RESOLVED AT CLICK TIME, `performMenuDelete`'s rule and for its reason.
+    ///
+    /// ⚠️ RETURNS `false` — DECLINING — EVERYWHERE EXCEPT THE ROLL, and that is
+    /// the feature working rather than failing. MEASURED 2026-08-13: a
+    /// `validateMenuItem` returning false greys the row AND the ⌘A key equivalent
+    /// runs no action (0 invocations, against a positive control that ran 1), and
+    /// an UNCLAIMED `selectAll:` behaved identically before this feature existed —
+    /// nil target, disabled item, key equivalent consumed by the menu system in
+    /// both cases. So outside the roll ⌘A does exactly what it always did.
+    @discardableResult
+    func performMenuSelectAll() -> Bool {
+        switch selectAllMenuItem.surface {
+        case .pianoRollNotes:
+            // The ROLL resolves it: `PianoRollModel` is `@State private`, so its
+            // draft is unreachable from here. NOT the m23-x staging nonce — see
+            // `PianoRollNoteSelectionBridge.selectAllNonce` for why a user
+            // keystroke must not ride a debug seam.
+            pianoRollNoteSelection.requestSelectAll()
+            return true
+        case nil:
+            return false
+        }
+    }
+
     /// Edit ▸ Paste fired.
     @discardableResult
     func performMenuPaste() -> Bool {
@@ -1380,20 +1582,69 @@ final class AppModel {
     /// `shouldDropNotes`' 1 → N growth so the roll's note selection is released
     /// on the way out. Both are coherent — the user just pasted clips, so the
     /// arrange is the subject — and decision 5 speaks only to the single case.
+    ///
+    /// - Parameter intoTrack: a destination named by THIS GESTURE, overriding the
+    ///   stored cursor for this paste only. nil (every shipped caller today) uses
+    ///   the resolved active track. See the seam comment in the body.
+    ///
+    /// ⚠️ **PRE-EXISTING WIRE GAP, MEASURED AT m25-l-3 AND DELIBERATELY NOT
+    /// CLOSED HERE.** `allCommands` has `edit.undo` / `edit.redo` /
+    /// `edit.history` but **no paste verb at all** — the only non-menu route to
+    /// this method is `debug.editClipboard {act:"paste"}`, which is debug tier.
+    /// m25-l-3 did not add a user-facing operation (it retargets an existing
+    /// one), so it owes no new command; but the constitution's "every capability
+    /// ships a control command + MCP tool + test" is unmet for PASTE itself and
+    /// was unmet before this item.
+    /// TODO(wire): `edit.pasteClips { trackId?: UUID }` → MCP tool
+    /// `daw_edit_paste_clips`. It rides `intoTrack` above verbatim, which is the
+    /// same seam m25-f-4 uses, so no new targeting logic is needed. Needs the
+    /// user's word (additive wire surface is a decision, not a chore).
     @discardableResult
-    func pasteClipsFromClipboard() -> Bool {
+    func pasteClipsFromClipboard(intoTrack: UUID? = nil) -> Bool {
         guard case .clips(let entries) = clipboard.payload else { return false }
-        // The FOCUS's track — "where you are" — for a relocated paste. Resolved
-        // through the live store, so a stale focus id simply yields nil and the
-        // policy falls back to the first compatible track.
-        let focusTrackID = arrangeSelection.focusID.flatMap { id in
-            store.tracks.first { $0.clips.contains { $0.id == id } }?.id
-        }
+        // ⭐ "WHERE YOU ARE" — the destination a paste is aimed at (m25-l-1),
+        // and since m25-l-3 the thing that can override the in-place rule.
+        //
+        // ONE HOME: this is `ArrangeActiveTrack.resolve` and nothing else. It
+        // used to derive the focused clip's owner inline here, which meant a
+        // header click — which deliberately adopts NO focus ("SELECTING IS NOT
+        // OPENING", `ArrangeTrackSelection`) — could not name a target at all,
+        // and a paste after clicking an empty track fell through to "the first
+        // track in store order that can hold the payload's topmost clip". That
+        // was the m25-l bug. Staleness still degrades to nil and still falls
+        // back, exactly as before; the fallback is now just much harder to reach.
+        //
+        // ⭐⭐ **m25-l-3 — AN EXPLICIT TRACK CHOICE NOW BEATS THE IN-PLACE RULE,
+        // BY USER RULING (2026-08-13).** The comment that stood here said
+        // redirecting an in-place paste "is a change to a SETTLED decision …
+        // and needs the user's word — it is deliberately NOT done here". The
+        // user has since performed the gesture and called the old behaviour
+        // wrong: *"when I copy clip and then select track using header and try
+        // to paste using keyboard shortcut, it does not copy on selected track,
+        // it still copies to the source track."* That IS the word. The rule now
+        // lives in `PasteAnchorPolicy.resolveClipPaste`, keyed on
+        // `Resolution.origin`, so an ORDINARY copy → paste (no header click,
+        // destination merely `.inferred` from the focused clip) is byte-for-byte
+        // unchanged and still lands home.
+        //
+        // ⚠️ SEAM FOR m25-f-4 (right-click ▸ Paste on empty lane space), which
+        // the same ruling unblocks: it supplies its destination through
+        // `intoTrack` and rides this identical mechanism. It is fed to
+        // `resolve`'s `explicit:` input rather than used to hand-build a
+        // `Resolution`, so the liveness/precedence rules stay in their one home.
+        // It deliberately does NOT write `explicitActiveTrackID`: that property
+        // documents *exactly three things move it* and calls the list the
+        // design, and a right-click permanently relocating the cursor is a side
+        // effect the user did not ask for.
+        let destination = ArrangeActiveTrack.resolve(
+            explicit: intoTrack ?? explicitActiveTrackID,
+            focusClipID: arrangeSelection.focusID,
+            tracks: store.tracks)
         let plan = PasteAnchorPolicy.resolveClipPaste(
             payload: entries,
             anchorBeat: store.transport.positionBeats,
             tracks: store.tracks,
-            focusTrackID: focusTrackID)
+            activeTrack: destination)
 
         guard !plan.isEmpty else {
             presentClipboardSkips(plan.skipped, refusal: plan.refusedBy)
@@ -1486,13 +1737,21 @@ final class AppModel {
         /// ECHO-SEAM LAW, learned at m23-e — and this is the field m23-x's
         /// arrow-key nudge will inherit.
         var clamped: Bool { storeClamped || gestureFlooredAtZero }
+        /// The ACHIEVED vertical translation in whole track rows (m25-l-2), 0 for
+        /// a same-track drag. Present so `changed` cannot lie about a move that
+        /// crossed lanes without moving a single beat — dragging a clip straight
+        /// down mutates the project while `effectiveDeltaBeats` stays 0, and a
+        /// `changed: false` there would tell a waiter there is no re-render
+        /// coming when there is.
+        var effectiveTrackDelta: Int = 0
         var trimmedIDs: [UUID] = []
         var removedIDs: [UUID] = []
         var refusal: String?
         /// True when the store was actually mutated — the debug seam only waits
         /// on a re-render when there is one to wait for.
         var changed: Bool {
-            effectiveDeltaBeats != 0 || !trimmedIDs.isEmpty || !removedIDs.isEmpty
+            effectiveDeltaBeats != 0 || effectiveTrackDelta != 0
+                || !trimmedIDs.isEmpty || !removedIDs.isEmpty
         }
     }
 
@@ -1515,9 +1774,31 @@ final class AppModel {
     /// WHOLE-GROUP beat-0 clamp and every resulting position). This method only
     /// routes between them — and unions the two reductions into one honest
     /// `clamped`, which neither stage can answer alone.
+    ///
+    /// ═══ THE VERTICAL AXIS (m25-l-2) ═══
+    ///
+    /// `requestedTrackDelta` DEFAULTS TO ZERO, and that default is load-bearing
+    /// rather than polite: the `debug.arrangeDrag` seam and every existing test
+    /// call this method unchanged, and a same-track drag must keep taking the
+    /// byte-identical path it took before this parameter existed.
+    ///
+    /// ⚠️⚠️ **THE GUARD KEYS ON THE *EFFECTIVE* DELTA, NEVER THE REQUESTED ONE.**
+    /// A vertical request that the whole-group clamp or the compatibility
+    /// back-off reduces to zero IS a same-track move and must go through
+    /// `moveClips(ids:byBeats:)` exactly as before — routing it through the
+    /// cross-track verb instead would change the UNDO LABEL (and the result
+    /// type) on the ordinary drag path that `m23g2-group-drag.mjs` pins, for a
+    /// gesture that moved nothing vertically.
+    ///
+    /// The effective delta comes from `ArrangeVerticalDrag.effectiveDelta` — the
+    /// SAME call `previewArrangeDrag` made on every frame — so the store is
+    /// handed a delta that is already in range and already kind-checked. Its own
+    /// clamp then has nothing left to do, which is why the ghost and the landing
+    /// are the same number rather than two numbers that happen to agree.
     @discardableResult
     func dragArrangeClips(anchorClipID: UUID, anchorOriginalStart: Double,
-                          rawDragDeltaBeats: Double) -> ArrangeGroupDragOutcome {
+                          rawDragDeltaBeats: Double,
+                          requestedTrackDelta: Int = 0) -> ArrangeGroupDragOutcome {
         // GRAB RULE — collapse onto the grabbed clip when it is not selected.
         if !arrangeSelection.contains(anchorClipID) {
             clickClip(id: anchorClipID, modifiers: [])
@@ -1539,7 +1820,25 @@ final class AppModel {
         guard !targets.isEmpty else {
             return ArrangeGroupDragOutcome(anchorStart: anchorCurrentStart)
         }
+        let trackDelta = ArrangeVerticalDrag.effectiveDelta(
+            requested: requestedTrackDelta, movingClipIDs: targets, tracks: store.tracks)
         do {
+            // ONE branch, on the EFFECTIVE vertical delta. Zero keeps the
+            // pre-m25-l-2 verb, its label and its result type untouched.
+            if trackDelta != 0 {
+                let result = try store.moveClips(ids: Array(targets), byTracks: trackDelta,
+                                                 byBeats: plan.deltaBeats)
+                return ArrangeGroupDragOutcome(
+                    anchorStart: liveClip(anchorClipID)?.startBeat ?? anchorCurrentStart,
+                    movedIDs: result.clips.map(\.id),
+                    requestedDeltaBeats: result.requestedDeltaBeats,
+                    effectiveDeltaBeats: result.effectiveDeltaBeats,
+                    storeClamped: result.clamped,
+                    gestureFlooredAtZero: plan.flooredAtZero,
+                    effectiveTrackDelta: result.effectiveTrackDelta ?? trackDelta,
+                    trimmedIDs: result.trimmedClipIDs,
+                    removedIDs: result.removedClipIDs)
+            }
             let result = try store.moveClips(ids: Array(targets), byBeats: plan.deltaBeats)
             return ArrangeGroupDragOutcome(
                 anchorStart: liveClip(anchorClipID)?.startBeat ?? anchorCurrentStart,
@@ -1608,9 +1907,16 @@ final class AppModel {
     /// `ProjectStore.plannedGroupBeatDelta` (the whole-group clamp, asked without
     /// moving). Both are the same producers `dragArrangeClips` uses on commit, so
     /// the ghost and the landing agree by construction.
+    ///
+    /// m25-l-2: `requestedTrackDelta` is the VERTICAL half — the raw row request
+    /// the pointer is making. It goes through `ArrangeVerticalDrag.effectiveDelta`
+    /// HERE and again identically at commit, so the ghost lands on the lane the
+    /// drop will actually reach. It DEFAULTS TO ZERO so every pre-existing caller
+    /// (and the `debug.arrangeDrag` seam) keeps its exact same-track behaviour.
     @discardableResult
     func previewArrangeDrag(anchorClipID: UUID, anchorOriginalStart: Double,
-                            rawDragDeltaBeats: Double) -> Double {
+                            rawDragDeltaBeats: Double,
+                            requestedTrackDelta: Int = 0) -> Double {
         if !arrangeSelection.contains(anchorClipID) {
             clickClip(id: anchorClipID, modifiers: [])
         }
@@ -1622,7 +1928,8 @@ final class AppModel {
             arrangeBodyDrag = ArrangeBodyDrag(anchorClipID: anchorClipID,
                                               anchorOriginalStart: anchorOriginalStart)
         }
-        arrangeBodyDrag?.update(rawDragDeltaBeats: rawDragDeltaBeats)
+        arrangeBodyDrag?.update(rawDragDeltaBeats: rawDragDeltaBeats,
+                                requestedTrackDelta: requestedTrackDelta)
 
         guard let anchorCurrentStart = liveClip(anchorClipID)?.startBeat else {
             arrangeDragPreview = nil
@@ -1641,7 +1948,9 @@ final class AppModel {
         let planned = store.plannedGroupBeatDelta(ids: Array(targets), byBeats: plan.deltaBeats)
         arrangeDragPreview = ArrangeDragPreview(
             anchorClipID: anchorClipID, movingClipIDs: targets,
-            deltaBeats: planned.effective)
+            deltaBeats: planned.effective,
+            deltaTracks: ArrangeVerticalDrag.effectiveDelta(
+                requested: requestedTrackDelta, movingClipIDs: targets, tracks: store.tracks))
         return anchorCurrentStart + planned.effective
     }
 
@@ -1661,7 +1970,8 @@ final class AppModel {
         guard let commit = drag?.commit() else { return nil }
         return dragArrangeClips(anchorClipID: commit.anchorClipID,
                                 anchorOriginalStart: commit.anchorOriginalStart,
-                                rawDragDeltaBeats: commit.rawDragDeltaBeats)
+                                rawDragDeltaBeats: commit.rawDragDeltaBeats,
+                                requestedTrackDelta: commit.requestedTrackDelta)
     }
 
     /// The gesture died without a release. Commits NOTHING and puts the ghost
@@ -1766,6 +2076,7 @@ final class AppModel {
             || (polySynthEditorTrackID != nil && polySynthEditor.targetIsPolySynth)
             || effectPickerTrackID != nil
             || quantizePanelClipID != nil
+            || humanizePanelClipID != nil
             || voiceConvertClipID != nil
             || showExportSheet
             || showUndoHistory
@@ -1782,6 +2093,55 @@ final class AppModel {
         guard !isArrangeTextEditingFocused else { return false }
         guard !arrangeSelection.isEmpty else { return false }
         return deleteArrangeSelection()
+    }
+
+    // MARK: - The maximized note editor's ESCAPE exit (m25-b-1)
+
+    /// HOW MANY TIMES A MOUNT HAS ASKED `handleEditorEscape` — the observable that
+    /// answers "did an ESCAPE keystroke actually REACH this app's handler?", the
+    /// `deleteKeyFunnelSeq` idea at one tenth the size. Bumped BEFORE the guards,
+    /// so a probe can tell "the key never arrived" (counter flat) apart from "the
+    /// key arrived and the mode was already off" (counter moves, mode unchanged) —
+    /// which are two different bugs with the same visible symptom.
+    ///
+    /// ⚠️⚠️ **IT COUNTS MOUNT HITS, NOT KEY PRESSES, AND ITS NAME SAYS SO.** Escape
+    /// has TWO mounts; when the decision REFUSES, the roll's mount reports
+    /// `.ignored` and the press bubbles to the workspace mount, which asks again —
+    /// so ONE refused press moves this by TWO. (A press that is CONSUMED stops at
+    /// the first mount and moves it by one.) Named `…MountHits` rather than
+    /// `…FunnelSeq` for the m25-d law this repo already paid for: a readout whose
+    /// name promises something other than what it counts is worse than no readout,
+    /// because the reader has no reason to doubt it. Non-observable on purpose:
+    /// nothing renders from it.
+    @ObservationIgnored private(set) var editorEscapeMountHits = 0
+
+    /// ESCAPE's ONE decision, shared by BOTH of its mounts — the roll's own
+    /// `.onKeyPress(.escape)` and the arrange workspace's key scope. Returns
+    /// whether the keystroke was consumed; `false` leaves both mounts reporting
+    /// `.ignored`, so Escape keeps propagating exactly as it did before this item.
+    ///
+    /// ⭐ TWO MOUNTS, ONE DECISION — the m23-cf lesson, applied before it could be
+    /// paid for again. Three focus-gated views claiming DELETE were measured to be
+    /// a coin flip in this tree, and the fix was to stop letting focus decide what
+    /// a key MEANS: every claimant asks the same question. Here the roll's mount
+    /// covers the ordinary case (the roll holds focus; it asserts it on appear) and
+    /// the workspace mount is the backstop for focus sitting elsewhere in the
+    /// arrange — a track row, the ruler, a lane. Both land here.
+    ///
+    /// ⭐ SET, NEVER TOGGLE. If both mounts somehow ran for one press, the second
+    /// would be a no-op rather than a re-maximize. A toggle here would make the
+    /// feature's correctness depend on SwiftUI's propagation being exactly-once.
+    ///
+    /// The refusals live in `EditorMaximize.escapeExits` (headless, tested):
+    /// a modal owns Escape, and so does a live rename field.
+    func handleEditorEscape() -> Bool {
+        editorEscapeMountHits &+= 1
+        guard EditorMaximize.escapeExits(maximized: panelLayout.editorMaximized,
+                                         modalPresented: isModalPresented,
+                                         textEditing: isArrangeTextEditingFocused)
+        else { return false }
+        panelLayout.setEditorMaximized(false)
+        return true
     }
 
     // MARK: - The DELETE key's ONE entry point (m23-cf, second pass)
@@ -3654,6 +4014,23 @@ final class AppModel {
                     fromClipId: clipID, name: name, gridBeats: grid, cycleBeats: cycle)
             })
 
+        // The Humanize model (m25-c): the panel's two amounts, applied through
+        // the store method the wire uses (`humanizeClipNotes` = ONE
+        // `performEdit("Humanize")` undo step). The seed is deliberately NOT
+        // threaded from the UI — the panel always draws a fresh one, because it
+        // closes on Apply and so could never show the user a `seedUsed` to
+        // reproduce. `try?` matches the Quantize apply above: the only refusals
+        // are an audio clip (the menu entry does not exist there, and `canApply`
+        // refuses anyway) and a take-comp member, which the sibling Quantize
+        // path also swallows — one refusal convention, not two.
+        self.humanizeModel = HumanizeModel(
+            apply: { [weak store] clipID, timingBeats, velocityRange in
+                _ = try? store?.humanizeClipNotes(clipID: clipID,
+                                                  timingBeats: timingBeats,
+                                                  velocityRange: velocityRange,
+                                                  seed: nil)
+            })
+
         // The Export dialog model (m23-m3). Stateless to construct — it takes
         // its track list as a VALUE snapshot at open time (`prepare(tracks:)`)
         // and drives the store only through the export call it is handed, so it
@@ -4371,8 +4748,9 @@ final class AppModel {
 
     /// `debug.panelLayout {sidebarWidth?, editorFraction?, rowHeight?,
     /// pianoRollPPB?, mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
-    /// waveformNormalize?, waveformVerticalZoom?, reset?}` — stages the adjustable
-    /// window layout (beta m10-d)
+    /// waveformNormalize?, waveformVerticalZoom?, editorMaximized?,
+    /// pianoRollMinimap?, reset?}` —
+    /// stages the adjustable window layout (beta m10-d)
     /// so a headless capture / E2E can drive the arrange sidebar width, the bottom
     /// editor's height fraction, the global track-row height, and (m21-c) the
     /// piano-roll zoom before `debug.captureUI` (the `debug.panelDensity`
@@ -4418,6 +4796,28 @@ final class AppModel {
         if let z = params["waveformVerticalZoom"]?.doubleValue {
             panelLayout.setWaveformVerticalZoom(CGFloat(z))
         }
+        // m25-b-1: the MAXIMIZED editor mode. One more `PanelLayoutStore` slot, so
+        // it rides here for the `waveformNormalize` reasons — and the WIRE DECISION
+        // is deliberate rather than inherited: `docs/DESIGN-LANGUAGE.md` records
+        // adjustable layout as "a documented NON-INVOKABLE window preference — no
+        // wire command / MCP tool", every one of the nine sibling slots obeys it,
+        // and an `allCommands` entry would break the wire-count pins for a control
+        // that changes no project byte and no sound. An agent that wants the notes
+        // reads `project.snapshot`; how tall the pane is drawn is not its business.
+        //
+        // ⚠️ ECHOED ALONGSIDE `editorFraction`, WHICH IS THE POINT OF ECHOING IT:
+        // the two are INDEPENDENT (maximize never writes the fraction), so a gate
+        // can prove the restore contract in one round trip — maximize, read that
+        // `editorFraction` did NOT move, un-maximize, read it back unchanged.
+        if let m = params["editorMaximized"]?.boolValue { panelLayout.setEditorMaximized(m) }
+        // m25-b-2: the piano roll's VIEWPORT MINIMAP visibility. One more
+        // `PanelLayoutStore` slot, riding here for the `editorMaximized` reasons —
+        // and the wire question was answered by the SAME recorded rule rather than
+        // re-opened: a corner navigator changes no project byte and no sound, so it
+        // is view chrome, and `allCommands` (175) / MCP (178) stay pinned. An agent
+        // that wants to know where the notes are reads `project.snapshot`; where a
+        // human happens to be LOOKING is not a capability.
+        if let m = params["pianoRollMinimap"]?.boolValue { panelLayout.setPianoRollMinimap(m) }
         return .object([
             "sidebarWidth": .number(Double(panelLayout.sidebarWidth)),
             "editorFraction": .number(Double(panelLayout.editorFraction)),
@@ -4428,6 +4828,25 @@ final class AppModel {
             "auditionEnabled": .bool(panelLayout.auditionEnabled),
             "waveformNormalize": .bool(panelLayout.waveformNormalize),
             "waveformVerticalZoom": .number(Double(panelLayout.waveformVerticalZoom)),
+            "editorMaximized": .bool(panelLayout.editorMaximized),
+            "pianoRollMinimap": .bool(panelLayout.pianoRollMinimap),
+            // The ESCAPE reach counter (m25-b-1) — "did the keystroke reach the
+            // app?", separable from "did it change anything?" because the echoed
+            // `editorMaximized` above answers the second question independently.
+            // ⚠️ MOUNT HITS, NOT PRESSES: a REFUSED press is asked twice (roll,
+            // then the workspace backstop), a CONSUMED one once. The name is the
+            // warning.
+            "editorEscapeMountHits": .number(Double(editorEscapeMountHits)),
+            // m25-c: whether the Humanize panel is up, and on which clip. It
+            // rides HERE — a read-only echo on an existing debug command, the
+            // `editorEscapeMountHits` precedent (a runtime value, not a
+            // `PanelLayoutStore` slot) — rather than becoming a command of its
+            // own, because `clip.humanize` ALREADY has a control command and an
+            // MCP tool. The only thing this item added was the human-clickable
+            // half, and where a human happens to be LOOKING is view chrome, so
+            // `allCommands` (175) / MCP (178) stay pinned (m10-c/sp-b).
+            "humanizePanelVisible": .bool(humanizePanelClipID != nil),
+            "humanizePanelClipId": humanizePanelClipID.map { JSONValue.string($0.uuidString) } ?? .null,
         ])
     }
 
@@ -5351,7 +5770,17 @@ final class AppModel {
     ///     `trackClickAckTrackId` to the ALWAYS-PRESENT fields below — those two
     ///     are the acknowledgement's verdict and its row, and being unconditional
     ///     is what lets a gate poll the 3-second decay with the same call it took
-    ///     its baseline with.
+    ///     its baseline with. m25-l-1 added `trackClickActiveTrackId` here (the
+    ///     CURSOR this click named, carried off the outcome) and the
+    ///     always-present pair `activeTrackId` / `explicitActiveTrackId` — the
+    ///     RESOLVED answer and the explicit input that fed it. **A paste-target
+    ///     leg must assert on `activeTrackId`**: that is the value
+    ///     `pasteClipsFromClipboard` and the sidebar rail both read, so it is the
+    ///     only one that can go red on a broken resolution rule. m25-l-3 added
+    ///     `activeTrackOrigin` beside it (`"explicit"` / `"inferred"`), because
+    ///     only an EXPLICIT origin redirects an in-place paste — a leg that
+    ///     reads the id alone cannot tell a redirecting cursor from a passive
+    ///     one, and the two now behave differently.
     ///   - `{act:"clear"}` — deselect everything.
     ///   - `{act:"delete"}` — the group delete, through the SAME
     ///     `deleteArrangeSelection` the DELETE key calls.
@@ -6006,6 +6435,34 @@ final class AppModel {
             // way a gate can tell "the word appeared" from "the word appeared on
             // the right row" — and the second is the whole placement decision.
             "trackClickAckTrackId": trackClickAck.map { .string($0.trackID.uuidString) } ?? .null,
+            // m25-l-1: WHERE THE USER IS — the RESOLVED active track, echoed on
+            // EVERY read so a gate can take a baseline with the same call it
+            // asserts with. Debug tier: selection/cursor is app-layer view state
+            // with no representation in `DAWCore`, so it earns no control command
+            // (the m10-c/sp-b pure-view rule).
+            //
+            // THE RESOLVED VALUE, deliberately, not the stored `explicitActive
+            // TrackID`: this is the property the paste target AND the sidebar
+            // rail both read, so a leg asserting on it is asserting on the thing
+            // that actually decides. Echoing the raw stored id instead would go
+            // green on a build whose resolution rule was broken.
+            "activeTrackId": activeTrackID.map { .string($0.uuidString) } ?? .null,
+            // m25-l-3: WHICH PRECEDENCE TERM ANSWERED — "explicit" (a header
+            // click) or "inferred" (the focused clip's owner). Echoed because
+            // the two now have DIFFERENT paste outcomes: only `explicit`
+            // overrides the in-place rule. A leg reading the id alone cannot
+            // tell them apart, and would therefore be unable to distinguish a
+            // working build from one whose provenance had been lost on the way
+            // to `PasteAnchorPolicy` — which is the exact defect m25-l-3 fixed.
+            "activeTrackOrigin": activeTrack.map { .string($0.origin.rawValue) } ?? .null,
+            // The EXPLICIT term beside the verdict, for the `trackClipIds` reason
+            // one field group down: a red leg needs to say WHICH input produced
+            // the answer. `activeTrackId == null` with a non-null explicit id
+            // means the clicked track was REMOVED; equal values mean the click is
+            // what is steering; a null explicit with a non-null resolved id means
+            // the focused clip's owner is (the pre-m25-l-1 behaviour, still live
+            // as the second precedence term).
+            "explicitActiveTrackId": explicitActiveTrackID.map { .string($0.uuidString) } ?? .null,
             "renderSeq": .number(Double(arrangeSelectionRenderSeq)),
             // m23-y: the KEY-FOCUS nonce, echoed on every read so a gate can take
             // a baseline with the same call it asserts with. This is the
@@ -6069,6 +6526,11 @@ final class AppModel {
             // selection moved" are two different reasons for no acknowledgement,
             // and `trackClipIds` beside it settles the first.
             object["trackClickChangedSelection"] = .bool(trackClick.changedSelection)
+            // m25-l-1: the cursor this click named, CARRIED OFF THE OUTCOME like
+            // everything else in this block — never `params["trackId"]` echoed
+            // back, which would be the gate reading its own input and would stay
+            // green if `clickTrack` stopped assigning it entirely.
+            object["trackClickActiveTrackId"] = .string(trackClick.activeTrackID.uuidString)
             object["trackClipIds"] = .array(trackClick.clipIDs.map { .string($0.uuidString) }
                 .sorted { a, b in (a.stringValue ?? "") < (b.stringValue ?? "") })
         }
@@ -9130,6 +9592,38 @@ final class AppModel {
     func applyQuantize() {
         quantizeModel.apply()
         closeQuantizePanel()
+    }
+
+    // MARK: - Humanize panel (m25-c)
+
+    /// Opens the Humanize panel for a clip: seeds the model with the clip's name +
+    /// kind and shows the centered card. Called by the piano-roll header chip and
+    /// the arrange clip context menu (MIDI clips only — the entry is HIDDEN on an
+    /// audio clip, the "Convert to Voice…" rule, so this is never reached with one).
+    ///
+    /// The amounts are NOT reset here: they are sticky across opens on purpose,
+    /// which is what makes ⌘Z + reopen the cheap re-roll this panel offers
+    /// instead of a Re-roll button (`humanizeClipNotes` compounds on re-run).
+    func openHumanizePanel(clipID: UUID) {
+        guard let clip = store.tracks.flatMap(\.clips).first(where: { $0.id == clipID }) else { return }
+        humanizeModel.prepare(clipID: clipID, clipName: clip.name, isMIDI: clip.isMIDI)
+        humanizePanelClipID = clipID
+    }
+
+    /// Closes the Humanize panel.
+    func closeHumanizePanel() {
+        humanizePanelClipID = nil
+    }
+
+    /// Applies the model's amounts through the SAME store method the wire uses
+    /// (`humanizeClipNotes`, ONE undo step), then closes the panel — a single
+    /// decisive action. This is `applyQuantize`'s reasoning VERBATIM and for the
+    /// same measured reason: the store method does not coalesce and a re-run
+    /// COMPOUNDS the jitter, so a panel that lingered would invite an accidental
+    /// second apply that drifts the notes twice as far.
+    func applyHumanize() {
+        humanizeModel.apply()
+        closeHumanizePanel()
     }
 
     /// Removes a saved groove template through the store (`removeGrooveTemplate`,

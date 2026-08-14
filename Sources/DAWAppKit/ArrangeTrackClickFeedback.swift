@@ -45,6 +45,45 @@ import Foundation
 // widening breaks worst: it would put "nothing to select" on top of the largest
 // visible change this surface has (a cleared selection and a closed piano roll).
 //
+// ═══ WHAT m25-l-1 DEFECT ② DID TO THAT TABLE (2026-08-13) — READ, DO NOT REDO ══
+//
+// A plain header click now CLEARS the clip selection instead of selecting the
+// track's clips (USER RULING; the argument is in `ArrangeTrackSelection`'s
+// banner). **THE PREDICATE IS UNCHANGED AND NEEDED NO CHANGE, and that is a
+// derived result rather than an assumption:**
+//
+//   • On a ZERO-clip track the plain branch's old `replace(with: [])` and its new
+//     `clear()` are the same mutation on both fields. D1 and D2 — the only plain
+//     rows in the table — are therefore untouched, byte for byte.
+//   • On a POPULATED track `clipIDs` is non-empty, so the first term is false and
+//     the verdict is `.notNeeded` whatever `changedSelection` says. It was
+//     `.notNeeded` before for the same reason.
+//
+// So every plain click's acknowledgement is BIT-IDENTICAL across the ruling. (The
+// rejected alternative — leaving the existing selection standing — was NOT: it
+// would have flipped D1 to `.noClipsToSelect`, i.e. announced "No clips to
+// select" over the loudest row in the table.)
+//
+// ⚠️ ONE ROW IS NO LONGER REACHABLE AS WRITTEN: **D6**. "PLAIN repeated on the
+// SAME 3-clip header" needed the FIRST plain click to select those three, which
+// it no longer does. Its JOB — a silent click on a track that HAS clips, killing
+// the one-term `!changedSelection` predicate — survives and is in fact easier to
+// reach: ONE plain click on a populated header with nothing selected is now
+// silent, with `clipIDs.count == 3`. What changed is only the REASON the verdict
+// is right. It used to be "three blocks are visibly selected, so the state
+// matches the intent"; it is now "the track HAS clips, so the sentence *No clips
+// to select* would simply be false". The table above is a record of a live
+// measurement and is deliberately NOT rewritten; `ArrangeTrackClickFeedbackTests`
+// carries the restated D6 and the newly-reachable case beside it.
+//
+// 📌 AN OBSERVATION, NOT A DEFECT AND NOT ADDRESSED HERE: since m25-l-1 shipped
+// the active-track cursor, a plain click on an EMPTY header is the canonical way
+// to aim a paste at an empty track — and it still draws "No clips to select"
+// (D2). The click is no longer silent (the active-track rail moves), so the
+// premise that owed the acknowledgement has weakened. That is a pre-existing
+// consequence of m25-l-1, NOT of defect ②, and re-deciding it needs the table
+// re-measured on a live binary rather than reasoned about here.
+//
 // ═══ WHY BOTH TERMS ARE ON THE OUTCOME, AND NOTHING ELSE IS THREADED IN ══════
 //
 // "An editor is open" is NOT independent state that would need passing in.

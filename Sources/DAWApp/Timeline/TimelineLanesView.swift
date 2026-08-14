@@ -157,9 +157,18 @@ struct TimelineLanesView: View {
     /// used to be the real move, called on every frame — which ran the drop-time
     /// overlap policy at every INTERMEDIATE position and destroyed clips the drag
     /// merely passed over. `ArrangeBodyDrag` documents the whole defect.
+    ///
+    /// ⚠️ m25-l-2: `requestedTrackDelta` carries the VERTICAL half, in whole
+    /// track ROWS, already resolved against the non-uniform lane ladder by
+    /// `verticalTrackDelta(fromRow:pointerContentY:)`. It is the pointer's RAW
+    /// request — the clamp and the compatibility back-off belong to
+    /// `ArrangeVerticalDrag`, downstream, so this view never decides where a clip
+    /// may land. Zero means "no vertical change", which is also what a pointer
+    /// off the lane stack produces.
     var onPreviewMoveClip: (_ trackID: UUID, _ clip: Clip,
                             _ anchorOriginalStart: Double,
-                            _ rawDragDeltaBeats: Double) -> Double = { _, _, s, _ in s }
+                            _ rawDragDeltaBeats: Double,
+                            _ requestedTrackDelta: Int) -> Double = { _, _, s, _, _ in s }
     /// The release — the ONE real move (m25-k). Takes nothing: the gesture's
     /// anchor and final translation live in `AppModel.arrangeBodyDrag`, which
     /// outlives the `ForEach`-built block that started the drag.
@@ -168,7 +177,8 @@ struct TimelineLanesView: View {
     /// being torn down mid-drag). Commits nothing, puts the ghost away.
     var onCancelMoveClip: () -> Void = {}
     /// The body-drag ghost (m25-k): clips in `movingClipIDs` are DRAWN at
-    /// `deltaBeats` from where the store still holds them.
+    /// `deltaBeats` — and, since m25-l-2, `deltaTracks` — from where the store
+    /// still holds them.
     var dragPreview: ArrangeDragPreview?
     /// A plain CLICK on empty timeline space (m25-m) — clears the clip
     /// selection, which also closes the note editor because `openEditorClip`
@@ -204,6 +214,9 @@ struct TimelineLanesView: View {
     /// Opens the Quantize panel for a clip (m11-a) — MIDI note quantize (arrange
     /// context menu, Pro; sp-c). UI-only, routes to `openQuantizePanel`.
     var onOpenQuantize: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the Humanize panel for a clip (m25-c) — MIDI note humanize (arrange
+    /// context menu, Pro; sp-c). UI-only, routes to `openHumanizePanel`.
+    var onOpenHumanize: (_ clip: Clip) -> Void = { _ in }
     /// Opens the Quantize panel focused on the extract affordance (both kinds).
     var onExtractGroove: (_ clip: Clip) -> Void = { _ in }
     /// Opens the "Convert to Voice…" sheet for an AUDIO clip (m10-p-5, Pro clip
@@ -1174,7 +1187,11 @@ struct TimelineLanesView: View {
                     waveformVerticalZoom: waveformVerticalZoom,
                     renderVisual: ClipStretch.renderVisual(for: stretchStatus(clip)),
                     onSelect: { mods in onSelectClip(clip, mods) },
-                    onMovePreview: { onPreviewMoveClip(track.id, clip, $0, $1) },
+                    onMovePreview: {
+                        onPreviewMoveClip(track.id, clip, $0, $1,
+                                          verticalTrackDelta(fromRow: index,
+                                                             pointerContentY: $2))
+                    },
                     onMoveCommit: onCommitMoveClip,
                     onMoveCancel: onCancelMoveClip,
                     onTrim: { onTrimClip(track.id, clip, $0, $1) },
@@ -1197,6 +1214,7 @@ struct TimelineLanesView: View {
                         if let g = takeGroup { onFlattenTakeGroup(track.id, g.id) }
                     },
                     onOpenQuantize: { onOpenQuantize(clip) },
+                    onOpenHumanize: { onOpenHumanize(clip) },
                     onExtractGroove: { onExtractGroove(clip) },
                     onConvertToVoice: { onConvertToVoice(clip) },
                     crossfadeNextClipID: isPro ? crossfadeNeighbor(for: clip, in: track) : nil,
@@ -1213,9 +1231,16 @@ struct TimelineLanesView: View {
                 // the store still holds — the model does not move until the drop.
                 // Zero for every clip that is not in the drag, and zero always
                 // when no drag is in flight.
+                //
+                // m25-l-2: the ghost moves VERTICALLY the same way, by drawing at
+                // the DESTINATION row's lane top. `laneTop` is used rather than a
+                // pixel delta because the ladder is non-uniform — one row down
+                // past an expanded track is a different distance than past a
+                // collapsed one, and a pixel offset would drift from the lane it
+                // claims to be on.
                 .offset(x: CGFloat(clip.startBeat + (dragPreview?.offsetBeats(for: clip.id) ?? 0))
                           * pixelsPerBeat,
-                        y: laneTop(index))
+                        y: laneTop(ghostRow(index, of: clip.id)))
                 // One card summarizes the clip's edit affordances — the honest scope
                 // for Canvas/gesture chrome (fade grips, trim edges, ⌥-stretch are
                 // gesture-internal, not tag-able views). Per-instance frames anchor it
@@ -1384,13 +1409,58 @@ struct TimelineLanesView: View {
     /// lane plus any expanded take/automation rows, so a drop anywhere in a track's
     /// vertical extent targets that track.
     private func trackIndex(atContentY y: CGFloat) -> Int? {
-        guard y >= rulerInset else { return nil }
-        for i in tracks.indices {
-            let top = laneTop(i)
-            let bottom = top + rowHeight + extraHeight(tracks[i]) + Self.laneSpacing
-            if y >= top && y < bottom { return i }
-        }
-        return nil
+        ArrangeVerticalDrag.row(atContentY: Double(y),
+                                bandTops: laneBandTops,
+                                stackBottom: Double(laneStackBottom))
+    }
+
+    /// The top of every track's band, ascending and CONTIGUOUS (band `i` runs to
+    /// `bandTops[i + 1]`) — the measured ladder `ArrangeVerticalDrag` resolves
+    /// against. A track with expanded takes or an open automation lane is taller
+    /// than its neighbours, which is why this is measured rather than derived
+    /// from a row height.
+    private var laneBandTops: [Double] { tracks.indices.map { Double(laneTop($0)) } }
+
+    /// The bottom of the last band — everything below it is empty space, NOT a
+    /// track. Equal to `laneTop(count)` if that were expressible.
+    private var laneStackBottom: CGFloat {
+        guard let last = tracks.indices.last else { return rulerInset }
+        return laneTop(last) + rowHeight + extraHeight(tracks[last]) + Self.laneSpacing
+    }
+
+    // MARK: - Cross-track body drag (m25-l-2)
+
+    /// The vertical request a body drag anchored on row `row` is making with its
+    /// pointer at content-space `y`, in whole track rows.
+    ///
+    /// ⚠️ RESOLVED FROM THE ABSOLUTE ROW UNDER THE POINTER, never from
+    /// `translation.height`. On a non-uniform ladder the same "one row down"
+    /// intent covers different pixel distances depending on which track is
+    /// expanded, so a pixel-delta reading would put the clip on a lane the
+    /// pointer is not over. This is also the no-skip axis the store's cross-track
+    /// core requires: a bus occupies a row here exactly as the arrange draws one.
+    ///
+    /// ⚠️⚠️ OFF THE LANE STACK MEANS ZERO, NOT ROW 0 — see
+    /// `ArrangeVerticalDrag.row`. The ruler sits immediately above lane 0, so a
+    /// `?? 0` here would fling the drag to the top track whenever the pointer
+    /// drifted up out of the lanes.
+    private func verticalTrackDelta(fromRow row: Int, pointerContentY y: CGFloat) -> Int {
+        ArrangeVerticalDrag.requestedDelta(fromRow: row, pointerContentY: Double(y),
+                                           bandTops: laneBandTops,
+                                           stackBottom: Double(laneStackBottom))
+    }
+
+    /// The row to DRAW clip `id` on: its own, plus the ghost's vertical offset
+    /// while a cross-track drag is in flight.
+    ///
+    /// ⚠️ THE CLAMP IS LOAD-BEARING, NOT DEFENSIVE. `laneTop` subscripts
+    /// `tracks[i]`, and `liveArrangeDragPreview` only checks that the ANCHOR clip
+    /// still exists — a TRACK removed mid-drag (an undo, an agent's
+    /// `track.remove` over the wire) leaves a delta that was clamped against a
+    /// longer array. An out-of-range row here is a trap, not a cosmetic glitch.
+    private func ghostRow(_ index: Int, of id: UUID) -> Int {
+        guard let preview = dragPreview, !tracks.isEmpty else { return index }
+        return min(max(0, index + preview.offsetTracks(for: id)), tracks.count - 1)
     }
 
     /// Resolves a live drop point into its hover preview: the landing beat + the
@@ -2613,7 +2683,16 @@ private struct ClipBlock: View {
     /// so the readout can show what happened rather than what was asked for.
     ///
     /// ⚠️ m25-k: PREVIEW, NOT A MOVE. See `TimelineLanesView.onPreviewMoveClip`.
-    var onMovePreview: (_ anchorOriginalStart: Double, _ rawDragDeltaBeats: Double) -> Double
+    ///
+    /// ⚠️ m25-l-2: the third argument is the pointer's y in the lanes' CONTENT
+    /// space — a RAW COORDINATE, deliberately. The block does not know the lane
+    /// ladder (which track is expanded, where each band starts), so it reports
+    /// where the pointer IS and lets `TimelineLanesView` — the one layer that
+    /// owns that geometry — say which row that is. A block that resolved its own
+    /// destination row would be the second producer of a number the lanes already
+    /// compute for the file-drop path.
+    var onMovePreview: (_ anchorOriginalStart: Double, _ rawDragDeltaBeats: Double,
+                        _ pointerContentY: Double) -> Double
     /// The release — the ONE real move (m25-k).
     var onMoveCommit: () -> Void = {}
     /// The gesture died without a release (m25-k).
@@ -2659,6 +2738,8 @@ private struct ClipBlock: View {
 
     /// Opens the Quantize panel for this clip (MIDI only — note quantize).
     var onOpenQuantize: () -> Void = {}
+    /// Opens the Humanize panel for this clip (m25-c; MIDI only — note humanize).
+    var onOpenHumanize: () -> Void = {}
     /// Opens the Quantize panel focused on the extract affordance (both kinds —
     /// `groove.extract` supports MIDI onsets and audio transients).
     var onExtractGroove: () -> Void = {}
@@ -3405,7 +3486,8 @@ private struct ClipBlock: View {
                 // Hold the zone's drag cursor even if the pointer leaves the block
                 // (a body closes the hand; an edge/fade keeps its resize).
                 DragCursor.set(CursorAffordance.forClipZone(active.zone, dragging: true))
-                applyDrag(active, translationBeats: Double(value.translation.width / ppb))
+                applyDrag(active, translationBeats: Double(value.translation.width / ppb),
+                          pointerContentY: Double(value.location.y))
             }
             .onEnded { value in endDrag(at: value.time) }
     }
@@ -3483,13 +3565,26 @@ private struct ClipBlock: View {
                     readout = ClipStretch.stretchReadout(length: preview.length, ratio: preview.ratio)
                 } else {
                     DragCursor.set(CursorAffordance.forClipZone(active.zone, dragging: true))
-                    applyDrag(active, translationBeats: dxBeats)
+                    // m25-l-2: ⌥ over a non-stretch zone falls through to the
+                    // ordinary handler, so the vertical axis must be threaded
+                    // from BOTH gestures — feeding it from `clipDrag` alone
+                    // would leave ⌥-drag silently same-track-only.
+                    //
+                    // ⚠️ BE PRECISE ABOUT WHICH ⌥-DRAGS THIS REACHES. Only the
+                    // `.body` zone crosses lanes; `isStretchDrag` is
+                    // `zone == .trimEnd && optionHeld && isAudio`, so ⌥ on a
+                    // MIDI clip's right edge lands in the TRIM branch below, not
+                    // here. The threading is still required — a ⌥-held drag on a
+                    // clip's body is an ordinary move and must behave like one.
+                    applyDrag(active, translationBeats: dxBeats,
+                              pointerContentY: Double(value.location.y))
                 }
             }
             .onEnded { value in endDrag(at: value.time) }
     }
 
-    private func applyDrag(_ active: ActiveDrag, translationBeats dxBeats: Double) {
+    private func applyDrag(_ active: ActiveDrag, translationBeats dxBeats: Double,
+                           pointerContentY: Double) {
         switch active.zone {
         case .body:
             // m23-g2: the gesture hands over its RAW translation and its own
@@ -3509,8 +3604,13 @@ private struct ClipBlock: View {
             // runs the same anchor snap and the same whole-group clamp the commit
             // will, so the number under the cursor is still the truth — it is
             // simply the truth about a landing that has not happened yet.
+            // m25-l-2: the vertical axis rides the SAME preview call — one
+            // observation of one pointer, previewed together and committed
+            // together. Splitting it into a second callback would let a frame
+            // carry a stale value on one axis while the store applies both as a
+            // single edit.
             bodyMovePreviewed = true
-            readout = "start " + fmt(onMovePreview(active.originStart, dxBeats))
+            readout = "start " + fmt(onMovePreview(active.originStart, dxBeats, pointerContentY))
         case .trimStart:
             let (s, l) = ClipEdit.trimStart(
                 originalStart: active.originStart, originalLength: active.originLength,
@@ -3699,6 +3799,12 @@ private struct ClipBlock: View {
             Divider()
             if clip.isMIDI {
                 Button("Quantize…") { onOpenQuantize() }
+                // Humanize (m25-c) — quantize's inverse, and MIDI-only for the
+                // same reason: `humanizeClipNotes` throws `notAMIDIClip` on an
+                // audio clip, so the entry simply does not exist there (hidden,
+                // never offered-then-errored — the "Convert to Voice…" rule two
+                // entries down, and the sibling "Quantize…" above).
+                Button("Humanize…") { onOpenHumanize() }
             }
             Button("Extract Groove…") { onExtractGroove() }
             // Convert to voice (m10-p-5): AUDIO clips only — a MIDI clip has no

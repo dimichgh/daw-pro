@@ -28,6 +28,41 @@ import Foundation
 /// inclusive edges.
 public enum PianoRollPlayhead {
 
+    // MARK: - Grab geometry (m25-o-2)
+
+    /// Half-width (points) of the playhead's grab band: the line is grabbable
+    /// within ± this tolerance of `lineX`, when nothing else is under the pointer
+    /// (`PianoRollHover.target`).
+    ///
+    /// ⭐ **ALIASED TO THE ARRANGE'S SHIPPED VALUE RATHER THAN CHOSEN, so the two
+    /// surfaces cannot drift apart in feel.** Grabbing the playhead is ONE
+    /// gesture the user performs in two places; a roll that wanted 6 pt and an
+    /// arrange that kept 4 would be a difference nobody designed.
+    ///
+    /// ⚠️ **THE NUMBER TRANSFERS; ITS ORIGINAL JUSTIFICATION DOES NOT, and that
+    /// is worth stating because it looks like a copied constant.** In the arrange
+    /// the tolerance does CONFLICT RESOLUTION — `ArrangePointer.zone` ranks
+    /// `playheadGrab` ABOVE `clip`, so a wide band would eat a clip's trim edge
+    /// one zoom step away, and 4 pt is the width at which it stops doing that.
+    /// In the roll notes win OUTRIGHT (`PianoRollHover`'s ranking), so nothing
+    /// here is being protected from the band and the tolerance means only "how
+    /// close is close enough to mean the line". 4 pt survives as a comfortable
+    /// answer to that question, not as the same tradeoff.
+    public static let grabTolerance: CGFloat = ArrangePointer.playheadGrabTolerance
+
+    /// Movement (points) below which a press on the playhead line stays a click
+    /// rather than becoming a scrub — the arrange's `scrubSlop`, aliased for the
+    /// same one-feel reason as `grabTolerance`.
+    ///
+    /// ⭐ **THIS IS THE "MUST NOT JUMP" RULE, AND IT IS INHERITED RATHER THAN
+    /// REDISCOVERED.** `ArrangePointer.scrubSlop`'s own doc states it: *"grabbing
+    /// the playhead without moving must not jump it to a snapped beat"*. Without
+    /// the slop, a snapping surface moves the transport on a press that never
+    /// travelled — the user reaches for the line, touches it, and the playhead
+    /// leaves. With snapping ON that displacement is up to half a grid cell,
+    /// which is exactly the case the user would notice and call a bug.
+    public static let scrubSlop: CGFloat = ArrangePointer.scrubSlop
+
     /// Clip-local beat of a project-timeline `position`. May be negative (the
     /// transport sits before the clip) or greater than `lengthBeats` (after it) —
     /// callers gate drawing with `isVisible`.
@@ -59,16 +94,68 @@ public enum PianoRollPlayhead {
         return CGFloat(localBeat(position: position, clipStartBeat: clipStartBeat)) * pixelsPerBeat
     }
 
-    /// Project-timeline beat a scrub at content `localX` targets. Free — UNSNAPPED,
-    /// the deliberate pro default (see docs/DESIGN-LANGUAGE.md): local x → clip-local
-    /// beat, clamped to the clip span `0…lengthBeats`, then offset back onto the
+    /// THE clip-local → project-timeline hand-off for every playhead placement on
+    /// this surface: clamp to the clip span `0…lengthBeats`, then offset onto the
     /// timeline by `clipStartBeat`. Clamping at BOTH ends keeps a seek inside the
-    /// edited clip so a scrub never leaves the editor's span.
+    /// edited clip, so no placement gesture can walk the transport out of the
+    /// editor's own span.
+    ///
+    /// ⭐ **THIS IS WHY THE USER'S "it should also reposition the same playhead in
+    /// track area" NEEDED NO SYNC CODE (m25-o).** The result is a PROJECT beat and
+    /// there is exactly one transport position, so the arrange playhead follows
+    /// because it is the same playhead — not because anything mirrors it.
+    ///
+    /// ⚠️ **IT TAKES A BEAT, NOT AN X, AND THAT SPLIT IS DELIBERATE.** The caller
+    /// converts pixels→beats and applies the gesture's snap through
+    /// `PianoRollModel` — the ONE home for the roll's grid arithmetic, a law
+    /// `PianoRollModel.snapUp`'s own doc states ("`PasteAnchorPolicy` deliberately
+    /// does not re-derive it"). A `(beat / grid).rounded() * grid` in this file
+    /// would be that second home. What lives here is the clamp and the clip
+    /// offset, which is geometry this namespace already owns.
+    ///
+    /// ⚠️ **AND THE SNAP MUST BE APPLIED IN CLIP-LOCAL SPACE, BEFORE THIS CALL.**
+    /// The roll's grid, its bar emphasis and its ruler labels are all clip-local
+    /// and 1-based (`PianoRollScrubRuler`'s axis note). Snapping the PROJECT beat
+    /// this returns would land the playhead on the ARRANGE's grid instead, which
+    /// is a different set of lines entirely whenever `clipStartBeat` is not a
+    /// multiple of the meter — i.e. the playhead would visibly miss the line the
+    /// user aimed at, in exactly the case the snap exists for.
+    public static func projectBeat(localBeat: Double, clipStartBeat: Double,
+                                   lengthBeats: Double) -> Double {
+        clipStartBeat + min(max(0, localBeat), max(0, lengthBeats))
+    }
+
+    /// The RAW (unsnapped) project-timeline beat at content `localX`: local x →
+    /// clip-local beat → `projectBeat`, with no grid applied.
+    ///
+    /// ⚠️⚠️ **THE SCRUB NO LONGER CALLS THIS, AND THE DEFAULT IT USED TO DOCUMENT
+    /// IS DEAD (m25-o-2).** For four milestones this was the scrub strip's
+    /// mapping and its doc called free scrubbing *"the deliberate pro default"*.
+    /// **The user overruled that on 2026-08-13**: *"we have two modes snap on and
+    /// off… when I move playhead in track over the clip it would snap it to the
+    /// position of the grid when snap is on, and anywhere in clip when it is
+    /// [off]. When we implement playhead positioning in node editor, it should
+    /// follow the same rules."* ONE snap model, ONE behaviour, BOTH surfaces — so
+    /// the strip's drag, the ⌘-click (m25-o) and the playhead-line drag now all
+    /// route through the view's `placementLocalBeat(atContentX:snapBypassed:)`
+    /// and `projectBeat` above, with ⌥ as the arrange's fine-scrub escape hatch.
+    ///
+    /// **What survives here is the RAW mapping, which is a real thing to want**
+    /// and is still the definition `PianoRollScrubRuler`'s axis notes are written
+    /// against: pixels → clip-local beats → clamped project beat, no grid. It is
+    /// kept as the unsnapped half of that pair rather than deleted, and it is
+    /// covered by its own unit tests.
+    ///
+    /// ⚠️ **DO NOT RE-POINT THE SCRUB AT IT.** A caller wanting the shipped
+    /// gesture behaviour wants the snap; this function deliberately has none, and
+    /// wiring a gesture back to it would silently re-revert the user's ruling —
+    /// which is precisely how a superseded default comes back, so the warning
+    /// lives at the function rather than in a milestone note nobody re-reads.
     public static func scrubProjectBeat(localX: CGFloat, clipStartBeat: Double,
                                         lengthBeats: Double, pixelsPerBeat: CGFloat) -> Double {
         let rawLocal = pixelsPerBeat > 0 ? Double(localX) / Double(pixelsPerBeat) : 0
-        let clampedLocal = min(max(0, rawLocal), max(0, lengthBeats))
-        return clipStartBeat + clampedLocal
+        return projectBeat(localBeat: rawLocal, clipStartBeat: clipStartBeat,
+                           lengthBeats: lengthBeats)
     }
 
     // MARK: - Off-clip edge cue (m23-c1)

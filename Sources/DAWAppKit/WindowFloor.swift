@@ -70,6 +70,18 @@ public enum WindowFloor {
     /// the editor open at its max fraction: the 42 pt ruler + ~1.5 default rows.
     /// Below this the track area SCROLLS (m10-j), so this is the visible minimum,
     /// not a content minimum.
+    ///
+    /// ⚠️ **THE PROSE ABOVE IS STALE AND THE NUMBER IS DELIBERATELY NOT MOVED**
+    /// (found while measuring for m25-b-1, 2026-08-13). `TimelineLanesView.rulerHeight`
+    /// is **80 pt**, not 42 — the pinned block grew when the loop band, marker lane
+    /// and tempo lane joined the bar ruler (m13-g), and this comment predates that.
+    /// So 96 is NOT "ruler + 1.5 rows"; it is the ruler block plus 16 pt. Changing
+    /// the constant would move `minHeight` and therefore the shipped window floor,
+    /// which is a measured decision of its own and out of scope here — recorded
+    /// rather than silently corrected, because a wrong justification for a right
+    /// number is how the next reader derives a wrong one from it. `EditorMaximize`
+    /// deliberately does NOT derive its reserve from this constant for exactly
+    /// this reason.
     public static let timelineSliverMinHeight: CGFloat = 96
 
     /// Minimum window CONTENT height. Derived so that with the editor open at its
