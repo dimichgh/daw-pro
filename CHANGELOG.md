@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-08-14 — Meme songs: a skill for turning a phrase into a track
+
+You can now hand an agent a recording of somebody talking and ask for a song built out of
+that voice — the vocal pitched into a melody and played rhythmically, rather than sung over
+a backing. `.claude/skills/meme-song/SKILL.md` teaches the whole sequence, and
+`scripts/meme/melody-offsets.mjs` turns a tune into the exact pitch-shift calls that play it.
+
+The interesting part is what turned out *not* to be needed. This workflow was filed as blocked
+on automatic pitch detection, which hasn't shipped. It isn't: a melody is a set of relative
+intervals, so shifting one syllable by 0, +3, +5, +7, +10, +12 semitones plays a minor
+pentatonic run no matter what pitch the syllable started at. Detection is needed for exactly
+one thing — making the backing agree with the voice's key — and there are three ways to do
+that today, the cheapest being to transpose the whole vocal set by a constant, which leaves
+the melody untouched.
+
+One ordering rule is now written down because it is easy to get wrong and fails late:
+tightening the rhythm must happen before any pitching. `clip_quantize_audio` refuses a
+pitch-shifted clip, not just a time-stretched one, so a melody built first is a melody that
+can no longer be quantized.
+
+Also fixed a scheduling trap. The pitch detector, the wire command that makes it usable, and
+this skill were split across two milestones, and the work-order banner routed cycles to only
+one of them — so the detector would have been built with nothing able to call it. All three
+now sit together.
+
 ## 2026-08-13 — The built app is current again, and now carries the pitch model
 
 Two things. The packaging script only ever copied one resource bundle, hardcoded by name — so
