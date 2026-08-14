@@ -399,6 +399,23 @@ try {
           `sel=${short(sortIds(removed.selectedIds))}`);
 
     // Row 3 — ⌘-click on EMPTY grid leaves the selection alone (was: cleared).
+    //
+    // ⚠️⚠️ m25-o GAVE THIS EXACT STEP A NEW SIDE EFFECT, and it is recorded here
+    // rather than left for someone to rediscover as a mystery. ⌘-click on empty
+    // grid now POSITIONS THE PLAYHEAD (`PianoRollGridRelease.positionPlayhead` →
+    // `onSeek`), so this staged press moves the transport to clip-local beat 7.
+    // C3's claim is unaffected — placing the playhead touches no selection — and
+    // the seam feeds GRID CONTENT coordinates straight in, so the follow-playhead
+    // scroll the seek may cause cannot move where any later step lands. But the
+    // transport is no longer where this gate left it, so a future leg that reads
+    // transport position must seek explicitly rather than assume 0.
+    //
+    // ⭐ THIS SEAM IS ALSO THE ONLY INSTRUMENT IN THE TREE THAT CAN REACH m25-o's
+    // NEW ARM: no gate can hold a real ⌘ (m23-g1), but `command: true` supplies
+    // the chord explicitly to the SAME `endGesture` the mouse drives. A C3b leg
+    // asserting the transport landed on the snapped beat is the natural next
+    // step; it is NOT written here because it has never been run, and an
+    // unexercised gate assertion is a hypothesis, not a guard.
     const kept = await clickAt(emptyPt, { command: true });
     check("C3 ⌘-click on empty grid LEAVES the selection alone (was: cleared)",
           same(sortIds(kept.selectedIds), [N1]), `sel=${short(sortIds(kept.selectedIds))}`);

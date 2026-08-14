@@ -532,6 +532,16 @@ try {
   // as an `inout` argument across a module boundary — the growth path a
   // click-watching trigger is most likely to miss, and the biggest one there is
   // (m23-y: selecting a track selects ALL of its clips).
+  //
+  // ⚠️ m25-v: MUST BE ⇧, NOT PLAIN. m25-l-1 defect ② (USER RULING 2026-08-13)
+  // made a PLAIN header click clear the selection instead of growing it — so a
+  // plain click here would collapse the selection to nothing and close the
+  // roll (INV2) rather than widen past it, and this leg would be testing a
+  // different mechanism than the one it names. ⇧/⌘ still grows the selection
+  // via `formUnion` untouched, which is the "same trigger as a shift-click"
+  // this leg's own name already said. MEASURED at m25-v: unedited, this leg
+  // failed 2/2 (`notes=false count=0 editorClipId=false focus=false` — the
+  // plain click's clear, not a growth) before the one-line fix below.
   const L5 = await fixture("AK-TRACK");
   const [e1] = L5.clips;
   await sel({ act: "clear" });
@@ -543,11 +553,13 @@ try {
           && armed.count === 1,
         `editorClipId=${armed.editorClipId === e1} notes=${armed.pianoRollNoteSelection} `
         + `count=${armed.count}`);
-  await sel({ act: "clickTrack", trackId: L5.trackId });
+  await sel({ act: "clickTrack", trackId: L5.trackId, shift: true });
   const headed = await awaitNotes(false);
-  check("L5b a TRACK-HEADER click selects all three clips and drops the note "
+  check("L5b a ⇧ TRACK-HEADER click selects all three clips and drops the note "
         + "selection too, with the roll still open on its clip — the `inout` "
-        + "mutation path fires the same trigger as a shift-click",
+        + "mutation path fires the same trigger as a shift-click (m25-v: was "
+        + "a plain click before the m25-l-1 defect ② ruling made plain clear "
+        + "instead of grow)",
         headed.pianoRollNoteSelection === false && headed.count === 3
           && headed.editorClipId === e1 && headed.focusClipId === e1,
         `notes=${headed.pianoRollNoteSelection} count=${headed.count} `

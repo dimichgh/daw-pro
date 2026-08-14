@@ -527,7 +527,11 @@ struct InsertSpectrumChainTests {
         let track = Track(name: "SRC", kind: .audio,
                           effects: [EffectDescriptor(id: effectID, kind: .eq,
                                                      eq: EQParams())])
-        let graph = PlaybackGraph(engine: AVAudioEngine())
+        // m25-t: pin the graph to `Self.rate` (the m20-c injection seam),
+        // matching `Self.tone`'s own 48 kHz assumption — see the fuller note
+        // on this same construction in `armsAreReappliedAfterTheChainSyncNotBefore`
+        // below, the first of the three legs this bug actually reddened.
+        let graph = PlaybackGraph(engine: AVAudioEngine(), graphRate: Self.rate)
         _ = graph.reconcile(tracks: [track])
         graph.applyParameters(tracks: [track])
         let state = try #require(graph.effectChainState(forTrack: track.id))
@@ -602,7 +606,19 @@ struct InsertSpectrumChainTests {
         // `armSurvivesAWholeGraphRebuild` drives the real rebuild for that.
         // Both are needed: deleting the install leaves this leg green, and
         // moving the re-application leaves that one green.
-        let graph = PlaybackGraph(engine: AVAudioEngine())
+        //
+        // m25-t: `graphRate: Self.rate` pins the graph to `Self.tone`'s own
+        // 48 kHz assumption (the m20-c injection seam). Un-injected,
+        // `graphFormat()` fell back to the live OUTPUT DEVICE's rate; at
+        // anything but 48 kHz the "750 Hz" tone below is really
+        // `750 × actualRate / 48000` Hz once it reaches the analyzer, so it
+        // lands in the wrong band and the peak-band assertion this leg (and
+        // the two siblings that share this construction) makes reads a real
+        // device-dependent frequency shift, not a plumbing regression. This
+        // is the fix for a live bug, not defensive pinning: this exact leg
+        // was measured red (`8 == 11`) on 24 kHz hardware before this line
+        // existed.
+        let graph = PlaybackGraph(engine: AVAudioEngine(), graphRate: Self.rate)
         graph.analysisArms = [key]
         _ = graph.reconcile(tracks: [track])
         graph.applyParameters(tracks: [track])
@@ -646,7 +662,7 @@ struct InsertSpectrumChainTests {
         let track = Track(name: "SRC", kind: .audio,
                           effects: [EffectDescriptor(id: liveID, kind: .gain,
                                                      gain: GainParams(gainLinear: 1.0))])
-        let graph = PlaybackGraph(engine: AVAudioEngine())
+        let graph = PlaybackGraph(engine: AVAudioEngine(), graphRate: Self.rate)
         _ = graph.reconcile(tracks: [track])
         graph.applyParameters(tracks: [track])
         let state = try #require(graph.effectChainState(forTrack: track.id))
@@ -707,7 +723,7 @@ struct InsertSpectrumChainTests {
         // exists only to pin the ordering claim the comment makes today.
         let masterEffectID = UUID()
         let key = InsertAnalysisKey(trackID: nil, effectID: masterEffectID)
-        let graph = PlaybackGraph(engine: AVAudioEngine())
+        let graph = PlaybackGraph(engine: AVAudioEngine(), graphRate: Self.rate)
         _ = graph.reconcile(tracks: [Track(name: "SRC", kind: .audio)])
         graph.ensureMasterSandwich()
 

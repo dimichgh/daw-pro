@@ -250,9 +250,17 @@ try {
   }
 
   // ══ P — the item's PREMISE, measured rather than assumed ═══════════════════
-  console.log("\n── P: a header click selects the track and adopts NO focus ──");
-  const clicked = await req("debug.arrangeSelection", { act: "clickTrack", trackId: tA });
-  check("P1 the header click selects exactly track A's 8 clips",
+  // ⚠️ m25-v: MUST BE ⇧, NOT PLAIN. m25-l-1 defect ② (USER RULING 2026-08-13)
+  // made a PLAIN header click select NOTHING and clear instead of selecting
+  // the track's clips — a plain click here would leave nothing selected for
+  // the DELETE-refusal fixture below to anchor on at all. ⇧/⌘ still selects
+  // "exactly this track's clips", unchanged. MEASURED at m25-v: unedited, this
+  // cascaded into 4 failures (P1, and A1-A3 downstream of an empty selection)
+  // before the one-line fix below.
+  console.log("\n── P: a ⇧ header click selects the track and adopts NO focus ──");
+  const clicked = await req("debug.arrangeSelection",
+    { act: "clickTrack", trackId: tA, shift: true });
+  check("P1 the ⇧ header click selects exactly track A's 8 clips",
         clicked.count === N_A
           && aIDs.every((id) => (clicked.selectedIds ?? []).includes(id)),
         `count=${clicked.count} ids=${(clicked.selectedIds ?? []).length}`);

@@ -113,6 +113,33 @@ const W = {
   RGRID:   { x: 140, y: undefined, w: 2635, h: 150, thr: 20 },
   RNOTES:  { x: 140, y: undefined, w: 2635, h: 34,  thr: 20 },
   RVEL:    { x: 140, y: 1570, w: 2635, h: 100, thr: 20 },
+  // ⭐ w=95 IS CORRECT AND WAS NEARLY "FIXED" BY MISTAKE — m25-f-5, 2026-08-13.
+  // Recorded because the near-miss is the lesson, not the number.
+  //
+  // m25-f-5 gave the roll's scrub strip a visible ruler. The first build of that
+  // band was laid out with a `ZStack`, which sizes to its WIDEST child, so the
+  // band took the full content width and its `.clipped()` clipped nothing; the
+  // ruler then painted across the keyboard gutter. THIS LEG CAUGHT IT — it went
+  // red with three distinct hashes (5e4d84d14518, d94d7f4af9e4, 47c52969d771)
+  // where it wants one, and it was the ONLY instrument that did: the Swift suite
+  // was green and the feature's own pixel probe was blind to it (its fixture had
+  // contentWidth == viewport, where the overflow is exactly zero).
+  //
+  // ⚠️⚠️ MY FIRST RESPONSE WAS TO NARROW THIS WINDOW TO w=74, with an arithmetic
+  // justification that ASSUMED THE GUTTER STARTS AT CAPTURE x=0 — it does not,
+  // and the assumption was never checked. What IS measured, on this gate's own
+  // `ctrl-paged.png`, is that the ruler band's leading edge is capture x=132
+  // (the first column reading `panelRaised` exactly). This window ends at x=124.
+  // So it never reached the band, and the hash identity below settles it without
+  // needing the arithmetic at all. The window was right; the app was wrong.
+  // MEASURED, four arms of an A/B on this gate:
+  //   armA  band BROKEN, w=95 -> 9 fails, the extra one being THIS leg
+  //   armB  band OFF,    w=95 -> 8 fails  (the pre-existing baseline)
+  //   armG  band FIXED,  w=95 -> 8 fails on this leg's side; it PASSES
+  // ⭐ THE LESSON: A GATE THAT REDDENS ON A NEW FEATURE IS REPORTING THE FEATURE
+  // UNTIL PROVEN OTHERWISE. Editing the gate first would have deleted the only
+  // evidence of a real, user-visible misalignment bug. Fix the app, then re-run
+  // the gate AS SHIPPED, and only then decide whether the window was ever wrong.
   RGUTTER: { x: 30,  y: 840,  w: 95,   h: 680, thr: 20 },
   RCTRL:   { x: 140, y: 1745, w: 2635, h: 80,  thr: 20 },
 };
@@ -573,7 +600,27 @@ W.RNOTES.y = Math.round(hotRow.y + (rowHCap - W.RNOTES.h) / 2);
 // overlap the hot row or run past the panel's bottom — checked, not assumed —
 // in which case it falls back to just below the hot row.
 const overlaps = (aY, aH, bY, bH) => aY < bY + bH && bY < aY + aH;
-let candidateGridY = gridBox.y;
+// ⚠️ m25-f-5, 2026-08-13: the anchor is `gridBox.y + SCRUB_STRIP` and NOT
+// `gridBox.y`. The `pianoRollGrid` explainable frame INCLUDES the frozen scrub
+// strip pinned across its top — `DAWAppKit.PianoRollScrubRuler.height`, 18 pt —
+// which is CHROME, not a pitch row. That was invisible while the strip was
+// `Color.clear`; m25-f-5 gave it a ruler with a ground, bar/beat numbers and a
+// 9 pt cyan PLAYHEAD HANDLE, and the handle is what broke the leg below: RGRID
+// is the window in which the playhead must read as "a thin ~2px stroke", and a
+// handle is deliberately six times that wide. Anchoring below the strip restores
+// what this band was always chosen to be — note-free GRID, not panel chrome.
+// (Its sibling premise is stated two blocks up: RGRID must be "a note-free
+// band"; a band of frozen ruler is not one.)
+//
+// ⭐ THIS IS THE ONLY EDIT m25-f-5 LEAVES IN THIS GATE, and it was kept only
+// because an arm PROVED it needed: with the app's band FIXED and this gate
+// otherwise AS SHIPPED (armG), the fail set is the pre-existing 8 plus exactly
+// ONE — "L1 roll CALIBRATION: rGrid's matched run is a thin ~2px stroke". Put
+// the anchor back below the strip and the set is 8, IDENTICAL BY NAME to the
+// band-disabled baseline (armB). A second edit this item also made, narrowing
+// RGUTTER, was reverted the same way: see the ⭐ block at the RGUTTER window.
+const SCRUB_STRIP = Math.round(18 * calScale);
+let candidateGridY = gridBox.y + SCRUB_STRIP;
 if (overlaps(candidateGridY, W.RGRID.h, hotRow.y, rowHCap) || candidateGridY + W.RGRID.h > gridBox.y + gridBox.h) {
   candidateGridY = Math.round(hotRow.y + rowHCap + 6);
 }

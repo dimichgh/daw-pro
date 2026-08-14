@@ -29,6 +29,35 @@
 // Plus Y5, the leg that PINS THE CHORD DECISION (all-or-none set toggle rather
 // than `formUnion`): without it the policy ships unpinned and a mutation to
 // `formUnion` is invisible.
+//
+// ═══ m25-v: RESTATED FOR THE m25-l-1 DEFECT ② RULING (USER, 2026-08-13) ═══
+//
+// The paragraphs above described a PLAIN header click that selected every clip
+// on the track — that was true when this gate was written, and it shipped as
+// designed. The user then hit it live and reported the opposite: *"when I
+// click on track with clips, all clipse got seleted which is not expected."*
+// The fix (`ArrangeTrackSelection.apply`, `.replace` branch) is one line:
+// `selection.clear()` instead of `replace(with: ids)`. Full argument —
+// including why CLEARING beat leaving a stale selection standing — is the
+// banner atop `Sources/DAWAppKit/ArrangeTrackSelection.swift`.
+//
+// The shipped rule now:
+//   • PLAIN header click  -> names the ACTIVE TRACK, selects NOTHING, clears
+//     any standing clip selection, and CLOSES an open piano roll (INV2).
+//   • ⇧ / ⌘ header click  -> the set behaviour these comments describe above,
+//     UNCHANGED — still "every clip on that track", still all-or-none, still
+//     no focus adopted, still leaves a SURVIVING focus (formUnion) standing.
+//
+// So of the 21 legs a straight re-run reddened at this item's open (measured
+// 21/52), MOST were never about a plain click at all — they were ⇧/⌘ legs, or
+// the mixed-selection/DELETE-arbitration legs, whose SETUP happened to use a
+// plain click to seed a selection that plain clicks no longer produce. Fixing
+// those is a SETUP change (plain -> ⇧) with the assertion UNTOUCHED, because
+// the ⇧/⌘ behaviour itself never regressed (`shiftClickSelectsTheTrack`,
+// `plainThenShiftIsolatesTheTrack` in `Tests/DAWAppKitTests/
+// ArrangeTrackSelectionTests.swift` stayed green throughout). Only Y1/Y1b (the
+// plain click's own claim) and Y6/Y6c/Y6d (which chord a focus leg is actually
+// about) needed their ASSERTIONS rewritten, and each says so at the site.
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 
 // The build/launch/pidfile-kill lifecycle lives in ONE place (m23-ac-1) —
@@ -110,30 +139,94 @@ try {
      same(await liveClips(), [...A, ...B, c0]) && new Set([...A, ...B, c0]).size === 6,
      JSON.stringify(await liveClips()));
 
-  // ══ Y1 — a header click selects EXACTLY that track's clips ════════════════
+  // ══ Y1 — a PLAIN header click selects NOTHING and clears (RESTATED, m25-v) ═
+  //
+  // ⚠️ USER RULING 2026-08-13 (m25-l-1 defect ②): *"when I click on track with
+  // clips, all clipse got seleted which is not expected."* This leg used to
+  // assert "selects the EXACT id set on that track" / "clips on OTHER tracks
+  // are NOT selected" — i.e. that a plain click selected exactly this track's
+  // clips and nothing beyond it. That capability moved to ⇧/⌘ (Y2 below); the
+  // plain branch now clears unconditionally. Seeded with a selection that
+  // belongs to a DIFFERENT track (via ⇧, still live) so the assertion is not
+  // vacuous, and so it can still tell a TOTAL `clear()` apart from a scoped
+  // `subtract(clipIDs(on: track))` — the latter would leave track B's clips
+  // standing, since they are disjoint from track A's ids.
   await sel({ act: "clear" });
-  let s = await clickTrack(T[0]);
-  ck("Y1 a plain header click selects the EXACT id set on that track",
-     same(idsOf(s), A), `${JSON.stringify(idsOf(s))} vs ${JSON.stringify(sorted(A))}`);
-  ck("Y1 clips on OTHER tracks are NOT selected (a project-wide handler fails here)",
-     !idsOf(s).includes(b0) && !idsOf(s).includes(b4) && !idsOf(s).includes(c0)
-       && s.count === 3,
-     `count=${s.count} ids=${JSON.stringify(idsOf(s))}`);
+  await clickTrack(T[1], { shift: true });          // seed: a real selection on a DIFFERENT track
+  let s = await clickTrack(T[0]);                   // PLAIN click on track A
+  ck("Y1 a plain header click selects NOTHING — not \"every clip on that track\" "
+     + "(m25-l-1 defect ②, USER RULING 2026-08-13)",
+     s.count === 0 && idsOf(s).length === 0, `count=${s.count} ids=${JSON.stringify(idsOf(s))}`);
+  ck("Y1 ...and it clears the WHOLE selection, including clips on a track this "
+     + "click never touched — not merely \"this track's own ids\" (the failure "
+     + "mode a scoped subtract(clipIDs(on: track)) would leave standing)",
+     same(idsOf(s), []), JSON.stringify(idsOf(s)));
   ck("Y1 the seam echoes the ONE HOME's own answer, and it matches the selection",
      same(s.trackClipIds ?? [], A) && s.trackClickIntent === "replace"
        && s.trackClickEffect === "replace",
      `trackClipIds=${JSON.stringify(s.trackClipIds)} intent=${s.trackClickIntent} `
      + `effect=${s.trackClickEffect}`);
 
-  // A SECOND plain click REPLACES rather than accumulating — the half that
-  // distinguishes `replace(with:)` from `formUnion` on the bare-chord path.
+  // Y1b used to pin "a SECOND plain click REPLACES rather than accumulating" —
+  // the half that distinguished `replace(with:)` from `formUnion` on the bare
+  // chord path. That distinction no longer exists: BOTH branches of a plain
+  // click now clear, so there is nothing left to accumulate. Restated as the
+  // idempotence a reader would otherwise have to take on faith: a second plain
+  // click, on a DIFFERENT header, does not somehow toggle a selection back —
+  // clearing an already-empty selection is a no-op, every time.
   s = await clickTrack(T[1]);
-  ck("Y1b a second PLAIN header click replaces — track A's clips are gone",
-     same(idsOf(s), B), JSON.stringify(idsOf(s)));
+  ck("Y1b a second PLAIN header click ALSO selects nothing — clearing stays "
+     + "clearing, it is not a toggle back to something",
+     s.count === 0 && idsOf(s).length === 0, JSON.stringify(idsOf(s)));
+
+  // ══ Y1c/Y1d — THE RULING, PINNED DIRECTLY (NEW LEGS, m25-v) ═══════════════
+  // Nothing above asserts the ruling's own combination on ONE click: a plain
+  // header click on a POPULATED track selects nothing AND still names the
+  // active track (m25-l-1, unaffected by defect ② — the active-track rule is
+  // unconditional, "every chord, every branch, and a zero-clip track too", per
+  // `ArrangeTrackSelection.apply`'s doc). Asserted on BOTH the click's own
+  // outcome (`trackClickActiveTrackId`) and a FRESH read's resolved value
+  // (`activeTrackId`) — the latter is "the property the paste target AND the
+  // sidebar rail both read" per its own doc comment, so a leg asserting only
+  // on the outcome could go green on a build whose RESOLUTION rule was broken.
+  await sel({ act: "clear" });
+  s = await clickTrack(T[0]);
+  const activeAfterPlain = await sel({});
+  ck("Y1c NEW LEG: a plain header click on a POPULATED track leaves the "
+     + "selection EMPTY while the ACTIVE TRACK is set to it — the ruling's "
+     + "exact combination (m25-l-1 defect ②, USER RULING 2026-08-13: \"when I "
+     + "click on track with clips, all clipse got seleted which is not "
+     + "expected\")",
+     s.count === 0 && idsOf(s).length === 0
+       && s.trackClickActiveTrackId === T[0]
+       && activeAfterPlain.activeTrackId === T[0],
+     `count=${s.count} ids=${JSON.stringify(idsOf(s))} `
+     + `outcomeActive=${s.trackClickActiveTrackId} `
+     + `resolvedActive=${activeAfterPlain.activeTrackId} expected=${T[0]}`);
+
+  // The other half of the safety argument, pinned directly rather than left
+  // implicit in Y1's count===0: `ArrangeTrackSelection.apply`'s own banner says
+  // defect ② WIDENED the `changedSelection === false` reachability — it used to
+  // require a ZERO-CLIP track, and now a PLAIN click on a POPULATED,
+  // already-empty-selection track produces the same silence. That pairing
+  // (false + non-empty clipIDs) is what keeps `ArrangeTrackClickFeedback` at
+  // `.notNeeded` instead of firing "No clips to select" on a track full of
+  // clips — previously unreachable at this clip count, now the plain branch's
+  // whole behaviour. `s` here is the SAME click as Y1c (selection was already
+  // empty before it ran).
+  ck("Y1d NEW LEG: that same click reports changedSelection===false with "
+     + "NON-EMPTY clipIDs — the combination that keeps the \"no clips to "
+     + "select\" acknowledgement silent, unreachable before defect ②",
+     s.trackClickChangedSelection === false && (s.trackClipIds ?? []).length > 0
+       && same(s.trackClipIds, A),
+     `changed=${s.trackClickChangedSelection} clipIds=${JSON.stringify(s.trackClipIds)}`);
 
   // ══ Y2 — ⇧ on a second header ADDS, exact union ═══════════════════════════
+  // Base seeded with ⇧, not a plain click (m25-v) — a plain click no longer
+  // selects anything, so it can no longer seed track A's clips for this leg to
+  // add to. The ASSERTIONS below are UNTOUCHED: ⇧/⌘ behaviour did not regress.
   await sel({ act: "clear" });
-  await clickTrack(T[0]);
+  await clickTrack(T[0], { shift: true });
   s = await clickTrack(T[1], { shift: true });
   ck("Y2 ⇧ on a second header yields the EXACT union of both tracks' clips",
      same(idsOf(s), [...A, ...B]) && s.count === 5,
@@ -150,8 +243,9 @@ try {
      !idsOf(s).includes(c0), JSON.stringify(idsOf(s)));
 
   // ⌘ is the SAME chord, because it is the same table the clip click uses.
+  // Base seeded with ⇧ (m25-v) for the same reason as Y2's.
   await sel({ act: "clear" });
-  await clickTrack(T[0]);
+  await clickTrack(T[0], { shift: true });
   const viaCommand = await clickTrack(T[1], { command: true });
   ck("Y2c ⌘ behaves exactly as ⇧ (ONE shared chord table, not a second one)",
      same(idsOf(viaCommand), [...A, ...B]) && viaCommand.trackClickEffect === "add",
@@ -161,8 +255,10 @@ try {
   // The ONLY leg that discriminates the shipped all-or-none set toggle from a
   // `formUnion` resolution. Under `formUnion` the selection below is unchanged
   // (still 5 ids) and every other leg in this gate still passes.
+  // Base seeded entirely with ⇧ (m25-v) — a plain click can no longer put
+  // track A's clips into the selection for this leg to fully-select over.
   await sel({ act: "clear" });
-  await clickTrack(T[0]);
+  await clickTrack(T[0], { shift: true });
   await clickTrack(T[1], { shift: true });
   s = await clickTrack(T[0], { shift: true });
   ck("Y5 ⇧ on a FULLY-selected header removes EXACTLY that track's clips",
@@ -190,12 +286,18 @@ try {
      `${JSON.stringify(idsOf(s))} effect=${s.trackClickEffect}`);
 
   // ══ Y6 — THE FOCUS DECISION: a header click NEVER ADOPTS a focus ══════════
-  // User-visible: plain-clicking a header does NOT open the piano roll, while
+  // User-visible: clicking a header does NOT open the piano roll, while
   // clicking a clip does. Asserted through `editorClipId`, which is the clip the
   // roll is ACTUALLY open on (`AppModel.openEditorClip`), not a guess.
+  //
+  // RESTATED WITH ⇧ (m25-v): a PLAIN click no longer selects `[c0]` at all — it
+  // selects nothing, which would make "selects it WITHOUT opening" vacuously
+  // true (there is no "it" selected to fail to open). The claim this leg exists
+  // to pin — SELECTING IS NOT OPENING — still needs a click that actually
+  // selects, and ⇧/⌘ still does, unchanged.
   await sel({ act: "clear" });
-  s = await clickTrack(T[2]);                      // track C: exactly ONE MIDI clip
-  ck("Y6 a plain header click on a single-MIDI-clip track selects it WITHOUT "
+  s = await clickTrack(T[2], { shift: true });      // track C: exactly ONE MIDI clip
+  ck("Y6 a ⇧ header click on a single-MIDI-clip track selects it WITHOUT "
      + "opening the note editor (selecting is not opening)",
      same(idsOf(s), [c0]) && s.focusClipId === null && s.editorClipId === null
        && s.selectedClipId === null,
@@ -209,19 +311,34 @@ try {
      s.focusClipId === c0 && s.editorClipId === c0,
      `focus=${s.focusClipId} editor=${s.editorClipId}`);
 
-  // …and a SURVIVING focus is KEPT by a header click (this is A2's setup).
+  // …and a SURVIVING focus is KEPT by a ⇧ header click (this is A2's setup).
+  //
+  // RESTATED WITH ⇧ (m25-v): a PLAIN click here would CLEAR — dropping the
+  // focus unconditionally rather than keeping one that survives into the new
+  // set — which is precisely what the m25-l-1 ruling changed (see Y6d below).
+  // "A header click can leave a focus standing" is now an ⇧/⌘-only claim.
   await sel({ act: "clear" });
   await sel({ act: "click", clipId: a4 });          // focus = a4, roll open on it
-  s = await clickTrack(T[0]);                       // header of a4's OWN track
-  ck("Y6c a header click KEEPS a focus that survives into the new set — the roll "
-     + "stays open on the clip it was open on",
+  s = await clickTrack(T[0], { shift: true });       // ⇧ on the header of a4's OWN track
+  ck("Y6c a ⇧ header click KEEPS a focus that survives into the new set — the "
+     + "roll stays open on the clip it was open on",
      same(idsOf(s), A) && s.focusClipId === a4 && s.editorClipId === a4,
      `ids=${JSON.stringify(idsOf(s))} focus=${s.focusClipId} editor=${s.editorClipId}`);
 
-  // …and a focus that does NOT survive is dropped, closing the editor (INV1).
-  s = await clickTrack(T[1]);                       // a different track entirely
-  ck("Y6d a header click DROPS a focus the new set does not contain (INV1)",
-     same(idsOf(s), B) && s.focusClipId === null && s.editorClipId === null,
+  // …and a PLAIN click drops it unconditionally, closing the editor — not
+  // because the new set excludes the focus clip (INV1's original reading,
+  // which needed a header whose clips did not include it), but because the
+  // plain branch clears the WHOLE selection regardless of what any header
+  // holds (m25-l-1 defect ②). RESTATED, not dropped: this is now the leg that
+  // pins "a plain click closes an open piano roll" directly, continuing from
+  // Y6c's state so there is a REAL focus standing to lose — not the vacuous
+  // "nothing was open anyway" case Y1/Y1b already cover.
+  s = await clickTrack(T[1]);                       // PLAIN, on a different track entirely
+  ck("Y6d a PLAIN header click DROPS a focus the new (empty) set cannot contain, "
+     + "closing the roll that was open on it (m25-l-1 defect ②, USER RULING "
+     + "2026-08-13)",
+     s.count === 0 && idsOf(s).length === 0
+       && s.focusClipId === null && s.editorClipId === null,
      `ids=${JSON.stringify(idsOf(s))} focus=${s.focusClipId} editor=${s.editorClipId}`);
 
   // ══ Y8 — the KEY-FOCUS nonce, the mechanism DELETE-after-a-header-click ═══
@@ -256,8 +373,10 @@ try {
   // a8, c0) and TWO remain (b0, b4). Asserted as the exact surviving SET,
   // because depth +1 alone is equally consistent with "one clip deleted, three
   // silently dropped".
+  // Base seeded with ⇧ (m25-v) — a plain click no longer puts track A's clips
+  // into the selection for the clip-click below to add the loose clip onto.
   await sel({ act: "clear" });
-  await clickTrack(T[0]);                           // a0, a4, a8
+  await clickTrack(T[0], { shift: true });          // a0, a4, a8
   s = await sel({ act: "click", clipId: c0, shift: true });   // + the loose clip
   const union = [...A, c0];
   ck("Y3 FIXTURE: a MIXED track+clip selection is exactly the union",
@@ -314,8 +433,10 @@ try {
 
   // ⇧ on the empty track is the guarded degenerate case: `Set().isSubset(of:)`
   // is vacuously TRUE, so without the explicit guard this reports "remove".
+  // Base seeded with ⇧ (m25-v) so track A's clips are actually standing for
+  // T[3]'s empty click to (not) disturb.
   await sel({ act: "clear" });
-  await clickTrack(T[0]);
+  await clickTrack(T[0], { shift: true });
   s = await clickTrack(T[3], { shift: true });
   ck("Y4b ⇧ on a zero-clip track reports .no-clips (NOT .remove — the vacuous "
      + "subset must not decide it) and changes nothing",
@@ -333,6 +454,10 @@ try {
      JSON.stringify(notUUID).slice(0, 200));
   const noID = await raw("debug.arrangeSelection", { act: "clickTrack" });
   ck("Y7c a missing trackId is refused", !!noID.error, JSON.stringify(noID).slice(0, 200));
+  // NO EDIT NEEDED HERE (m25-v): this leg reads whatever selection Y4b's ⇧
+  // base left standing (track A), not a plain click's leftovers — restating
+  // Y4b's setup above is what fixes this leg too, and it is left as the
+  // confirmation that the fix is a genuine cascade and not a coincidence.
   ck("Y7d a refused clickTrack left the selection untouched",
      same(idsOf(await sel({})), A), JSON.stringify(idsOf(await sel({}))));
 
@@ -376,7 +501,15 @@ try {
      roll.editorClipId === a4 && roll.pianoRollNoteSelection === true,
      `editor=${roll.editorClipId} notes=${roll.pianoRollNoteSelection}`);
 
-  s = await clickTrack(T[0]);                       // the header of a4's own track
+  // RESTATED WITH ⇧ (m25-v): a PLAIN click here would CLEAR the whole
+  // selection and close the roll on its own (INV2) — leaving no roll-open,
+  // notes-dropped arbitration for the DELETE handler below to resolve at all.
+  // The two-candidate-consumer state this section pins survives ONLY behind a
+  // chord that widens the selection without touching focus, which is ⇧/⌘, not
+  // plain, since the m25-l-1 ruling. The doc comment above this block
+  // ("THE ROLL-VS-ARRANGE DELETE ARBITRATION SURVIVES, BEHIND THE MODIFIER")
+  // already said as much; only the seam call below had not caught up.
+  s = await clickTrack(T[0], { shift: true });       // ⇧ on the header of a4's own track
   ck("A2 the header click LEAVES THE ROLL OPEN while selecting the whole track, "
      + "reached the way a user reaches it (this leg used to call that 'the "
      + "two-consumer state'; m23-ak made that false — the click GROWS the "
@@ -423,10 +556,12 @@ try {
   // key-event gating on staging is DEMONSTRABLY POSSIBLE. Do not quote the text below
   // as a reason not to write one. Root cause still open as m23-fi.
   // unreachable on staging either way (delivered=false, m23-g1).
+  // ⇧, not plain (m25-v) — this fixture is a repeat of A2's own, and needs the
+  // same widen-without-clearing click to arm the state the probe describes.
   await sel({ act: "clear" });
   await sel({ act: "click", clipId: a4 });
   await sel({ act: "pianoRollNotes", select: true });
-  await clickTrack(T[0]);
+  await clickTrack(T[0], { shift: true });
   const dProbe = await depth();
   const probe = await sel({ act: "keyDelete" });
   if (probe.delivered === true) {
