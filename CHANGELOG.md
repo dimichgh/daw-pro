@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-08-13 — The built app is current again, and now carries the pitch model
+
+Two things. The packaging script only ever copied one resource bundle, hardcoded by name — so
+when the pitch model arrived it landed in a different bundle and silently never reached the built
+app. It now copies every one, with a single exclusion: test bundles, which must never ship.
+
+And `dist/DAWPro.app` was fifteen hours out of date — built this morning, before everything from
+today. If you had been testing against it, none of the recent work would have been there. It is
+rebuilt: 40 MB, signature verified, pitch model present and byte-identical to source.
+
 ## 2026-08-13 — The note editor no longer offers you something it won't do
 
 Holding ⌘ near a note selection used to light up the stretch handle — while actually clicking

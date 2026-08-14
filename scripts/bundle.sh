@@ -109,18 +109,58 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 # iconutil; CFBundleIconFile=AppIcon in the plist template points at it.
 cp "Sources/DAWApp/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
-# SwiftPM resource bundle (glass-d): the DAWApp target declares runtime-loaded
-# resources (the onboarding hero PNGs), which SwiftPM emits as a .bundle beside
-# the binary. Ship it in Contents/Resources — the standard app location, where
-# OnboardingHeroArt.load looks first (NOT the bundle root: a stray top-level
-# item there would break the codesign seal).
-RESOURCE_BUNDLE="$BIN_DIR/daw-pro_DAWApp.bundle"
-if [[ -d "$RESOURCE_BUNDLE" ]]; then
-    cp -R "$RESOURCE_BUNDLE" "$APP/Contents/Resources/"
-else
-    echo "error: SwiftPM resource bundle not found at $RESOURCE_BUNDLE" >&2
-    exit 1
-fi
+# SwiftPM resource bundles (glass-d; generalised at m23-ap-2a-1, 2026-08-13).
+#
+# Every target that declares runtime-loaded resources gets its own .bundle beside
+# the binary. They all ship in Contents/Resources — the standard app location,
+# where the loaders look first (NOT the bundle root: a stray top-level item there
+# would break the codesign seal).
+#
+# ⚠️⚠️ THIS USED TO COPY EXACTLY ONE, HARDCODED (`daw-pro_DAWApp.bundle`), AND
+# THAT WAS A LATENT SHIPPING BUG THE MOMENT A SECOND TARGET GAINED RESOURCES.
+# m23-ap-2a vendored the SwiftF0 weights into DAWEngine; they landed in
+# `daw-pro_DAWEngine.bundle`, which this script then silently did not copy — so a
+# packaged app could never find the pitch model. It failed as a clean
+# `weightsMissing` rather than a crash only because `PitchTracker` deliberately
+# avoids `Bundle.module` (whose generated accessor ends in `fatalError`). The
+# whole test suite stayed green throughout, because tests resolve via the
+# `.xctest`-sibling path and never exercise the packaged layout.
+#
+# USER RULING 2026-08-13, asked as "the pitch model won't reach the built app":
+# *"Copy every resource bundle — fixes this and any future one."*
+#
+# ⚠️ "EVERY" IS FILTERED IN EXACTLY ONE WAY, AND IT IS NOT PEDANTRY: TEST BUNDLES
+# MUST NEVER SHIP. A test build leaves `daw-pro_*Tests.bundle` beside the product
+# ones (measured: `daw-pro_DAWCoreTests.bundle`, 92 KB), and a literal "copy
+# every .bundle" would seal test fixtures into a signed, distributed app.
+# `--show-bin-path -c release` does not normally surface them, which is exactly
+# what makes this the kind of leak nobody notices until it has shipped.
+shopt -s nullglob
+copied_bundles=()
+for rb in "$BIN_DIR"/*.bundle; do
+    case "$(basename "$rb")" in
+        *Tests.bundle|*Tests*.bundle)
+            echo "  skipping test bundle: $(basename "$rb")"
+            continue
+            ;;
+    esac
+    cp -R "$rb" "$APP/Contents/Resources/"
+    copied_bundles+=("$(basename "$rb")")
+done
+shopt -u nullglob
+
+echo "  resource bundles copied: ${#copied_bundles[@]} — ${copied_bundles[*]:-none}"
+
+# Two are REQUIRED, and each fails loudly here rather than quietly at runtime.
+# DAWApp carries the onboarding hero art; DAWEngine carries the SwiftF0 weights.
+# A missing one is a packaging failure, not a runtime condition.
+for required in daw-pro_DAWApp.bundle daw-pro_DAWEngine.bundle; do
+    if [[ ! -d "$APP/Contents/Resources/$required" ]]; then
+        echo "error: required resource bundle '$required' did not reach the app" >&2
+        echo "       (looked in $BIN_DIR — was the release build run?)" >&2
+        exit 1
+    fi
+done
 
 # Voice-conversion correctness patches + the facade hook (m10-p-6, 2026-08-13).
 #
