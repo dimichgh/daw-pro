@@ -1,5 +1,233 @@
 # Changelog
 
+## 2026-08-13 — The note editor no longer offers you something it won't do
+
+Holding ⌘ near a note selection used to light up the stretch handle — while actually clicking
+placed the playhead instead. The handle now retracts under ⌘ and ⇧, so what the editor shows you
+and what it does are the same thing.
+
+## 2026-08-13 — Grab the playhead and drag it, and snapping finally agrees with itself
+
+The playhead line in the note editor can now be grabbed and dragged anywhere in the grid, not just
+in the thin strip at the top. Notes always win: if one is under the pointer you grab the note, so
+the playhead can never make notes unreachable by sitting on top of them.
+
+**Snapping in the note editor now follows the same rule as the arrange**, which is what you asked
+for. Previously the editor's scrub deliberately ignored your snap setting entirely — it called
+itself "the pro default". With snap on, the playhead lands on the grid; with it off, anywhere you
+like. Holding ⌥ gives you free positioning without changing the setting, exactly as in the arrange.
+All three ways of moving the playhead — ⌘-click, dragging the line, and the strip at the top — now
+go through one piece of code, so they cannot drift apart again.
+
+## 2026-08-13 — Three tests that failed depending on your headphones
+
+Internal only, but worth recording. Three audio-analysis tests read the sample rate from whatever
+output device happened to be default, while generating their test tone at a fixed 48 kHz. Your
+AirPods drop to 24 kHz whenever the microphone engages — so the tests failed whenever you were on
+a call, and passed when you weren't. They now pin the rate they analyse at, and pass either way.
+
+## 2026-08-13 — Put the playhead where you're looking
+
+Hold ⌘ in the note editor and the cursor becomes a vertical bar; click on empty grid and the
+playhead moves there. It respects your snap setting, and lands anywhere you like when snap is off.
+The playhead in the track area moves with it — there's only one playhead, so nothing has to be
+kept in sync.
+
+Everything ⌘ already did still works: ⌘ on a note still adds or removes it from the selection,
+⌘-dragging still draws an additive selection box, and a plain click on empty space still deselects.
+Those three are the ones a change like this quietly breaks, so each has a test that fails if it
+stops working.
+
+## 2026-08-13 — Stretch and squeeze a group of notes
+
+Select several notes, hover near either end of the selection, and a handle appears. Drag it and the
+whole group scales in time — compress a phrase to fit, or stretch it out. The far end stays put, so
+the handle you're holding is the only thing that moves, and the clip grows if you stretch past its
+end.
+
+Swing and triplets survive it. That sounds obvious and isn't: scaling notes individually would snap
+each one to the nearest grid line and quietly straighten a swung figure into a stiff one. The whole
+group is transformed as one gesture instead, and there's a test that fails the moment anyone changes
+that.
+
+Two things to know. A selection that starts at the very first beat gets a right-hand handle only —
+there's no room to its left. And the handles only appear in Pro density, matching how single-note
+resizing already works.
+
+## 2026-08-13 — ⌘A selects every note in the editor
+
+You asked for it: in the note editor, ⌘A now selects all the notes. It stays out of the way
+everywhere else — inside a rename field ⌘A still selects text, because macOS hands the key to the
+text field before it ever reaches us, and that was measured rather than assumed.
+
+**One rough edge worth trying and telling me about.** Opening a clip shows the editor but doesn't
+yet treat it as the surface you're working in, so the very first ⌘A after opening a clip does
+nothing until you click somewhere inside the editor. After that it works every time. Making it
+work immediately is a one-line change — the reason it isn't already is that a different keystroke
+(Delete) uses the same "which panel are you in" rule, and having the two disagree seemed worse to
+decide without asking you.
+
+## 2026-08-13 — Pasting notes into a short clip now grows the clip
+
+You reported this: paste a run of notes into a clip that ends before they do, and the notes went in
+but the clip stayed short, so the tail never played. The clip now stretches to cover what you
+pasted, in the same single undo step — one ⌘Z puts everything back.
+
+It stops at 16 bars of growth, the same ceiling that already applied when a note is dragged past
+the end, and it will never grow over a clip that follows it on the same track. If a paste lands
+further out than that ceiling allows, the notes are still placed but the clip does not grow — that
+case is currently silent, and telling you about it is a separate piece of work.
+
+## 2026-08-13 — Clicking a track no longer grabs everything on it
+
+Clicking a track header used to select every clip on that track. It now just makes the track
+active — a cursor, not a grab. Nothing gets selected, so the next Delete can't take the whole
+track with it.
+
+That mattered more after yesterday's paste change: clicking a header became the way to choose
+where a paste lands, which meant the most ordinary navigation gesture was quietly arming a
+destructive one.
+
+**Selecting a whole track is still there, behind ⇧ or ⌘ on the header** — and "just this track,
+nothing else" is now two clicks: plain, then ⇧. One knock-on worth knowing: a plain header click
+now closes an open piano roll, where before it left the roll on its clip. Hold ⇧ to keep it open.
+
+## 2026-08-13 — You can see which track is active now
+
+The cyan rail marking the active track had been written but never actually placed on screen — the
+code that draws it existed and nothing ever called it. That is why the track you picked looked
+identical to every other one. It runs down the left edge of the track card now.
+
+This matters more than it did yesterday: paste now goes to the track you select, so being unable
+to see which track that is made the feature guesswork.
+
+## 2026-08-13 — Paste goes where you pointed
+
+**Click a track's header, hit ⌘V, and the clip lands on that track.** Before, it went back to the
+track you copied it from, whatever you had selected — which is what you reported. Selecting a track
+is now treated as saying where you want things to go.
+
+Plain copy-and-paste with no track selected is unchanged: it still lands in place, and a copy
+spanning several tracks still keeps those tracks' relative positions when it moves. The distinction
+the app now makes is between a track you *deliberately clicked* and one it merely inferred from
+whatever clip you last touched — only the first one redirects a paste.
+
+**One consequence worth knowing:** copy a MIDI clip, click an *audio* track's header, then paste,
+and nothing lands — you get an amber note saying that track can't hold it. Previously the clip
+would quietly go home to the MIDI track. Saying "that won't fit there" seems more honest than
+putting it somewhere you didn't point, but tell me if you'd rather have the old behaviour back.
+
+## 2026-08-13 — The note editor's ruler, and it turns out you already had a feature nobody could see
+
+**The strip along the top of the note editor is now a real ruler** — bar numbers, tick marks, a
+ground you can see, and a handle showing where the playhead sits. It was always there and always
+worked: an 18-point transparent band you could drag to move the playhead. Being invisible, it may
+as well not have existed. Nothing about how it behaves has changed; it is exactly 18 points tall
+as before. You can just see it now.
+
+Bar numbers appear at any zoom; beat numbers join them once there is room. One thing worth your
+eye: the numbers count bars **within the clip** you are editing, starting at 1 — so a clip that
+begins at bar 19 of the song shows "1" where the transport reads 19. That is consistent with the
+grid underneath, and it is the call most likely to be wrong. Say so if it reads oddly.
+
+## 2026-08-13 — Groundwork: the pitch engine has a runtime
+
+Under the hood, and nothing you can click yet. Pitch correction needs a neural pitch tracker, and
+that needs a machine-learning runtime inside the app. ONNX Runtime is now a pinned dependency and
+runs real inference in this codebase — a test feeds it a 220 Hz tone and it answers 220.83 Hz.
+
+**The cost, since it is worth being straight about:** the app binary goes from 17.75 MB to
+37.63 MB. That is a little over double, and it is the honest post-compression number rather than
+the alarming one we had been quoting — stripping debug symbols gives back about 10.8 MB of it.
+
+Two things we learned that will shape the feature itself. The tracker can be extremely confident
+and still be wrong: on a clean 440 Hz tone it reports 437.55 Hz — about a tenth of a semitone flat
+— while claiming 98.5 % confidence. And how loud a sound is changes whether it lands on the right
+octave at all. Both mean the eventual "fix my pitch" button needs to be more careful than
+"trust the model when it says it is sure", and both were found before any of it was built.
+
+## 2026-08-13 — Five things you asked for, and one that was quietly eating your work
+
+**Dragging a clip past another one was destroying it.** Not dropping it there — just moving
+across. The overlap rule itself was right (drop a clip on another and it overwrites, same as Logic
+and Live), but it was being applied on every frame of the drag rather than at the drop, so
+anything you passed over on the way got consumed about sixty times a second. Undo always brought
+it back, which is why this hid for so long: the edit history looked perfectly clean. Now the move
+is previewed while you drag and committed once when you release. The type that runs the drag holds
+no reference to the project at all, so the per-frame version cannot come back by accident.
+
+**⌘X / ⌘C / ⌘V now work** for clips and for notes, pasting at the playhead with the group's
+internal timing preserved. They are wired through macOS's own Edit menu rather than as our own
+shortcut — which matters, because a menu shortcut is checked before the text field you are typing
+in, and ⌘C in a rename box would have copied the clip instead of the text.
+
+**Clicking empty space deselects**, in both the arrange and the note editor, and the note editor
+closes when the clip driving it is deselected. Holding ⇧ or ⌘ still adds to a selection, a
+right-click still keeps the selection it was invoked on, and dragging from empty space still draws
+a marquee.
+
+**Audio waveforms now fill their clip.** They were drawn at raw amplitude, so anything mastered
+below full scale sat as a thin ribbon down the middle — material at −12 dBFS used about 22% of the
+available height. It now fills about 88% of it. Quiet passages still read as quieter, the boost is
+capped so near-silence does not blow up into noise, and there is a **TRUE LEVEL** mode if you want
+honest amplitude back. There is also a vertical zoom, 1× to 8×, for reading detail.
+
+**Playback stops at the end of your material** instead of running on forever into empty bars. It
+is a preference, looping still wins while a loop is active, and recording is deliberately exempt —
+recording past the end of what exists is the entire point of recording.
+
+**Also:** the Delete key fix is confirmed working. Six places in the code were still holding other
+work back on the assumption that it was broken; all corrected.
+
+**The note editor has a minimap.** A small overview in the corner of the piano roll showing every
+note in the clip, where you are in it, and where the playhead is — click or drag it to jump. It is
+on by default and collapses to a chip if you want it out of the way. **This one has not had a human
+look at it yet:** it passes its tests, but whether it reads well on a dense clip is a question only
+your eyes can answer, so tell me if it looks wrong.
+
+**Humanize is now something you can click.** It nudges note timing and velocity off the grid by
+small random amounts, for a less mechanical feel — the opposite of Quantize. It has been in the app
+for a while, but only agents could reach it; there was no button anywhere. Now it is in the note
+editor header and the clip's right-click menu, next to Quantize. Apply is one decisive action that
+closes the panel, and the amounts stay where you set them — so undo and reopen is how you re-roll.
+**Also not looked at by a human yet.**
+
+**You can already move clips between tracks with ↑ and ↓.** Not a new feature — it has been there,
+and I only found it while auditing. Select the clips and press the arrow keys, no modifier. That is
+not the drag-and-drop you asked for, which is still missing, but it may unblock you today.
+
+**Tracks now have a "you are here."** Click a track header and it becomes the active track, marked
+with a cyan rail down its leading edge. It is a cursor, not a selection — it does not change what is
+selected, and it does not open the note editor. Clicking a clip hands the cursor back to that clip's
+track, so it follows you rather than getting stuck. **Not looked at by a human yet** — the rail's
+appearance rests on code review, not on anyone seeing it.
+
+**But it does not yet fix pasting to another track, and I want to be straight about why.** Paste has
+a deliberate rule: if the tracks you copied from still exist, it pastes *in place* — back where it
+came from — no matter what else is selected. That is good behaviour for the common case and it was a
+settled decision, so I did not quietly override it. It does mean the active track has no effect on
+an ordinary copy/paste. **There is a decision waiting for you** on whether deliberately clicking a
+track header should override that, or whether cross-track paste should be its own command.
+
+**You can drag clips between tracks now.** Pick a clip up and move it to another lane; a ghost shows
+where it will land, and the move commits once when you let go — not sixty times a second on the way,
+which is the bug that was eating your clips. A multi-clip selection keeps its shape rather than
+collapsing onto one lane, matching what ↑/↓ already did. If a lane can't hold what you're dragging
+(a MIDI clip over an audio track), the ghost simply won't cross — it doesn't refuse the whole move,
+so you keep the horizontal part.
+
+Two things I chose that you may want changed: the readout still shows only the beat, not the
+destination track name; and a lane that won't accept the clip says nothing — the ghost just stops.
+**No human has done this with a mouse yet.** Every automated check around it passes, but none of
+them can execute a drag, so this one genuinely needs your hand.
+
+**Not done yet:** copy/paste into a different track. I said
+previously that both needed "a concept the app does not have — a selected track for actions to
+target." **That was overstated.** What I measured since: paste already resolves a target track, but
+it derives it from whichever *clip* is focused — so with nothing selected there is no track, and it
+falls back to the first one that fits. That is exactly the behaviour you ran into. How much has to
+be built on top of that is still being checked.
+
 ## 2026-08-13 — Voice conversion actually works now, and the fix travels with the app
 
 Voice conversion has been producing noise instead of a voice. Two separate bugs, neither of them
