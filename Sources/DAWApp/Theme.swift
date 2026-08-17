@@ -4,7 +4,11 @@ import SwiftUI
 /// All color in the app goes through these — no raw hex literals in views.
 enum DAWTheme {
     static let background = Color(hex: 0x0B0D12)
-    static let panel = Color(hex: 0x12151D)
+    /// ONE literal (m25-i): `panel` is also the piano-roll grid's backdrop, and a
+    /// note pill's ink polarity is decided from what the pill composites to OVER
+    /// it — so the ink math and the fill read the same number.
+    static let panelHex: UInt32 = 0x12151D
+    static let panel = Color(hex: Self.panelHex)
     static let panelRaised = Color(hex: 0x181C27)
     static let hairline = Color.white.opacity(0.06)
     /// Brighter-than-hairline grid line (bar lines, octave markers). One token so
@@ -30,11 +34,34 @@ enum DAWTheme {
     static let keyLabelOnWhite = Color(hex: 0x232833)
 
     // Semantic accents — one meaning each, never decorative.
-    static let playback = Color(hex: 0x3EE6FF)   // cyan: playback/position/active
+    // ⚠️ `playback` and `ai` are ALSO the piano roll's two note-pill tints, and a
+    // pill is a surface things get drawn ON (m25-i pitch labels). The ink that
+    // can be read on one is derived from its luminance, so the two that carry a
+    // pill keep their literal in ONE place — `…Hex` below — and both the fill
+    // colour and the ink decision read THAT. Deriving the ink from a second copy
+    // of the hex is the drift this shape exists to prevent.
+    static let playbackHex: UInt32 = 0x3EE6FF
+    static let aiHex: UInt32 = 0xB48CFF
+    static let playback = Color(hex: Self.playbackHex)   // cyan: playback/position/active
     static let record = Color(hex: 0xFFB84D)     // amber: record/warning
     static let clip = Color(hex: 0xFF4D5E)       // red: overload/destructive
     static let signal = Color(hex: 0x5DFF9F)     // green: healthy signal/success
-    static let ai = Color(hex: 0xB48CFF)         // violet: AI-generated/AI-touched
+    static let ai = Color(hex: Self.aiHex)       // violet: AI-generated/AI-touched
+
+    /// On-pill ink for a piano-roll note label (m25-i) — the DUAL INK law applied
+    /// to the app's other variable-luminance surface. Which of the two a pill
+    /// takes is `DAWAppKit.NotePillInk.prefersDarkInk`, decided from that pill's
+    /// own composited luminance; the polarity is never fixed and never inferred
+    /// from velocity.
+    ///
+    /// ⛔ **THESE ARE PURE BLACK AND PURE WHITE ON PURPOSE — do not "harmonise"
+    /// them with the text hierarchy above.** A note pill is a mid-luminance
+    /// object, and measured against real renders the softer inks cannot label
+    /// one: `keyLabelOnWhite` peaks at 3.80:1 on a cyan pill at velocity 32 and
+    /// `background` crosses over at 4.41:1, both under Rule 5's 4.5:1, while
+    /// black/white cross at 4.58:1. The extremes are what makes the rule pass.
+    static let noteInkOnLight = Color.black
+    static let noteInkOnDark = Color.white
 
     // Text hierarchy — measured against base #0B0D12 / raised #12151D / chip #181C27.
     // These are DARK-SURFACE ratios and hold everywhere except the piano-roll

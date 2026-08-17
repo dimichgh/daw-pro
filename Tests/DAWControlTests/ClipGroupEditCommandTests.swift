@@ -352,15 +352,21 @@ struct ClipGroupEditCommandTests {
         // …and m23-dl appended `ai.modelResidency`/`ai.modelUnload` after THOSE,
         // so every entry slides two rungs further up in turn. m23-di-2a then
         // appended `vc.importVoiceModel` after THAT, one rung further still.
-        #expect(CommandRouter.allCommands.dropLast(8).last == "clip.removeMany")
-        #expect(CommandRouter.allCommands.dropLast(7).last == "clip.moveMany")
-        #expect(CommandRouter.allCommands.dropLast(6).last == "transport.panic")
-        #expect(CommandRouter.allCommands.dropLast(5).last == "clip.moveManyByTracks")
-        #expect(CommandRouter.allCommands.dropLast(4).last == "clip.moveManyToTrack")
-        #expect(CommandRouter.allCommands.dropLast(3).last == "ai.modelResidency")
-        #expect(CommandRouter.allCommands.dropLast(2).last == "ai.modelUnload")
-        #expect(CommandRouter.allCommands.dropLast().last == "vc.importVoiceModel")
+        #expect(CommandRouter.allCommands.dropLast(11).last == "clip.removeMany")
+        #expect(CommandRouter.allCommands.dropLast(10).last == "clip.moveMany")
+        #expect(CommandRouter.allCommands.dropLast(9).last == "transport.panic")
+        #expect(CommandRouter.allCommands.dropLast(8).last == "clip.moveManyByTracks")
+        #expect(CommandRouter.allCommands.dropLast(7).last == "clip.moveManyToTrack")
+        #expect(CommandRouter.allCommands.dropLast(6).last == "ai.modelResidency")
+        #expect(CommandRouter.allCommands.dropLast(5).last == "ai.modelUnload")
+        #expect(CommandRouter.allCommands.dropLast(4).last == "vc.importVoiceModel")
         // m25-d appended transport.setStopAtContentEnd at the END (same law).
-        #expect(CommandRouter.allCommands.last == "transport.setStopAtContentEnd")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "transport.setStopAtContentEnd")
+        // m25-z appended audio.profileFile at the END (same law).
+        #expect(CommandRouter.allCommands.dropLast(2).last == "audio.profileFile")
+        // m23-ap-3 appended clip.detectPitch at the END (same law).
+        #expect(CommandRouter.allCommands.dropLast().last == "clip.detectPitch")
+        // m26-k appended edit.pasteClips at the END (same law).
+        #expect(CommandRouter.allCommands.last == "edit.pasteClips")
     }
 }

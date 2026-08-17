@@ -33,6 +33,20 @@ struct PianoRollView: View {
     /// now sticky across close/reopen and relaunch. A plain value input — a
     /// preview can pass a `PanelDensityStore()` with an in-memory backing.
     var densityStore: PanelDensityStore
+    /// **The APP-LEVEL snap currently in force (m25-ab)** — `AppModel.effectiveClipSnap`,
+    /// i.e. the arrange toolbar's `SNAP:` chip after its own density lock.
+    ///
+    /// The roll keeps its own DIVISION (`snap`); this input carries exactly one
+    /// thing across the boundary — whether the user has turned snapping OFF app-wide
+    /// — and `SnapResolution.effective` is the only thing allowed to combine the
+    /// two. Before it existed the toolbar chip and the roll's chip rendered the same
+    /// string and meant different things, and turning snap off left the note editor's
+    /// playhead rounding to whole beats.
+    ///
+    /// ⚠️ Defaults to `.bar` (any non-`.off` value would do) so a call site that
+    /// forgets it gets SNAPPING, not silent free placement — the fail-safe
+    /// direction. Previews stay one-liner-simple.
+    var appSnap: ClipSnap = .bar
     /// The shared layout store (m21-c): owns the persisted `pianoRollPPB` zoom
     /// slot every band rescales from. A plain value input — a preview can pass
     /// a `PanelLayoutStore()` with an in-memory backing.
@@ -52,7 +66,21 @@ struct PianoRollView: View {
     /// travels as a second ARGUMENT rather than as a second closure precisely
     /// because it must not become a second store call — two calls would be two
     /// undo entries.
-    var onCommit: (_ notes: [MIDINote], _ extendToCover: Set<UUID>) -> Void
+    ///
+    /// **RETURNS the auto-extend refusal to show, or nil (m25-a-2)** — the
+    /// `onCutNotes -> Bool` / `onCommitControllerLane -> Clip?` precedent: the
+    /// closure hands the store's result back so the view can decide what to
+    /// draw. It is a RETURN rather than a second `onAutoExtendRefused` closure
+    /// because the refusal belongs to THIS call: a separate channel could be
+    /// read a beat late, and one funnel returning one answer cannot desync.
+    ///
+    /// ⚠️ **NIL IS OVERWHELMINGLY THE NORMAL ANSWER, INCLUDING WHEN NOTHING
+    /// GREW.** The store distinguishes "the notes already fit" (the ordinary
+    /// case, on every edit inside the clip, and on every DELETE / velocity-lane
+    /// commit that passes an empty `extendToCover`) from the three real
+    /// refusals. This view must never re-derive that distinction — it renders
+    /// the words it is handed and nothing else.
+    var onCommit: (_ notes: [MIDINote], _ extendToCover: Set<UUID>) -> String?
     /// Seeks the transport to a PROJECT beat (wired to `ProjectStore.seek`) — the
     /// scrub's only side effect. Kept a closure so the view stays store-free and
     /// previewable (the `onCommit` precedent).
@@ -117,7 +145,12 @@ struct PianoRollView: View {
     /// `model.selection` today only because the paste selects what it pasted —
     /// the invariant being encoded is "what this gesture placed", so the call
     /// site passes an explicit set rather than reading the selection back.
-    var onPasteNotes: (_ notes: [MIDINote], _ extendToCover: Set<UUID>) -> Void
+    ///
+    /// **RETURNS the auto-extend refusal to show, or nil (m25-a-2)** — same
+    /// contract as `onCommit`, wired to the SAME store message helper. Wiring
+    /// only the note-edit funnel would leave a refused paste silent, which is
+    /// half the defect.
+    var onPasteNotes: (_ notes: [MIDINote], _ extendToCover: Set<UUID>) -> String?
     /// m23-ek-3 — the notes currently on `AppModel.clipboard`, clip-local and
     /// UNTRANSLATED, or empty when the clipboard holds clips or nothing.
     ///
@@ -231,9 +264,47 @@ struct PianoRollView: View {
     /// Edit model for the Pro controller strip (m16-b4), seeded from the clip's
     /// lanes. Recreated with the view on a clip switch (`.id(clip.id)`).
     @State private var controllerModel: ControllerStripModel
+    /// The roll's OWN grid division — 16ths for notes while the arrange sits on
+    /// bars is a legitimate independence and this is where it lives.
+    ///
+    /// ⚠️ **IT IS NOT THE ANSWER TO "does this surface snap" — read `effectiveSnap`,
+    /// never this (m25-ab).** `appSnap` can veto it, and for four milestones this
+    /// `@State` WAS the whole answer, which is precisely the bug the user reported:
+    /// the toolbar's `SNAP:` chip and this one rendered the identical string and
+    /// were unrelated.
+    ///
+    /// ⭐ **KNOWN AND ACCEPTED: `@State private` means this resets to `.beat` on a
+    /// clip switch** — the view is mounted `.id(clip.id)` (see
+    /// `PanelLayoutStore.pianoRollMinimapKey`'s doc for the same hazard, solved
+    /// there by persisting). Persisting a 9-case string enum needs a stable code
+    /// map through the `Double`-only `PanelLayoutBacking`, which is a bigger change
+    /// than this fix, so it is deliberately left. It does NOT weaken the fix: the
+    /// user's OFF arrives through `appSnap`, which is app-held and survives the
+    /// rebuild.
     @State private var snap: SnapResolution = .beat
     @State private var activeDrag: ActiveDrag = .none
     @State private var didMove = false
+    /// m25-r — the last REAL pointer event of a live content drag, in the form
+    /// the held-at-edge repeat needs (viewport-local x, so a scroll cannot make
+    /// it stale). Written ONLY from `applyGesture`, i.e. only by a live mouse:
+    /// the staging seam drives `advanceGesture` directly and has no pointer to
+    /// hold still, so it can never arm a clock.
+    @State private var heldEdgePointer: PianoRollEdgeRepeat.HeldPointer?
+    /// When the last live `onChanged` arrived — the clock's only way to tell a
+    /// held pointer from a moving one. `ContinuousClock` rather than `Date`
+    /// because this is an elapsed-time question and must not move when the wall
+    /// clock does.
+    @State private var lastPointerEventAt: ContinuousClock.Instant?
+    /// m25-r — the held-at-edge repeat clock, alive only while a content drag
+    /// is in flight.
+    ///
+    /// ⚠️ **A CLOCK THAT OUTLIVES ITS GESTURE SCROLLS A SURFACE NOBODY IS
+    /// TOUCHING, so it has three teardowns and needs all three** — the
+    /// `flagsMonitor` shape above, for the same reason. `endGesture` stops it on
+    /// every normal release; `reseedFromExternalMutation` stops it on the m18-i
+    /// cancel, which has no `onEnded`-shaped end at all; `.onDisappear` stops it
+    /// on the clip switch that recreates this view under a live drag.
+    @State private var edgeRepeatTask: Task<Void, Never>?
     /// ⭐ THE ROLL'S HOVER FACILITY (m25-g) — the live pointer position over the
     /// note grid, in grid CONTENT coordinates, or nil when the pointer is away.
     ///
@@ -303,16 +374,46 @@ struct PianoRollView: View {
     /// panel's right edge instead of leaving dead glass. Changes only on a window
     /// or splitter resize — never on a transport tick or playback frame.
     @State private var panelWidth: CGFloat = 0
-    /// The zoom scale captured on the first pinch tick (m21-c) — each tick
-    /// rescales off the gesture-START value because `MagnifyGesture`'s
-    /// magnification is cumulative (the arrange `PinchState` rule, minus the
-    /// anchor math: the roll's plain SwiftUI scroller owns its own offset).
-    @State private var pinchStartPPB: CGFloat?
+    /// The state a live zoom measures its anchor FROM (m25-b-3) — the roll's
+    /// `ArrangeZoom.PinchState`, reduced to exactly the three arguments
+    /// `ArrangeZoom.offsetPreservingAnchor` takes, so the formula stays in its one
+    /// shared home and this type carries nothing but the memo.
+    ///
+    /// ⚠️ **NON-NIL MEANS "A GESTURE OWNS THE ANCHOR", and that is the whole
+    /// point.** A pinch is CUMULATIVE (`MagnifyGesture.magnification` measures off
+    /// the gesture start, not off the last tick), so every tick must rescale from
+    /// the START scale AND re-pin the START anchor. Deriving the anchor afresh
+    /// each tick from the live `gridScrollX` would feed the zoom's own motion back
+    /// into it: a scroll request that has not landed yet reads as a different
+    /// anchor beat, and the beat under the pointer would wander through the pinch.
+    /// The arrange met this first and answered it the same way (`PinchState` —
+    /// "measures off a FIXED anchor").
+    private struct ZoomAnchorBase: Equatable {
+        /// The scale the anchor was measured at.
+        var ppb: CGFloat
+        /// The scroll offset it was measured at.
+        var offset: CGFloat
+        /// The anchor's VIEWPORT-relative x — invariant for the whole gesture,
+        /// because the pointer does not move during a pinch (the m25-r
+        /// `HeldPointer.localX` argument, one gesture over).
+        var anchorScreenX: CGFloat
+    }
+    @State private var zoomAnchorBase: ZoomAnchorBase?
     /// A transient inline reason shown when the delete-bar button is pressed
     /// while it can't act (m21-c bar-ops honesty) — the m17-c refusal-bubble
     /// idiom: amber, verbatim prose, auto-clearing.
     @State private var barOpsNotice: String?
     @State private var barOpsNoticeTask: Task<Void, Never>?
+    /// The auto-extend refusal currently standing over the grid (m25-a-2), and
+    /// its auto-clear task — the `barOpsNotice` pair one surface over, holding
+    /// the store's message VERBATIM.
+    ///
+    /// ⚠️ **THE VIEW HOLDS THE WORDS, NEVER THE REASON.** This is a `String?`
+    /// and not a `ClipAutoExtend.ExtendOutcome` on purpose: the moment this view
+    /// could switch on the outcome, composing the sentence here would be one
+    /// small edit away, and that is the second home m25-a-2 exists to prevent.
+    @State private var autoExtendNotice: String?
+    @State private var autoExtendNoticeTask: Task<Void, Never>?
     /// The content x follow last asked every band to put at its leading edge
     /// (m23-c2), plus the nonce that makes a repeat of the same x still apply. The
     /// bands' `ScrollViewReader`s watch the nonce; the markers size off the x.
@@ -364,8 +465,9 @@ struct PianoRollView: View {
 
     init(clip: Clip, beatsPerBar: Int, positionBeats: Double, isPlaying: Bool,
          densityStore: PanelDensityStore,
+         appSnap: ClipSnap = .bar,
          layout: PanelLayoutStore, follow: FollowPlayheadModel,
-         onCommit: @escaping (_ notes: [MIDINote], _ extendToCover: Set<UUID>) -> Void,
+         onCommit: @escaping (_ notes: [MIDINote], _ extendToCover: Set<UUID>) -> String?,
          onSeek: @escaping (Double) -> Void,
          onDeleteTimeRange: @escaping (_ startBeat: Double, _ lengthBeats: Double) -> Clip?,
          onInsertTimeRange: @escaping (_ atBeat: Double, _ lengthBeats: Double) -> Clip?,
@@ -375,7 +477,7 @@ struct PianoRollView: View {
          onCopyNotes: @escaping ([MIDINote]) -> Void = { _ in },
          onCutNotes: @escaping (_ copied: [MIDINote], _ remaining: [MIDINote]) -> Bool
              = { _, _ in false },
-         onPasteNotes: @escaping ([MIDINote], Set<UUID>) -> Void = { _, _ in },
+         onPasteNotes: @escaping ([MIDINote], Set<UUID>) -> String? = { _, _ in nil },
          clipboardNotes: [MIDINote] = [],
          onClose: @escaping () -> Void,
          onEscape: @escaping () -> Bool = { false },
@@ -393,6 +495,7 @@ struct PianoRollView: View {
         self.positionBeats = positionBeats
         self.isPlaying = isPlaying
         self.densityStore = densityStore
+        self.appSnap = appSnap
         self.layout = layout
         self.follow = follow
         self.onCommit = onCommit
@@ -429,11 +532,27 @@ struct PianoRollView: View {
     /// The panel's live density (Simple default), read from the shared store.
     private var mode: PanelDensity { densityStore.density(forPanel: Self.panelID) }
 
-    /// Simple mode locks snapping to whole beats; Pro honors the picker.
-    private var effectiveSnap: SnapResolution { mode == .simple ? .beat : snap }
+    /// **THE grid this surface applies** — every gesture and the drawn grid read
+    /// this, never `snap` and never `appSnap`.
+    ///
+    /// ⚠️ **A THIN READ OF A TESTED CONTRACT, DELIBERATELY (m25-ab).** The rule —
+    /// app-level OFF wins, else Simple locks to `.beat`, else the roll's pick —
+    /// lives in `SnapResolution.effective`, the `ClipSnap.effective` precedent.
+    /// Inlining any part of it here would rebuild the second home this item exists
+    /// to remove; the answer to "what snap applies" must be derivable in exactly
+    /// one place, and that place must be headless-testable.
+    private var effectiveSnap: SnapResolution {
+        SnapResolution.effective(appSnap: appSnap, density: mode, picked: snap)
+    }
 
     /// Violet whenever the clip is AI-touched, else playback cyan.
-    private var noteColor: Color { clip.isAIGenerated ? DAWTheme.ai : DAWTheme.playback }
+    ///
+    /// The AI branch is taken ONCE, here, and everything else — the fill colour,
+    /// and (m25-i) the luminance the on-pill pitch-label ink is picked from —
+    /// derives from this one hex. Two branches agreeing today is how a violet
+    /// pill ends up wearing the ink computed for a cyan one.
+    private var noteTintHex: UInt32 { PianoRollGrid.tintHex(isAI: clip.isAIGenerated) }
+    private var noteColor: Color { Color(hex: noteTintHex) }
 
     // MARK: - Step sequencer (m23-cq-1)
 
@@ -838,14 +957,24 @@ struct PianoRollView: View {
             // hover-exit is not guaranteed for a view torn down under the pointer,
             // so this is the teardown that actually holds.
             stopFlagsMonitor()
+            // m25-r — teardown 3 of 3, the same argument one line down: a clip
+            // switch recreates this view (`.id(clip.id)`) and is not guaranteed
+            // to deliver an `onEnded` for a drag in flight, so the disappearing
+            // instance stops its own clock.
+            setEdgeRepeat(running: false)
         }
         // m21-c: ONE persisted zoom value (`panelLayout.pianoRollPPB`) feeds
         // every band's beat→x mapping — the note grid + velocity lane via
         // `model`, the controller strip via its own model — so all three
         // rescale together and never drift.
-        .onChange(of: layout.pianoRollPPB, initial: true) { _, ppb in
+        //
+        // ⭐⭐ m25-b-3 — AND THE NO-JUMP RULE RIDES HERE, ON THE CHANGE ITSELF,
+        // NOT ON THE FOUR DRIVERS. See `repinZoomAnchor` for why this is the
+        // funnel rather than four call sites.
+        .onChange(of: layout.pianoRollPPB, initial: true) { oldPPB, ppb in
             model.pixelsPerBeat = ppb
             controllerModel.pixelsPerBeat = ppb
+            repinZoomAnchor(oldPPB: oldPPB, newPPB: ppb)
         }
         // m18-i: the external-mutation seam. `.id(clip.id)` recreates this view
         // (and its seeded @State models) only on a clip IDENTITY switch; a
@@ -900,10 +1029,25 @@ struct PianoRollView: View {
 
     /// The playhead's x in the GRID's content space, or nil when the transport
     /// sits outside the edited clip (m23-c1).
-    private var playheadLineX: CGFloat? {
+    private var playheadLineX: CGFloat? { playheadLineX(atPPB: model.pixelsPerBeat) }
+
+    /// The same line, at an EXPLICIT scale.
+    ///
+    /// ⚠️⚠️ **THIS OVERLOAD EXISTS FOR ONE CALLER AND THE REASON IS A BUG IT
+    /// PREVENTS.** `repinZoomAnchor` runs from the ppb `onChange`, whose body has
+    /// ALREADY written the new scale into `model.pixelsPerBeat` — so the property
+    /// above would hand it the playhead's content x at the NEW scale, while the
+    /// anchor it is computing must be a screen x measured in the OLD one. The
+    /// error is silent (a plausible number, a wrong anchor, content that slides
+    /// exactly as far as the zoom step) and it survives every rule test, because
+    /// the rules are right and only the argument is wrong. `setArrangeZoom` passes
+    /// `positionBeats * old` explicitly for this same reason; the roll now says so
+    /// in the type rather than in a comment. Pinned by
+    /// `PianoRollZoomAnchorSiteTests`.
+    private func playheadLineX(atPPB ppb: CGFloat) -> CGFloat? {
         PianoRollPlayhead.lineX(
             position: positionBeats, clipStartBeat: clip.startBeat,
-            lengthBeats: clip.lengthBeats, pixelsPerBeat: model.pixelsPerBeat)
+            lengthBeats: clip.lengthBeats, pixelsPerBeat: ppb)
     }
 
     /// Whether follow is actually DRIVING this surface right now — the enable flag
@@ -1098,6 +1242,13 @@ struct PianoRollView: View {
         if activeDrag != .none {
             activeDrag = .cancelled
             didMove = false
+            // m25-r — teardown 2 of 3, and the one a clock cannot live without:
+            // this path swallows the gesture with NO `onEnded`-shaped end, so
+            // without it an external mutation mid-drag would leave a repeat
+            // running against content that no longer exists.
+            setEdgeRepeat(running: false)
+            heldEdgePointer = nil
+            lastPointerEventAt = nil
             // m23-ek-1: a live rubber band dies with the gesture, and its VISUAL
             // has to die with it. A band left on screen with no gesture behind it
             // is a ghost the user cannot dismiss, and the next release would
@@ -1129,9 +1280,18 @@ struct PianoRollView: View {
     /// through the same single store call. Default `[]` keeps the other four
     /// callers byte-identical: DELETE and the velocity lane cannot push a note
     /// past the clip end, so neither should be able to grow the clip.
+    ///
+    /// m25-a-2 — AND IT IS WHERE THE AUTO-EXTEND REFUSAL SURFACES, for the same
+    /// reason `extendToCover` is a parameter here: the two gestures that can
+    /// provoke a refusal (double-click-to-create past the end, and m25-f-3's
+    /// edge drag) both submit through this ONE call, so they cannot end up with
+    /// one warned path and one silent one. The other four callers pass an empty
+    /// set and the store answers nil, so nothing changes for them.
     private func commit(extendToCover: Set<UUID> = []) {
         onEngage()
-        onCommit(model.buildSubmission(), extendToCover)
+        if let refusal = onCommit(model.buildSubmission(), extendToCover) {
+            flashAutoExtendNotice(refusal)
+        }
     }
 
     // MARK: - Clipboard (m23-ek-3)
@@ -1255,7 +1415,13 @@ struct PianoRollView: View {
             // already applies to note creation and note drags. The R6
             // false-engage guard in `EditorSurfaceOwnershipSiteTests` counts
             // `commit(` occurrences in this file — this line must not become one.
-            onPasteNotes(model.buildSubmission(), pastedIDs)
+            //
+            // m25-a-2 — the SECOND call site of the refusal, and the one that is
+            // easy to forget: a paste landing past a blocked edge is exactly as
+            // silent as a double-click was.
+            if let refusal = onPasteNotes(model.buildSubmission(), pastedIDs) {
+                flashAutoExtendNotice(refusal)
+            }
         }
     }
 
@@ -1603,6 +1769,61 @@ struct PianoRollView: View {
         }
     }
 
+    /// The AUTO-EXTEND refusal chip (m25-a-2): the store's message VERBATIM in
+    /// the app's shared `ArrangeRefusalBubble` — amber (the edit didn't fully
+    /// happen, nothing was destroyed), SF Pro prose, soft warning glow,
+    /// transient, hit-test-through.
+    ///
+    /// ⭐ **THE SHARED COMPONENT, NOT A THIRD COPY OF IT.** Its own doc is *"ONE
+    /// component, two anchors… the callers own only the placement"*, and this is
+    /// the third anchor. `barOpsNoticeBubble` above is deliberately left as it
+    /// is — it predates the shared component and is tuned trailing-aligned at
+    /// 240 pt for the header cluster it hangs under; converting it here would be
+    /// a visual change outside this item's scope, and is filed rather than
+    /// smuggled in.
+    ///
+    /// **ANCHORED OVER THE GRID, NOT UNDER THE HEADER, and the difference is the
+    /// rule**: a refusal bubble hangs on the thing it is about. The bar-ops
+    /// notice explains a BUTTON, so it hangs at that button; this one explains a
+    /// NOTE the user just placed, so it stands over the note grid. It clears the
+    /// scrub ruler band so it never covers the transport handle.
+    ///
+    /// ⚠️ **ANCHORED `.topLeading` PAST `keyboardWidth`, NOT CENTRED, AND THAT IS
+    /// THE m25-f-5 LESSON APPLIED RATHER THAN RE-LEARNED.** A centred anchor
+    /// would put this bubble at `(viewportWidth − 300) / 2`, which is arithmetic
+    /// over a width this view has already been burned by (a `ZStack` once took
+    /// the CONTENT width here and centred the overflow, painting across the
+    /// gutter). Every sibling overlay on the editor — `scrubStrip`,
+    /// `offClipCueBand` — clears the ivory keyboard gutter by starting past
+    /// `keyboardWidth` instead, so this one does too: the clearance is
+    /// structural, not a sum that can drift when the viewport changes.
+    @ViewBuilder
+    private var autoExtendNoticeBubble: some View {
+        if let autoExtendNotice {
+            ArrangeRefusalBubble(message: autoExtendNotice)
+                .padding(.leading, Self.keyboardWidth + 8)
+                .padding(.top, Self.scrubStripHeight + 8)
+                .transition(.opacity)
+        }
+    }
+
+    /// Shows the auto-extend refusal for a few seconds, then fades it.
+    ///
+    /// The `flashBarOpsNotice` shape verbatim — cancel the standing task first,
+    /// so a second refusal restarts the clock instead of being erased by the
+    /// first one's timer. Six seconds rather than the bar-ops three: this
+    /// message is two sentences and names a remedy, and the arrange's own
+    /// refusal (`AppModel.presentArrangeRefusal`) already stands for six.
+    private func flashAutoExtendNotice(_ message: String) {
+        autoExtendNoticeTask?.cancel()
+        withAnimation(.easeOut(duration: 0.15)) { autoExtendNotice = message }
+        autoExtendNoticeTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(6))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.3)) { autoExtendNotice = nil }
+        }
+    }
+
     /// Shows the inline bar-ops reason for a few seconds, then fades it.
     private func flashBarOpsNotice(_ message: String) {
         barOpsNoticeTask?.cancel()
@@ -1638,6 +1859,13 @@ struct PianoRollView: View {
     /// state — Rule 3). Every driver mutates the ONE persisted
     /// `panelLayout.pianoRollPPB` slot (buttons here, pinch on the grid, and
     /// the View-menu ⌘+/⌘−/⌘0 while the editor is focused via the app router).
+    ///
+    /// ⭐ **m25-b-3 REACHED THESE BUTTONS WITHOUT EDITING THEM, AND THAT IS THE
+    /// ARGUMENT FOR WHERE IT LIVES.** They still write nothing but the scale; the
+    /// no-jump anchor rides on the slot's `onChange` (`repinZoomAnchor`), so the
+    /// ± cluster, ⌘±, and the debug seam cannot drift apart. A stepper press has
+    /// no pointer, so it anchors on the playhead when the roll is drawing one and
+    /// on the viewport centre otherwise.
     private var zoomCluster: some View {
         HStack(spacing: 0) {
             // m23-al R5 — the roll's OWN zoom cluster. Pressing it is a gesture
@@ -1677,27 +1905,143 @@ struct PianoRollView: View {
         .help(help)
     }
 
-    /// The live pinch (m21-c): magnification is cumulative, so every tick
-    /// rescales off the gesture-START scale (the arrange `PinchState` rule).
-    /// No anchor RE-PIN here: a pinch rescales the bands but does not hold the
-    /// beat under the cursor at a fixed screen x the way the arrange's zoom does.
+    /// ⭐⭐⭐ **THE NO-JUMP RULE (m25-b-3), AND THERE IS EXACTLY ONE OF IT.** Every
+    /// zoom of this surface — the header ± cluster, the grid pinch, ⌘+/⌘−/⌘0
+    /// through the app router, and `debug.panelLayout {pianoRollPPB}` — writes the
+    /// ONE persisted `panelLayout.pianoRollPPB` slot, so the change itself is the
+    /// only event all four share. Hanging the rule here is what makes a driver
+    /// unable to forget it.
     ///
-    /// That is a scope choice, not a platform limit — corrected m23-c2, because
-    /// this comment used to say the arrange "needed an AppKit bridge for that" and
-    /// that bridge was never built: the arrange's programmatic scroll is plain
-    /// SwiftUI (`ScrollViewReader` + a layout-real marker), and this view now uses
-    /// the same idiom for follow. An anchor re-pin here is strictly harder than
-    /// follow's scroll-into-view (it must land mid-gesture, against content that is
-    /// rescaling under it), and it remains unbuilt for that reason alone.
+    /// ⚠️ **THAT IS A DELIBERATE DIVERGENCE FROM THE ARRANGE, WHICH THIS ADOPTS
+    /// FROM.** `setArrangeZoom` is a per-driver entry point, and its rule holds
+    /// only as long as every caller remembers to use it — a caller that writes
+    /// `panelLayout.setArrangePPB` directly gets the jump back, silently. The roll
+    /// has FOUR drivers and one of them (`debug.panelLayout`) is a generic slot
+    /// setter that could never be routed through a zoom-specific entry point
+    /// without forking it. Same rule, one hop later, and every writer covered.
+    ///
+    /// **The ordering is load-bearing and is the arrange's:** the compensating
+    /// offset is computed from the OLD scale, and the anchor's screen x is
+    /// measured in the OLD scale too (`playheadLineX(atPPB:)` — see the warning on
+    /// that overload, which is the one real bug in this item's blast radius).
+    ///
+    /// **Anchor, per driver:**
+    /// - **Pinch → the POINTER.** `zoomAnchorBase` is captured on the first tick
+    ///   from `MagnifyGesture.Value.startLocation` and the whole gesture measures
+    ///   off it. The pointer is the thing the user is looking at, and the arrange
+    ///   agrees (`TimelineLanesView:1000` feeds `startLocation.x` into
+    ///   `PinchState`).
+    /// - **Everything else → the PLAYHEAD when there is a line, else the viewport
+    ///   centre** (`PianoRollZoom.anchorScreenX`, which delegates the in-frame test
+    ///   to `ArrangeZoom` and adds the roll's m23-c1 off-clip case). A stepper
+    ///   press and a ⌘+ have no pointer to speak of; the playhead is the one point
+    ///   on this surface the eye is already on.
+    ///
+    /// ⭐ **THE PLAYHEAD ANCHOR ALSO SETTLES FOLLOW-THE-PLAYHEAD PRECEDENCE
+    /// WITHOUT A TIE-BREAK — WHEN THE PLAYHEAD IS THE ANCHOR.** Holding its
+    /// screen x is exactly the condition under which `FollowPlayhead.pageOffset`
+    /// returns nil, so there is no competing scroll to break a tie about — the two
+    /// rules agree by construction instead of fighting.
+    ///
+    /// ⚠️ **The qualifier is real, so do not drop it.** When the anchor is the
+    /// CENTRE instead, one reachable case has two writers for a single tick: the
+    /// playhead inside this clip but scrolled OUT of the viewport (so
+    /// `anchorScreenX` falls back to the centre) while playing and unsuspended, on
+    /// the tick that crosses the follow margin. `followDrives` keys off the clip,
+    /// not the viewport, so follow is still driving there. Off-clip is NOT that
+    /// case — `playheadLineX` is nil, and follow issues nothing at all. Both
+    /// writers recompute from the OBSERVED offset rather than integrating, so the
+    /// last write wins and the next tick agrees; it is a one-tick overlap, not a
+    /// fight. An unqualified version of this sentence is the sort that put the
+    /// wrong claim in `PanelLayoutModel` and DESIGN-LANGUAGE in the first place.
+    ///
+    /// And the offset is delivered
+    /// through `scrollExternally` (the roll's one programmatic scroll seam, m23-c2)
+    /// like the minimap jump and the edge drag, but **a zoom is NOT read as a
+    /// manual scroll**: the report that carries it also carries a changed
+    /// `contentWidth` (the grid is `beats · ppb`), and the detector re-baselines on
+    /// a geometry change instead of suspending — its own doc names *zoom* in that
+    /// list (`FollowPlayheadModel`, "a resize / zoom / edit, NOT a user scroll").
+    ///
+    /// ⚠️ **RESIDUAL, MEASURED NOWHERE AND THEREFORE STATED:** if the scroller
+    /// clamps itself on the rescale BEFORE this scroll lands, the detector sees two
+    /// reports — the first absorbed by the geometry change, the second (same
+    /// geometry, different offset) read as the user, suspending follow. It costs a
+    /// PAUSED chip and one click, never data, and the arrange carries the identical
+    /// exposure today through `applyArrangeHScroll`. Curing it means teaching
+    /// `reportOffset` to hold an in-flight expectation across a geometry change,
+    /// which changes shipped behaviour on BOTH surfaces and is not this item's.
+    private func repinZoomAnchor(oldPPB: CGFloat, newPPB: CGFloat) {
+        // The `initial: true` call arrives with old == new, and so does a clamped
+        // write at either end of the ladder: no scale change, nothing to re-pin.
+        // A zero viewport is a view that has not been laid out yet — there is no
+        // anchor to hold and `bandViewportWidth / 2` would be a fake one.
+        guard abs(newPPB - oldPPB) > 0.0001, bandViewportWidth > 0 else { return }
+        let base = zoomAnchorBase ?? ZoomAnchorBase(
+            ppb: oldPPB,
+            offset: gridScrollX,
+            anchorScreenX: PianoRollZoom.anchorScreenX(
+                // ⚠️ AT THE **OLD** SCALE. `model.pixelsPerBeat` is already the new
+                // one by the time this runs.
+                playheadContentX: playheadLineX(atPPB: oldPPB),
+                offset: gridScrollX, viewportWidth: bandViewportWidth))
+        follow.scrollExternally(to: ArrangeZoom.offsetPreservingAnchor(
+            oldPPB: base.ppb, newPPB: newPPB,
+            oldOffset: base.offset, anchorScreenX: base.anchorScreenX))
+    }
+
+    /// The live pinch (m21-c, anchored by m25-b-3): magnification is cumulative,
+    /// so every tick rescales off the gesture-START scale — which is now the same
+    /// `zoomAnchorBase` the anchor is measured from, one memo instead of two.
+    ///
+    /// ⚠️ **IT WRITES THE SCALE AND NOTHING ELSE.** The offset is `repinZoomAnchor`'s
+    /// to issue, for both drivers, so there is exactly one writer of the roll's
+    /// scroll offset per zoom and no ordering question about which of two callers
+    /// lands last. (An earlier sketch had the pinch call `scrollExternally` itself
+    /// and let the funnel skip while a pinch was live; the skip would have had to
+    /// out-race the gesture's own `onEnded`, which nothing guarantees.)
+    ///
+    /// ⚠️ **`startLocation` IS A CONTENT-SPACE POINT**, because this gesture is
+    /// attached to the grid Canvas INSIDE the horizontal scroller — the same space
+    /// `gridDrag` feeds straight into `model.hitTest` with no offset term. Hence
+    /// `- gridScrollX` to reach the screen x that must stay put. It is also frozen
+    /// at gesture start, so it means that beat only at the START scale, which is
+    /// the second reason the base is captured once rather than re-derived.
+    ///
+    /// ⚠️ Historical note kept because it was wrong twice: this used to say an
+    /// anchor re-pin "needed an AppKit bridge" (corrected m23-c2 — the programmatic
+    /// scroll is plain SwiftUI), and then that it "remains unbuilt" because landing
+    /// mid-gesture against rescaling content is hard. It is built, and what made it
+    /// tractable was not a bridge but a fixed anchor: the arrange's rule, unchanged.
     private var gridPinch: some Gesture {
         MagnifyGesture()
             .onChanged { value in
                 onEngage()   // m23-al R3 — pinch-zoom the roll
-                if pinchStartPPB == nil { pinchStartPPB = layout.pianoRollPPB }
-                guard let start = pinchStartPPB else { return }
-                layout.setPianoRollPPB(PianoRollZoom.clamp(start * value.magnification))
+                if zoomAnchorBase == nil {
+                    zoomAnchorBase = ZoomAnchorBase(
+                        ppb: layout.pianoRollPPB, offset: gridScrollX,
+                        anchorScreenX: value.startLocation.x - gridScrollX)
+                }
+                guard let base = zoomAnchorBase else { return }
+                layout.setPianoRollPPB(PianoRollZoom.clamp(base.ppb * value.magnification))
             }
-            .onEnded { _ in pinchStartPPB = nil }
+            // ⚠️ The last tick's ppb change may not have been delivered to the
+            // funnel yet when this fires. If it lands after, that ONE tick is
+            // anchored on the playhead/centre instead of the pointer — bounded by
+            // a single magnification step (a fraction of a point at 60 Hz), and
+            // self-limiting because the next gesture captures a fresh base. A
+            // state machine to close it would cost more than the error it removes.
+            //
+            // ⚠️ INHERITED, NOT NEW: `if zoomAnchorBase == nil` means a base left
+            // behind by a DROPPED `onEnded` is never refreshed, so the next
+            // pinch's first tick would rescale from the stale start scale
+            // (`base.ppb * 1.0`) and jump. The `pinchStartPPB` this replaced had
+            // the identical shape, and m25-r's teardown notes say plainly that
+            // `onEnded` is not guaranteed. Switching clips cannot carry one over
+            // (`.id(clip.id)` rebuilds this view and its `@State`). Left as-is
+            // deliberately: the fix is a gesture-generation token, which is
+            // m25-r's shape of problem, not this item's.
+            .onEnded { _ in zoomAnchorBase = nil }
     }
 
     /// Inserts one empty bar at the target bar start, then reseeds the edit model
@@ -1855,6 +2199,37 @@ struct PianoRollView: View {
 
     /// Themed snap menu (Pro only) — styled like the input-device picker chip,
     /// never a stock gray control (docs/DESIGN-LANGUAGE.md rule 2).
+    ///
+    /// ⚠️⚠️ **THE CHIP READS THE EFFECTIVE GRID; THE CHECKMARK MARKS THE PICK
+    /// (m25-ab).** These differ in exactly one situation — the app-level snap is
+    /// OFF — and showing the pick there would leave this chip announcing
+    /// "SNAP: 1/16" while nothing snaps. That is the same duplicated-promise defect
+    /// the user reported, one degree quieter, and it would be introduced BY the fix
+    /// for it. The checkmark still sits on the user's own choice because that
+    /// choice is intact and returns the instant the app-level snap comes back
+    /// (`SnapResolution.effective` never mutates it) — the `debug.arrangeDrop`
+    /// `snap` vs `effectiveSnap` split, made visible.
+    ///
+    /// ⚠️⚠️ **TODO (m25-ab, NOT DONE HERE) — THIS CONTROL HAS NO SEAM, AND THAT IS
+    /// WHY THE BUG WAS INVISIBLE TO EVERY GATE.** The arrange's snap picker is
+    /// observable (`debug.arrangeDrop` echoes `snap` AND `effectiveSnap`, precisely
+    /// so a caller CHECKS that a snap it asked for landed); this one echoes
+    /// nothing, so no automated check in the tree could ever have compared the two
+    /// surfaces' grids. `PianoRollSnapPolicySiteTests` pins the wiring at the
+    /// SOURCE, which is the strongest instrument available without a seam — but it
+    /// cannot observe a running app.
+    ///
+    /// The missing surface, named exactly so it can be built without re-deriving
+    /// this: debug verb **`debug.pianoRollSnap`**, params `{snap?: <SnapResolution
+    /// rawValue>}`, echoing `{snap, appSnap, effectiveSnap, density}` — the
+    /// `debug.arrangeDrop` shape. It needs the picked resolution to leave this
+    /// view's `@State` first (the `StepSequencerBridge` pattern: an app-held
+    /// `@Observable`, which would also fix the reset-on-clip-switch defect noted at
+    /// `snap`'s declaration). MCP tool name if it is ever surfaced there:
+    /// **`piano_roll_snap`** — though the arrange precedent argues it should stay
+    /// debug-tier, since a snap PICKER is UI state and not an agent capability.
+    /// Deliberately NOT built in this diff: a new stateful component does not
+    /// belong in the same change as the pure policy that removes a second home.
     private var snapPicker: some View {
         Menu {
             ForEach(SnapResolution.allCases, id: \.self) { resolution in
@@ -1869,7 +2244,7 @@ struct PianoRollView: View {
                 }
             }
         } label: {
-            Text("SNAP: \(snap.label)")
+            Text("SNAP: \(effectiveSnap.label)")
                 .font(.system(size: 9, weight: .medium, design: .monospaced))
                 .foregroundStyle(DAWTheme.textDim)
                 .padding(.horizontal, 8)
@@ -2019,7 +2394,7 @@ struct PianoRollView: View {
                     // "offset a view, never a per-frame Canvas redraw" rule, enforced
                     // here by extraction rather than trusting Canvas diffing).
                     PianoRollGrid(model: model, beatsPerBar: beatsPerBar,
-                                  snap: effectiveSnap, noteColor: noteColor)
+                                  snap: effectiveSnap, noteTintHex: noteTintHex)
                         // Extended to the viewport at wide windows (m18-f): the
                         // Canvas draws the extension correctly by construction —
                         // key rows + gridlines run the full width and the
@@ -2194,6 +2569,14 @@ struct PianoRollView: View {
         // away with the notes it maps. Topmost of the editor's overlays — it is the
         // only one here that takes a gesture from a corner nothing else claims.
         .overlay(alignment: .bottomTrailing) { minimapOverlay }
+        // m25-a-2 — the auto-extend refusal, standing over the grid the note was
+        // placed on. TOPMOST, because a message the user must read is worth more
+        // than any furniture it briefly covers, and it costs that furniture
+        // nothing: `ArrangeRefusalBubble` is `allowsHitTesting(false)`, so every
+        // gesture underneath still lands. On the EDITOR rather than on the grid
+        // CONTENT for the `offClipCueBand` reason — it is viewport furniture and
+        // must not scroll away from the eye it is trying to reach.
+        .overlay(alignment: .topLeading) { autoExtendNoticeBubble }
         }
     }
 
@@ -2912,6 +3295,20 @@ struct PianoRollView: View {
     }
 
     private func applyGesture(_ value: DragGesture.Value) {
+        // m25-r — REMEMBER THE LIVE POINTER, so the repeat clock has something
+        // to hold still. Captured HERE and not in `advanceGesture` on purpose:
+        // this function is the live-mouse-only wrapper, and the staging seam
+        // (which reaches `advanceGesture` directly) has no pointer that can be
+        // held, so it must not be able to arm a clock.
+        //
+        // ⚠️ `value.location` and `gridScrollX` are read as a PAIR, off the same
+        // laid-out geometry, because their DIFFERENCE is what gets stored. Both
+        // describe the layout the event was hit-tested against, so a scroll
+        // request still in flight biases neither.
+        heldEdgePointer = PianoRollEdgeRepeat.HeldPointer(
+            pointerContentX: value.location.x, pointerContentY: value.location.y,
+            origin: value.startLocation, currentOffset: gridScrollX)
+        lastPointerEventAt = ContinuousClock.now
         // The live pointer's OWN quantities, passed through unchanged: no
         // geometry a real drag depends on is recomputed. The one thing that did
         // change is WHERE `.current` is read — it used to be evaluated inside the
@@ -2920,6 +3317,88 @@ struct PianoRollView: View {
         // side-effect-free, so this is a cost, not a behaviour change.
         advanceGesture(translation: value.translation, location: value.location,
                        origin: value.startLocation, modifiers: .current)
+        // ⚠️ ARMED ON `didMove`, NOT ON THE PRESS, and this is the one hazard the
+        // clock introduces that the shipped per-event scroll does not have.
+        // `DragGesture(minimumDistance: 0)` fires `onChanged` on the PRESS, so a
+        // press on a note that happens to sit inside the 48 pt band already
+        // collects one scroll step today — harmless, and invisible. Repeat that
+        // at 60 Hz and a stationary CLICK becomes a runaway scroll-and-move. The
+        // travel gate is the same `moveCommitSlop` that decides whether this
+        // gesture is an edit at all, so nothing scrolls that would not also
+        // commit.
+        setEdgeRepeat(running: didMove && activeDragScrollsContent)
+    }
+
+    /// Whether the gesture in flight is one that drags CONTENT, and therefore
+    /// one the edge scroll (and its repeat) applies to. The same three cases
+    /// `advanceGesture` calls `autoScroll(towards:)` from, asked once.
+    private var activeDragScrollsContent: Bool {
+        switch activeDrag {
+        case .move, .resize, .groupScale: return true
+        // A band must not scroll the grid under itself (it would re-decide the
+        // selection from a moving origin), a playhead scrub is aimed at a line
+        // the user can SEE, and `.none`/`.cancelled` are not gestures.
+        case .click, .marquee, .playheadDrag, .none, .cancelled: return false
+        }
+    }
+
+    /// Starts or stops the held-at-edge repeat clock (m25-r). Idempotent, so the
+    /// per-tick call in `applyGesture` cannot stack a second clock behind an
+    /// overwritten handle — the `startFlagsMonitor` rule.
+    private func setEdgeRepeat(running: Bool) {
+        guard running != (edgeRepeatTask != nil) else { return }
+        guard running else {
+            edgeRepeatTask?.cancel()
+            edgeRepeatTask = nil
+            return
+        }
+        edgeRepeatTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: PianoRollEdgeRepeat.interval)
+                guard !Task.isCancelled else { return }
+                repeatHeldEdgeScroll()
+            }
+        }
+    }
+
+    /// ONE REPEAT TICK (m25-r) — what a held pointer does between real events.
+    ///
+    /// ⭐⭐ **IT SYNTHESISES NOTHING IT DOES NOT OBSERVE.** The pointer has not
+    /// moved, so its position in the CONTENT changed by exactly the amount the
+    /// content scrolled, and `gridScrollX` is where that scroll is observed. The
+    /// tick therefore RECOMPUTES `localX + gridScrollX` from scratch rather than
+    /// nudging a stored value: nothing integrates, so nothing drifts, and a
+    /// frame's lag in the observation is erased by the next tick instead of
+    /// accumulating. It is also the value SwiftUI itself would report, so the
+    /// next real event agrees with these rather than contradicting them — which
+    /// is the whole of the desync worry `PianoRollAutoScroll`'s no-timer note
+    /// raised. `PianoRollEdgeRepeat`'s doc carries the argument in full.
+    ///
+    /// ⚠️ **THIS IS REASONING OVER CODE, NOT A MEASUREMENT.** No instrument here
+    /// can watch a note track a cursor or feel a ramp; `PianoRollEdgeRepeatTests`
+    /// pins the arithmetic (the dragged note's SCREEN position is invariant
+    /// across a full run to the wall), and the feel needs a human hand.
+    ///
+    /// Deliberately routed through `advanceGesture` rather than doing its own
+    /// work: the snap, the audition, the `didMove` bookkeeping and the scroll all
+    /// stay spelled once, and a repeat is by construction unable to do something
+    /// a real event would not.
+    private func repeatHeldEdgeScroll() {
+        guard didMove, activeDragScrollsContent, let held = heldEdgePointer,
+              let since = lastPointerEventAt else { return }
+        // Suppressed until the pointer has genuinely been still, so a MOVING
+        // pointer behaves exactly as it did before this feature and the two step
+        // sources can never add up. See `holdDelay` for why a duration and not a
+        // "no event since the last tick" counter.
+        guard PianoRollEdgeRepeat.isHeld(
+            sinceLastPointerEvent: ContinuousClock.now - since) else { return }
+        guard let tick = PianoRollEdgeRepeat.tick(
+            held: held,
+            observedOffset: gridScrollX,
+            viewportWidth: bandViewportWidth,
+            contentWidth: gridDrawnWidth) else { return }
+        advanceGesture(translation: tick.translation, location: tick.location,
+                       origin: held.origin, modifiers: .current)
     }
 
     /// ONE HOME for "the pointer moved" — every grid gesture's changed phase, for
@@ -3232,6 +3711,13 @@ struct PianoRollView: View {
         // reference in this file), so this is a pure reordering.
         let outgoing = activeDrag
         activeDrag = .none
+        // m25-r — teardown 1 of 3. Stopped BEFORE the branch runs, alongside the
+        // state-machine reset above and for the same reason: nothing below may
+        // observe a gesture that has ended, and a clock is the loudest possible
+        // way to observe one.
+        setEdgeRepeat(running: false)
+        heldEdgePointer = nil
+        lastPointerEventAt = nil
         switch outgoing {
         case .playheadDrag(let scrubbing):
             // ⭐⭐ m25-o-2 — A NO-TRAVEL GRAB IS A CLICK ON EMPTY GRID, AND MUST
@@ -3547,7 +4033,12 @@ private struct PianoRollGrid: View {
     var model: PianoRollModel
     var beatsPerBar: Int
     var snap: SnapResolution
-    var noteColor: Color
+    /// The note tint as its `0xRRGGBB` literal, NOT as a `Color` — the pitch
+    /// labels (m25-i) need the fill's luminance, and a `Color` cannot be
+    /// inspected without a main-actor `NSColor` round-trip. The fill colour is
+    /// derived from this, so there is one number, not two.
+    var noteTintHex: UInt32
+    var noteColor: Color { Color(hex: noteTintHex) }
 
     /// A value snapshot of everything the renderer needs, taken on the main actor
     /// before the closure runs. All fields are Sendable so the `@Sendable` Canvas
@@ -3562,7 +4053,35 @@ private struct PianoRollGrid: View {
         var beatsPerBar: Int
         var snapStep: Double
         var noteColor: Color
+        /// The SAME tint as `noteColor`, in the form the pitch-label ink policy
+        /// reasons in (m25-i). Both come from ONE hex literal in `DAWTheme`, so
+        /// the ink can never be computed from a colour the fill isn't using.
+        var noteTint: SRGBColor
     }
+
+    /// `noteColor` and `noteTint` from ONE branch, never two agreeing ones.
+    static func tintHex(isAI: Bool) -> UInt32 { isAI ? DAWTheme.aiHex : DAWTheme.playbackHex }
+
+    /// What a note pill composites OVER: the grid panel, plus the black-key lane
+    /// wash on accidental rows. The wash alpha is `blackKeyLaneAlpha` — the same
+    /// constant `drawBlackKeyRows` paints with, not a copy of 0.22.
+    ///
+    /// ⚠️ `nonisolated`, and it is the CANVAS CONTRACT (m16-a) rather than
+    /// tidiness: a `View`'s members are main-actor-isolated by default, and both
+    /// of these are read from inside the `@Sendable` renderer. Written without
+    /// it, both compiled with a warning that names the defect exactly ("main
+    /// actor-isolated … referenced from a nonisolated context") — the annotation
+    /// is what keeps the renderer's value-only capture discipline enforceable by
+    /// the compiler instead of by habit.
+    private nonisolated static func rowBackdrop(isBlackKeyRow: Bool) -> SRGBColor {
+        let panel = SRGBColor(hex: DAWTheme.panelHex)
+        guard isBlackKeyRow else { return panel }
+        return SRGBColor(hex: 0x000000).blended(over: panel, alpha: blackKeyLaneAlpha)
+    }
+
+    /// Black-key lane wash. ONE home: the row fill and the ink policy that has to
+    /// know how dark that row is read the same number.
+    private nonisolated static let blackKeyLaneAlpha: Double = 0.22
 
     var body: some View {
         // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
@@ -3575,7 +4094,8 @@ private struct PianoRollGrid: View {
             selectedIDs: model.selection,
             beatsPerBar: beatsPerBar,
             snapStep: snap.beats ?? 1,
-            noteColor: noteColor)
+            noteColor: noteColor,
+            noteTint: SRGBColor(hex: noteTintHex))
         return Canvas { @Sendable context, size in
             Self.drawBlackKeyRows(&context, size: size, s: s)
             Self.drawGridLines(&context, size: size, s: s)
@@ -3589,7 +4109,7 @@ private struct PianoRollGrid: View {
             let y = CGFloat(PianoRollModel.pitchCount - 1 - pitch) * s.rowHeight
             context.fill(
                 Path(CGRect(x: 0, y: y, width: size.width, height: s.rowHeight)),
-                with: .color(Color.black.opacity(0.22))
+                with: .color(Color.black.opacity(blackKeyLaneAlpha))
             )
         }
         // Octave separators.
@@ -3671,6 +4191,17 @@ private struct PianoRollGrid: View {
     /// m18-e ghost grammar). The split comes from the model's engine-honest
     /// `playableEndBeat` — ONE boundary definition, never view beat math.
     private nonisolated static func drawNotes(_ context: inout GraphicsContext, s: GridSnapshot) {
+        // ONE text layout per DRAW for the pitch labels (m25-i), not one per
+        // note: the face is monospaced, so every name's width is its glyph count
+        // times a single advance. A 400-note clip therefore costs ONE resolve
+        // here plus one draw per name that actually fits — the labels add no
+        // per-note layout to a path that already redraws on every drag frame.
+        let probe = context.resolve(
+            Text("0000").font(.system(size: PianoRollNoteLabel.fontSize, weight: .medium,
+                                      design: .monospaced))
+        )
+        let probeSize = probe.measure(in: CGSize(width: 1000, height: 100))
+        let glyph = CGSize(width: probeSize.width / 4, height: probeSize.height)
         for note in s.draft {
             // ONE producer of the note rect (m23-ek-1): the same `noteRect` a
             // CLICK hit-tests and a BAND intersects, inset HERE at the call site
@@ -3690,6 +4221,8 @@ private struct PianoRollGrid: View {
             }
             if playableEnd >= note.endBeat {
                 drawLitPill(&context, rect: rect, path: path, note: note, selected: selected, s: s)
+                drawNoteLabel(&context, rect: rect, note: note, selected: selected,
+                              visibleWidth: rect.width, glyph: glyph, s: s)
             } else {
                 // Partial overhang: the engine truncates the note-off at the
                 // clip end (`min(endBeat, clipLength)`), so the body is lit to
@@ -3704,6 +4237,14 @@ private struct PianoRollGrid: View {
                                          width: boundaryX - (rect.minX - pad),
                                          height: rect.height + pad * 2)))
                 drawLitPill(&lit, rect: rect, path: path, note: note, selected: selected, s: s)
+                // The label's budget is the LIT width, not the pill's width: the
+                // context above is clipped at the boundary, so a name sized
+                // against the full rect would be sliced by that clip — a
+                // truncated pitch name, which is the one thing
+                // `PianoRollNoteLabel` exists to prevent, arriving through
+                // geometry instead of through text layout.
+                drawNoteLabel(&lit, rect: rect, note: note, selected: selected,
+                              visibleWidth: boundaryX - rect.minX, glyph: glyph, s: s)
                 var ghost = context
                 ghost.clip(to: Path(CGRect(x: boundaryX, y: rect.minY - pad,
                                            width: (rect.maxX + pad) - boundaryX,
@@ -3715,10 +4256,65 @@ private struct PianoRollGrid: View {
 
     /// The full neon pill treatment (unchanged from pre-m19-g): velocity →
     /// fill opacity, selected = brighter + hairline + subtle bloom.
+    /// The lit pill's fill opacity — velocity → alpha, selection → +0.2 clamped.
+    ///
+    /// ONE home (m25-i): the pitch label's ink polarity is decided from what this
+    /// alpha composites to, so if the fill and the ink read two copies of this
+    /// expression, a change to the velocity curve silently leaves the ink behind
+    /// on a pill it can no longer be read on.
+    private nonisolated static func litFillOpacity(velocity: Int, selected: Bool) -> Double {
+        let opacity = 0.45 + 0.5 * (Double(velocity) / 127)
+        return selected ? min(1, opacity + 0.2) : opacity
+    }
+
+    /// The pitch name ON the note block (m25-i) — the second half of "labels on
+    /// every key AND on the notes themselves".
+    ///
+    /// Three decisions live here, each recorded where it is made:
+    /// 1. **Lit pills only.** A ghost pill (an onset at/past the clip end, or the
+    ///    tail of a note crossing it) is deliberately the least informative thing
+    ///    the grid draws — flat, dim, velocity no longer modulating it, no bloom
+    ///    (m19-g). A crisp name on one would be the BRIGHTEST thing about an
+    ///    inert block, inverting that grammar. A partially-overhanging note still
+    ///    gets exactly one name, on its lit body, because the split draws the lit
+    ///    half first.
+    /// 2. **Suppress, never truncate**, and never scale the type down — see
+    ///    `PianoRollNoteLabel.fits`. `"C#4"` cut to `"C#"` is a valid, DIFFERENT
+    ///    pitch name, so truncation here invents a plausible wrong answer.
+    /// 3. **Both densities.** A pitch name is content, not edit chrome — the
+    ///    same call the MIDI note-map and the empty-lane hint make — and Rule 6
+    ///    (the beginner test) points the same way: the reader who most needs to
+    ///    know that block is an F# is the one in Simple mode.
+    private nonisolated static func drawNoteLabel(_ context: inout GraphicsContext, rect: CGRect,
+                                                  note: MIDINote, selected: Bool,
+                                                  visibleWidth: CGFloat, glyph: CGSize,
+                                                  s: GridSnapshot) {
+        // `Fundamental.noteName` — the repo's ONE scientific-pitch name, the same
+        // one the gutter key beside this note is labelled with, so a note and its
+        // key can never disagree about what the pitch is called.
+        let name = Fundamental.noteName(midiNote: note.pitch)
+        let size = CGSize(width: PianoRollNoteLabel.width(glyphCount: name.count, advance: glyph.width),
+                          height: glyph.height)
+        guard PianoRollNoteLabel.fits(labelSize: size, pillWidth: visibleWidth,
+                                      pillHeight: rect.height) else { return }
+        // DUAL INK, per pill: the polarity comes from what THIS pill composites
+        // to over THIS row, never from a constant and never from velocity (the
+        // two tints flip at different velocities — cyan ≈ 8, violet ≈ 56).
+        let dark = NotePillInk.prefersDarkInk(
+            tint: s.noteTint,
+            alpha: litFillOpacity(velocity: note.velocity, selected: selected),
+            backdrop: rowBackdrop(isBlackKeyRow: KeyboardSidebar.isBlackKey(note.pitch)))
+        let label = Text(name)
+            .font(.system(size: PianoRollNoteLabel.fontSize, weight: .medium, design: .monospaced))
+            .foregroundColor(dark ? DAWTheme.noteInkOnLight : DAWTheme.noteInkOnDark)
+        context.draw(label,
+                     at: CGPoint(x: rect.minX + PianoRollNoteLabel.leadingInset, y: rect.midY),
+                     anchor: .leading)
+    }
+
     private nonisolated static func drawLitPill(_ context: inout GraphicsContext, rect: CGRect, path: Path,
                                                 note: MIDINote, selected: Bool, s: GridSnapshot) {
-        let velocity = Double(note.velocity) / 127
-        let opacity = 0.45 + 0.5 * velocity
+        let opacity = litFillOpacity(velocity: note.velocity, selected: selected)
         if selected {
             // Subtle bloom behind a selected note.
             context.fill(
@@ -3726,7 +4322,7 @@ private struct PianoRollGrid: View {
                 with: .color(s.noteColor.opacity(0.28))
             )
         }
-        context.fill(path, with: .color(s.noteColor.opacity(selected ? min(1, opacity + 0.2) : opacity)))
+        context.fill(path, with: .color(s.noteColor.opacity(opacity)))
         context.stroke(
             path,
             with: .color(selected ? DAWTheme.textPrimary.opacity(0.9) : s.noteColor.opacity(0.9)),

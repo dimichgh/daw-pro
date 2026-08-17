@@ -1858,6 +1858,35 @@ public final class AudioEngine: AudioEngineControlling {
         }.value
     }
 
+    /// Offline windowed peak/RMS file profile (m25-z): `FileProfiler`,
+    /// streamed in bounded chunks on a detached task — zero render-thread
+    /// involvement, zero live-graph involvement. Read-only; no cache (a
+    /// profile is a throwaway diagnostic read, not persisted state like the
+    /// reference slot).
+    public func profileFile(at url: URL, windowSeconds: Double, fromSeconds: Double,
+                            durationSeconds: Double?) async throws -> FileProfile {
+        try await Task.detached(priority: .userInitiated) {
+            try FileProfiler.profile(
+                fileAt: url, windowSeconds: windowSeconds,
+                fromSeconds: fromSeconds, durationSeconds: durationSeconds)
+        }.value
+    }
+
+    /// Offline per-frame pitch detection (m23-ap-3): `ClipPitchAnalyzer`,
+    /// which owns the `PitchTracker` construction + conversion, on a
+    /// detached task — zero render-thread involvement, zero live-graph
+    /// involvement (§7.6 in `PitchTracker.swift`). Read-only; no cache (see
+    /// `ClipPitchAnalyzer`'s header for why).
+    public func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
+                            confidenceThreshold: Double,
+                            silenceFloorDbfs: Double) async throws -> PitchDetectionResult {
+        try await Task.detached(priority: .userInitiated) {
+            try ClipPitchAnalyzer.detect(
+                fileAt: url, fromSeconds: fromSeconds, durationSeconds: durationSeconds,
+                confidenceThreshold: confidenceThreshold, silenceFloorDbfs: silenceFloorDbfs)
+        }.value
+    }
+
     /// Total fixed insert-chain latency for one track's strip, in samples at
     /// the graph rate (non-bypassed effects only) — the M4 (viii) PDC hook.
     public func insertChainLatencySamples(forTrack id: UUID) -> Int {

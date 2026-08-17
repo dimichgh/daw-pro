@@ -406,6 +406,30 @@ public protocol AudioEngineControlling: AnyObject {
     /// cache: the result persists in the project's reference slot.
     func analyzeReferenceFile(at url: URL) async throws -> ReferenceAnalysis
 
+    /// Offline windowed peak/RMS profile of an ARBITRARY file on disk
+    /// (m25-z, the `analyzeReferenceFile` sibling for a windowing question
+    /// instead of a program-loudness one): `FileProfiler`, streamed in
+    /// bounded chunks, never a full-file buffer. Runs in async/detached
+    /// context only — never touches the render thread. Read-only: no
+    /// cache, no project slot, nothing persisted, nothing copied.
+    func profileFile(at url: URL, windowSeconds: Double, fromSeconds: Double,
+                     durationSeconds: Double?) async throws -> FileProfile
+
+    /// Offline per-frame pitch detection over the source window
+    /// `[fromSeconds, fromSeconds + durationSeconds)` of the file at `url`
+    /// (m23-ap-3, wiring m23-ap-2b's `PitchTracker`/`SwiftF0PitchTracker`
+    /// seam — the PROTOCOL, never the concrete backend, by name, in this
+    /// signature). Results are SOURCE-domain (before any clip stretch/pitch
+    /// — `ProjectStore.detectClipPitch` attaches that echo). HONEST
+    /// ABSENCE crosses this boundary too: an unvoiced frame in the returned
+    /// `PitchDetectionResult` omits its frequency rather than reporting a
+    /// sentinel. Never result-cached (see `ClipPitchAnalyzer`'s header for
+    /// why). Runs in async/detached context only — never touches the
+    /// render thread.
+    func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
+                     confidenceThreshold: Double,
+                     silenceFloorDbfs: Double) async throws -> PitchDetectionResult
+
     /// The project's reference SLOT changed (m22-g P2) — the
     /// `masterEffectsChanged` twin for the monitor lane: live engines cache
     /// the slot (path/offset/trim) for scheduling; an offset change while
@@ -1081,6 +1105,26 @@ extension AudioEngineControlling {
     /// precedent). Fakes that need the surface override it; the import path
     /// catches the throw and lands the slot with `analysis: nil` + a warning.
     public func analyzeReferenceFile(at url: URL) async throws -> ReferenceAnalysis {
+        throw ProjectError.engineUnavailable
+    }
+
+    /// File profiling is optional capability (m25-z) — and like
+    /// `analyzeAudioContent`/`analyzeReferenceFile` above, a fabricated
+    /// profile would be a lie, so the default THROWS `engineUnavailable`.
+    /// Fakes that need the surface override it.
+    public func profileFile(at url: URL, windowSeconds: Double, fromSeconds: Double,
+                            durationSeconds: Double?) async throws -> FileProfile {
+        throw ProjectError.engineUnavailable
+    }
+
+    /// Pitch detection is optional capability (m23-ap-3) — and like
+    /// `analyzeAudioContent`/`profileFile` above, a fabricated contour would
+    /// be a lie (a phantom pitch curve is exactly the sentinel hazard this
+    /// subsystem exists to avoid), so the default THROWS `engineUnavailable`.
+    /// Fakes that need the surface override it.
+    public func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
+                            confidenceThreshold: Double,
+                            silenceFloorDbfs: Double) async throws -> PitchDetectionResult {
         throw ProjectError.engineUnavailable
     }
 

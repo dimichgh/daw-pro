@@ -1587,21 +1587,43 @@ final class AppModel {
     ///   stored cursor for this paste only. nil (every shipped caller today) uses
     ///   the resolved active track. See the seam comment in the body.
     ///
-    /// ⚠️ **PRE-EXISTING WIRE GAP, MEASURED AT m25-l-3 AND DELIBERATELY NOT
-    /// CLOSED HERE.** `allCommands` has `edit.undo` / `edit.redo` /
-    /// `edit.history` but **no paste verb at all** — the only non-menu route to
-    /// this method is `debug.editClipboard {act:"paste"}`, which is debug tier.
-    /// m25-l-3 did not add a user-facing operation (it retargets an existing
-    /// one), so it owes no new command; but the constitution's "every capability
-    /// ships a control command + MCP tool + test" is unmet for PASTE itself and
-    /// was unmet before this item.
-    /// TODO(wire): `edit.pasteClips { trackId?: UUID }` → MCP tool
-    /// `daw_edit_paste_clips`. It rides `intoTrack` above verbatim, which is the
-    /// same seam m25-f-4 uses, so no new targeting logic is needed. Needs the
-    /// user's word (additive wire surface is a decision, not a chore).
+    /// ✅ **WIRE GAP CLOSED (m26-k, by user ruling 2026-08-17).** `allCommands`
+    /// now has `edit.pasteClips { trackId?: UUID }` → MCP tool
+    /// `edit_paste_clips`, routed through the typed `EditPasteControlling` seam
+    /// (`Sources/DAWControl/EditPasteSurface.swift`, the `plugin.*` precedent) —
+    /// `AppModel` conforms in `EditPasteWireSurface.swift` and calls straight
+    /// into `pasteClipsFromClipboardDetailed(intoTrack:)` below, which is now
+    /// the ONE HOME for this method's body; this `Bool`-returning wrapper is a
+    /// thin derivation over it so every existing caller (the Edit ▸ Paste menu
+    /// item, `debug.editClipboard {act:"paste"}`) keeps its exact contract.
+    /// `debug.editClipboard` remains the only note-paste route (no wire verb
+    /// exists for that — `EditClipboardStaging.swift`'s header explains why).
     @discardableResult
     func pasteClipsFromClipboard(intoTrack: UUID? = nil) -> Bool {
-        guard case .clips(let entries) = clipboard.payload else { return false }
+        if case .pasted = pasteClipsFromClipboardDetailed(intoTrack: intoTrack) { return true }
+        return false
+    }
+
+    /// The detailed twin of `pasteClipsFromClipboard(intoTrack:)` above — SAME
+    /// targeting, SAME store call, SAME selection/refusal-bubble side effects;
+    /// it just names WHICH of four outcomes happened instead of collapsing them
+    /// into a `Bool` (m26-k — `edit.pasteClips`'s reason for existing: an agent
+    /// told only `false` cannot tell "clipboard already empty" from "clipboard
+    /// holds notes, not clips" from "every clip was refused by its
+    /// destination" apart). This is the ONE HOME for the paste's actual work;
+    /// the `Bool` wrapper and `EditPasteWireSurface.swift`'s protocol
+    /// conformance both call THIS, never duplicate it.
+    @discardableResult
+    func pasteClipsFromClipboardDetailed(intoTrack: UUID? = nil) -> EditPasteResult {
+        guard let payload = clipboard.payload else { return .emptyClipboard }
+        guard case .clips(let entries) = payload else {
+            // The only other case is `.notes` — `ClipboardPayload` is a sum
+            // type of exactly two (`EditClipboard.swift`), so this is never
+            // reached by anything but that case; `clipboard.kind` is read
+            // rather than hardcoded so a future third payload kind fails
+            // loudly here instead of silently reporting "notes".
+            return .wrongPayloadKind(actual: clipboard.kind?.rawValue ?? "notes")
+        }
         // ⭐ "WHERE YOU ARE" — the destination a paste is aimed at (m25-l-1),
         // and since m25-l-3 the thing that can override the in-place rule.
         //
@@ -1646,9 +1668,27 @@ final class AppModel {
             tracks: store.tracks,
             activeTrack: destination)
 
+        // Wire-facing skip mirror — the SAME `plan.skipped` the amber bubble
+        // below renders, translated to `EditPasteSurface`'s Foundation-only
+        // shape (DAWControl cannot import DAWAppKit; see that file's header).
+        func editPasteSkips(_ skipped: [PasteAnchorPolicy.ClipPasteSkip]) -> [EditPasteSkip] {
+            skipped.map {
+                EditPasteSkip(sourceClipID: $0.sourceClipID, clipName: $0.clipName,
+                             reason: $0.reason.rawValue)
+            }
+        }
+
         guard !plan.isEmpty else {
             presentClipboardSkips(plan.skipped, refusal: plan.refusedBy)
-            return false
+            if let refusedBy = plan.refusedBy {
+                return .blocked(reason: refusedBy.rawValue, skipped: editPasteSkips(plan.skipped))
+            }
+            // A plan CAN resolve with empty landings and no `refusedBy` when
+            // every ordered member individually mismatched its destination
+            // (`resolveClipPaste`'s per-entry `canHold`/sibling-overlap skips)
+            // — distinct from a policy-level refusal, which fires before any
+            // per-clip decision at all.
+            return .blocked(reason: "all-skipped", skipped: editPasteSkips(plan.skipped))
         }
         let outcomes: [ClipPasteOutcome]
         do {
@@ -1658,12 +1698,17 @@ final class AppModel {
             })
         } catch {
             presentArrangeSplitRefusal(error, clipID: plan.landings.first?.clip.id)
-            return false
+            // `store.pasteClips` never actually throws today (its `throws`
+            // is defensive, matching the `performEdit` family's shape) — this
+            // branch is unreachable in practice, but folds honestly into
+            // `.blocked` rather than losing the error if that ever changes.
+            return .blocked(reason: "store-error: \(error.localizedDescription)",
+                            skipped: editPasteSkips(plan.skipped))
         }
         let pastedIDs = Set(outcomes.compactMap { $0.clip?.id })
         guard !pastedIDs.isEmpty else {
             presentClipboardSkips(plan.skipped, refusal: nil)
-            return false
+            return .blocked(reason: "all-skipped", skipped: editPasteSkips(plan.skipped))
         }
         if pastedIDs.count == 1, let only = pastedIDs.first {
             arrangeSelection.selectOnly(only)
@@ -1671,7 +1716,23 @@ final class AppModel {
             arrangeSelection.replace(with: pastedIDs)
         }
         presentClipboardSkips(plan.skipped, refusal: nil)
-        return true
+        let landings = outcomes.compactMap { outcome -> EditPasteLanding? in
+            guard let clip = outcome.clip, let trackID = outcome.trackID else { return nil }
+            return EditPasteLanding(clipID: clip.id, trackID: trackID, startBeat: clip.startBeat)
+        }
+        // Store-side per-landing failures (a target track vanishing between
+        // the policy's plan and this call — unreachable synchronously today,
+        // same defensiveness as the `catch` above) fold into `skipped` too,
+        // so a partial failure here is never silently dropped from the wire.
+        let storeSkips: [EditPasteSkip] = outcomes.compactMap { outcome in
+            guard outcome.clip == nil, let error = outcome.error else { return nil }
+            let name = plan.landings.first { $0.clip.id == outcome.sourceClipID }?.clip.name ?? ""
+            return EditPasteSkip(sourceClipID: outcome.sourceClipID, clipName: name, reason: error)
+        }
+        let trimmedClipIDs = Array(Set(outcomes.flatMap(\.trimmedClipIDs)))
+        let removedClipIDs = Array(Set(outcomes.flatMap(\.removedClipIDs)))
+        return .pasted(landings: landings, skipped: editPasteSkips(plan.skipped) + storeSkips,
+                       trimmedClipIDs: trimmedClipIDs, removedClipIDs: removedClipIDs)
     }
 
     /// Surfaces what a paste could NOT place, through the same amber refusal
@@ -4012,6 +4073,10 @@ final class AppModel {
                 guard let store else { throw DebugError("project store unavailable") }
                 return try await store.extractGroove(
                     fromClipId: clipID, name: name, gridBeats: grid, cycleBeats: cycle)
+            },
+            compRefusal: { [weak store] clipID in
+                guard let store else { return nil }
+                return store.compEditRefusal(clipID: clipID)
             })
 
         // The Humanize model (m25-c): the panel's two amounts, applied through
@@ -4019,16 +4084,31 @@ final class AppModel {
         // `performEdit("Humanize")` undo step). The seed is deliberately NOT
         // threaded from the UI — the panel always draws a fresh one, because it
         // closes on Apply and so could never show the user a `seedUsed` to
-        // reproduce. `try?` matches the Quantize apply above: the only refusals
-        // are an audio clip (the menu entry does not exist there, and `canApply`
-        // refuses anyway) and a take-comp member, which the sibling Quantize
-        // path also swallows — one refusal convention, not two.
+        // reproduce.
+        //
+        // ⚠️ THE `try?` IS NO LONGER A SWALLOW OF ANYTHING A USER CAN REACH
+        // (m25-c-2 — this comment used to call the swallow deliberate, and it was
+        // wrong: the take-comp refusal it named was the reported bug, an offered
+        // Apply that threw, was eaten here, and closed the panel in silence).
+        // BOTH known refusals are now decided BEFORE the press: an audio clip via
+        // `targetIsMIDI` (and its menu entry does not exist), a take-comp member
+        // via `compRefusal` below, which reads the SAME `requireNotCompMember`
+        // guard the store method runs. What is left for `try?` is the clip
+        // VANISHING between open and press (`clipNotFound`) — a race no panel
+        // state can pre-empt, and one that ends with the clip gone from under the
+        // user anyway. `compRefusal` is passed to BOTH models: this is one bug
+        // with two faces and a one-sided fix would be the two-conventions problem
+        // mirroring `applyQuantize` was chosen to avoid.
         self.humanizeModel = HumanizeModel(
             apply: { [weak store] clipID, timingBeats, velocityRange in
                 _ = try? store?.humanizeClipNotes(clipID: clipID,
                                                   timingBeats: timingBeats,
                                                   velocityRange: velocityRange,
                                                   seed: nil)
+            },
+            compRefusal: { [weak store] clipID in
+                guard let store else { return nil }
+                return store.compEditRefusal(clipID: clipID)
             })
 
         // The Export dialog model (m23-m3). Stateless to construct — it takes
@@ -4196,6 +4276,16 @@ final class AppModel {
         // it reads store state only through the toggle funnel, no init order
         // dependency, but keeping bootstrap side effects at the tail is house style.
         installSpaceKeyMonitor()
+        // edit.pasteClips (m26-k): AppModel conforms to EditPasteControlling
+        // directly (EditPasteWireSurface.swift) — no separate owned object is
+        // needed, since AppModel already IS the paste's one home
+        // (pasteClipsFromClipboardDetailed). LAST in init, not beside
+        // `router.pluginUI` above: assigning `self` as a value requires every
+        // stored property to be definitely initialized first, and this is a
+        // designated initializer. `self` here is retained by DAWProApp's own
+        // `@State`, the same non-retaining-router precedent as
+        // `copilotEngine`/`pluginUI`.
+        router.editPaste = self
     }
 
     /// Binds the REFERENCE panel model to the store (m22-g P3). Every READ goes
@@ -9572,6 +9662,10 @@ final class AppModel {
     /// panel density from the shared store. Called by the piano-roll header chip and
     /// the arrange clip context menu. `startExtract` reveals the extract field
     /// straight away (the "Extract Groove…" menu entry's entry point).
+    ///
+    /// `prepare` also asks the store whether Apply would be REFUSED on this clip
+    /// (m25-c-2, a take-comp member) — not passed from here on purpose, so no
+    /// entry point can open the panel without the question being asked.
     func openQuantizePanel(clipID: UUID, startExtract: Bool = false) {
         guard let clip = store.tracks.flatMap(\.clips).first(where: { $0.id == clipID }) else { return }
         quantizeModel.prepare(clipID: clipID, clipName: clip.name, isMIDI: clip.isMIDI)
@@ -9589,8 +9683,13 @@ final class AppModel {
     /// the wire uses (`quantizeClipNotes`, ONE undo step), then closes the panel — a
     /// single decisive action (re-quantizing partial-strength notes compounds, so
     /// the panel doesn't linger inviting an accidental re-apply).
+    ///
+    /// ⚠️ **CLOSES ONLY IF IT ACTUALLY APPLIED (m25-c-2).** `apply()` reports
+    /// whether it fired; on a refusal the panel STAYS OPEN carrying the sentence
+    /// that says why, because a message that appears as the panel vanishes
+    /// underneath it is a bubble flashing at an empty screen.
     func applyQuantize() {
-        quantizeModel.apply()
+        guard quantizeModel.apply() else { return }
         closeQuantizePanel()
     }
 
@@ -9604,6 +9703,10 @@ final class AppModel {
     /// The amounts are NOT reset here: they are sticky across opens on purpose,
     /// which is what makes ⌘Z + reopen the cheap re-roll this panel offers
     /// instead of a Re-roll button (`humanizeClipNotes` compounds on re-run).
+    ///
+    /// The REFUSAL is not sticky and is re-asked on every open (m25-c-2): the
+    /// model's `prepare` consults the store itself, so the piano-roll chip — which
+    /// is gated on nothing — cannot open a panel that skipped the question.
     func openHumanizePanel(clipID: UUID) {
         guard let clip = store.tracks.flatMap(\.clips).first(where: { $0.id == clipID }) else { return }
         humanizeModel.prepare(clipID: clipID, clipName: clip.name, isMIDI: clip.isMIDI)
@@ -9621,8 +9724,12 @@ final class AppModel {
     /// same measured reason: the store method does not coalesce and a re-run
     /// COMPOUNDS the jitter, so a panel that lingered would invite an accidental
     /// second apply that drifts the notes twice as far.
+    ///
+    /// ⚠️ **CLOSES ONLY IF IT ACTUALLY APPLIED (m25-c-2)** — `applyQuantize`'s
+    /// reasoning verbatim: nothing happened, so nothing is decisive, and the panel
+    /// has to survive to show the reason.
     func applyHumanize() {
-        humanizeModel.apply()
+        guard humanizeModel.apply() else { return }
         closeHumanizePanel()
     }
 
@@ -9721,6 +9828,12 @@ final class AppModel {
             "grooveLocked": .bool(quantizeModel.gridIsGrooveLocked),
             "savedGrooveCount": .number(Double(quantizeModel.savedGrooves.count)),
             "extractExpanded": .bool(quantizeModel.isExtractExpanded),
+            // m25-c-2 — whether Apply can fire, and the sentence shown when it
+            // cannot (a take-comp member). Additive keys on a `debug.*` response:
+            // `allCommands` and MCP are untouched. This is the only instrument in
+            // the tree that can observe the refusal on the APP tier at all.
+            "canApply": .bool(quantizeModel.canApply),
+            "refusal": quantizeModel.refusalMessage.map { JSONValue.string($0) } ?? .null,
         ])
     }
 

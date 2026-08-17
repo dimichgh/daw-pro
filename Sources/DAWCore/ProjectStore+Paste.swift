@@ -296,6 +296,8 @@ extension ProjectStore {
     @discardableResult
     public func pasteNotes(clipID: UUID, notes: [MIDINote],
                            extendToCover: Set<UUID> = []) throws -> Clip {
+        // m25-a-2 — cleared before the guards; see `setClipNotes` for why.
+        lastAutoExtendOutcome = .notNeeded
         guard let t = tracks.firstIndex(where: { $0.clips.contains { $0.id == clipID } }),
               let c = tracks[t].clips.firstIndex(where: { $0.id == clipID }) else {
             throw ProjectError.clipNotFound(clipID)
@@ -315,15 +317,23 @@ extension ProjectStore {
         // and the piano roll's own bar lines sample it, so the new end lands on
         // a line the user can already see.
         let clip = tracks[t].clips[c]
-        let grownLength: Double? = ClipAutoExtend.coverage(of: ordered, ids: extendToCover)
-            .flatMap { span in
-                ClipAutoExtend.extendedLength(
+        // m25-a-2 — the SAME outcome shape as `setClipNotes`, and `?? .notNeeded`
+        // for the same reason: an empty/unmatched `extendToCover` is the ordinary
+        // case, never a refusal. The refusal MESSAGE is composed by the store's
+        // one `autoExtendRefusalMessage`, so paste and note-edit cannot describe
+        // the same obstacle in two different ways.
+        let outcome = ClipAutoExtend.coverage(of: ordered, ids: extendToCover)
+            .map { span in
+                ClipAutoExtend.outcome(
                     currentLengthBeats: clip.lengthBeats,
                     coveringOnsetBeat: span.onsetBeat,
                     coveringEndBeat: span.endBeat,
                     beatsPerBar: transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
                     maxLengthBeats: trailingHeadroom(trackIndex: t, clipIndex: c))
-            }
+            } ?? .notNeeded
+        lastAutoExtendOutcome = outcome
+        var grownLength: Double?
+        if case .grew(let length) = outcome { grownLength = length }
 
         // ONE `performEdit`, and NO `key:`. See the banner — the missing key is
         // the entire point of the method, and the single edit is what keeps a

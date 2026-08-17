@@ -132,14 +132,20 @@ struct ReferenceCommandTests {
         // m23-dl appended `ai.modelResidency` + `ai.modelUnload` after THAT,
         // making the tail EIGHTEEN. m23-di-2a appended `vc.importVoiceModel`
         // after THAT, making the tail NINETEEN.
-        let tail = Array(CommandRouter.allCommands.dropLast(20).suffix(8))
+        // m23-ap-3 appended `clip.detectPitch` after THAT, making the tail
+        // TWENTY-ONE, and m26-k appended `edit.pasteClips` after THAT, making
+        // the tail TWENTY-TWO.
+        let tail = Array(CommandRouter.allCommands.dropLast(23).suffix(8))
         #expect(tail == ["reference.import", "reference.remove",
                          "reference.status", "reference.analyze",
                          "reference.setMonitor", "reference.setOffset",
                          "reference.setTrim", "reference.compare"])
-        #expect(CommandRouter.allCommands.count == 175)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d
-        #expect(CommandRouter.allCommands.dropLast().last == "vc.importVoiceModel")  // m23-di-2a (ai.modelUnload was last at m23-dl)
-        #expect(CommandRouter.allCommands.last == "transport.setStopAtContentEnd")  // m25-d
+        #expect(CommandRouter.allCommands.count == 180)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips)
+        #expect(CommandRouter.allCommands.dropLast(4).last == "vc.importVoiceModel")  // m23-di-2a (ai.modelUnload was last at m23-dl)
+        #expect(CommandRouter.allCommands.dropLast(3).last == "transport.setStopAtContentEnd")  // m25-d
+        #expect(CommandRouter.allCommands.dropLast(2).last == "audio.profileFile")  // m25-z
+        #expect(CommandRouter.allCommands.dropLast().last == "clip.detectPitch")  // m23-ap-3
+        #expect(CommandRouter.allCommands.last == "edit.pasteClips")  // m26-k
         // Additive: earlier neighbors untouched.
         #expect(CommandRouter.allCommands.contains("mixer.liveLoudness"))
         #expect(CommandRouter.allCommands.contains("clip.analyzeAudio"))

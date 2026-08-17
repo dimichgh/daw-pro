@@ -18,29 +18,44 @@ import DAWAppKit
 // deviation, for its reason: `DAWProApp.swift` is 9 000+ lines and a standing
 // merge magnet, so the footprint there is one dispatch line.
 //
-// ⚠️⚠️ ZERO WIRE GROWTH, AND THAT IS AN ARCHITECTURAL POSITION RATHER THAN A
-// SHORTCUT. Two independent arguments, and they fire on different verbs:
+// ⚠️⚠️ COPY/CUT STILL HAVE ZERO WIRE GROWTH, AND THAT HALF OF THE ARGUMENT
+// STILL HOLDS. `edit.copy` / `edit.cut` HAVE NO DOMAIN EFFECT AT ALL — copy
+// mutates nothing, and putting either on the wire means putting APP CLIPBOARD
+// STATE on the wire, the same category `debug.arrangeMarquee` rejects for
+// selection ("the selection is UI state"). Neither exists as a control command
+// today and this file's reasoning for that is unchanged.
 //
-//   • `edit.copy` / `edit.cut` HAVE NO DOMAIN EFFECT AT ALL. Copy mutates
-//     nothing; putting it on the wire means putting APP CLIPBOARD STATE on the
-//     wire — the same category `debug.arrangeMarquee` rejects for selection
-//     ("the selection is UI state").
-//   • `edit.paste` WOULD HAVE TO READ that app-tier clipboard, so it cannot be a
-//     headless `DAWControl` verb; it would route through `appCommandHandler`,
-//     which `Commands.swift:170-172` defines as the debug tier BY DEFINITION. An
-//     `edit.paste` on `allCommands` implemented behind `appCommandHandler` is a
-//     debug command wearing a badge.
+// ⚠️⚠️ **PASTE'S HALF WAS OVERTURNED, BY USER RULING (2026-08-17) — DO NOT
+// RE-LITIGATE IT.** This comment used to argue `edit.paste` "would have to
+// read that app-tier clipboard, so it cannot be a headless `DAWControl` verb;
+// it would route through `appCommandHandler` … a debug command wearing a
+// badge." That objection is answered, not overridden: `edit.pasteClips`
+// (m26-k) does NOT route through `appCommandHandler` — it routes through a
+// TYPED seam, `EditPasteControlling` (`Sources/DAWControl/EditPasteSurface.swift`),
+// the exact `plugin.*` precedent this file's own sibling command family
+// (`PluginUISurface.swift`) already used for an app-tier capability that is on
+// `allCommands` with a real MCP tool. A typed seam with its own
+// `rejectUnknownKeys` site is not `appCommandHandler`'s untyped debug switch,
+// so the "debug command wearing a badge" objection does not apply to it.
+// `AppModel.pasteClipsFromClipboard(intoTrack:)` is still this seam's ONE
+// HOME (unchanged); `edit.pasteClips` is a new WIRE ROUTE to it, not a new
+// operation, and it does not touch `performMenuCopy/Cut/Paste` or this file's
+// `debug.editClipboard` handler.
 //
-// AND THE HONEST AUDIT SAYS AGENTS LOSE NOTHING. Notes are already fully
-// reachable and already atomic: `clip.setNotes` takes the WHOLE array, so an
-// agent reads a clip's notes, merges a transposed copy and writes back — one
-// call, one undo step. Clips are reachable through `clip.duplicate` +
-// `clip.move`. The ONLY genuine gap is ATOMIC multi-clip duplication, whose
-// honest form is one `clip.duplicateBatch` verb — a user decision about agent
-// capability, to be filed with its own evidence if a real workflow needs it, NOT
-// three `edit.*` verbs over an app-tier clipboard.
+// AND THE HONEST AUDIT STILL SAYS AGENTS LOSE NOTHING BEYOND CLIP PASTE.
+// Notes remain reachable through `clip.setNotes`/`clip.getNotes` (read the
+// clip's current array, merge a transposed copy, write the whole array back —
+// one call, one undo step) — there is still no `edit.pasteNotes` wire verb,
+// and `edit.pasteClips` returns a named `wrongPayloadKind` outcome (never a
+// bare `false`) precisely so an agent whose clipboard holds notes is told to
+// use that pair instead of guessing why nothing landed. The ONLY remaining
+// gap is ATOMIC multi-clip duplication, whose honest form is one
+// `clip.duplicateBatch` verb — still a user decision to be filed with its own
+// evidence if a real workflow needs it, not a wire verb over the clipboard.
 //
-// Counts therefore stay: `allCommands` 173 / MCP 176 / Copilot catalog 74.
+// Counts: see `docs/ARCHITECTURE.md`'s "Wire surface — CURRENT TOTALS" table,
+// the one to trust — this file does not re-state them (that is exactly the
+// prose-headline rot the constitution warns about elsewhere).
 
 extension AppModel {
 

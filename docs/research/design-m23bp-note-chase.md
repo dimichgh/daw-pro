@@ -132,12 +132,15 @@ decidable by reading one line and provable by the compiler. Two supporting obser
 | 8 | `AudioEngine.swift:2594` | record start (with count-in) | `transport.positionBeats` | `.relocation` | no |
 | 9 | `AudioEngine.swift:3122` | loop-wrap **fallback** restart | `loopStartBeat` | `.relocation` | no |
 | 10 | `AudioEngine.swift:3204` | `recoverEngine` resume (also reached by `watchdogRestart`, `:3261`) | `beat(forElapsedSeconds:)` from the live anchor | `.continuation` | **yes** |
-| 11 | `OfflineRenderer.swift:353` | bounce / stem render | caller's `fromBeat` | `.relocation` (default) | no |
+| 11 | `OfflineRenderer.swift` | bounce / stem / loudness / clip vocal-fix render | caller's `fromBeat` | `.offlineRender` (**m23-bv**; was `.relocation`, and before that the bare default) | **yes** |
 
 Six continuations, four relocations inside `AudioEngine.swift`, plus the offline renderer which
 takes the default and is never touched. **AMENDED BY m23-cd (2026-08-04): row 1 is now
 `.transportStart` and CHASES — six continuations, ONE transport start, three relocations. See
-§2.4.**
+§2.4.** **AMENDED AGAIN BY m23-bv (2026-08-17): row 11 is now `.offlineRender` and CHASES — the
+offline renderer no longer takes the default, and the enum has FOUR cases of which only
+`.relocation` declines to chase. See §2.5.** ⚠️ The line numbers in this table are the m23-bp
+snapshot and have drifted; `NoteChaseSiteTests` pins the ORDERED SEQUENCE, never the numbers.
 
 ### 2.4 AMENDMENT — m23-cd (2026-08-04): the play button chases
 
@@ -188,10 +191,12 @@ jump, an offline bounce.
   moment a take begins. Out of the ruling.
 - **Site 9, the loop-wrap fallback.** §2.2's two reasons are unchanged and still binding: cycle
   determinism, and "a once-only re-attack is worse than uniform absence".
-- **Site 11, the offline bounce.** m23-bv, a DIFFERENT SURFACE with its own measured audio/MIDI
-  asymmetry (0.354 vs 0.0 at identical geometry), still awaiting its own ruling. m23-cd is strong
-  evidence for the same answer there and should be attached when it is re-put — but it is not a
-  ruling on it, and nothing in this cycle changed a single rendered byte offline.
+- **Site 11, the offline bounce.** ~~m23-bv, a DIFFERENT SURFACE with its own measured audio/MIDI
+  asymmetry (0.354 vs 0.0 at identical geometry), still awaiting its own ruling.~~ **RULED
+  2026-08-17 — see §2.5.** The prediction recorded here was right: m23-cd was re-put with the
+  measurement attached and the user gave the same answer for the offline surface. What is no longer
+  true is the last clause — m23-bv DOES change rendered bytes offline, by design, contained to
+  renders from a non-zero `fromBeat`.
 
 **KNOWN CONSEQUENCE UNDER A LIVE LOOP, and the §2.2 tension it creates.** `.transportStart` goes
 through the head-build path, which chases; the appended loop-cycle blocks do not (§3.4, unchanged).
@@ -218,6 +223,66 @@ one 64-beat pad note resumed at beat 2: **held-note RMS 0.0644 with `.transportS
 0.0642; the pause window exactly 0.0 in both, so the sound after the resume cannot be a leftover
 ring; a marker note whose onset is AFTER the resume beat audible in both arms). Round-tripped
 through a real 388 096-byte wav and re-measured off disk at the same 0.0644.
+
+### 2.5 AMENDMENT — m23-bv (2026-08-17): the offline bounce chases too
+
+**The user's ruling, verbatim option:** *"Make the bounce chase held notes, like the play button
+already does."* This settles the product question §2.1 row 11 and §2.4's site-11 note had parked.
+
+**What was measured first, which is why the question was worth putting.**
+`OfflineChaseDivergenceTests` renders through the real `OfflineRenderer.render` / `renderToWAV`
+production path and asserts on SAMPLES — five arms at 48 kHz / 120 BPM, bar 5 = beat 16, RMS over
+0.5 s past the ADSR attack:
+
+| arm | fixture | rendered from | RMS (pre-ruling) |
+|---|---|---|---|
+| A | MIDI note held `[0, 32)` | beat 16 | **0.0** ← the finding |
+| B | anti-vacuity: onset exactly at 16 | beat 16 | 0.066 |
+| C | AUDIO clip `[14, 18)` | beat 16 | **0.354** ← the asymmetry |
+| D | MIDI note `[14, 18)` — C's geometry EXACTLY | beat 16 | **0.0** |
+| E | reference: arm A played from beat 0, read at frame 384 000 | beat 0 | 0.064 |
+
+A and E are the same project at the same musical instant; only the render's start beat differed.
+C and D differ only in the MEDIUM of the straddling material, and they disagreed.
+
+**The choice was two-sided and was put that way:** chasing MIDI means synthesising an attack the
+song does not have at bar 5, so the trade is *missing pad* vs *phantom attack*, not *correct* vs
+*incorrect*. (The third position — chase at the note's decayed amplitude — needs a sampler feature
+that does not exist; §4.) The user chose the phantom attack.
+
+**Shape of the fix: a FOURTH case, `.offlineRender`, whose `chasesHeldNotes` is true.** Rejected
+alternatives, both of which would have been one-token edits:
+- **Pass `.transportStart`.** Its own doc defines it as *the user pressed PLAY*. A bounce is not a
+  transport start; making the case lie corrupts the ONE home of this mapping, which is the single
+  property the whole m23-bp design rests on.
+- **Flip `.relocation.chasesHeldNotes` to true.** `.relocation` is still correct — no chase — for
+  a seek while rolling, a record start, and a loop-wrap jump (§2.2, §3.4). Flipping it changes
+  three live behaviours to fix one offline one, and re-breaks the §8.6 cycle-determinism law.
+
+So the amended law reads: **chase iff playback is CONTINUING, the user just pressed PLAY, or we are
+rendering offline.** Only `.relocation` declines. `chasesHeldNotes` remains an exhaustive switch and
+`RescheduleCause` remains `CaseIterable`, so this fourth case had to be added to the site pin's
+token list rather than silently vanishing from it — **verified by adding the case and running the
+pin BEFORE updating the list: `scanTokenListIsExhaustive` went red exactly as its doc claims.**
+
+**BYTE-IDENTITY — the consequence, contained and machine-checked.** The recorded justification for
+site 11's `.relocation` was *"it keeps the offline SHA gates byte-identical"*, which is a reason not
+to CHANGE the behaviour rather than a reason it was right. Chasing does legitimately change offline
+output, and the containment argument is: chase can only ever ADD notes whose onset precedes
+`fromBeat`, and the guard in `buildEvents` is a **strict** `onBeat < fromBeat`, so at `fromBeat: 0`
+nothing can qualify — and a note onsetting exactly AT the anchor is not chased, so it cannot
+double-fire alongside its natural note-on. Therefore **every render from beat 0 is byte-identical
+to the pre-ruling tree**, and the blast radius is confined to renders from a non-zero `fromBeat`
+with material straddling it. This is asserted, not argued: `NoteChaseGraphTests` G-L4a (identical
+events AND noteIDs at beat 0 over a corpus) and G-L4b (0 differing samples of 48 000 through the
+real `PlaybackGraph`, bit-pattern compared), each carrying an anti-vacuity arm at beat 4 where the
+same comparison must go red — it does, at 47 998 differing samples. Precondition, stated because it
+is not universal: this holds for projects whose note onsets are ≥ 0.
+
+**Post-ruling measurement:** arm A **0.0 → 0.066** in memory and on disk (against play-through
+0.064), arm D 0.0 → sounding, so the audio/MIDI asymmetry at identical geometry is closed. The
+suite kept its silent-arm legs INVERTED rather than deleted, so a revert of site 11 to
+`.relocation` fails in the audio a user would have lost, naming the ruling in its message.
 
 ### 2.2 Where I differ from the parent's provisional split
 

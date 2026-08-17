@@ -16,6 +16,14 @@ import Testing
 /// ⚠️ §7.6: pitch DSP never reaches the render thread, and neither does this
 /// suite — every leg runs on the test's own thread, off any audio callback.
 ///
+/// ⚠️ RENAMED AT m23-ap-2b, NOTHING ELSE CHANGED. The concrete class this suite
+/// drives is now `SwiftF0PitchTracker`; `PitchTracker` became the PROTOCOL it
+/// conforms to. All eight legs below are byte-identical apart from that type
+/// name — this suite characterises the RAW model (`detect`), which is now
+/// internal, and `PitchTrackerAccuracyTests` characterises the policy layer
+/// (`analyze`) on top of it. Read a failure here as "the artefact moved";
+/// read a failure there as "the policy moved".
+///
 /// ⚠️⚠️ EVERY NUMBER ASSERTED BELOW WAS MEASURED FIRST AND THEN PINNED, not
 /// guessed and then loosened. The first draft of this file asserted "≥ 50 of 62
 /// frames are voiced at confidence ≥ 0.9" on a clean 220 Hz sine — a threshold
@@ -35,7 +43,7 @@ struct PitchTrackerInferenceTests {
     /// a fixture than a wav blob, and there is nothing to rot.
     private static func sine(frequency: Double, sampleCount: Int, amplitude: Float = 0.5) -> [Float] {
         (0..<sampleCount).map { n in
-            amplitude * Float(sin(2.0 * Double.pi * frequency * Double(n) / PitchTracker.modelSampleRate))
+            amplitude * Float(sin(2.0 * Double.pi * frequency * Double(n) / SwiftF0PitchTracker.modelSampleRate))
         }
     }
 
@@ -55,7 +63,7 @@ struct PitchTrackerInferenceTests {
     /// `Sources/DAWEngine/Analysis/Resources/VENDORED.md` — so "some SwiftF0
     /// model" is not good enough to reproduce the spike's numbers.)
     @Test func vendoredWeightsMatchThePinnedArtefact() throws {
-        let url = try #require(PitchTracker.weightsURL,
+        let url = try #require(SwiftF0PitchTracker.weightsURL,
                                "swiftf0.onnx did not make it into the DAWEngine resource bundle")
         let data = try Data(contentsOf: url)
         #expect(data.count == 397_987)
@@ -73,7 +81,7 @@ struct PitchTrackerInferenceTests {
     @Test func aMissingModelFileThrowsRatherThanSilentlySucceeding() {
         let bogus = URL(fileURLWithPath: "/nonexistent/definitely-not-a-model.onnx")
         #expect(throws: PitchTrackerError.self) {
-            _ = try PitchTracker(weightsURL: bogus)
+            _ = try SwiftF0PitchTracker(weightsURL: bogus)
         }
     }
 
@@ -88,7 +96,7 @@ struct PitchTrackerInferenceTests {
     /// 222.074 / 221.129 / 220.917 / 220.830 / 220.759 — the spike's head was
     /// 222.036 / 221.138 / 220.924 / 220.821 / 220.754.
     @Test func detectsTwoTwentyHertzFromARealOnnxRuntimeSession() throws {
-        let tracker = try PitchTracker()
+        let tracker = try SwiftF0PitchTracker()
         let frames = try tracker.detect(samples: Self.sine(frequency: 220, sampleCount: 16_000))
 
         // 16000 samples at hop 256 => 62 frames (62.5 fps). This pins the
@@ -123,7 +131,7 @@ struct PitchTrackerInferenceTests {
     /// **437.55 Hz — 9.7 cents FLAT**. High confidence is not high accuracy,
     /// and m23-ap-2b's correction UI must not present it as such.
     @Test func detectsADifferentFrequencyToo() throws {
-        let tracker = try PitchTracker()
+        let tracker = try SwiftF0PitchTracker()
         let frames = try tracker.detect(samples: Self.sine(frequency: 440, sampleCount: 16_000))
         #expect(frames.count == 62)
         #expect(frames.allSatisfy { $0.frequencyHz.isFinite && $0.confidence.isFinite })
@@ -156,7 +164,7 @@ struct PitchTrackerInferenceTests {
     /// change without someone deliberately changing them. If it reddens, the
     /// first question is "what did we bump?", not "what did we break."
     @Test func octaveBimodalityIsPresentAndBounded() throws {
-        let tracker = try PitchTracker()
+        let tracker = try SwiftF0PitchTracker()
 
         let quiet = try tracker.detect(samples: Self.sine(frequency: 220, sampleCount: 16_000, amplitude: 0.5))
         let quietOctaveDown = quiet.filter { abs($0.frequencyHz - 110.0) < 20 }
@@ -181,7 +189,7 @@ struct PitchTrackerInferenceTests {
     /// confidence 0.384 while the sustained portion of a 220 Hz sine sits at
     /// 0.483. Both are far below the design's 0.9 policy threshold.
     @Test func silenceProducesFiniteValuesAndNoConfidentPitch() throws {
-        let tracker = try PitchTracker()
+        let tracker = try SwiftF0PitchTracker()
         let frames = try tracker.detect(samples: [Float](repeating: 0, count: 16_000))
         #expect(frames.count == 62)
         #expect(frames.allSatisfy { $0.frequencyHz.isFinite && $0.confidence.isFinite })
@@ -192,7 +200,7 @@ struct PitchTrackerInferenceTests {
     /// A buffer shorter than one hop is refused as a value, not by trapping
     /// inside ORT with a shape error the caller cannot act on.
     @Test func aBufferShorterThanOneFrameIsRefused() throws {
-        let tracker = try PitchTracker()
+        let tracker = try SwiftF0PitchTracker()
         #expect(throws: PitchTrackerError.self) {
             _ = try tracker.detect(samples: [Float](repeating: 0, count: 8))
         }
@@ -202,9 +210,9 @@ struct PitchTrackerInferenceTests {
     /// samples is 48.2 hops, so the frame count must round DOWN consistently
     /// and nothing may read past the end of the buffer.
     @Test func anOddLengthBufferFramesCleanly() throws {
-        let tracker = try PitchTracker()
+        let tracker = try SwiftF0PitchTracker()
         let frames = try tracker.detect(samples: Self.sine(frequency: 220, sampleCount: 12_345))
-        #expect(frames.count == 12_345 / PitchTracker.hopLength)
+        #expect(frames.count == 12_345 / SwiftF0PitchTracker.hopLength)
         #expect(frames.allSatisfy { $0.frequencyHz.isFinite && $0.confidence.isFinite })
         let overall = Self.median(frames.map(\.frequencyHz))
         #expect(abs(overall - 220.0) < 1.5, "median f0 was \(overall) Hz on an odd-length buffer")

@@ -56,6 +56,85 @@ struct PianoRollZoomTests {
         #expect(PianoRollZoom.percentLabel(pixelsPerBeat: 200) == "625%")
     }
 
+    // MARK: - Anchor-preserving zoom (m25-b-3)
+
+    @Test("a visible playhead is the anchor; its SCREEN x is what the zoom holds")
+    func anchorIsThePlayheadWhenVisible() {
+        // Playhead at content 500, scroller at 200 → 300 pt into a 900 pt viewport.
+        #expect(PianoRollZoom.anchorScreenX(playheadContentX: 500, offset: 200,
+                                            viewportWidth: 900) == 300)
+        // Exactly on either edge still counts as in frame (the arrange's rule).
+        #expect(PianoRollZoom.anchorScreenX(playheadContentX: 200, offset: 200,
+                                            viewportWidth: 900) == 0)
+        #expect(PianoRollZoom.anchorScreenX(playheadContentX: 1100, offset: 200,
+                                            viewportWidth: 900) == 900)
+    }
+
+    @Test("OFF-CLIP (nil) falls back to the viewport centre — the m23-c1 rule")
+    func offClipAnchorsOnTheCentre() {
+        // ⚠️ THE POINT OF THIS ASSERTION IS THE COMPARISON, NOT THE NUMBER. It is
+        // pinned against `ArrangeZoom`'s OWN no-playhead answer rather than a
+        // re-typed `viewportWidth / 2`, so the day the shared centre rule changes
+        // this test tracks it instead of freezing a second definition into the
+        // roll. `PianoRollZoom.anchorScreenX` delegates by handing the shared rule
+        // a playhead that cannot be in frame; if someone "tidies" that into a local
+        // literal, this stays green — which is why the NEXT test exists.
+        let shared = ArrangeZoom.anchorScreenX(playheadContentX: 5000, offset: 0,
+                                               viewportWidth: 900)
+        #expect(PianoRollZoom.anchorScreenX(playheadContentX: nil, offset: 0,
+                                            viewportWidth: 900) == shared)
+        #expect(PianoRollZoom.anchorScreenX(playheadContentX: nil, offset: 400,
+                                            viewportWidth: 900) == shared)
+        // A playhead that exists but has been scrolled out of frame takes the same
+        // fallback — "not on screen" and "not in this clip" are one case here.
+        #expect(PianoRollZoom.anchorScreenX(playheadContentX: 50, offset: 400,
+                                            viewportWidth: 900) == shared)
+        // Degenerate viewport: no anchor to invent, and never a negative one.
+        #expect(PianoRollZoom.anchorScreenX(playheadContentX: nil, offset: 0,
+                                            viewportWidth: 0) == 0)
+    }
+
+    @Test("the beat under the anchor survives the zoom — at roll scales, both directions")
+    func anchoredZoomHoldsTheBeat() {
+        // ⭐ THE RULE THE WHOLE ITEM EXISTS FOR, exercised through the shared home
+        // the roll now calls (`ArrangeZoom.offsetPreservingAnchor`) at the ROLL's
+        // own default scale and ladder — a proof that the arrange's arithmetic is
+        // surface-independent, which is the premise of reusing it.
+        let viewport: CGFloat = 900
+        for anchorX in [CGFloat(0), 120, viewport / 2, 880] {
+            for oldOffset in [CGFloat(0), 37, 1024] {
+                let old = PianoRollZoom.defaultPixelsPerBeat        // 32
+                let beatUnderAnchor = (oldOffset + anchorX) / old
+                for new in [PianoRollZoom.zoomedIn(old), PianoRollZoom.zoomedOut(old),
+                            CGFloat(200), CGFloat(4)] {
+                    let offset = ArrangeZoom.offsetPreservingAnchor(
+                        oldPPB: old, newPPB: new,
+                        oldOffset: oldOffset, anchorScreenX: anchorX)
+                    // Where does that beat now sit on screen? Only the floor at 0
+                    // may move it, and only when the anchor would need a negative
+                    // offset (the timeline origin cannot scroll past the left edge).
+                    let screenX = beatUnderAnchor * new - offset
+                    let floored = beatUnderAnchor * new - anchorX < 0
+                    if floored {
+                        #expect(offset == 0)
+                        #expect(screenX <= anchorX + 1e-9)
+                    } else {
+                        #expect(abs(screenX - anchorX) < 1e-9,
+                                "ppb \(old)→\(new), offset \(oldOffset), anchor \(anchorX)")
+                    }
+                }
+            }
+        }
+    }
+
+    @Test("a degenerate OLD scale cannot produce a NaN offset (divide-by-zero guard)")
+    func degenerateOldScaleIsSafe() {
+        let offset = ArrangeZoom.offsetPreservingAnchor(
+            oldPPB: 0, newPPB: 32, oldOffset: 400, anchorScreenX: 100)
+        #expect(offset == 400)
+        #expect(!offset.isNaN)
+    }
+
     // MARK: - Grid density (the sub-beat fade)
 
     @Test("sub-beat lines are hidden at ≤4 pt spacing, full at ≥8 pt, a linear ramp between")

@@ -845,7 +845,12 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
                     loopStart: zd.loopStart, loopEnd: zd.loopEnd)
             }
             return SamplerParams(zones: zones, oneShot: s.oneShot,
-                                 attack: s.attack, release: s.release, gain: s.gain)
+                                 attack: s.attack, release: s.release, gain: s.gain,
+                                 // m26-h: provenance is a RECORD, so it decodes
+                                 // verbatim — no resolution, no warning, no drop
+                                 // if the .sfz has since moved. Absent (every
+                                 // pre-m26-h project) → nil → today's behaviour.
+                                 sourcePath: s.sourcePath, displayName: s.displayName)
         }
         // The AU config round-trips intact even when the component isn't
         // installed on this machine — the engine reports `.missing` and
@@ -867,8 +872,22 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
     public var attack: Double
     public var release: Double
     public var gain: Double
+    // m26-h provenance — nil never encodes (the synthesized encoder uses
+    // encodeIfPresent for optionals), so a sampler that was never imported
+    // from a library keeps a document shape byte-identical to pre-m26-h, and a
+    // pre-m26-h project decodes both keys as nil. `sourcePath` is a plain
+    // absolute path, NOT a `media/` reference: it names the .sfz/.dspreset the
+    // zones came from, which the bundle deliberately does not copy (the SAMPLES
+    // are what get copied, per zone). ReferenceDocument's `media`/`sourcePath`
+    // pair is the sibling precedent for a path that may not resolve on the
+    // machine that opens the project — and, like it, an unresolvable path here
+    // is never an open-time failure: nothing reads it back.
+    public var sourcePath: String?
+    public var displayName: String?
 
-    private enum CodingKeys: String, CodingKey { case zones, oneShot, attack, release, gain }
+    private enum CodingKeys: String, CodingKey {
+        case zones, oneShot, attack, release, gain, sourcePath, displayName
+    }
 
     init(from s: SamplerParams, mediaRefs: [UUID: String?]) {
         zones = s.zones.map { SamplerZoneDocument(from: $0, media: mediaRefs[$0.id] ?? nil) }
@@ -876,6 +895,8 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         attack = s.attack
         release = s.release
         gain = s.gain
+        sourcePath = s.sourcePath
+        displayName = s.displayName
     }
 
     public init(from decoder: any Decoder) throws {
@@ -886,6 +907,8 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         attack = try c.decodeIfPresent(Double.self, forKey: .attack) ?? d.attack
         release = try c.decodeIfPresent(Double.self, forKey: .release) ?? d.release
         gain = try c.decodeIfPresent(Double.self, forKey: .gain) ?? d.gain
+        sourcePath = try c.decodeIfPresent(String.self, forKey: .sourcePath)
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
     }
 }
 

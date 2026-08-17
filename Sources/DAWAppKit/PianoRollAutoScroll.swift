@@ -47,6 +47,21 @@ import Foundation
 /// and at the window's physical edge the pointer runs out of travel.** The
 /// user's sentence says *"as user MOVES close to the edge"*, which this
 /// satisfies; a held-at-edge auto-repeat is a separate, timer-shaped item.
+///
+/// ⭐⭐ **THE FABRICATION OBJECTION ABOVE WAS ANSWERED AND IS RETRACTED (m25-r,
+/// 2026-08-16). IT IS LEFT STANDING BECAUSE THE REASONING IS STILL CORRECT AND
+/// STILL BINDING ON ANY FUTURE TIMER — but it is no longer a reason not to have
+/// one.** A tick does not have to fabricate, because it can RECOMPUTE: a held
+/// pointer's content position changes only because the content moved, and the
+/// content moved only because this file's own `nextOffset` scrolled it, which
+/// the roll observes directly. `localX + observedOffset`, rebuilt from scratch
+/// every tick, integrates nothing and therefore drifts nowhere — and it is
+/// exactly the value SwiftUI would report, so the next real event agrees with
+/// the synthesised ones. **The cancel debt was real and was paid: three
+/// teardowns, all pinned.** The policy lives in `PianoRollEdgeRepeat.swift`;
+/// this file is still pointer-driven and unchanged. ⚠️ **DO NOT "SIMPLIFY" BY
+/// DELETING THE PARAGRAPH ABOVE — a future timer that integrates instead of
+/// recomputing reintroduces exactly the desync it names.**
 public enum PianoRollAutoScroll {
 
     /// How wide the hot band at each viewport edge is, in points.
@@ -65,6 +80,19 @@ public enum PianoRollAutoScroll {
     /// 24 pt is deliberately less than `edgeBand`: a single tick can never carry
     /// the content further than the band is wide, so the pointer cannot "fall
     /// out" of the band it is steering through one large jump.
+    ///
+    /// ⚠️⚠️ **THAT RATIONALE DESCRIBES A WORLD THIS CODE DOES NOT LIVE IN, AND
+    /// THE CONSTANT IS RIGHT FOR A DIFFERENT REASON (found m25-r, 2026-08-16).**
+    /// The pointer cannot "fall out" of the band by scrolling at all: `local`
+    /// reduces to the pointer's physical viewport x, which does not move when
+    /// the content moves under it. The sentence presumes the pointer's
+    /// band-position travels with the content — the opposite of the content-space
+    /// premise this file's own header relies on. **Kept because the VALUE is
+    /// sound (a 24 pt ceiling is a comfortable per-event step) and because
+    /// `PianoRollAutoScrollTests` pins literals derived from it; corrected
+    /// because a guard justified by a false premise is how the next reader
+    /// derives a false conclusion.** The file asserted one premise in prose and
+    /// guarded its negation in a constant, and nobody had established which held.
     public static let maxStep: CGFloat = 24
 
     /// The next horizontal content offset for a drag whose pointer is at

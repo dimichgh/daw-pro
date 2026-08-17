@@ -13,9 +13,30 @@
 /// implied: a note that was already decaying when the transport stopped
 /// re-attacks at full velocity on the next play. That counter-case was put to
 /// the user before they ruled; it is a cost, not a defect.
+/// `.offlineRender`: an OFFLINE render (bounce / stems / loudness measurement /
+/// the windowed clip vocal-fix bounce). Like `.transportStart`, the beat WAS
+/// chosen — so this is not a continuation — but it chases anyway, because a
+/// region bounce should sound like the song sounds at that instant. A pad held
+/// from bar 1 is audible when you play THROUGH bar 5; it must not vanish
+/// because you bounced FROM bar 5. The user ruled for this on 2026-08-17
+/// ("make the bounce chase held notes, like the play button already does").
+/// THE ACCEPTED COST, stated not implied — it is the same trade
+/// `.transportStart` names: a note already mid-decay at `fromBeat` re-attacks
+/// at full velocity, so the bounce synthesises an attack the song does not
+/// have there. That counter-case ("missing pad" vs "phantom attack") was put to
+/// the user before they ruled; it is a cost, not a defect. True voice
+/// continuation — chasing at the note's decayed amplitude — needs a sampler
+/// feature that does not exist (design-m23bp §4).
+/// ⚠️ THIS CASE CHANGES RENDERED BYTES, and deliberately: see m23-bv. It can
+/// only ever ADD notes whose onset precedes `fromBeat`, so a render from beat 0
+/// is byte-identical to the pre-ruling tree (`buildEvents`' guard is a STRICT
+/// `onBeat < fromBeat`, so nothing can precede 0 and a note onsetting exactly
+/// AT the anchor is not chased and cannot double-fire). `NoteChaseGraphTests`
+/// machine-checks that containment rather than leaving it argued.
 /// `.relocation`: the beat was CHOSEN **and** the build must reproduce a fresh
-/// seek — a seek while rolling, a record start, a loop-wrap jump, a bounce
-/// range. The v0 no-chase rule stands.
+/// seek — a seek while rolling, a record start, a loop-wrap jump. The v0
+/// no-chase rule stands. ⚠️ It no longer covers a bounce range: m23-bv moved
+/// the offline surface to `.offlineRender` on the user's 2026-08-17 ruling.
 ///
 /// ⚠️ CHASE AND ANCHOR POLICY ARE INDEPENDENT AXES (ARCHITECTURE.md, m23-bs-3b
 /// note): "who chose the beat?" decides `StartAnchorPolicy`, "does this build
@@ -38,6 +59,7 @@ enum RescheduleCause: CaseIterable {
     case relocation
     case continuation
     case transportStart
+    case offlineRender
 
     /// THE mapping. It exists exactly once in the tree (read only by
     /// `PlaybackGraph.scheduleAll`); every consumer reads this property rather
@@ -49,7 +71,7 @@ enum RescheduleCause: CaseIterable {
     var chasesHeldNotes: Bool {
         switch self {
         case .relocation: return false
-        case .continuation, .transportStart: return true
+        case .continuation, .transportStart, .offlineRender: return true
         }
     }
 }

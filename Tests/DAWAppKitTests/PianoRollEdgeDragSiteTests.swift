@@ -20,7 +20,7 @@ import Foundation
 /// extracted by name (a rename fails rather than passing vacuously), prose
 /// cannot satisfy a claim about what code CALLS, and every negative below is
 /// paired with a positive control proving the needle is findable.
-@Suite("Piano roll edge drag + paste wiring (m25-f-2, m25-f-3)")
+@Suite("Piano roll edge drag + paste wiring (m25-f-2, m25-f-3, m25-r)")
 struct PianoRollEdgeDragSiteTests {
 
     // MARK: - Source access
@@ -170,6 +170,91 @@ struct PianoRollEdgeDragSiteTests {
         // A `guard let … else { return }` on the policy's nil is what keeps the
         // nonce quiet on the ~90 % of drag ticks nowhere near an edge.
         #expect(scroll.contains("else { return }"))
+    }
+
+    // MARK: - m25-r — held-at-edge auto-repeat
+
+    /// ⭐⭐ **ARMED FROM THE LIVE WRAPPER, NEVER FROM THE SHARED FUNNEL.**
+    /// `applyGesture` is the only path a real mouse takes; `advanceGesture` is
+    /// also driven by `debug.pianoRollMarquee`, which has no pointer that can be
+    /// held still. A clock armed in the funnel would let a staged gesture start
+    /// a repeat with nothing behind it.
+    @Test("m25-r: the repeat clock is armed by the LIVE pointer, and only once it has travelled")
+    func edgeRepeatArmsFromTheLivePointerOnly() {
+        let apply = rollBody("applyGesture")
+        #expect(apply.contains("PianoRollEdgeRepeat.HeldPointer("))
+        #expect(apply.contains("lastPointerEventAt = ContinuousClock.now"))
+        // ⚠️ THE `didMove` TERM IS THE HAZARD GATE, not decoration.
+        // `DragGesture(minimumDistance: 0)` fires `onChanged` on the PRESS, so
+        // without it a stationary CLICK on a note inside the 48 pt band would
+        // become a runaway scroll-and-move at the clock's rate.
+        #expect(apply.contains("setEdgeRepeat(running: didMove && activeDragScrollsContent)"))
+        let advance = rollBody("advanceGesture")
+        #expect(!advance.contains("setEdgeRepeat("))
+        #expect(!advance.contains("PianoRollEdgeRepeat."))
+        // POSITIVE CONTROL for both negatives — both spellings ARE findable in
+        // this file, so their absence from `advanceGesture` is a fact about that
+        // body rather than about a needle that could never match.
+        let roll = Self.codeOnly(Self.text(Self.rollPath))
+        #expect(roll.contains("setEdgeRepeat("))
+        #expect(roll.contains("PianoRollEdgeRepeat."))
+    }
+
+    /// A repeat tick must be unable to do anything a real pointer event would
+    /// not: same funnel, same snap, same audition, same scroll delivery.
+    @Test("m25-r: a repeat tick routes through the SAME funnel, gated on a real hold")
+    func edgeRepeatTickRoutesThroughTheFunnel() {
+        let tick = rollBody("repeatHeldEdgeScroll")
+        #expect(tick.contains("guard didMove, activeDragScrollsContent"))
+        #expect(tick.contains("PianoRollEdgeRepeat.isHeld("))
+        #expect(tick.contains("PianoRollEdgeRepeat.tick("))
+        #expect(tick.contains("advanceGesture(translation: tick.translation, location: tick.location,"))
+        // ⚠️ AND MUST NOT DELIVER ITS OWN SCROLL: `advanceGesture` already ends
+        // in `autoScroll(towards:)`, so a `scrollExternally` here would be a
+        // second home for "where should the viewport go" — the exact duplication
+        // `PianoRollAutoScroll` exists to prevent.
+        #expect(!tick.contains("follow.scrollExternally("))
+        // POSITIVE CONTROL: the spelling IS present in this file, in `autoScroll`.
+        #expect(rollBody("autoScroll").contains("follow.scrollExternally("))
+    }
+
+    /// ⚠️⚠️ **A CLOCK THAT OUTLIVES ITS GESTURE SCROLLS A SURFACE NOBODY IS
+    /// TOUCHING.** Three teardowns, and the count is the pin: a normal release
+    /// (`endGesture`), the m18-i external reseed (which swallows the gesture
+    /// with no `onEnded`-shaped end at all), and `.onDisappear` (a clip switch
+    /// recreates this view under a live drag). Dropping any one of them leaves
+    /// a reachable state with a running repeat.
+    @Test("⚠️ m25-r: the repeat clock has all THREE teardowns")
+    func edgeRepeatHasEveryTeardown() {
+        let roll = Self.codeOnly(Self.text(Self.rollPath))
+        let stops = occurrences("setEdgeRepeat(running: false)", in: roll)
+        #expect(stops == 3, "expected 3 repeat-clock teardowns, found \(stops)")
+        #expect(rollBody("endGesture").contains("setEdgeRepeat(running: false)"))
+        #expect(rollBody("reseedFromExternalMutation").contains("setEdgeRepeat(running: false)"))
+        // The third lives in `.onDisappear`, which is not a declaration the
+        // extractor can slice by name — so it is pinned as "exactly one, inside
+        // the view's `body`", which is where `.onDisappear` is and where neither
+        // named function above is.
+        #expect(occurrences("setEdgeRepeat(running: false)", in: rollBody("body")) == 1)
+    }
+
+    /// The policy stays in `DAWAppKit/`: `EditorSurfaceOwnershipSiteTests`
+    /// pins exactly 7 Swift files under `Sources/DAWApp/PianoRoll/`, and an
+    /// eighth would move that number for a reason unrelated to what it guards —
+    /// the same argument that placed `PianoRollAutoScroll` there.
+    @Test("m25-r: the repeat policy is headless, and lives in DAWAppKit")
+    func edgeRepeatPolicyIsHeadless() {
+        let policy = Self.text("DAWAppKit/PianoRollEdgeRepeat.swift")
+        #expect(policy.contains("public enum PianoRollEdgeRepeat"))
+        // Headless means headless: no SwiftUI, no store, no engine.
+        let code = Self.codeOnly(policy)
+        #expect(!code.contains("import SwiftUI"))
+        #expect(!code.contains("import DAWCore"))
+        // POSITIVE CONTROL for those two negatives — both imports ARE findable
+        // in this tree, so their absence is a fact about this file.
+        let roll = Self.text(Self.rollPath)
+        #expect(roll.contains("import SwiftUI"))
+        #expect(roll.contains("import DAWCore"))
     }
 
     // MARK: - m25-f-3 — auto-extend

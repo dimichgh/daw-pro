@@ -200,6 +200,14 @@ public final class CommandRouter {
     /// then fail with a readable error, `listOpenUIs` answers `{available:false}`.
     public weak var pluginUI: (any PluginUIControlling)?
 
+    /// Arrange-clip-paste seam (m26-k) — the typed, sync app-layer surface
+    /// `edit.pasteClips` routes through, installed by DAWApp (`AppModel`
+    /// itself; see `EditPasteSurface.swift`). Weak: `AppModel` is retained by
+    /// `DAWProApp`'s own `@State`, the same non-retaining-router precedent as
+    /// `pluginUI`/`copilotEngine`. Nil in a headless control session — the
+    /// route then fails with a readable error rather than crashing.
+    public weak var editPaste: (any EditPasteControlling)?
+
     public static let allCommands: [String] = [
         "transport.play",
         "transport.stop",
@@ -241,6 +249,7 @@ public final class CommandRouter {
         "instrument.listSoundBankPrograms",
         "instrument.importSoundBank",
         "instrument.importSampleLibrary",
+        "instrument.describeSampler",
         "mixer.setMasterVolume",
         "mixer.applyPreset",
         "mixer.masterAnalysis",
@@ -255,6 +264,7 @@ public final class CommandRouter {
         "clip.addAudio",
         "clip.addMIDI",
         "clip.setNotes",
+        "clip.getNotes",
         "clip.remove",
         "clip.split",
         "clip.trim",
@@ -442,6 +452,30 @@ public final class CommandRouter {
         // (docs/ARCHITECTURE.md), and a second would compound the trap.
         // STRICTLY ADDITIVE, appended at the end per the additive-at-end law.
         "transport.setStopAtContentEnd",
+        // m25-z: windowed peak/RMS file profile — what is the peak level
+        // between 53s and 54s of a WAV, a WINDOWING question, deliberately
+        // NOT a second copy of the BS.1770 loudness path (render.measureLoudness/
+        // reference.analyze already own program loudness; m23-ch keeps the
+        // ebur128 cross-check external on purpose). Read-only: never touches the
+        // project reference slot or the References library.
+        // NOTE: no quoted string in this comment, deliberately (the m25-d rule).
+        // STRICTLY ADDITIVE, appended at the end per the additive-at-end law.
+        "audio.profileFile",
+        // m23-ap-3: per-frame pitch detection over an audio clip's current
+        // source window, wiring m23-ap-2b's PitchTracker/SwiftF0PitchTracker
+        // seam onto the wire for the first time. Read-only; NOT result-cached
+        // (see ClipPitchAnalyzer's header for why).
+        // NOTE: no quoted string in this comment, deliberately (the m25-d rule).
+        // STRICTLY ADDITIVE, appended at the end per the additive-at-end law.
+        "clip.detectPitch",
+        // m26-k: the wire route the menu paste (Cmd-V) and debug.editClipboard
+        // already exercise in-app — a headless control session and every MCP
+        // agent had no way to reach it at all until now. Rides the SAME
+        // targeting logic verbatim (no new behaviour), through a typed seam
+        // (EditPasteSurface.swift), the plugin.* precedent. NOTE: no quoted
+        // string in this comment, deliberately (the m25-d rule). STRICTLY
+        // ADDITIVE, appended at the end per the additive-at-end law.
+        "edit.pasteClips",
     ]
 
     public init(
@@ -914,21 +948,53 @@ public final class CommandRouter {
             // "sampler") and waveform ("saw"|"square"|"triangle"|"sine") validated
             // against the enum rawValues; optional attack/decay/sustain/release/
             // cutoffHz/resonance/gain numbers clamp silently through the model
-            // ranges (like track.setVolume). Optional `sampler` object is a
-            // WHOLESALE replacement of the sampler config — see parseSampler; a
+            // ranges (like track.setVolume). Optional `sampler` object is now a
+            // PARTIAL update like everything else here — see parseSampler; a
             // nonexistent zone file surfaces the MediaImporting-style error. PARTIAL
             // update otherwise: omitted fields keep the track's current descriptor
             // (or .default when it has none). A non-instrument track surfaces
             // instrumentRequiresInstrumentTrack via the LocalizedError mapping;
             // unknown id → noTrack. Response is the resolved instrument object
-            // {kind, polySynth:{...}, sampler:{zones:[{path,…}],…}}.
+            // {kind, polySynth:{...}, sampler:{zones:[{id,path,…}], sourcePath?,
+            // name?, …}}.
+            //
+            // m26-g: the sampler object takes EXACTLY ONE of `zones` (wholesale
+            // replace; [] deliberately clears) or `zonePatches` (merge by zone
+            // id, every field but `id` optional, unnamed zones untouched). Zone
+            // ids now survive a write on both paths — see parseSampler.
+            // m26-h: `sampler.sourcePath` / `sampler.name` are READ-ONLY
+            // provenance recorded by instrument.importSampleLibrary; they are
+            // emitted, preserved across edits, and ignored on input.
+            //
+            // TODO(m26-g/m26-h, MCP): expose over MCP as
+            // `instrument_set_sampler_zones` (the `zonePatches` merge path) and
+            // surface `sourcePath`/`name` in `instrument_describe_sampler`;
+            // `instrument_set_sampler_param` covers the single-global write.
+            // See ROADMAP m26-i for the agreed tool names.
             try params.rejectUnknownKeys(
                 ["trackId", "kind", "waveform", "sampler", "attack", "decay", "sustain",
                     "release", "cutoffHz", "resonance", "gain", "audioUnit", "soundBank"], verb: "track.setInstrument")
             let instTrackID = try params.requireTrackID()
             let kind = try parseInstrumentKind(params["kind"])
             let waveform = try parseWaveform(params["waveform"])
-            let sampler = try parseSampler(params["sampler"])
+            // The sampler object overlays onto the track's CURRENT sampler
+            // config, so `{sampler: {release: 0.4}}` changes one global and
+            // leaves a 309-zone imported library standing. Before this, an
+            // omitted `zones` key meant an EMPTY zone array, and since the
+            // store swaps the sampler wholesale, tuning one envelope value
+            // SILENTLY DELETED every zone — the instrument went quiet with no
+            // error, and the only way to avoid it was to resend all 309 zones
+            // read back from a ~1 MB project.snapshot. Reported 2026-08-17 by
+            // an agent driving the app end-to-end (finding 12).
+            let instCurrentSampler = store.tracks
+                .first(where: { $0.id == instTrackID })?.instrument?.sampler
+            // `remintedZoneIDs` (m26-g): ids the caller sent on the `zones`
+            // path that name no zone here. Copying one track's map onto another
+            // is the shape that produces these, and it must keep WORKING (it
+            // did before m26-g) — but not silently. See `UnknownZoneID`.
+            var instRemintedZoneIDs: [String] = []
+            let sampler = try parseSampler(params["sampler"], current: instCurrentSampler,
+                                           reminted: &instRemintedZoneIDs)
             // Optional `audioUnit: {type?, subType, manufacturer}` (type
             // defaults "aumu"): STRICT selection — resolved against the
             // installed list, unknown components error readably. Providing it
@@ -956,7 +1022,15 @@ public final class CommandRouter {
                 audioUnit: audioUnit,
                 soundBank: soundBank
             ) else { throw ControlError.noTrack(instTrackID) }
-            return .success(request.id, instrumentJSON(descriptor, trackID: instTrackID))
+            var instPayload = instrumentJSON(descriptor, trackID: instTrackID)
+            // ONLY when non-empty: an always-present empty array would read as
+            // a field worth checking on all 178 other calls, and the ordinary
+            // case is that nothing was substituted.
+            if !instRemintedZoneIDs.isEmpty, case .object(var instObj) = instPayload {
+                instObj["remintedZoneIDs"] = .array(instRemintedZoneIDs.map { .string($0) })
+                instPayload = .object(instObj)
+            }
+            return .success(request.id, instPayload)
 
         case "track.bounceInPlace":
             // Renders ONE track offline and lands the result as a new audio
@@ -1102,6 +1176,107 @@ public final class CommandRouter {
                 "report": try JSONValue(encoding: sampleLibReport),
                 "applied": .bool(!sampleLibDryRun),
             ]))
+
+        case "instrument.describeSampler":
+            // Read-only sibling of au.describeParams for the built-in
+            // Sampler (m26-i): answers "which library is loaded and how is
+            // it mapped" without paying for project.snapshot's whole-project
+            // cost (measured 296,809 bytes on the user's real song).
+            // params: trackId (required), offset?/limit? — providing EITHER
+            // requests a PAGED zone list (mirrors au.describeParams' offset/
+            // maxParams paging); omitting BOTH returns the summary only,
+            // with no `zones` key at all, since the whole point of this verb
+            // is to answer without the megabyte.
+            //
+            // Refusals mirror track.setInstrument's OWN guards, so an agent
+            // gets the same explanation from both verbs for the same track:
+            // instrumentRequiresInstrumentTrack for an audio/bus track (the
+            // exact wording track.setInstrument already throws), a
+            // describeSampler-only message when the track IS an instrument
+            // track but has never had a sampler configured
+            // (`instrument?.sampler == nil` — distinct from a sampler
+            // present with zero zones, which is the documented `zones: []`
+            // clear and answers SUCCESS with `zoneSummary.count: 0`), and
+            // noTrack for an unknown id. Deliberately does NOT require the
+            // ACTIVE kind to be "sampler" — sampler config, like
+            // audioUnit/soundBank, is carried across kind switches
+            // (InstrumentDescriptor's own contract) and
+            // track.setInstrument's partial-update overlay reads `current`
+            // the same way, so a read that refused where the write succeeds
+            // would be the inconsistency. The response's own `kind` field is
+            // how a caller tells whether this sampler is the one actually
+            // sounding.
+            //
+            // zoneSummary's pitch/velocity coverage is the UNION of zone
+            // ranges, not a naive min/max — a naive envelope reports
+            // "0-127, fully covered" for a library with a hole in the
+            // middle, hiding exactly the field report's own failure mode (a
+            // bass silent below MIDI 35, a library silent above 45). `gaps`
+            // lists the uncovered sub-ranges INSIDE the envelope; omitted
+            // (rather than an always-present empty array) when there are
+            // none, the A-imp-1 idiom. Velocity ranges default nil -> the
+            // FULL 0-127 span (SamplerZone's own documented default), not 0.
+            //
+            // Response: {trackId, kind, oneShot, attack, release, gain,
+            // sourcePath?, displayName?, zoneSummary:{count,
+            // pitchCoverage?:{min,max,gaps?}, velocityCoverage?:{min,max,
+            // gaps?}, groupCount, distinctSampleFiles}, offset?, limit?,
+            // truncated?, returnedZones?, zones?}. `zones` (when paged in)
+            // use the EXACT samplerZoneJSON shape track.setInstrument's
+            // response already emits (id included), so a caller can read one
+            // page and round-trip an id into instrument_set_sampler_zones.
+            try params.rejectUnknownKeys(
+                ["trackId", "offset", "limit"], verb: "instrument.describeSampler")
+            let describeSamplerTrackID = try params.requireTrackID()
+            guard let describeSamplerTrack = store.tracks.first(where: {
+                $0.id == describeSamplerTrackID
+            }) else {
+                throw ControlError.noTrack(describeSamplerTrackID)
+            }
+            guard describeSamplerTrack.kind == .instrument else {
+                throw ProjectError.instrumentRequiresInstrumentTrack(describeSamplerTrack.kind)
+            }
+            guard let describeSamplerInstrument = describeSamplerTrack.instrument,
+                  let describeSamplerParams = describeSamplerInstrument.sampler
+            else {
+                throw ControlError(
+                    "track '\(describeSamplerTrackID.uuidString)' has no sampler configured yet"
+                        + " — import a library with instrument.importSampleLibrary, or build one"
+                        + " by hand with track.setInstrument {kind: \"sampler\","
+                        + " sampler: {zones: [...]}}")
+            }
+            var describeSamplerResult: [String: JSONValue] = [
+                "trackId": .string(describeSamplerTrackID.uuidString),
+                "kind": .string(describeSamplerInstrument.kind.rawValue),
+                "oneShot": .bool(describeSamplerParams.oneShot),
+                "attack": .number(describeSamplerParams.attack),
+                "release": .number(describeSamplerParams.release),
+                "gain": .number(describeSamplerParams.gain),
+                "zoneSummary": Self.samplerZoneSummaryJSON(describeSamplerParams.zones),
+            ]
+            if let sourcePath = describeSamplerParams.sourcePath {
+                describeSamplerResult["sourcePath"] = .string(sourcePath)
+            }
+            if let displayName = describeSamplerParams.displayName {
+                describeSamplerResult["displayName"] = .string(displayName)
+            }
+            if params["offset"] != nil || params["limit"] != nil {
+                let describeSamplerOffset = try Self.parseZonePageOffset(params)
+                let describeSamplerLimit = try Self.parseZonePageLimit(params)
+                let describeSamplerAllZones = describeSamplerParams.zones
+                let describeSamplerPageEnd = min(
+                    describeSamplerAllZones.count, describeSamplerOffset + describeSamplerLimit)
+                let describeSamplerPage = describeSamplerOffset < describeSamplerAllZones.count
+                    ? Array(describeSamplerAllZones[describeSamplerOffset..<describeSamplerPageEnd])
+                    : []
+                describeSamplerResult["offset"] = .number(Double(describeSamplerOffset))
+                describeSamplerResult["limit"] = .number(Double(describeSamplerLimit))
+                describeSamplerResult["returnedZones"] = .number(Double(describeSamplerPage.count))
+                describeSamplerResult["truncated"] = .bool(
+                    describeSamplerOffset + describeSamplerPage.count < describeSamplerAllZones.count)
+                describeSamplerResult["zones"] = .array(describeSamplerPage.map(Self.samplerZoneJSON))
+            }
+            return .success(request.id, .object(describeSamplerResult))
 
         case "project.importMIDI":
             // params: path (required, absolute or ~-prefixed; .mid/.midi),
@@ -1827,6 +2002,62 @@ public final class CommandRouter {
             return .success(request.id,
                             try JSONValue(encoding: try store.referenceCompare()))
 
+        case "audio.profileFile":
+            // params: path (required — absolute/~-prefixed path to ANY
+            // audio file on disk; not a track, not a clip, not the project
+            // reference), windowSeconds > 0 (required), fromSeconds >= 0
+            // (default 0), durationSeconds > 0 (default: rest of the file
+            // from fromSeconds). m25-z: the missing "what is the peak level
+            // between 53s and 54s of this WAV" surface — a windowing
+            // question, deliberately NOT a second copy of the BS.1770
+            // loudness path (render.measureLoudness/reference.analyze
+            // already answer program-loudness questions; m23-ch keeps the
+            // ebur128 cross-check external on purpose, since a single
+            // meter cannot detect its own miscount).
+            // Read-only: never writes, never copies, and the project's
+            // reference slot / References library are UNTOUCHED (unlike
+            // reference.import, this never occupies the one reference slot
+            // and never copies the file anywhere).
+            // Response: {durationSeconds, sampleRateHz, channelCount,
+            // bitDepth?, isFloat?, windows: [{startSeconds, durationSeconds,
+            // peakDb?, rmsDb?}]}. durationSeconds in the header is the
+            // WHOLE file (the ffprobe readback); each window's own
+            // durationSeconds is usually windowSeconds, except the LAST
+            // window of the profiled range, which truncates at EOF (or at
+            // fromSeconds+durationSeconds) and reads shorter. peakDb is
+            // SAMPLE peak (raw inter-sample max) — NOT the 4x-oversampled
+            // BS.1770 true peak render.measureLoudness/reference.analyze
+            // report as truePeakDbtp; a window can read under 0 dBFS here
+            // and still exceed 0 dBTP true peak. rmsDb combines all
+            // channels (the live-meter convention: max-abs peak across
+            // channels, combined-channel RMS — never a mono downmix
+            // first, which would under-report anti-phase content). A
+            // digitally-silent window OMITS peakDb/rmsDb (honest absence —
+            // JSON has no -inf; never a fabricated 0). Refusals verbatim:
+            // no file at path -> audioFileNotFound (names the path);
+            // headless / no engine -> engineUnavailable (a profile is
+            // never fabricated).
+            try params.rejectUnknownKeys(
+                ["path", "windowSeconds", "fromSeconds", "durationSeconds"],
+                verb: "audio.profileFile")
+            let profilePath = try params.requireAbsolutePath("path")
+            let profileWindowSeconds = try params.require("windowSeconds", \.doubleValue)
+            guard profileWindowSeconds > 0 else {
+                throw ControlError("'windowSeconds' must be > 0")
+            }
+            let profileFromSeconds = params["fromSeconds"]?.doubleValue ?? 0
+            guard profileFromSeconds >= 0 else {
+                throw ControlError("'fromSeconds' must be >= 0")
+            }
+            let profileDurationSeconds = params["durationSeconds"]?.doubleValue
+            if let profileDurationSeconds, profileDurationSeconds <= 0 {
+                throw ControlError("'durationSeconds' must be > 0")
+            }
+            let profileResult = try await store.profileFile(
+                path: profilePath, windowSeconds: profileWindowSeconds,
+                fromSeconds: profileFromSeconds, durationSeconds: profileDurationSeconds)
+            return .success(request.id, try JSONValue(encoding: profileResult))
+
         case "engine.performanceStats":
             // params: reset? (bool, default false). Render-load / overrun
             // telemetry (M9 perf-b) stamped per render callback by the
@@ -1972,9 +2203,12 @@ public final class CommandRouter {
             // tempoBPM? (20-400; default = genre's), sections? (array of
             // {name, bars} — default = genre's layout). Scaffolds the whole
             // session (tempo, a genre track roster with mixer presets applied,
-            // an "Arrangement" guide track of named empty MIDI clips, and the
-            // loop region) as ONE undoable edit — ADDITIVE, never wiping the
-            // project. Unknown genre → an error listing every valid name;
+            // an "Arrangement" guide track of named empty MIDI clips, a real
+            // SESSION MARKER at every section start — so `marker.list` returns
+            // the beat map immediately and no caller has to re-derive it — and
+            // the loop region) as ONE undoable edit — ADDITIVE, never wiping the
+            // project (markers already present survive, merged into beat order).
+            // Unknown genre → an error listing every valid name;
             // bad tempo/sections → field-named errors. Both surface via the
             // LocalizedError mapping. Response carries the full scaffold with
             // real, actionable ids (see `songSkeletonResult`).
@@ -2145,6 +2379,91 @@ public final class CommandRouter {
             let setNotes = try parseNotes(setNotesValue)
             let updatedClip = try store.setClipNotes(clipID: setClipID, notes: setNotes)
             return .success(request.id, try JSONValue(encoding: updatedClip))
+
+        case "clip.getNotes":
+            // params: clipId (required UUID). fromBeat/toBeat? — CLIP-RELATIVE
+            // beats (same frame as a note's startBeat: 0 = the clip's own
+            // start, NOT the timeline). A note is included when its startBeat
+            // is >= fromBeat and < toBeat (HALF-OPEN on the beat range).
+            // pitchMin/pitchMax? — integers 0...127, INCLUSIVE both ends.
+            // fromBeat > toBeat or pitchMin > pitchMax is a field-named error.
+            //
+            // STRICTLY READ-ONLY (the point of this verb): no performEdit, no
+            // engine call, no undo entry, no dirty flag, no coalescing — reads
+            // `store.tracks` directly, the note.audition precedent. Contrast
+            // with the old "peek" workaround, clip.humanize {timingBeats:0,
+            // velocityRange:0}: `ProjectStore.performEdit` skips the undo
+            // journal entry there too (its `captureEditState() != before`
+            // guard sees a byte-identical clip when both jitter axes are
+            // exactly zero), but it STILL runs `markDirty()` and
+            // `engine?.tracksDidChange(tracks)` unconditionally inside the
+            // same call — real, wasted work this verb performs none of.
+            // clipNotFound/notAMIDIClip surface via the LocalizedError
+            // mapping (same messages clip.setNotes gives).
+            //
+            // Response: {clipId, trackId, clipName, clipStartBeat,
+            // clipLengthBeats, totalNotes, returnedNotes, notes}. `totalNotes`
+            // is the clip's UNFILTERED count (load-bearing: it's the only way
+            // a caller notices it filtered before a later whole-array
+            // clip.setNotes would silently drop the notes it never saw).
+            // `notes` are ordered by startBeat then pitch and use the EXACT
+            // clip.setNotes/clip.addMIDI shape (id, pitch, velocity,
+            // startBeat, lengthBeats) via the same MIDINote Codable encoder,
+            // so get -> edit -> clip.setNotes round-trips byte-for-byte.
+            try params.rejectUnknownKeys(
+                ["clipId", "fromBeat", "toBeat", "pitchMin", "pitchMax"], verb: "clip.getNotes")
+            let getNotesClipID = try params.requireClipID()
+            // `optionalNumber`, NOT a bare `?.doubleValue`: a wrong-typed
+            // fromBeat/toBeat (`"8"`) must be a field-named error, never a
+            // silently DROPPED filter. Dropping one is the worst failure this
+            // verb has — the caller reads `returnedNotes` as "what matched my
+            // range" and gets the whole clip, then whole-array-replaces from a
+            // window it never actually asked for.
+            let getNotesFromBeat = try Self.optionalNumber(params["fromBeat"], "'fromBeat'")
+            let getNotesToBeat = try Self.optionalNumber(params["toBeat"], "'toBeat'")
+            if let getNotesFromBeat, let getNotesToBeat, getNotesFromBeat > getNotesToBeat {
+                throw ControlError("'fromBeat' must be <= 'toBeat'")
+            }
+            let getNotesPitchMin = try Self.optionalPitch(params["pitchMin"], "'pitchMin'")
+            let getNotesPitchMax = try Self.optionalPitch(params["pitchMax"], "'pitchMax'")
+            if let getNotesPitchMin, let getNotesPitchMax, getNotesPitchMin > getNotesPitchMax {
+                throw ControlError("'pitchMin' must be <= 'pitchMax'")
+            }
+            guard let getNotesTrack = store.tracks.first(where: { track in
+                track.clips.contains(where: { $0.id == getNotesClipID })
+            }) else {
+                throw ProjectError.clipNotFound(getNotesClipID)
+            }
+            guard let getNotesClip = getNotesTrack.clips.first(where: { $0.id == getNotesClipID }) else {
+                throw ProjectError.clipNotFound(getNotesClipID)
+            }
+            guard let getNotesAllNotes = getNotesClip.notes else {
+                throw ProjectError.notAMIDIClip(getNotesClipID, verb: "clip.getNotes")
+            }
+            var getNotesFiltered = getNotesAllNotes
+            if let getNotesFromBeat {
+                getNotesFiltered = getNotesFiltered.filter { $0.startBeat >= getNotesFromBeat }
+            }
+            if let getNotesToBeat {
+                getNotesFiltered = getNotesFiltered.filter { $0.startBeat < getNotesToBeat }
+            }
+            if let getNotesPitchMin {
+                getNotesFiltered = getNotesFiltered.filter { $0.pitch >= getNotesPitchMin }
+            }
+            if let getNotesPitchMax {
+                getNotesFiltered = getNotesFiltered.filter { $0.pitch <= getNotesPitchMax }
+            }
+            let getNotesOrdered = MIDINote.canonicallyOrdered(getNotesFiltered)
+            return .success(request.id, .object([
+                "clipId": .string(getNotesClip.id.uuidString),
+                "trackId": .string(getNotesTrack.id.uuidString),
+                "clipName": .string(getNotesClip.name),
+                "clipStartBeat": .number(getNotesClip.startBeat),
+                "clipLengthBeats": .number(getNotesClip.lengthBeats),
+                "totalNotes": .number(Double(getNotesAllNotes.count)),
+                "returnedNotes": .number(Double(getNotesOrdered.count)),
+                "notes": try JSONValue(encoding: getNotesOrdered),
+            ]))
 
         case "clip.remove":
             // params: clipId (required UUID). Removes an audio or MIDI clip.
@@ -2670,6 +2989,98 @@ public final class CommandRouter {
             let aqSlices = try await store.quantizeAudioClip(
                 trackId: aqTrackID, clipId: aqClipID, settings: aqSettings)
             return .success(request.id, .object(["clips": try JSONValue(encoding: aqSlices)]))
+
+        case "clip.detectPitch":
+            // params: clipId (required). fromSeconds?/durationSeconds?
+            // (SOURCE-FILE-absolute seconds — the clip.detectTransients/
+            // clip.analyzeAudio domain; omitted fromSeconds defaults to the
+            // clip's own window start, omitted durationSeconds defaults to
+            // the rest of the clip's current window — see
+            // ProjectStore.detectClipPitch's doc for the full contract and
+            // the payload-arithmetic reasoning, PitchDetectionResult's doc
+            // for why the default is deliberately unbounded).
+            // confidenceThreshold? (0...1, default 0.9 —
+            // PitchDetectionDefaults.defaultConfidenceThreshold, DUPLICATED
+            // from DAWEngine's PitchAnalysisOptions since DAWCore cannot
+            // import DAWEngine — kept in lockstep by
+            // PitchDetectionDefaultsMatchTrackerTests).
+            // silenceFloorDbfs? (default -75 dBFS — UNTUNED against real
+            // vocal material; exposed specifically so a listening pass can
+            // retune it without a code change, since judging pitch accuracy
+            // BY EAR against a real recording is this item's open question).
+            //
+            // Wires m23-ap-2b's PitchTracker/SwiftF0PitchTracker seam (the
+            // PROTOCOL, not the backend — nothing here names SwiftF0).
+            // Read-only: no edit, no undo entry, nothing persisted (the
+            // detectTransients/analyzeAudio idiom). NOT result-cached (see
+            // ClipPitchAnalyzer's header for why — unlike
+            // analyzeAudioContent's few-KB aggregates, a cached pitch result
+            // can be hundreds of KB, a materially bigger caching commitment
+            // this item does not make).
+            //
+            // HONEST ABSENCE ACROSS THE WIRE: each frame in the response is
+            // {timeSeconds, frequencyHz?, confidence, levelDbfs?, absence?}
+            // — an unvoiced frame OMITS frequencyHz (never 0, never a
+            // sentinel) and CARRIES absence ("belowConfidence" |
+            // "belowLevel" | "outOfRange") plus the measured
+            // confidence/level that produced it. Frames are never dropped —
+            // the uniform time grid is the point (segmentation reads holes
+            // as signal, m23-ap-2b design §5.6.6).
+            //
+            // Registered via the strict-schema MCP wrapper despite being
+            // read-only — the audio.profileFile precedent (real windowing
+            // params worth typo-catching), not the clip.detectTransients
+            // one (a single sensitivity knob).
+            //
+            // Response: {pitch: {frames: [...], frameCount, voicedFrameCount,
+            // voicedFraction, frameRateHz, analysisSampleRateHz,
+            // sourceSampleRateHz, windowStartSeconds, windowDurationSeconds,
+            // confidenceThreshold, silenceFloorDbfs, minFrequencyHz,
+            // maxFrequencyHz}, clipWindowDurationSeconds, stretchRatio,
+            // pitchShiftSemitones}. stretchRatio/pitchShiftSemitones echo the
+            // clip's state (SOURCE-domain numbers, before either — the
+            // analyzeAudio precedent); no derived "playback" pitch curve is
+            // computed (out of this item's scope — see ClipPitchDetection's
+            // doc).
+            //
+            // m23-q §7.7 names clip.detectPitch as its own future Phase-1
+            // verb ("runs detection, stores the segment set"): THIS response
+            // is the raw per-frame contour, not a segment set. A future
+            // segment-set field is an ADDITIVE field on this same response,
+            // never a re-contract (see PitchDetectionResult's doc).
+            //
+            // Errors: clipNotFound / pitchDetectionRequiresAudioClip /
+            // engineUnavailable surface via the LocalizedError mapping in
+            // handle(_:); a missing backing file or a fromSeconds outside
+            // the clip's current window are both a teaching invalidClipEdit.
+            try params.rejectUnknownKeys(
+                ["clipId", "fromSeconds", "durationSeconds", "confidenceThreshold",
+                    "silenceFloorDbfs"], verb: "clip.detectPitch")
+            let pitchClipID = try params.requireClipID()
+            let pitchFromSeconds = params["fromSeconds"]?.doubleValue
+            if let pitchFromSeconds, pitchFromSeconds < 0 {
+                throw ControlError("'fromSeconds' must be >= 0")
+            }
+            let pitchDurationSeconds = params["durationSeconds"]?.doubleValue
+            if let pitchDurationSeconds, pitchDurationSeconds <= 0 {
+                throw ControlError("'durationSeconds' must be > 0")
+            }
+            let pitchConfidenceThreshold = params["confidenceThreshold"]?.doubleValue
+                ?? PitchDetectionDefaults.defaultConfidenceThreshold
+            guard (0...1).contains(pitchConfidenceThreshold) else {
+                throw ControlError("'confidenceThreshold' must be between 0 and 1 (default 0.9)")
+            }
+            let pitchSilenceFloorDbfs = params["silenceFloorDbfs"]?.doubleValue
+                ?? PitchDetectionDefaults.defaultSilenceFloorDbfs
+            guard pitchSilenceFloorDbfs.isFinite else {
+                throw ControlError("'silenceFloorDbfs' must be a finite number (default -75)")
+            }
+            let pitchResult = try await store.detectClipPitch(
+                clipId: pitchClipID, fromSeconds: pitchFromSeconds,
+                durationSeconds: pitchDurationSeconds,
+                confidenceThreshold: pitchConfidenceThreshold,
+                silenceFloorDbfs: pitchSilenceFloorDbfs)
+            return .success(request.id, try JSONValue(encoding: pitchResult))
 
         case "arrange.insertBars":
             // params: atBar (required int >= 1, 1-BASED — bar 1 is the first bar,
@@ -4013,6 +4424,23 @@ public final class CommandRouter {
                 // caller can act on.
                 auditionPayload["reason"] = .string(reason)
             }
+            // The instrument's LOAD status rides the reply for the two kinds
+            // whose readiness can lag the call — `soundBank` and `audioUnit`
+            // share the one registry slot (§6.1), and a patch set moments ago
+            // may still be preparing. `audible` and this field read the registry
+            // through DIFFERENT questions ("is there a prepared instrument?" vs
+            // "what status did the engine record?"), so they can legitimately
+            // disagree for an instant: an agent that saw `audible:true` next to
+            // `"pending"` learns to retry instead of concluding the patch it
+            // just set is what sounded. Reported for those two kinds ONLY —
+            // `polySynth`/`sampler`/`testTone` hold no registry slot, so the
+            // default-`pending` fallback would read as a stall that cannot
+            // happen (`SamplerInstrument` loads its zones synchronously).
+            if let auditionKind = store.tracks.first(where: { $0.id == auditionTrackID })?
+                .instrument?.kind, auditionKind == .audioUnit || auditionKind == .soundBank {
+                auditionPayload["instrumentStatus"] =
+                    .string(instrumentStatusString(auditionTrackID))
+            }
             return .success(request.id, .object(auditionPayload))
 
         case "project.snapshot":
@@ -4541,6 +4969,44 @@ public final class CommandRouter {
                 "canUndo": .bool(history.canUndo),
                 "canRedo": .bool(history.canRedo),
             ]))
+
+        case "edit.pasteClips":
+            // Pastes the APP'S clipboard — whatever the user last copied with
+            // Cmd-C in the arrange (m26-k). No agent can populate this
+            // clipboard over the wire; this route only fires it. params:
+            // trackId? (UUID — omit to use the resolved active track, exactly
+            // what Cmd-V uses; a value overrides it for THIS paste only,
+            // without moving the stored cursor). Rides
+            // `AppModel.pasteClipsFromClipboard(intoTrack:)`'s targeting
+            // verbatim through the typed `editPaste` seam (the plugin.*
+            // precedent) — a headless control session (no app UI) errors
+            // readably. Result names WHICH of four outcomes happened rather
+            // than a bare ok: {pasted:true, landings:[{clipId,trackId,
+            // startBeat}], skipped:[...], trimmedClipIDs, removedClipIDs} on
+            // success; {pasted:false, reason:"empty-clipboard"} when there was
+            // nothing to paste; {pasted:false, reason:"wrong-payload-kind",
+            // clipboardKind} when the clipboard holds NOTES, not clips (paste
+            // those with clip.getNotes + clip.setNotes instead — there is no
+            // note-paste wire route); {pasted:false, reason:<refusal>,
+            // skipped:[...]} when nothing could land (no tracks, no track can
+            // hold the payload, or every member individually mismatched its
+            // destination — e.g. a MIDI clip pasted onto an audio track).
+            try params.rejectUnknownKeys(["trackId"], verb: "edit.pasteClips")
+            var pasteIntoTrack: UUID?
+            if let raw = params["trackId"]?.stringValue {
+                guard let id = UUID(uuidString: raw) else {
+                    throw ControlError("'trackId' is not a valid UUID: \(raw)")
+                }
+                pasteIntoTrack = id
+            } else if params["trackId"] != nil {
+                throw ControlError("'trackId' must be a string")
+            }
+            guard let editPaste else {
+                throw ControlError(
+                    "edit paste unavailable — this control session has no app UI (headless). Launch DAWApp/DAWPro.app and retry.")
+            }
+            let pasteResult = editPaste.pasteClips(intoTrack: pasteIntoTrack)
+            return .success(request.id, editPasteResultJSON(pasteResult))
 
         case "plugin.openUI":
             // Opens (or focuses) the floating window of the LIVE hosted Audio
@@ -6112,12 +6578,67 @@ public final class CommandRouter {
         return .object(obj)
     }
 
+    /// Wire shape for one `EditPasteSkip` — `{sourceClipId, clipName, reason}`.
+    private func editPasteSkipJSON(_ skip: EditPasteSkip) -> JSONValue {
+        .object([
+            "sourceClipId": .string(skip.sourceClipID.uuidString),
+            "clipName": .string(skip.clipName),
+            "reason": .string(skip.reason),
+        ])
+    }
+
+    /// Wire shape for `edit.pasteClips`'s result — see the case arm's own doc
+    /// comment for the four distinguishable outcomes this encodes.
+    private func editPasteResultJSON(_ result: EditPasteResult) -> JSONValue {
+        switch result {
+        case .pasted(let landings, let skipped, let trimmedClipIDs, let removedClipIDs):
+            return .object([
+                "pasted": .bool(true),
+                "landings": .array(landings.map {
+                    .object([
+                        "clipId": .string($0.clipID.uuidString),
+                        "trackId": .string($0.trackID.uuidString),
+                        "startBeat": .number($0.startBeat),
+                    ])
+                }),
+                "skipped": .array(skipped.map(editPasteSkipJSON)),
+                "trimmedClipIDs": .array(trimmedClipIDs.map { .string($0.uuidString) }),
+                "removedClipIDs": .array(removedClipIDs.map { .string($0.uuidString) }),
+            ])
+        case .emptyClipboard:
+            return .object([
+                "pasted": .bool(false),
+                "reason": .string("empty-clipboard"),
+            ])
+        case .wrongPayloadKind(let actual):
+            return .object([
+                "pasted": .bool(false),
+                "reason": .string("wrong-payload-kind"),
+                "clipboardKind": .string(actual),
+            ])
+        case .blocked(let reason, let skipped):
+            return .object([
+                "pasted": .bool(false),
+                "reason": .string(reason),
+                "skipped": .array(skipped.map(editPasteSkipJSON)),
+            ])
+        }
+    }
+
     /// Wire shape for `macro.songSkeleton`'s result: the whole scaffold with
     /// real, actionable ids — `{genre, tempoBPM, tracks: [{id, name}],
-    /// sectionClips: [{name, startBeat, lengthBeats}], loopStart, loopEnd,
-    /// arrangementTrackId}`. `tracks` lists EVERY created track (the genre
-    /// roster then the Arrangement guide track LAST, whose id is also surfaced
-    /// as `arrangementTrackId`).
+    /// sectionClips: [{name, startBeat, lengthBeats}],
+    /// markers: [{id, name, beat}], loopStart, loopEnd, arrangementTrackId}`.
+    /// `tracks` lists EVERY created track (the genre roster then the Arrangement
+    /// guide track LAST, whose id is also surfaced as `arrangementTrackId`).
+    /// `markers` (ADDITIVE) is the session beat map the scaffold just dropped —
+    /// one per section, at that section's start, in section order, named exactly
+    /// like the matching `sectionClips` entry (repeats are NOT auto-numbered;
+    /// disambiguate by `beat`). Each id is a REAL marker addressable by
+    /// `marker.rename`/`marker.move`/`marker.remove` and listed by `marker.list`
+    /// — which returns the whole project's markers, so it also carries any that
+    /// pre-dated this call. The per-marker shape routes through the SAME
+    /// `markerJSON` the marker verbs use, so the two can never drift.
     private func songSkeletonResult(_ result: SongSkeletonResult) -> JSONValue {
         .object([
             "genre": .string(result.genre),
@@ -6131,6 +6652,9 @@ public final class CommandRouter {
                 "startBeat": .number($0.startBeat),
                 "lengthBeats": .number($0.lengthBeats),
             ]) }),
+            "markers": .array(result.markers.map {
+                Self.markerJSON(Marker(id: $0.id, name: $0.name, beat: $0.beat))
+            }),
             "loopStart": .number(result.loopStart),
             "loopEnd": .number(result.loopEnd),
             "arrangementTrackId": .string(result.arrangementTrackID.uuidString),
@@ -7084,114 +7608,381 @@ public final class CommandRouter {
     /// m20-g loop fields ride along too (loopMode "sustain"/"continuous",
     /// loopStart/loopEnd source frames, end exclusive); omitted = nil = no
     /// loop. loopMode wins over oneShot on a looping zone (engine law).
-    private func parseSampler(_ value: JSONValue?) throws -> SamplerParams? {
+    ///
+    /// PARTIAL, against `current` (the track's existing sampler config, nil on a
+    /// track that has none): every key the caller omits keeps the value it
+    /// already had, `zones` INCLUDED. This is the m26 fix for field-report
+    /// finding 12 — the sampler object used to be the one carve-out from
+    /// `track.setInstrument`'s own "omitted fields keep their current value"
+    /// contract, and because the store swaps the sampler wholesale, an omitted
+    /// `zones` key silently deleted every zone of an imported library. Tuning
+    /// `release` on a 309-zone upright bass emptied it, with no error and no
+    /// way to notice except silence. Note the asymmetry that remains and is
+    /// deliberate: a PRESENT `zones` array still REPLACES the zone list rather
+    /// than merging into it, because a wire zone carries no id the parser
+    /// honours (ids are emitted in snapshots but re-minted on every set), so
+    /// there is nothing to merge BY. Zone-level patching is m26-g.
+    /// Every per-zone field a `sampler.zones[i]` object may carry, PARSED but
+    /// not yet resolved: nil means the caller did not mention the key. One
+    /// parse, shared by the wholesale `zones` path and (m26-g) the merge-by-id
+    /// `zonePatches` path, so a new zone field is added in exactly one place
+    /// and the two paths cannot drift apart.
+    ///
+    /// Resolution differs between the two and only there: `zones` resolves an
+    /// absent key to the MODEL DEFAULT (a fresh zone), `zonePatches` resolves
+    /// it to the zone's CURRENT value (a partial edit).
+    private struct ParsedZoneFields {
+        var path: String?
+        var rootPitch: Int?
+        var minPitch: Int?
+        var maxPitch: Int?
+        var gain: Double?
+        var minVelocity: Int?
+        var maxVelocity: Int?
+        var group: Int?
+        var seqLength: Int?
+        var seqPosition: Int?
+        var randMin: Double?
+        var randMax: Double?
+        var tuneCents: Double?
+        var pan: Double?
+        var ampVelTrack: Double?
+        var oneShot: Bool?
+        var startFrame: Int?
+        var endFrame: Int?
+        var attack: Double?
+        var decay: Double?
+        var sustain: Double?
+        var release: Double?
+        var loopMode: SamplerLoopMode?
+        var loopStart: Int?
+        var loopEnd: Int?
+    }
+
+    /// Parses one zone object's fields. `label` is the wire path prefix
+    /// ("sampler.zones[0]" / "sampler.zonePatches[0]") so every error names the
+    /// key the caller actually sent. `id` and `path` requiredness are the
+    /// CALLER's business — they differ between the two zone paths.
+    private static func parseZoneFields(
+        _ zone: [String: JSONValue], _ label: String
+    ) throws -> ParsedZoneFields {
+        var f = ParsedZoneFields()
+        // Tilde-expanded here so both zone paths agree on what a `path` means.
+        // The wholesale path re-checks requiredness itself (and does so BEFORE
+        // this call, to keep its "path is required" error ahead of every
+        // field-type error, as it has always been).
+        f.path = zone["path"]?.stringValue.map { ($0 as NSString).expandingTildeInPath }
+        f.rootPitch = try optionalPitch(zone["rootPitch"], "\(label).rootPitch")
+        f.minPitch = try optionalPitch(zone["minPitch"], "\(label).minPitch")
+        f.maxPitch = try optionalPitch(zone["maxPitch"], "\(label).maxPitch")
+        f.gain = try optionalNumber(zone["gain"], "\(label).gain")
+        f.minVelocity = try optionalPitch(zone["minVelocity"], "\(label).minVelocity")
+        f.maxVelocity = try optionalPitch(zone["maxVelocity"], "\(label).maxVelocity")
+        f.group = try optionalInteger(zone["group"], "\(label).group")
+        f.seqLength = try optionalInteger(zone["seqLength"], "\(label).seqLength")
+        f.seqPosition = try optionalInteger(zone["seqPosition"], "\(label).seqPosition")
+        f.randMin = try optionalNumber(zone["randMin"], "\(label).randMin")
+        f.randMax = try optionalNumber(zone["randMax"], "\(label).randMax")
+        f.tuneCents = try optionalNumber(zone["tuneCents"], "\(label).tuneCents")
+        f.pan = try optionalNumber(zone["pan"], "\(label).pan")
+        f.ampVelTrack = try optionalNumber(zone["ampVelTrack"], "\(label).ampVelTrack")
+        f.oneShot = try optionalBool(zone["oneShot"], "\(label).oneShot")
+        f.startFrame = try optionalInteger(zone["startFrame"], "\(label).startFrame")
+        f.endFrame = try optionalInteger(zone["endFrame"], "\(label).endFrame")
+        f.attack = try optionalNumber(zone["attack"], "\(label).attack")
+        f.decay = try optionalNumber(zone["decay"], "\(label).decay")
+        f.sustain = try optionalNumber(zone["sustain"], "\(label).sustain")
+        f.release = try optionalNumber(zone["release"], "\(label).release")
+        if let loopModeValue = zone["loopMode"] {
+            guard let raw = loopModeValue.stringValue,
+                  let mode = SamplerLoopMode(rawValue: raw) else {
+                throw ControlError(
+                    "\(label).loopMode must be \"sustain\" or \"continuous\"")
+            }
+            f.loopMode = mode
+        }
+        f.loopStart = try optionalInteger(zone["loopStart"], "\(label).loopStart")
+        f.loopEnd = try optionalInteger(zone["loopEnd"], "\(label).loopEnd")
+        return f
+    }
+
+    /// Resolves a zone's identity (m26-g). ABSENT → a fresh id, which is how a
+    /// caller authors a brand-new zone map without knowing any ids. PRESENT →
+    /// the id is honoured, but only if it is well-formed AND already names a
+    /// zone on this track; anything else is a teaching error naming the field
+    /// and the offending value, never a silent insert and never a silent
+    /// re-mint.
+    ///
+    /// `seen` rejects the SAME id twice in one call. That is not pedantry: the
+    /// project document keys its per-zone media references by zone id
+    /// (`SamplerDocument.init(from:mediaRefs:)`), so two zones sharing an id
+    /// would collide there and one sample file would silently stand in for
+    /// both on the next save.
+    /// What a zone id that names no zone on THIS track means, which differs by
+    /// path because the two paths ask different questions of it.
+    ///
+    /// ⭐ ORCHESTRATOR RULING 2026-08-17, overriding the brief this landed
+    /// under. The implementing agent applied `.reject` to BOTH paths and
+    /// flagged the consequence honestly: an agent could previously read track
+    /// A's zones from a snapshot and send them to track B, which SUCCEEDED
+    /// (ids were silently re-minted), and under a blanket reject that call
+    /// starts erroring. That is a live behaviour change on a shipped verb,
+    /// against this repo's additive-only wire rule.
+    ///
+    /// **The tell is where the hazard comes from.** Honouring ids at all is
+    /// what makes a cross-track copy dangerous — zone ids must be globally
+    /// unique because `ProjectDocument` keys every zone's sample-file
+    /// reference out of ONE project-wide `mediaRefs` dictionary by zone id
+    /// (`ProjectDocument.swift:893`), so two tracks holding the same zone id
+    /// would make one sample file stand in for both at save time. The old
+    /// re-mint was SAFE. A blanket reject therefore charges existing callers
+    /// for a hazard this feature introduced.
+    ///
+    /// So: `.mintUnknown` on the REPLACE path (`zones`) — an id we recognise
+    /// is honoured, which is the whole point of m26-g, and anything else gets
+    /// a fresh id exactly as it did before this item, with the substitution
+    /// REPORTED rather than silent. `.reject` on the MERGE path
+    /// (`zonePatches`) — a patch that names no zone has nothing to merge into,
+    /// minting there would silently convert an edit into an insert, and the
+    /// key is new so no caller can be relying on it.
+    private enum UnknownZoneID {
+        case mintUnknown
+        case reject
+    }
+
+    private static func parseZoneID(_ value: JSONValue?, label: String,
+                                    known: [SamplerZone],
+                                    onUnknown: UnknownZoneID,
+                                    seen: inout Set<UUID>,
+                                    reminted: inout [String]) throws -> UUID {
+        guard let value else { return UUID() }
+        guard let raw = value.stringValue else {
+            throw ControlError(
+                "\(label).id must be a UUID string — the value project.snapshot emits as "
+                    + "this zone's 'id'. Omit 'id' entirely to create a NEW zone.")
+        }
+        guard let id = UUID(uuidString: raw) else {
+            throw ControlError(
+                "\(label).id is not a valid UUID: \"\(raw)\". Send the id project.snapshot "
+                    + "emitted for this zone, or omit 'id' to create a NEW zone.")
+        }
+        guard known.contains(where: { $0.id == id }) else {
+            switch onUnknown {
+            case .reject:
+                throw ControlError(
+                    "\(label).id \"\(raw)\" names no zone on this track. Ids are per-track: omit "
+                        + "'id' on every zone to author a new map or to copy one onto a DIFFERENT "
+                        + "track, or re-read the current ids from project.snapshot's "
+                        + "instrument.sampler.zones[].id.")
+            case .mintUnknown:
+                // Pre-m26-g behaviour, preserved deliberately: this is the call
+                // shape that copies one track's map onto another, and it used
+                // to work. `remintedZoneIDs` in the reply is what keeps it from
+                // being SILENT — a caller that believed it was preserving ids
+                // is told, by id, that it was not.
+                reminted.append(raw)
+                return UUID()
+            }
+        }
+        guard seen.insert(id).inserted else {
+            throw ControlError(
+                "\(label).id \"\(raw)\" appears more than once in this call. Zone ids are "
+                    + "unique — the project file keys each zone's sample-file reference by id, "
+                    + "so duplicates would make two zones share one sample. Omit 'id' on the "
+                    + "copy to make it a new zone.")
+        }
+        return id
+    }
+
+    /// A PARTIAL edit of an existing zone (m26-g `zonePatches`): every field
+    /// the patch does not mention keeps the zone's current value — including
+    /// its NIL-ness, since an absent `pan` is not the same thing as an explicit
+    /// 0 (see `SamplerZone.pan`).
+    ///
+    /// The merged zone goes back through `SamplerZone.init`, so it clamps and
+    /// swaps under exactly the same law as the wholesale path: patching
+    /// `maxPitch` below the zone's current `minPitch` SWAPS the span rather
+    /// than collapsing it, and an `endFrame` at or below `startFrame` RAISES
+    /// rather than swapping. Deliberate — a patch must not be able to reach a
+    /// state the wholesale path cannot.
+    ///
+    /// Known limit, stated so it is not rediscovered as a bug: a patch cannot
+    /// CLEAR an optional field back to nil, because an omitted key already
+    /// means "keep". Send the whole map as `zones` for that.
+    private static func merge(_ f: ParsedZoneFields, into base: SamplerZone) -> SamplerZone {
+        SamplerZone(
+            id: base.id,
+            audioFileURL: f.path.map { URL(fileURLWithPath: $0) } ?? base.audioFileURL,
+            rootPitch: f.rootPitch ?? base.rootPitch,
+            minPitch: f.minPitch ?? base.minPitch,
+            maxPitch: f.maxPitch ?? base.maxPitch,
+            gain: f.gain ?? base.gain,
+            minVelocity: f.minVelocity ?? base.minVelocity,
+            maxVelocity: f.maxVelocity ?? base.maxVelocity,
+            group: f.group ?? base.group,
+            seqLength: f.seqLength ?? base.seqLength,
+            seqPosition: f.seqPosition ?? base.seqPosition,
+            randMin: f.randMin ?? base.randMin,
+            randMax: f.randMax ?? base.randMax,
+            tuneCents: f.tuneCents ?? base.tuneCents,
+            pan: f.pan ?? base.pan,
+            ampVelTrack: f.ampVelTrack ?? base.ampVelTrack,
+            oneShot: f.oneShot ?? base.oneShot,
+            startFrame: f.startFrame ?? base.startFrame,
+            endFrame: f.endFrame ?? base.endFrame,
+            attack: f.attack ?? base.attack,
+            decay: f.decay ?? base.decay,
+            sustain: f.sustain ?? base.sustain,
+            release: f.release ?? base.release,
+            loopMode: f.loopMode ?? base.loopMode,
+            loopStart: f.loopStart ?? base.loopStart,
+            loopEnd: f.loopEnd ?? base.loopEnd)
+    }
+
+    /// A brand-new zone: every unmentioned field resolves to the MODEL DEFAULT.
+    /// The four literals here (60/0/127/1) are the wire's documented defaults
+    /// and predate m26-g — they are reproduced, not re-decided.
+    private static func makeZone(_ f: ParsedZoneFields, id: UUID, path: String) -> SamplerZone {
+        SamplerZone(
+            id: id,
+            audioFileURL: URL(fileURLWithPath: path),
+            rootPitch: f.rootPitch ?? 60,
+            minPitch: f.minPitch ?? 0,
+            maxPitch: f.maxPitch ?? 127,
+            gain: f.gain ?? 1,
+            minVelocity: f.minVelocity,
+            maxVelocity: f.maxVelocity,
+            group: f.group,
+            seqLength: f.seqLength,
+            seqPosition: f.seqPosition,
+            randMin: f.randMin,
+            randMax: f.randMax,
+            tuneCents: f.tuneCents,
+            pan: f.pan,
+            ampVelTrack: f.ampVelTrack,
+            oneShot: f.oneShot,
+            startFrame: f.startFrame,
+            endFrame: f.endFrame,
+            attack: f.attack,
+            decay: f.decay,
+            sustain: f.sustain,
+            release: f.release,
+            loopMode: f.loopMode,
+            loopStart: f.loopStart,
+            loopEnd: f.loopEnd)
+    }
+
+    /// - Parameter reminted: OUT — the ids the caller SENT on the `zones` path
+    ///   that named no zone here and were therefore replaced with fresh ones.
+    ///   Empty on every other path. Surfaced as `remintedZoneIDs` so the
+    ///   substitution is reported rather than silent (see `UnknownZoneID`).
+    private func parseSampler(_ value: JSONValue?,
+                              current: SamplerParams? = nil,
+                              reminted: inout [String]) throws -> SamplerParams? {
         guard let value else { return nil }
         guard case .object(let obj) = value else {
             throw ControlError("sampler must be an object {zones, oneShot?, attack?, release?, gain?}")
         }
-        var zones: [SamplerZone] = []
+        // m26-g: `zones` and `zonePatches` are mutually exclusive. They say
+        // OPPOSITE things about the zones the caller did not mention — `zones`
+        // drops them, `zonePatches` keeps them — so a payload carrying both
+        // cannot be read, only guessed at. Same shape as ai.modelUnload's
+        // modelId-vs-all.
+        if obj["zones"] != nil, obj["zonePatches"] != nil {
+            throw ControlError(
+                "sampler takes exactly one of 'zones' or 'zonePatches', not both. 'zones' "
+                    + "REPLACES the whole keyzone map (and [] deliberately clears it); "
+                    + "'zonePatches' edits the zones you name by id and leaves every other "
+                    + "zone standing.")
+        }
+        let currentZones = current?.zones ?? []
+        var zones: [SamplerZone] = currentZones
         if let zonesValue = obj["zones"] {
+            zones = []
             guard case .array(let array) = zonesValue else {
                 throw ControlError("sampler.zones must be an array")
             }
+            var seen: Set<UUID> = []
             for (i, element) in array.enumerated() {
                 guard case .object(let zone) = element else {
                     throw ControlError("sampler.zones[\(i)] must be an object")
                 }
+                let label = "sampler.zones[\(i)]"
                 guard let rawPath = zone["path"]?.stringValue else {
-                    throw ControlError("sampler.zones[\(i)].path is required")
+                    throw ControlError("\(label).path is required")
                 }
                 let path = (rawPath as NSString).expandingTildeInPath
-                let root = try Self.optionalPitch(zone["rootPitch"], "sampler.zones[\(i)].rootPitch")
-                let lo = try Self.optionalPitch(zone["minPitch"], "sampler.zones[\(i)].minPitch")
-                let hi = try Self.optionalPitch(zone["maxPitch"], "sampler.zones[\(i)].maxPitch")
-                let zoneGain = try Self.optionalNumber(zone["gain"], "sampler.zones[\(i)].gain")
-                let minVel = try Self.optionalPitch(
-                    zone["minVelocity"], "sampler.zones[\(i)].minVelocity")
-                let maxVel = try Self.optionalPitch(
-                    zone["maxVelocity"], "sampler.zones[\(i)].maxVelocity")
-                let group = try Self.optionalInteger(zone["group"], "sampler.zones[\(i)].group")
-                let seqLength = try Self.optionalInteger(
-                    zone["seqLength"], "sampler.zones[\(i)].seqLength")
-                let seqPosition = try Self.optionalInteger(
-                    zone["seqPosition"], "sampler.zones[\(i)].seqPosition")
-                let randMin = try Self.optionalNumber(
-                    zone["randMin"], "sampler.zones[\(i)].randMin")
-                let randMax = try Self.optionalNumber(
-                    zone["randMax"], "sampler.zones[\(i)].randMax")
-                let tuneCents = try Self.optionalNumber(
-                    zone["tuneCents"], "sampler.zones[\(i)].tuneCents")
-                let pan = try Self.optionalNumber(zone["pan"], "sampler.zones[\(i)].pan")
-                let ampVelTrack = try Self.optionalNumber(
-                    zone["ampVelTrack"], "sampler.zones[\(i)].ampVelTrack")
-                let zoneOneShot = try Self.optionalBool(
-                    zone["oneShot"], "sampler.zones[\(i)].oneShot")
-                let startFrame = try Self.optionalInteger(
-                    zone["startFrame"], "sampler.zones[\(i)].startFrame")
-                let endFrame = try Self.optionalInteger(
-                    zone["endFrame"], "sampler.zones[\(i)].endFrame")
-                let zoneAttack = try Self.optionalNumber(
-                    zone["attack"], "sampler.zones[\(i)].attack")
-                let zoneDecay = try Self.optionalNumber(
-                    zone["decay"], "sampler.zones[\(i)].decay")
-                let zoneSustain = try Self.optionalNumber(
-                    zone["sustain"], "sampler.zones[\(i)].sustain")
-                let zoneRelease = try Self.optionalNumber(
-                    zone["release"], "sampler.zones[\(i)].release")
-                var loopMode: SamplerLoopMode?
-                if let loopModeValue = zone["loopMode"] {
-                    guard let raw = loopModeValue.stringValue,
-                          let mode = SamplerLoopMode(rawValue: raw) else {
-                        throw ControlError(
-                            "sampler.zones[\(i)].loopMode must be \"sustain\" or \"continuous\"")
-                    }
-                    loopMode = mode
+                // m26-g: a PRESENT id is honoured, so snapshot → setInstrument
+                // stops renumbering the map; an ABSENT id mints a fresh one, so
+                // authoring a brand-new map still needs no ids at all.
+                let id = try Self.parseZoneID(zone["id"], label: label,
+                                              known: currentZones, onUnknown: .mintUnknown,
+                                              seen: &seen, reminted: &reminted)
+                let fields = try Self.parseZoneFields(zone, label)
+                zones.append(Self.makeZone(fields, id: id, path: path))
+            }
+        } else if let patchesValue = obj["zonePatches"] {
+            // m26-g merge-by-id: edit the zones named here, leave the rest
+            // alone. This is the ONLY way to touch one zone of a 309-zone
+            // imported library without resending all 309.
+            guard case .array(let array) = patchesValue else {
+                throw ControlError("sampler.zonePatches must be an array")
+            }
+            var seen: Set<UUID> = []
+            var patches: [UUID: ParsedZoneFields] = [:]
+            for (i, element) in array.enumerated() {
+                guard case .object(let patch) = element else {
+                    throw ControlError("sampler.zonePatches[\(i)] must be an object")
                 }
-                let loopStart = try Self.optionalInteger(
-                    zone["loopStart"], "sampler.zones[\(i)].loopStart")
-                let loopEnd = try Self.optionalInteger(
-                    zone["loopEnd"], "sampler.zones[\(i)].loopEnd")
-                zones.append(SamplerZone(
-                    audioFileURL: URL(fileURLWithPath: path),
-                    rootPitch: root ?? 60,
-                    minPitch: lo ?? 0,
-                    maxPitch: hi ?? 127,
-                    gain: zoneGain ?? 1,
-                    minVelocity: minVel,
-                    maxVelocity: maxVel,
-                    group: group,
-                    seqLength: seqLength,
-                    seqPosition: seqPosition,
-                    randMin: randMin,
-                    randMax: randMax,
-                    tuneCents: tuneCents,
-                    pan: pan,
-                    ampVelTrack: ampVelTrack,
-                    oneShot: zoneOneShot,
-                    startFrame: startFrame,
-                    endFrame: endFrame,
-                    attack: zoneAttack,
-                    decay: zoneDecay,
-                    sustain: zoneSustain,
-                    release: zoneRelease,
-                    loopMode: loopMode,
-                    loopStart: loopStart,
-                    loopEnd: loopEnd
-                ))
+                let label = "sampler.zonePatches[\(i)]"
+                guard let idValue = patch["id"] else {
+                    throw ControlError(
+                        "\(label).id is required — a patch names the zone it edits. Read the "
+                            + "ids from project.snapshot's instrument.sampler.zones[].id, or "
+                            + "send the whole map as 'zones' to author new zones.")
+                }
+                let id = try Self.parseZoneID(idValue, label: label,
+                                              known: currentZones, onUnknown: .reject,
+                                              seen: &seen, reminted: &reminted)
+                patches[id] = try Self.parseZoneFields(patch, label)
+            }
+            // IN PLACE, by index. Zone ORDER is load-bearing — on an overlap
+            // the FIRST zone whose span contains the pitch wins — so a patch
+            // replaces its zone where it sits and never appends or re-sorts.
+            // Rebuilding the array from a dictionary would silently change
+            // which zone plays, a worse bug than the one m26-g fixes.
+            for index in zones.indices {
+                guard let fields = patches[zones[index].id] else { continue }
+                zones[index] = Self.merge(fields, into: zones[index])
             }
         }
+        // Each global falls back to the CURRENT value, then to the model
+        // default on a track that has no sampler config yet — so tuning one
+        // knob never quietly resets the other three.
+        let fallback = current ?? SamplerParams()
         let oneShot: Bool
         switch obj["oneShot"] {
-        case .none: oneShot = false
+        case .none: oneShot = fallback.oneShot
         case .some(.bool(let b)): oneShot = b
         case .some: throw ControlError("sampler.oneShot must be a boolean")
         }
         return SamplerParams(
             zones: zones,
             oneShot: oneShot,
-            attack: try Self.optionalNumber(obj["attack"], "sampler.attack") ?? 0.001,
-            release: try Self.optionalNumber(obj["release"], "sampler.release") ?? 0.05,
-            gain: try Self.optionalNumber(obj["gain"], "sampler.gain") ?? 0.8
+            attack: try Self.optionalNumber(obj["attack"], "sampler.attack") ?? fallback.attack,
+            release: try Self.optionalNumber(obj["release"], "sampler.release") ?? fallback.release,
+            gain: try Self.optionalNumber(obj["gain"], "sampler.gain") ?? fallback.gain,
+            // m26-h: provenance is SET BY THE IMPORTER and never read off the
+            // wire — parity with `SoundBankConfig.displayName`, which is
+            // likewise server-derived. It rides through here so that a partial
+            // update (or a wholesale zone edit) does not erase it; a caller who
+            // echoes `sourcePath`/`name` back from project.snapshot gets the
+            // right answer for the right reason, because the value came from
+            // `current`, not from their payload. Unknown keys inside `sampler`
+            // stay IGNORED rather than rejected, precisely so that echo cannot
+            // become an error.
+            sourcePath: fallback.sourcePath,
+            displayName: fallback.displayName
         )
     }
 
@@ -7563,6 +8354,25 @@ public final class CommandRouter {
     static func instrumentJSON(_ d: InstrumentDescriptor) -> JSONValue {
         let poly = d.polySynth
         let sampler = d.resolvedSampler
+        // m26-h: provenance rides NEXT TO `zones`, only when set — the same
+        // only-when-SET idiom as every zone field, so a hand-built sampler's
+        // wire shape stays byte-identical to pre-m26-h. Shaped after the
+        // `soundBank` sibling's {path, name}; there is no `source` (a sampler
+        // has no sentinel) and no `status` (the built-in sampler does not ride
+        // the AU registry slot those two share).
+        var samplerObject: [String: JSONValue] = [
+            "zones": .array(sampler.zones.map(samplerZoneJSON)),
+            "oneShot": .bool(sampler.oneShot),
+            "attack": .number(sampler.attack),
+            "release": .number(sampler.release),
+            "gain": .number(sampler.gain),
+        ]
+        if let sourcePath = sampler.sourcePath {
+            samplerObject["sourcePath"] = .string(sourcePath)
+        }
+        if let displayName = sampler.displayName {
+            samplerObject["name"] = .string(displayName)
+        }
         return .object([
             "kind": .string(d.kind.rawValue),
             "polySynth": .object([
@@ -7575,73 +8385,178 @@ public final class CommandRouter {
                 "resonance": .number(poly.resonance),
                 "gain": .number(poly.gain),
             ]),
-            "sampler": .object([
-                "zones": .array(sampler.zones.map { zone -> JSONValue in
-                    // m19-a selection fields are emitted only when SET, so a
-                    // legacy zone's wire shape is byte-identical to pre-m19
-                    // (and agents read back exactly what they configured).
-                    var object: [String: JSONValue] = [
-                        "id": .string(zone.id.uuidString),
-                        "path": .string(zone.audioFileURL.path),
-                        "rootPitch": .number(Double(zone.rootPitch)),
-                        "minPitch": .number(Double(zone.minPitch)),
-                        "maxPitch": .number(Double(zone.maxPitch)),
-                        "gain": .number(zone.gain),
-                    ]
-                    if let minVelocity = zone.minVelocity {
-                        object["minVelocity"] = .number(Double(minVelocity))
-                    }
-                    if let maxVelocity = zone.maxVelocity {
-                        object["maxVelocity"] = .number(Double(maxVelocity))
-                    }
-                    if let group = zone.group { object["group"] = .number(Double(group)) }
-                    if let seqLength = zone.seqLength {
-                        object["seqLength"] = .number(Double(seqLength))
-                    }
-                    if let seqPosition = zone.seqPosition {
-                        object["seqPosition"] = .number(Double(seqPosition))
-                    }
-                    if let randMin = zone.randMin { object["randMin"] = .number(randMin) }
-                    if let randMax = zone.randMax { object["randMax"] = .number(randMax) }
-                    // m19-b playback scalars: same only-when-SET emission
-                    // (A-imp-1 idiom) — a legacy zone's wire shape stays
-                    // byte-identical.
-                    if let tuneCents = zone.tuneCents {
-                        object["tuneCents"] = .number(tuneCents)
-                    }
-                    if let pan = zone.pan { object["pan"] = .number(pan) }
-                    if let ampVelTrack = zone.ampVelTrack {
-                        object["ampVelTrack"] = .number(ampVelTrack)
-                    }
-                    if let oneShot = zone.oneShot { object["oneShot"] = .bool(oneShot) }
-                    if let startFrame = zone.startFrame {
-                        object["startFrame"] = .number(Double(startFrame))
-                    }
-                    if let endFrame = zone.endFrame {
-                        object["endFrame"] = .number(Double(endFrame))
-                    }
-                    if let attack = zone.attack { object["attack"] = .number(attack) }
-                    if let decay = zone.decay { object["decay"] = .number(decay) }
-                    if let sustain = zone.sustain { object["sustain"] = .number(sustain) }
-                    if let release = zone.release { object["release"] = .number(release) }
-                    // m20-g loop fields: same only-when-SET emission.
-                    if let loopMode = zone.loopMode {
-                        object["loopMode"] = .string(loopMode.rawValue)
-                    }
-                    if let loopStart = zone.loopStart {
-                        object["loopStart"] = .number(Double(loopStart))
-                    }
-                    if let loopEnd = zone.loopEnd {
-                        object["loopEnd"] = .number(Double(loopEnd))
-                    }
-                    return .object(object)
-                }),
-                "oneShot": .bool(sampler.oneShot),
-                "attack": .number(sampler.attack),
-                "release": .number(sampler.release),
-                "gain": .number(sampler.gain),
-            ]),
+            "sampler": .object(samplerObject),
         ])
+    }
+
+    /// Wire JSON for ONE sampler zone. Split out of `instrumentJSON` at m26-h
+    /// only so the sampler object could gain two sibling keys; the emission
+    /// rules below are unchanged.
+    private static func samplerZoneJSON(_ zone: SamplerZone) -> JSONValue {
+        // m19-a selection fields are emitted only when SET, so a legacy zone's
+        // wire shape is byte-identical to pre-m19 (and agents read back exactly
+        // what they configured).
+        var object: [String: JSONValue] = [
+            "id": .string(zone.id.uuidString),
+            "path": .string(zone.audioFileURL.path),
+            "rootPitch": .number(Double(zone.rootPitch)),
+            "minPitch": .number(Double(zone.minPitch)),
+            "maxPitch": .number(Double(zone.maxPitch)),
+            "gain": .number(zone.gain),
+        ]
+        if let minVelocity = zone.minVelocity {
+            object["minVelocity"] = .number(Double(minVelocity))
+        }
+        if let maxVelocity = zone.maxVelocity {
+            object["maxVelocity"] = .number(Double(maxVelocity))
+        }
+        if let group = zone.group { object["group"] = .number(Double(group)) }
+        if let seqLength = zone.seqLength {
+            object["seqLength"] = .number(Double(seqLength))
+        }
+        if let seqPosition = zone.seqPosition {
+            object["seqPosition"] = .number(Double(seqPosition))
+        }
+        if let randMin = zone.randMin { object["randMin"] = .number(randMin) }
+        if let randMax = zone.randMax { object["randMax"] = .number(randMax) }
+        // m19-b playback scalars: same only-when-SET emission
+        // (A-imp-1 idiom) — a legacy zone's wire shape stays
+        // byte-identical.
+        if let tuneCents = zone.tuneCents {
+            object["tuneCents"] = .number(tuneCents)
+        }
+        if let pan = zone.pan { object["pan"] = .number(pan) }
+        if let ampVelTrack = zone.ampVelTrack {
+            object["ampVelTrack"] = .number(ampVelTrack)
+        }
+        if let oneShot = zone.oneShot { object["oneShot"] = .bool(oneShot) }
+        if let startFrame = zone.startFrame {
+            object["startFrame"] = .number(Double(startFrame))
+        }
+        if let endFrame = zone.endFrame {
+            object["endFrame"] = .number(Double(endFrame))
+        }
+        if let attack = zone.attack { object["attack"] = .number(attack) }
+        if let decay = zone.decay { object["decay"] = .number(decay) }
+        if let sustain = zone.sustain { object["sustain"] = .number(sustain) }
+        if let release = zone.release { object["release"] = .number(release) }
+        // m20-g loop fields: same only-when-SET emission.
+        if let loopMode = zone.loopMode {
+            object["loopMode"] = .string(loopMode.rawValue)
+        }
+        if let loopStart = zone.loopStart {
+            object["loopStart"] = .number(Double(loopStart))
+        }
+        if let loopEnd = zone.loopEnd {
+            object["loopEnd"] = .number(Double(loopEnd))
+        }
+        return .object(object)
+    }
+
+    /// `instrument.describeSampler`'s zone summary (m26-i): count, pitch/
+    /// velocity COVERAGE (the union of zone ranges, not a naive min/max —
+    /// see `zoneCoverage`), group count (nil group = implicit group 0, the
+    /// model's own default), and distinct sample-file count. Empty zones
+    /// (the documented `zones: []` clear) is a legal, describable state:
+    /// every field below answers honestly for it (count 0, no coverage
+    /// keys, group/file counts 0) rather than being reachable only through
+    /// an error.
+    private static func samplerZoneSummaryJSON(_ zones: [SamplerZone]) -> JSONValue {
+        var obj: [String: JSONValue] = ["count": .number(Double(zones.count))]
+        if let pitch = Self.zoneCoverage(zones.map { ($0.minPitch, $0.maxPitch) }) {
+            obj["pitchCoverage"] = Self.coverageJSON(pitch)
+        }
+        // minVelocity/maxVelocity nil means the FULL 0...127 span (the
+        // model's own documented default), never 0 — folding nil to 0 here
+        // would silently report a velocity hole that does not exist.
+        let velocityIntervals = zones.map { zone in
+            (zone.minVelocity ?? 0, zone.maxVelocity ?? 127)
+        }
+        if let velocity = Self.zoneCoverage(velocityIntervals) {
+            obj["velocityCoverage"] = Self.coverageJSON(velocity)
+        }
+        let groups = Set(zones.map { $0.group ?? 0 })
+        obj["groupCount"] = .number(Double(groups.count))
+        let files = Set(zones.map { $0.audioFileURL.path })
+        obj["distinctSampleFiles"] = .number(Double(files.count))
+        return .object(obj)
+    }
+
+    private struct ZoneCoverage {
+        var lowerBound: Int
+        var upperBound: Int
+        var gaps: [(lowerBound: Int, upperBound: Int)]
+    }
+
+    /// Merges a list of INCLUSIVE (lowerBound, upperBound) ranges into their
+    /// union, then reports the outer envelope plus every INTERIOR gap — the
+    /// space the envelope's own min/max cannot see. A naive min-of-lower/
+    /// max-of-upper reports "0-127, fully covered" for a keymap with a hole
+    /// in the middle; this is the fix (m26-i, written against the field
+    /// report's own two examples — a bass silent below MIDI 35, a library
+    /// silent above 45 — both of which sit at the envelope's OWN edges and
+    /// so are already visible in a naive min/max; an interior hole between
+    /// two zone islands is the case a naive envelope hides).
+    private static func zoneCoverage(_ ranges: [(Int, Int)]) -> ZoneCoverage? {
+        guard !ranges.isEmpty else { return nil }
+        let sorted = ranges.sorted { $0.0 < $1.0 }
+        var merged: [(lowerBound: Int, upperBound: Int)] = []
+        for range in sorted {
+            if let last = merged.last, range.0 <= last.upperBound + 1 {
+                merged[merged.count - 1].upperBound = max(last.upperBound, range.1)
+            } else {
+                merged.append((lowerBound: range.0, upperBound: range.1))
+            }
+        }
+        var gaps: [(lowerBound: Int, upperBound: Int)] = []
+        for i in 1..<merged.count {
+            let gapStart = merged[i - 1].upperBound + 1
+            let gapEnd = merged[i].lowerBound - 1
+            if gapStart <= gapEnd { gaps.append((lowerBound: gapStart, upperBound: gapEnd)) }
+        }
+        return ZoneCoverage(
+            lowerBound: merged.first!.lowerBound, upperBound: merged.last!.upperBound, gaps: gaps)
+    }
+
+    private static func coverageJSON(_ coverage: ZoneCoverage) -> JSONValue {
+        var obj: [String: JSONValue] = [
+            "min": .number(Double(coverage.lowerBound)),
+            "max": .number(Double(coverage.upperBound)),
+        ]
+        if !coverage.gaps.isEmpty {
+            obj["gaps"] = .array(coverage.gaps.map {
+                .object(["min": .number(Double($0.lowerBound)), "max": .number(Double($0.upperBound))])
+            })
+        }
+        return .object(obj)
+    }
+
+    /// `offset` (int >= 0, default 0) for `instrument.describeSampler`'s
+    /// zone page — same law as `au.describeParams`' offset
+    /// (`parseAUOffset`): non-integers/negatives reject readably, absurdly
+    /// large values cap in the Double domain before the Int conversion (no
+    /// trap) and just page past the end, returning an empty, untruncated
+    /// page.
+    private static func parseZonePageOffset(_ params: [String: JSONValue]) throws -> Int {
+        guard let raw = params["offset"] else { return 0 }
+        guard let value = raw.doubleValue, value >= 0,
+              value == value.rounded(.towardZero) else {
+            throw ControlError("'offset' must be an integer >= 0")
+        }
+        return Int(min(value, 1_000_000_000))
+    }
+
+    /// `limit` (default 500) — out-of-range values silently CLAMP into
+    /// 1...5000 (a sampler zone's wire JSON is far lighter than an AU
+    /// parameter, so the ceiling sits higher than `au.describeParams`'
+    /// `maxParams`); non-integers reject readably.
+    private static func parseZonePageLimit(_ params: [String: JSONValue]) throws -> Int {
+        guard let raw = params["limit"] else { return 500 }
+        guard let value = raw.doubleValue, value == value.rounded(.towardZero) else {
+            throw ControlError(
+                "'limit' must be an integer (default 500; values clamp into 1…5000)")
+        }
+        return Int(min(max(value, 1), 5_000))
     }
 
     // MARK: - frequency.reference helpers (m23-o1 Step 3, design §6)

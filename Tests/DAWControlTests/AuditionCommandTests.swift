@@ -140,6 +140,59 @@ struct AuditionCommandTests {
         #expect(rebuilding.result?["reason"]?.stringValue == "engineRebuilding")
     }
 
+    /// The field-report case (2026-08-17): an agent read `audible: true` off a
+    /// soundBank track whose patch was still loading, A/B'd two candidate
+    /// patches on the strength of it, and reported a tonal preference it could
+    /// not have heard. `audible` answers "is this signal path gated?", not "did
+    /// the patch I just set finish loading?" — the two read the registry through
+    /// different questions and can disagree for an instant. So the reply carries
+    /// the load status for the two kinds that HAVE one, and stays silent for the
+    /// three that don't (a default "pending" on a polySynth would read as a
+    /// stall that cannot happen).
+    @Test("the reply carries instrumentStatus for soundBank/AU, and NOT for polySynth")
+    func instrumentStatusRidesTheReply() async throws {
+        // `engine` is bound (not `_`): ProjectStore holds it weakly, so dropping
+        // the only strong reference deallocates the spy mid-test and every
+        // audition answers inaudible for the wrong reason.
+        let (router, store, engine, instrument, _) = makeRouter()
+        #expect(engine.isRunning)
+
+        // Negative control FIRST: a default (polySynth) track holds no registry
+        // slot, so the key must be absent — not "pending", not "ready".
+        let poly = await audition(router, [
+            "trackId": .string(instrument.uuidString),
+            "pitches": .array([.number(60)]),
+        ])
+        #expect(poly.ok)
+        #expect(poly.result?["audible"]?.boolValue == true)
+        #expect(poly.result?["instrumentStatus"] == nil)
+
+        // The reported case: a soundBank patch, headless, so the engine has
+        // recorded no status yet — `audible:true` NEXT TO "pending" is exactly
+        // the pair that misled the agent, and it is now visible in one reply.
+        // A real config, not a bare `kind:` — the snapshot only publishes the
+        // `soundBank` object (and with it the status this cross-check reads)
+        // when the descriptor actually carries one.
+        _ = try store.setInstrument(id: instrument, kind: .soundBank,
+                                    soundBank: SoundBankConfig(source: .generalMIDI, program: 0))
+        let bank = await audition(router, [
+            "trackId": .string(instrument.uuidString),
+            "pitches": .array([.number(60)]),
+        ])
+        #expect(bank.ok)
+        #expect(bank.result?["audible"]?.boolValue == true)
+        #expect(bank.result?["instrumentStatus"]?.stringValue == "pending")
+        // It agrees with the OTHER place the same status is published, so an
+        // agent can't be told two different stories about one track.
+        let snapshot = await router.handle(
+            ControlRequest(id: "s", command: "project.snapshot", params: [:]))
+        let tracks = snapshot.result?["tracks"]?.arrayValue ?? []
+        let bankTrack = tracks.first { $0.objectValue?["id"]?.stringValue == instrument.uuidString }
+        let snapshotStatus = bankTrack?.objectValue?["instrument"]?
+            .objectValue?["soundBank"]?.objectValue?["status"]?.stringValue
+        #expect(snapshotStatus == bank.result?["instrumentStatus"]?.stringValue)
+    }
+
     @Test("C10 every rejection is a teaching error that pushed NOTHING")
     func rejectionsTeachAndSoundNothing() async {
         let (router, _, engine, instrument, audio) = makeRouter()

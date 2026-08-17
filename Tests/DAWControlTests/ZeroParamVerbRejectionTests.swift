@@ -294,7 +294,7 @@ struct ZeroParamVerbRejectionTests {
         let orphaned = sourceCallSites.subtracting(Set(CommandRouter.allCommands))
         #expect(orphaned.isEmpty,
                 "these verbs have a rejectUnknownKeys call site but are not in allCommands — either renamed/removed (a bug), or an off-surface debug.* verb that was hardened (good; allowlist it above): \(orphaned.sorted())")
-        #expect(CommandRouter.allCommands.count == 175)   // 161 -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d
+        #expect(CommandRouter.allCommands.count == 180)   // 161 -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips)
     }
 
     private func makeRouter() -> CommandRouter {

@@ -9,10 +9,10 @@ user-invocable: false
 This is the shared reference every agent in this plugin (`producer`, `composer`,
 `arranger`, `sound-designer`, `mix-engineer`, `finisher`) and every skill
 points at. It reflects the ACTUAL current tool surface enumerated from
-`mcp-server/src/server.ts` (177 tools — re-decomposed 2026-08-10 at m23-di-2a:
-143 registered through the strict wrapper + 34 direct) and
+`mcp-server/src/server.ts` (185 tools — re-counted 2026-08-17, m26-k:
+151 registered through the strict wrapper + 34 direct) and
 `Sources/DAWControl/Commands.swift`
-(174 commands; the 3 extra tools call a generation provider directly and have no
+(180 commands; the 3 extra tools call a generation provider directly and have no
 backing command)
 in the DAW Pro repo — not memory, and not the app's own in-app Copilot
 catalog (`Sources/DAWControl/CopilotCatalog.swift`), which is a **different,
@@ -107,6 +107,131 @@ calling it.
   `undoLabel` field previews what the NEXT `edit_undo` would revert, before
   you call it.
 
+## Traps that have actually bitten (measured, not theoretical)
+
+Every item here cost a real agent real time in a real session. Read them
+before you reach for the tool they name.
+
+### Editing notes: read ONE clip, don't snapshot the project
+
+`clip_set_notes` is a whole-array replace, so editing existing notes means
+reading them first — and the read tool is `clip_get_notes`, not
+`project_snapshot`. It takes one `clipId`, optionally narrowed by
+`fromBeat`/`toBeat` (CLIP-relative beats, half-open) and `pitchMin`/
+`pitchMax` (inclusive), and it is read-only: no undo step, nothing dirtied.
+
+⚠️ **The one way to destroy notes with it:** if you filter the read and
+then whole-array-replace, everything you filtered out is deleted. That is
+what `totalNotes` (unfiltered) next to `returnedNotes` (what you got) is
+for — if they differ, you are not holding the whole clip. Read unfiltered
+before a write, or write back through a re-read.
+
+### `project_snapshot` will overflow your output budget
+
+MEASURED 2026-08-17 on a modest song — 6 tracks, 38 clips, 2,367 notes:
+**~290 KB of JSON on the wire, ~560 KB / 17.7k lines once it is rendered
+into a tool result.** That is past a single agent's output limit, and it
+gets worse with every note you write. `project_overview` on the same
+project: **7.5 KB.** So:
+
+- **Default to `project_overview`.** It has the ids, the routing, the
+  effect chains, and the clip layout — everything except note-level
+  detail.
+- Reach for `project_snapshot` only when you genuinely need notes,
+  automation points, or resolved effect params, and expect it to be
+  enormous on anything past a sketch.
+- If a call does overflow, don't retry it and don't guess at the contents:
+  say what you needed from it and hand the question back to the main
+  session, which can read the overflow file from disk.
+
+### Sidechain: it is the DESTINATION that must be audio/bus, not the source
+
+`fx_set_sidechain` fails in an all-MIDI project for one reason only — the
+keyed compressor/gate has to live on an **audio or bus** track, and an
+instrument track cannot host one. The **key source may be any non-bus
+track, instrument tracks included**: ducking a pad off a MIDI kick needs no
+audio bounce at all. The recipe is `track_add {kind: "bus"}` →
+`track_set_output` the pad into the bus → `fx_add` a compressor on the bus →
+`fx_set_sidechain` keyed from the kick's instrument track. Only bus key
+sources are deferred. (`mix-engineer` holds `track_add` for exactly this.)
+
+### The master fader stops at +6 dB
+
+`mixer_set_master_volume` is capped at 2.0 linear and a bigger value is
+REJECTED, not clamped. General-MIDI-sourced material regularly needs more
+than +6 dB to reach -14 LUFS. When it does, put a `gain` insert
+(`gainLinear` 0-4, ≈ +12 dB) at the front of the master chain rather than
+pushing the fader — the fader is a trim, not a makeup stage.
+
+### A present `zones` array replaces the whole sampler map
+
+`track_set_instrument` is a partial update everywhere, `sampler` included —
+omit `zones` and the track's zones stand, so a one-global tweak
+(`{sampler: {release: 0.4}}`) no longer costs a 309-zone resend. **But a
+`zones` array you DO send replaces the map wholesale.** There is no
+merge-by-zone-id yet (zone ids are emitted in snapshots but re-minted on
+every set), so a partial zone list deletes the zones you left out. Send
+`zones` only when you mean the complete map; `zones: []` is the deliberate
+clear.
+
+### A windowed render is not an excerpt of the full render
+
+`render_measure_loudness` (and any `fromBeat`-windowed render) DROPS every
+MIDI note whose note-ON falls before the window start — both the note-on
+and the note-off, so the note contributes nothing at all. A straddling
+AUDIO clip behaves the opposite way: it is entered mid-file and sounds.
+Measuring "just the outro" of a pad-heavy arrangement can therefore report
+gated silence for a passage that is perfectly fine from the top. This
+produced a convincing false alarm in a real session.
+
+**So: an unexpectedly silent window over sustained MIDI is far more likely
+to be this scheduling rule than a hole in the arrangement.** Re-measure
+from beat 0, or from the start of the clip in question, before you report
+silence to anyone. (The behaviour is deliberate-for-now and pinned by
+tests; whether the bounce should chase held notes is an open product
+question for the project owner, not something to work around silently.)
+
+Related unit trap in the same call: `fromBeat` is BEATS, `durationSeconds`
+is SECONDS. There is no beat-range form.
+
+### `clip_humanize` compounds — it is not idempotent
+
+The jitter is added to each note's CURRENT position, not to a stored
+quantized original, and nothing on the clip records that it was ever
+humanized. Two passes = double the drift, invisibly. `seed` reproduces a
+result only from the SAME starting state. To re-roll a feel, `edit_undo`
+the previous humanize first.
+
+### Nobody in this plugin can hear anything
+
+No agent here has ears. Every timbral judgement you make is inference from
+names and numbers — so use the numbers, and say plainly when you are
+guessing. What is actually measurable:
+
+| Question | Tool |
+|---|---|
+| Is a signal reaching the master at all? | `project_snapshot`'s `meters`, after `transport_play` |
+| How loud is the mix, properly? | `mixer_live_loudness` (live), `render_measure_loudness` (offline BS.1770-4 ground truth) |
+| What's the tonal balance right now? | `mixer_master_analysis` (24 bands, centroid/brightness, flux) |
+| What does ONE track/effect chain look like spectrally? | `fx_spectrum` |
+| What key/tempo/spectral balance is this audio clip? | `clip_analyze_audio` |
+| What pitch is this audio, over time? | `clip_detect_pitch` |
+| What did the file I just wrote actually contain? | `audio_profile_file` (peak/RMS/DC/silence — explicitly NOT a loudness meter) |
+| How does my mix compare to a reference track? | `reference_import` + `reference_compare` |
+
+`note_audition` is a SIGNAL-PATH check, not a timbre check. `audible: true`
+means the strip isn't muted or solo-excluded, the engine is running, and —
+for `soundBank`/`audioUnit` instruments — a prepared instrument existed at
+that instant. It measures no level and no spectrum. Never A/B two candidate
+patches with it and report a tonal preference: you would be inventing the
+difference. Pick by program name and documented character, say that is what
+you did, and leave the listening to the user.
+
+The reply also carries `instrumentStatus` for those two kinds
+("pending"/"ready"/"missing"/"failed: …"). **`audible: true` alongside
+`"pending"` means the path is clear but the patch you just set may not have
+been what sounded** — retry before trusting it.
+
 ## Etiquette (every agent follows this)
 
 1. **Orient before mutating.** Call `app_connection_info` if you're unsure
@@ -180,7 +305,18 @@ real conversion).
 ## Genre-neutral defaults worth knowing
 
 `macro_song_skeleton` (held by `producer`) scaffolds tempo + a genre's track
-roster + section clips + a loop in one call, across five genres: `pop`
-(120 BPM), `house` (124 BPM), `hip-hop` (90 BPM), `rock` (140 BPM), `ballad`
-(72 BPM). It's additive — safe to call on an existing project — and a single
-`edit_undo` reverts the whole scaffold.
+roster + section clips + **a marker at every section start** + a loop in one
+call, across five genres: `pop` (120 BPM), `house` (124 BPM), `hip-hop`
+(90 BPM), `rock` (140 BPM), `ballad` (72 BPM). It's additive — safe to call
+on an existing project — and a single `edit_undo` reverts the whole
+scaffold, markers included.
+
+Two things about its output nobody should be surprised by:
+
+- **The roster is a GENRE template, not the brief.** Every vocal genre
+  scaffolds a `Vocals` AUDIO track, which cannot host an instrument — dead
+  weight on an instrumental brief. `producer` owns reconciling this
+  (`track_add`/`track_rename`/`track_remove`) before reporting the roster.
+- **Marker names mirror the section names verbatim**, so a layout with two
+  verses gives you two markers named "Verse". Disambiguate by beat, not by
+  name — the result payload carries both.

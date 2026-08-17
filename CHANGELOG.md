@@ -1,5 +1,434 @@
 # Changelog
 
+## 2026-08-17 — Four answers, and one of them cost no code at all
+
+The open questions from the field report came back answered. Two have landed.
+
+**A bounce now sounds notes that started before it.** The entry below says this one was left where it
+was, because whether a region bounce should chase held notes is a product decision and not ours to
+make. It has been made: chase, the way the play button already does. A pad held from bar one is
+audible when you play *through* bar five, and it should not vanish because you bounced *from* bar
+five — which is what it did, at RMS exactly zero, while a straddling *audio* clip in the identical
+position sounded fine. That asymmetry is now closed.
+
+It is a fourth reschedule cause rather than a reuse or a flip. Calling it a transport start would
+have made that case mean "the user pressed play" when nobody did, and flipping the relocation case
+would have changed three live behaviours — seeking while rolling, starting a record, wrapping a loop
+— to fix one offline one. The cost is stated rather than implied: a note already mid-decay at the
+window edge re-attacks at full velocity, so a bounce synthesises an attack the song does not have
+there. You can see it in the measurement — the bounce reads slightly *louder* than the play-through,
+0.0662 against 0.0639, where it used to read 0.0.
+
+The part worth trusting is the containment. Chasing can only ever add notes that begin before the
+window, so a render from beat zero cannot change — nothing precedes zero. That is now checked in bit
+patterns rather than argued: zero differing samples out of forty-eight thousand at beat zero, and
+47,998 differing at beat four, so the test can demonstrably see a difference when there is one.
+Nothing was re-baselined, because nothing moved.
+
+**The pitch-accuracy target was corrected rather than enforced.** The detector spike set a bar of ±10
+cents and attached a consequence — miss it and we throw out the detector and vendor a different
+library. The detector missed it. But the bar is impossible by arithmetic: the model reports pitch by
+picking one of 256 bins across 6,577 cents, so a bin is 25.8 cents wide and the worst-case rounding
+error is ±12.9 cents before the model is consulted at all. No tuning reaches ±10, and neither does
+swapping in another library that reports through the same 256 bins — so the consequence would have
+discarded a working detector over a specification error.
+
+What it actually does on voice-like material is 4.74 cents median in the sung range and zero octave
+errors, which is the failure that actually ruins a tuned vocal. The synthetic tier of the target is
+now written in those units. The real-vocal tier is untouched and still binding — and still unmet, in
+the honest sense that no real vocal has been through this path yet.
+
+The odd part: the code needed no change, and neither did the tests. The Swift battery had been
+measuring median, p95 and octave rate all along, with margin over the measured numbers and a
+deliberately-wrong tracker asserted to fail it. The *document* was the only thing still stating a
+target nothing could hit.
+
+**The Sampler is reachable now, over MCP.** It was the only instrument surface in the app with
+neither a read nor a per-parameter write — effects have describe-and-set, hosted plugins have
+describe-and-set, the sound banks report where they came from, and the built-in Sampler had none of
+it. After an import, a nineteen-parameters-per-zone instrument was frozen at whatever its `.sfz`
+author chose.
+
+Three tools and a new read command. The read is the one worth describing: it reports pitch and
+velocity coverage as the *union* of the zone ranges — the outer envelope plus the interior gaps —
+rather than a minimum and a maximum. A min/max would report "0 to 127" for a keymap with a hole in
+the middle, and a hole in the middle is exactly what cost the last session an afternoon: a bass that
+was silent below MIDI 35 and a library silent above 45. It also pages, because the only previous way
+to see any of this was a project snapshot that measures 296,809 bytes on a real song.
+
+Underneath, two things that had to be fixed first. Zone ids were published in every snapshot and
+then thrown away on every write — the parser minted fresh ones per element — so reading a keymap and
+writing it back silently renumbered all of it, and nothing could address a zone to edit it. And a
+sampler track recorded nothing about where its library came from, so "which bass is this?" was
+answerable only by dumping a megabyte and eyeballing a file path. Both now hold.
+
+One compatibility note, because it changes nothing you'd notice but is the kind of thing that bites
+later. Copying one track's zones onto another track still works. Honouring ids is what made that
+dangerous — zone ids have to be unique across the whole project, since the project file keys each
+zone's sample reference by id — so ids that don't belong to the destination get fresh ones, exactly
+as they always did, and the reply now tells you which ones were replaced instead of doing it
+silently.
+
+**And agents can paste.** Paste was reachable only through a debug verb, so the one operation you
+perform constantly by hand had no honest route for anything else. `edit.pasteClips` fires the app's
+own ⌘V — the same clipboard, the same target resolution, the same undo step — and its reply
+distinguishes the four things that used to collapse into a bare false: clips landed, the clipboard
+was empty, the clipboard holds notes rather than clips, or the destination refused the payload. An
+agent that got `false` had no way to tell those apart.
+
+Worth being plain about one limit: the clipboard is *yours*. Nothing can put clips into it over the
+wire, so this pastes whatever you last copied.
+
+## 2026-08-17 — What the agents were told, versus what the app can actually do
+
+Someone installed the Music Team plugin, asked it for a song, and then asked it what got in the
+way. Eleven findings came back. Six of them turned out not to be about the app at all — they were
+about what the agents had been *told*, and in two cases what they had been told was simply wrong.
+
+The sidechain is the clearest example. An agent reported it unusable in an all-MIDI project,
+because the tool's own description said the key source has to be an audio track. It doesn't. The
+code has only ever rejected a *bus* as a key source — an instrument track is a perfectly valid one,
+and ducking a pad off a MIDI kick never needed an audio bounce. What the tool actually requires is
+that the *keyed compressor* live on an audio or bus track, which in an all-MIDI project means
+adding a bus. The mix engineer couldn't do that either, but for an unrelated reason: nobody had
+given it `track_add`. Two sentences and one tool grant, and a capability that had been reported as
+missing turned out to have been there the whole time.
+
+The same shape, four more times. `clip_humanize` compounds when you run it twice — the store's own
+comment says so, the tool description never did. `render_measure_loudness` re-renders the session
+rather than reading the file you just wrote, which is fine, but nothing said so and nothing pointed
+at the tools that *do* read a file. The master fader stops at +6 dB, and the answer to a mix that
+needs more is a gain insert, not a fight with the fader. And a windowed loudness measurement
+silently drops every MIDI note that started before the window — which produced a convincing false
+alarm about a silent outro, and cost several probes to disprove.
+
+Two real gaps got closed rather than documented. `note_audition` now returns the instrument's load
+status alongside `audible`, because `audible: true` on a patch that is still loading had been read
+as "this patch sounds good" — it never meant that, and now it can't be mistaken for it. And
+`macro_song_skeleton` now drops a real marker at every section start, so the song's beat map exists
+the moment the scaffold lands instead of being retyped by hand into every downstream instruction.
+
+The plugin itself got the rest. Its coordinator agent had been told to delegate through a tool it
+was never granted — an exhaustive tool allowlist revokes the built-ins, so its documented job was
+literally unexecutable. It now plans, scaffolds, and hands back a delegation plan, with the tools
+to reconcile a genre template against an actual brief. The finisher can inspect the file it just
+wrote. The composer can read one clip's notes instead of the entire project. And the reference
+every agent preloads now carries the traps above, each with the measurement that proved it.
+
+One finding was left exactly where it was. Whether a bounce should chase notes held across its
+start is a product decision with a test suite already pinning today's answer, and it belongs to the
+person who owns the product.
+
+A later pass through the same report turned up something worse than friction. `track_set_instrument`
+describes itself as a partial update — omit a field and it keeps its value — with the sampler as
+the stated exception. What that exception meant in practice: send `{sampler: {release: 0.4}}` to
+lengthen the release on a 309-zone imported bass, and the omitted `zones` key parsed as an empty
+array, which the store then swapped in wholesale. The library was deleted. The call returned
+success. The only symptom was an instrument that had stopped making sound, and the documented way
+to avoid it was to read all 309 zones back out of a snapshot approaching a megabyte and resend them
+with your one change.
+
+The sampler is now partial too, at both levels: omit `zones` and the track's zones stand, omit a
+global and it keeps its value instead of snapping back to a default. A `zones` array you actually
+send still replaces the map — a wire zone carries no id the parser honours, so there is nothing to
+merge by yet — which makes `zones: []` the deliberate way to clear a sampler and nothing else.
+
+`clip.getNotes` / `clip_get_notes` — new, strictly read-only control command and MCP tool. Give it
+a clip id and it hands back that clip's notes, with their real ids, optionally narrowed to a beat
+range or a pitch range. It exists because there was no honest way to read a MIDI clip's notes back
+without either asking for the entire project or mutating the clip to get an echo of it.
+
+`clip.setNotes` has always replaced a clip's whole note array — by design, there's no
+add-one-note verb. That's fine for writing, but it means editing requires reading first: you need
+the current array, ids included, before you can change three notes and resubmit six. The only
+tool that returned notes at all was `project.snapshot`, and on a modest six-track project that's
+about 290 KB of JSON — comfortably past what an agent can afford to read on every turn just to
+find one clip's content. The only other option was calling `clip.humanize` with zero jitter and
+throwing away the jitter, using a mutating command as a magnifying glass.
+
+That trick turns out to be worse than it looks. Zero jitter does draw nothing and does leave the
+notes byte-identical — but the edit still runs through the same code path as a real edit, which
+marks the project dirty and pings the engine, whether or not anything actually changed. Undo is
+the one thing it happens to spare, because the store already skips writing a history entry for an
+edit that produced no change — but "the app now thinks you have unsaved work" is exactly the kind
+of side effect a read should never have. `clip.getNotes` never enters that path at all.
+
+Two things about the response are worth knowing before wiring it into anything. The beat window is
+half-open — a note starting exactly at the end of your range doesn't come back, so two adjacent
+windows never both claim the same note. And the response always reports the clip's *total* note
+count alongside however many survived your filter, specifically so that filtering, editing, and
+then calling `clip.setNotes` with only what you saw can't quietly delete the notes you never asked
+for.
+
+## 2026-08-16 — Zooming the note editor no longer slides the music away
+
+Pinch or press ⌘+ in the note editor and the music used to drift sideways under your
+cursor — you'd zoom in on a bar and land somewhere else. The arrange has always held
+its place. The editor simply never adopted the rule.
+
+It does now, and it anchors on the right thing for each way of zooming. A pinch has a
+pointer, so it holds the beat under your fingers. The ± buttons and ⌘± don't — your
+hand is at the header, nowhere near the beat you're reading — so those hold the
+playhead, or the centre when the playhead isn't in this clip.
+
+The arithmetic wasn't rewritten. It's the same function the arrange has always used,
+called from one more place; the editor adds only its own answer to *which point should
+stay still*. Worth doing that way because "the centre of the view" now has exactly one
+definition, and the day it changes, both surfaces change together.
+
+One bug nearly shipped inside this. The new scale was being written before the anchor
+was measured, so the code would have read the playhead's position at the *new* zoom
+level — a perfectly plausible number describing the wrong place, and the picture would
+have slid by exactly one zoom step. Caught, fixed, and pinned by a test that fails if
+anyone reintroduces it.
+
+## 2026-08-16 — The test suite stops forgetting its own history
+
+Internal tooling, invisible in the app, but it was quietly destroying evidence.
+
+This project has 94 "gates" — standalone checks that guard behaviours ordinary tests
+can't see. Each run recorded its result into a single file that the next run overwrote.
+That file isn't in version control, so the previous result wasn't recoverable from
+anywhere. Running a gate destroyed the only record of how it did last time — which makes
+*"did this used to pass?"*, the first question anyone asks when something breaks,
+permanently unanswerable.
+
+There's now an append-only history alongside it: one line per write, never rewritten.
+
+The interesting part was finding all the places that write. Three different pieces of
+code do, and they deliberately record different things — one knows how many checks ran,
+another knows how long it took, and only one knows the actual pass/fail verdict, because
+only it can tell a genuine failure from one that's expected and pinned. Hook the history
+into the obvious two and you'd get a complete record of hashes and timestamps that never
+once says whether anything passed. All three now go through a single shared writer, which
+also fixed one of them writing non-atomically — it could leave a half-written file behind
+if interrupted, a hazard the other two had already been hardened against.
+
+Verified by breaking it on purpose: unhooking each writer in turn fails exactly its own
+check and leaves the other two green.
+
+## 2026-08-16 — Hold at the edge and it keeps scrolling
+
+Dragging notes to the edge of the note editor scrolls the view. Holding them there used to do
+nothing: the scroll advanced only when a pointer event arrived, and a pointer held still emits no
+events. Push to the edge of a long clip and you'd stop, mid-drag, with nowhere left to go.
+
+The reason it had never been built was a real objection written into the code: a clock firing
+between pointer events has no event to read, so it would have to *invent* how far the pointer
+moved — and an invented number would slide the notes out from under your cursor. That objection
+turns out to be answerable. A held pointer only changes position within the content because the
+content moved underneath it, and the editor already knows exactly how far it scrolled. So each tick
+recomputes the position from that, rather than accumulating guesses. Nothing drifts, because nothing
+is being added up; and the value it arrives at is the one the system itself would have reported, so
+the next real movement agrees with it instead of jumping.
+
+Two hazards showed up during the build and both would have shipped as bugs. The first gate tried
+"no event since the last tick" as the test for *held* — but a 16 ms clock and 16.7 ms pointer events
+drift past each other, so roughly every other tick would have fired mid-motion and quietly made
+normal dragging faster. It now waits for 200 ms of genuine stillness, which can't beat against
+anything. Second, a press with no movement counts as a drag, so simply clicking near the edge would
+have launched a runaway scroll. It now arms only once you've actually moved.
+
+The arithmetic is machine-checked: the dragged note's position on screen is pinned across a
+four-thousand-point run, and deliberately corrupting the calculation makes that check fail. Whether
+the *ramp* feels right is not something any test here can judge — that needs a hand on a trackpad.
+
+## 2026-08-16 — Every key is named, and so is every note
+
+The piano roll's keyboard used to label C and nothing else, which left you counting rows to find
+out where you were. Every key now carries its name, and note blocks carry theirs too when there's
+room.
+
+A note too narrow for its name shows no name at all rather than a shortened one. This is not
+fussiness: "C#4" trimmed to "C#" is a *valid, different pitch*, so trimming here would invent a
+plausible wrong answer instead of admitting it ran out of space. Zoom in and the names appear.
+
+Legibility was measured rather than eyeballed — the actual view rendered offscreen and its pixels
+read back. Every one of the 128 rows clears the contrast floor. That measurement changed the
+design twice: a single dark ink turned out to fail on quiet violet notes, which are exactly the
+ones marking AI-generated material, so each note now picks its ink from its own colour and
+loudness. And the text metrics we assumed were slightly wrong in a way that had been costing every
+eighth note its name at normal zoom.
+
+Accidentals are set one tone quieter than naturals so 128 names read as a scale rather than a wall
+— though whether that lands is a matter of taste, and nobody has looked at it in a running app yet.
+
+## 2026-08-16 — Ask a clip what notes are in it
+
+`clip.detectPitch` — new control command and MCP tool. Point it at an audio clip and it returns the
+pitch, 62.5 readings a second, with a confidence and a level for each one. This is what the
+voice-to-song workflow was waiting on: an agent can now find the notes in a spoken or sung phrase
+instead of being told them.
+
+Verified end to end against a tone built for the purpose — 220 Hz for two seconds, then silence.
+It read **220.06 Hz, a median error of half a cent**, and no octave errors. Where the silence
+begins, every frame says so: the pitch field is simply absent, with a reason attached — *below
+level*, meaning too quiet to tell, as distinct from *below confidence*, meaning present but
+unclear. A zero there would have become a real note the moment anything read it.
+
+Frames are never dropped, only emptied. A gap in a vocal is information — the difference between
+two notes and one long one — so the grid stays even and the holes stay visible.
+
+One shape worth knowing: asking about a whole three-minute song returns about 11,000 frames. That
+ceiling is deliberate. Thinning them out would have been easy and would have quietly destroyed the
+evenness the previous paragraph depends on.
+
+## 2026-08-16 — The app can hear pitch
+
+Pitch detection runs in-process now: a protocol seam with a SwiftF0 backend behind it, reading
+frequency from audio 62.5 times a second. This is the foundation vocal tuning and the voice-to-song
+workflow have both been waiting on. It isn't reachable from the app yet — the command that exposes
+it is the next piece.
+
+Two things found while measuring it are worth writing down, because both nearly caused the wrong
+decision.
+
+**Every bad accuracy number previously on record was a property of the test tone, not the model.**
+A 220 Hz pure sine came back 88.8% wrong by an octave. The same pitch played with harmonics — a
+sound resembling a voice or an instrument — reads 0.48 cents off, with no octave errors at all. A
+model trained on spectrograms of real audio has never seen a pure sine. The fixture was the defect,
+and it very nearly condemned a working detector.
+
+**Confidence does not mean "there is sound here."** A tone at −140 dBFS, which is silence by any
+practical definition, comes back with 99.99% confidence. Left unguarded, that turns room tone into
+a confident melody. Detection now requires both confidence and an actual signal level, and those
+two catch different things: confidence rejects noise, level rejects near-silence.
+
+Where a frame has no pitch, it says so and says why — too quiet, too uncertain, or out of range —
+rather than reporting zero. A zero would become a real note the moment anything read it.
+
+Accuracy on voice-like material: 4.74 cents median in the sung range, 10.60 in the low range, zero
+octave errors in either.
+
+## 2026-08-16 — Humanize and Quantize no longer pretend to work on a comp'd take
+
+If a clip was part of a take comp, the Humanize and Quantize panels would open, let you set
+amounts, accept the Apply, close — and change nothing. The store had always refused that edit;
+the refusal just never reached the screen.
+
+Both panels now ask before offering. Apply is disabled and the panel says why, naming the comp
+and the way out (flatten it, or edit through the comp). The panel also stays open, so the
+sentence is still there to read.
+
+The distinction underneath is worth stating, because it decides how every future refusal in a
+panel should look: **kind hides, state explains.** Whether a clip is audio or MIDI is what it
+*is* — the panel makes no sense, so the entry never appears. Whether it belongs to a comp is
+something you can change — so the door stays open and the app tells you what to do first.
+
+Fixed in both panels deliberately. Quantize shipped first and had the identical fault; fixing
+only the one you'd noticed would have left the same silence one menu away.
+
+Not yet confirmed by eye: the reason is verified to be computed and wired, but nobody has seen
+it drawn in the panel.
+
+## 2026-08-16 — When a clip can't grow to fit your note, it now says so
+
+Placing a note past the end of a clip usually just works: the clip grows to make room. But it
+can't always. Another clip may be sitting right behind it, or the note may be further out than
+the app is willing to stretch in one go. Until now those two cases looked identical to the
+ordinary one — the note landed, stayed silent, and nothing on screen changed.
+
+An amber note now appears and names the actual obstacle, because the obstacles have different
+fixes: a clip in the way is something you move, a note too far out is something you place nearer.
+Telling you the wrong one would be worse than the silence.
+
+The hard part was not the message. "The clip didn't grow" and "the clip couldn't grow" were the
+same answer internally — the same empty result covers a note that already fits, which is what
+happens on essentially every edit inside a clip. The naive version of this feature would have
+warned you every time you moved a note, and every time you pressed Delete. The rule now returns
+a named reason instead of a bare blank, so the ordinary case is something the compiler forces
+anyone to handle rather than something a reader has to notice.
+
+Not yet confirmed by eye: the message is verified to fire on the right cases and carry the right
+text, but nobody has seen it drawn over the grid.
+
+## 2026-08-16 — You can now ask the app what a rendered file actually contains
+
+Verifying a bounce used to mean leaving the app. Checking whether a render was truncated, or
+what the level was in one particular second of it, needed external tools every time.
+
+`audio.profileFile` answers that directly: give it a path and a window size and it returns
+peak and RMS for each window, plus the file's own header — duration, sample rate, channels,
+bit depth. It reads the file where it lies: nothing is copied, nothing is imported, and the
+project's reference slot is left alone, so it works as a throwaway probe rather than an
+operation you have to undo.
+
+Two deliberate limits. A digitally silent window reports no level at all rather than zero,
+because silence has no decibel value and pretending otherwise is how a truncated render gets
+mistaken for a quiet one. And this is not a loudness meter — the existing external loudness
+cross-check stays external, since a meter cannot be used to check itself.
+
+## 2026-08-16 — A check that was failing on the wrong view's colour
+
+One of the header checks verifies that the "no clips to select" chip stays visually neutral —
+plain secondary ink, no accent colour, no glow. It had been failing, and the tempting reading
+was that the chip's colours had drifted.
+
+They hadn't. The check grabbed the chip's source by taking everything up to the next view
+declaration in the file, which is not the same thing as taking the chip. It overshot by 3413
+characters into the neighbouring declaration — the cyan active-track rail — and reported that
+rail's cyan as the chip's. The chip itself was, and is, correct.
+
+It now extracts the declaration by matching its own braces, and refuses to run at all if that
+extraction looks wrong in either direction: too short to contain the chip's own text, or long
+enough to have swallowed the neighbour. What it asserts about the colours is unchanged, which
+was the point — the easy repair was to stop looking for cyan, and that would have left a check
+that could never fail again.
+
+## 2026-08-16 — A test that guarded nothing now guards something
+
+One of the note-editor tests claimed to check that changing only a clip's length forces the
+editor to reload. It never checked that. It built its two note sets by calling the same
+fixture twice, and notes get a fresh identity each time they are made — so the two sets
+always differed by identity, and the reload it observed was triggered by the notes looking
+different, not by the length changing at all. Deleting the length check outright left the
+test green.
+
+It is three lines shorter now and actually fails when the code it names is removed.
+
+The method matters more than the fix: the only reliable way to tell a real test from a
+decorative one is to delete the thing it claims to protect and confirm it goes red. Every
+test in that file was put through it, and the other eleven earned their keep — including one
+with the identical suspicious shape that turns out to be fine, because controller points
+carry no identity to diverge on.
+
+## 2026-08-16 — Turning snap off now turns it off in the note editor too
+
+Reported from a real session: with snap off, clicking or dragging the playhead in the note
+editor still dropped it on a grid line, while doing the same thing in the arrange worked
+fine.
+
+It was not a playhead bug. There were two separate snap settings. The toolbar control drove
+the arrange; the note editor kept its own, defaulting to whole beats, and never read the
+toolbar's. Both rendered as an identical "SNAP:" label, so there was no way to tell from
+looking that you were adjusting only half the app.
+
+There is now one policy deciding what snap applies, and turning snap off wins everywhere.
+The note editor keeps its own resolution — sixteenths for notes while clips move in bars is
+genuinely useful — but off means off. The editor's own chip now shows the grid actually in
+force rather than the resolution you picked, since a chip reading "1/16" while nothing snaps
+is the same broken promise in a quieter voice.
+
+One thing deliberately left: the note editor's own resolution still resets when you reopen a
+clip. That is a separate piece of plumbing, and your off setting is unaffected by it.
+
+## 2026-08-16 — The loudness tool now admits what it returns
+
+`render_measure_loudness` has always returned a loudness-range figure (EBU Tech 3342 LRA)
+and never mentioned it in its own description, so an agent reading the docs would reach for
+an external meter to get a number the tool was already handing it. It is documented now,
+along with what LRA actually means and the fact that it is the same figure
+`reference_analyze` reports — so a mix and a reference track are directly comparable on it.
+
+A second error in the same paragraph turned out to be worse than the omission: the text said
+a missing measurement meant the audio was silent. That is only sometimes true. The windowed
+figures also go missing when the excerpt is shorter than their window — 400 ms for max
+momentary, 3 seconds for max short-term and loudness range — so measuring a two-second
+snippet drops three fields while the integrated and true-peak numbers stay perfectly
+healthy. Read literally, the old text told you to diagnose that as silence.
+
+Documentation only; no behaviour changed and nothing was added to the control surface.
+
 ## 2026-08-14 — Meme songs: a skill for turning a phrase into a track
 
 You can now hand an agent a recording of somebody talking and ask for a song built out of

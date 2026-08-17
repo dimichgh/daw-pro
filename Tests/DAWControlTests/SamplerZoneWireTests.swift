@@ -20,6 +20,70 @@ struct SamplerZoneWireTests {
         return (CommandRouter(store: store), store)
     }
 
+    /// FIELD REPORT 2026-08-17, finding 12. An agent imported a 309-zone
+    /// upright bass, then tried to lengthen its release. `track.setInstrument`
+    /// documents itself as a PARTIAL update, but the sampler object was a
+    /// carve-out: an omitted `zones` key parsed as an EMPTY array and the store
+    /// swaps the sampler wholesale, so a one-knob tweak DELETED the whole
+    /// library — silently, with a successful response, and audible only as an
+    /// instrument that had stopped making sound. The documented workaround was
+    /// to resend all 309 zones, readable only from a ~1 MB project.snapshot.
+    @Test("a partial sampler edit keeps the zones AND the untouched globals")
+    func partialSamplerEditKeepsZones() async throws {
+        let (router, store) = makeRouter()
+        let instID = store.addTrack(kind: .instrument).id.uuidString
+
+        let imported = await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: [
+                "trackId": .string(instID),
+                "kind": .string("sampler"),
+                "sampler": .object([
+                    "zones": .array([
+                        .object(["path": .string(Self.pingPath), "minPitch": .number(36),
+                                 "maxPitch": .number(59)]),
+                        .object(["path": .string(Self.pingPath), "minPitch": .number(60),
+                                 "maxPitch": .number(83)]),
+                    ]),
+                    "oneShot": .bool(true),
+                    "gain": .number(0.42),
+                ]),
+            ]))
+        #expect(imported.ok)
+        let zoneIDs = store.tracks[0].instrument?.sampler?.zones.map(\.id) ?? []
+        #expect(zoneIDs.count == 2)
+
+        // The reported call: ONE global, nothing else.
+        let tweak = await router.handle(ControlRequest(
+            id: "2", command: "track.setInstrument",
+            params: ["trackId": .string(instID),
+                     "sampler": .object(["release": .number(0.4)])]))
+        #expect(tweak.ok)
+
+        let sampler = try #require(store.tracks[0].instrument?.sampler)
+        // THE POINT: the library is still there, same zones, same ids.
+        #expect(sampler.zones.count == 2)
+        #expect(sampler.zones.map(\.id) == zoneIDs)
+        #expect(sampler.zones[0].minPitch == 36)
+        #expect(sampler.zones[1].maxPitch == 83)
+        // The edit landed…
+        #expect(sampler.release == 0.4)
+        // …and the globals the caller never mentioned did NOT snap back to
+        // model defaults (oneShot false / gain 0.8), which is the same class of
+        // silent loss one level down.
+        #expect(sampler.oneShot == true)
+        #expect(sampler.gain == 0.42)
+
+        // An EXPLICIT empty array still clears — "partial" must not mean
+        // "unclearable", and this is the only way to say it deliberately.
+        let cleared = await router.handle(ControlRequest(
+            id: "3", command: "track.setInstrument",
+            params: ["trackId": .string(instID),
+                     "sampler": .object(["zones": .array([])])]))
+        #expect(cleared.ok)
+        #expect(store.tracks[0].instrument?.sampler?.zones.isEmpty == true)
+    }
+
     @Test("the ten m19-b zone keys round-trip through set → echo → snapshot")
     func playbackScalarsRoundTrip() async throws {
         let (router, store) = makeRouter()

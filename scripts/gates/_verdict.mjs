@@ -99,6 +99,16 @@
 // ever reads hash + timestamp (`kind` is decoration for a human skimming the
 // baseline file) — so there is no conflict and no false record possible.
 //
+// ⚠️ "TWO WRITERS" ABOVE IS SCOPED TO THE BASELINE *RECORD* (this function +
+// the runner) — do NOT read it as the count for the append-only JSONL
+// HISTORY m25-q added alongside the baseline (scripts/gate-baseline-
+// write.mjs). The history has THREE writers: this function, `gate-corpus-
+// staleness.mjs`'s prune path (preserves an outgoing record before deleting
+// it), and the runner's bulk upsert (the only writer of `kind`). See that
+// module's own header for the full contract before assuming "two" covers it
+// — an earlier draft of this exact item's brief made precisely that
+// mistake, sourced from this section.
+//
 // KEYING: the invoking file must be a real gate — `scripts/gates/*.mjs`,
 // not `_`-prefixed — determined from `process.argv[1]` (the script node was
 // actually started with), never from "does the call site literally say
@@ -134,9 +144,10 @@
 // mechanism; those two open items already own crediting them, by whatever
 // means fits each one's own vacuous-idiom shape. Do not "fix" it here.
 
-import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, basename, join, resolve } from "node:path";
+import { writeJSONAtomic } from "../gate-baseline-write.mjs";
 
 const ROOT = "/Users/dsemenov/Views/daw-pro";
 const GATES_DIR = join(ROOT, "scripts/gates");
@@ -181,26 +192,22 @@ function readBaselineObjectOrEmpty(path) {
   return parsed;
 }
 
-// Atomic on the same filesystem: a process killed between the two calls
-// leaves the ORIGINAL file untouched and an orphaned `.tmp-*` file behind,
-// never a half-written live baseline. If the rename itself fails (e.g.
-// `path` is a directory, not a file — EISDIR), the temp file is cleaned up
-// before re-throwing so a failed write doesn't litter the tree either.
-function writeJSONAtomic(path, obj) {
-  const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
-  writeFileSync(tmp, JSON.stringify(obj, null, 1) + "\n");
-  try {
-    renameSync(tmp, path);
-  } catch (e) {
-    try { unlinkSync(tmp); } catch { /* best effort */ }
-    throw e;
-  }
-}
+// The atomic write + history append now live in one shared module
+// (scripts/gate-baseline-write.mjs, m25-q) — imported above as
+// `writeJSONAtomic`. See that module's header for the full "three writers"
+// contract; this file is writer #1 of 3.
 
 // COVERAGE FACTS ONLY — see the header's "TWO WRITERS" section for the full
 // contract. Never throws: any failure here must be invisible to the gate's
 // own pass/fail result (stdout stays byte-identical either way).
-function recordCoverage() {
+//
+// `ran`/`failed` are threaded in from `verdict()`'s own arguments (m25-q):
+// this is the one place in the system that knows a gate's raw ran/failed
+// counts WITHOUT the runner's EXPECTED_RED reclassification, so the history
+// line records them even though the baseline record itself still carries
+// only sha256+ranAt (see gate-baseline-write.mjs's header for why `kind` is
+// deliberately never written here).
+function recordCoverage(ran, failed) {
   const gate = invokingGateFile();
   if (!gate) return; // not a real gate invocation — nothing to record
   try {
@@ -208,10 +215,13 @@ function recordCoverage() {
     const sha256 = createHash("sha256").update(readFileSync(join(GATES_DIR, gate))).digest("hex");
     const baseline = readBaselineObjectOrEmpty(baselinePath);
     const existing = baseline[gate] || {};
+    const ranAt = new Date().toISOString();
     // Spread `existing` FIRST so any `kind`/`secs` a runner pass already
     // wrote survive untouched; only `sha256`/`ranAt` are ever set here.
-    baseline[gate] = { ...existing, sha256, ranAt: new Date().toISOString() };
-    writeJSONAtomic(baselinePath, baseline);
+    baseline[gate] = { ...existing, sha256, ranAt };
+    writeJSONAtomic(baselinePath, baseline, [
+      { recordedAt: ranAt, source: "verdict", gate, sha256, ranAt, ran, failed },
+    ]);
   } catch (e) {
     process.stderr.write(
       `⚠️ verdict(): could not record baseline coverage (${e.message}) — ` +
@@ -280,7 +290,7 @@ export function verdict({ ran, failed } = {}, { allowEmpty, subject } = {}) {
   // BEFORE all three exit branches below (every real verdict — empty,
   // failed, or passed — counts as "this gate ran just now"). See the file
   // header's "COVERAGE RECORDING" section for the full contract.
-  recordCoverage();
+  recordCoverage(ran, failed);
 
   if (ran === 0) {
     if (allowEmpty) {

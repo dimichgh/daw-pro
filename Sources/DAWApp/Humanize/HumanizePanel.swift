@@ -25,6 +25,17 @@ import DAWAppKit
 /// command and NO MCP tool, because the capability already has both (the
 /// m10-c/sp-b pure-view rule — `allCommands` and MCP counts are unchanged).
 ///
+/// **A TAKE-COMP MEMBER IS REFUSED HERE, IN PLACE, WITH THE REASON (m25-c-2).**
+/// It used to be offered: `canApply` was blind to comp membership, so Apply fired,
+/// `humanizeClipNotes` threw `clipInTakeGroup`, a `try?` ate it and this panel
+/// closed having done nothing. The model now asks the store BEFORE the press
+/// (`HumanizeModel.targetRefusal`), Apply is dark, `PanelRefusalLine` prints the
+/// store's sentence, and the panel STAYS OPEN — the message and the surface it
+/// sits on must survive the press together or the message is a flash at an empty
+/// screen. The entry is NOT hidden the way an audio clip's is, because comp
+/// membership is state the user can change and the piano-roll HUMANIZE chip is
+/// ungated: hiding would have to happen in two places and would explain nothing.
+///
 /// **NO SIMPLE/PRO CHIP.** The panel is two amounts and one button in every
 /// density — there is no Pro delta to expose, and `QuantizePanel` states the
 /// rule for exactly this case: a chip whose modes coincide is a do-nothing
@@ -163,10 +174,18 @@ struct HumanizePanel: View {
             .buttonStyle(.plain)
             .disabled(!model.canApply)
             .help("Apply the human feel to this part (one undo step)")
-            // Both amounts at zero is a LEGAL no-op in the store — it would spend
-            // an undo step and change nothing. Say why the button is dark rather
-            // than letting it look broken.
-            if model.isNoOp {
+            // WHY THE BUTTON IS DARK — one reason at a time, most fundamental
+            // first (m25-c-2). A store refusal outranks the no-op caption because
+            // raising a slider cannot help: the obstacle is the clip, not the
+            // amounts, and printing both would send the user to do the useless
+            // one. Amber (PanelRefusalLine) for an obstacle you must leave the
+            // panel to clear; dim caption for one you can fix right here.
+            if let refusal = model.refusalMessage {
+                PanelRefusalLine(message: refusal)
+            } else if model.isNoOp {
+                // Both amounts at zero is a LEGAL no-op in the store — it would
+                // spend an undo step and change nothing. Say why the button is
+                // dark rather than letting it look broken.
                 caption("Both amounts are zero — raise one to change anything.")
             }
         }

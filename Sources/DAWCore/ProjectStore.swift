@@ -1827,7 +1827,16 @@ public final class ProjectStore {
     /// (Swift's `sorted(by:)` is NOT guaranteed stable, so sort on `(beat, index)`
     /// with the current index as the tiebreak). The single funnel every marker
     /// mutation re-applies so `markers` is always the ordered exposure.
-    private static func markersSortedByBeat(_ markers: [Marker]) -> [Marker] {
+    ///
+    /// Module-`internal`, NOT `private`, for exactly one reason: `markers` is the
+    /// ordered exposure for mutations in OTHER FILES of DAWCore too — the
+    /// `applySongSkeleton` extension (`SongSkeleton.swift`) merges its section
+    /// markers through this same funnel inside its single `performEdit`, and
+    /// Swift's `private` is unreachable across files even from an extension of
+    /// the same type. Widening the funnel keeps ONE sort; the alternative was a
+    /// second, drift-prone copy of the tiebreak rule. Still not `public` — the
+    /// ordering is an implementation detail of the store.
+    static func markersSortedByBeat(_ markers: [Marker]) -> [Marker] {
         markers.enumerated()
             .sorted { a, b in
                 a.element.beat != b.element.beat ? a.element.beat < b.element.beat : a.offset < b.offset
@@ -3473,6 +3482,79 @@ public final class ProjectStore {
         return clip
     }
 
+    // MARK: - Auto-extend reporting (m25-a-2)
+
+    /// What auto-extend did on the MOST RECENT `setClipNotes` / `pasteNotes`.
+    ///
+    /// **A REPORT CHANNEL, NOT STATE ANYTHING RENDERS OFF** — the arrange's
+    /// `arrangePointerZone` echo-seam idiom, one layer down. It exists because
+    /// an auto-extend refusal is the one refusal in this store that is NOT a
+    /// throw: the note write SUCCEEDS, the clip simply does not grow, so there
+    /// is no error for the caller to catch and the whole thing was silent
+    /// (m25-a-2 — the user's report: *"It should warn with signal or something
+    /// and direct user or give a clue"*). The caller reads it synchronously
+    /// after the call; `@ObservationIgnored` because a value that changes on
+    /// every note edit has no business invalidating a view.
+    ///
+    /// ⚠️ Both verbs set this on EVERY invocation, including to `.notNeeded`, so
+    /// a stale value can never be read as a fresh refusal.
+    @ObservationIgnored
+    public internal(set) var lastAutoExtendOutcome: ClipAutoExtend.ExtendOutcome = .notNeeded
+
+    /// The user-facing sentence for `lastAutoExtendOutcome`, or nil when there is
+    /// nothing to say. Derived, never stored — one value, one message.
+    public var lastAutoExtendRefusal: String? {
+        Self.autoExtendRefusalMessage(lastAutoExtendOutcome)
+    }
+
+    /// THE ONE HOME for auto-extend's user-facing words (m25-a-2).
+    ///
+    /// Prose lives HERE and not on `ClipAutoExtend`, whose own banner is *"Pure
+    /// value math, no store, no UI"*; and it lives here rather than in the view
+    /// because `ArrangeRefusalBubble` is contracted to render *"the store's
+    /// refusal message VERBATIM"* — the view renders, it never composes. Both
+    /// verbs (`setClipNotes` and `pasteNotes`, in two different files) call this
+    /// one function, so the two gestures cannot start telling the user different
+    /// stories about the same obstacle.
+    ///
+    /// ⛔ **THE SWITCH IS EXHAUSTIVE AND MUST STAY THAT WAY — NEVER ADD
+    /// `default:`.** `.notNeeded` is the ORDINARY case (the notes already fit),
+    /// and it fires on essentially every note edit inside a clip. A
+    /// `default: warn` would fire an amber bubble on every one of them, which is
+    /// far worse than the silence this exists to fix — and no test would catch
+    /// it, because every fixture anyone writes for this function is a refusal.
+    /// The compiler forcing a human to handle `.notNeeded` IS the safety.
+    ///
+    /// Each message names the ACTUAL obstacle, because the remedies differ and a
+    /// message that names the wrong one sends the user to do something that
+    /// cannot work.
+    /// `nonisolated` because it is a pure value→prose mapping that touches no
+    /// store state — the reason the store OWNS it is where the words belong,
+    /// not what they need to read.
+    nonisolated static func autoExtendRefusalMessage(_ outcome: ClipAutoExtend.ExtendOutcome) -> String? {
+        switch outcome {
+        case .notNeeded, .grew:
+            // Nothing was refused. SAY NOTHING.
+            return nil
+        case .refusedByGrowthCap:
+            return """
+                That note is more than \(ClipAutoExtend.maxGrowthBars) bars past the end of this clip, \
+                so the clip wasn't grown to reach it and the note won't sound. \
+                Place it closer to the clip, or make the clip longer first.
+                """
+        case .refusedByNeighbour:
+            return """
+                There's another clip right after this one, so this clip can't grow to reach that \
+                note and it won't sound. Move the next clip later, or place the note inside this clip.
+                """
+        case .refusedOnsetStillLatent:
+            return """
+                That note starts exactly at the clip's end, so it won't sound wherever the clip ends. \
+                Move it a little earlier.
+                """
+        }
+    }
+
     /// Replaces the entire note list of a MIDI clip (whole-array set — the M3
     /// piano roll edits by re-sending the clip's notes). Throws `clipNotFound`
     /// for an unknown id and `notAMIDIClip` for an audio clip. Notes are
@@ -3509,6 +3591,11 @@ public final class ProjectStore {
     @discardableResult
     public func setClipNotes(clipID: UUID, notes: [MIDINote],
                              extendToCover: Set<UUID> = []) throws -> Clip {
+        // m25-a-2 — CLEARED BEFORE THE GUARDS, not after them. Every throw below
+        // leaves the call with nothing to report, and a caller reading the
+        // channel after a `try?` that threw must not be handed the PREVIOUS
+        // call's refusal.
+        lastAutoExtendOutcome = .notNeeded
         guard let (t, c) = locateClip(clipID) else {
             throw ProjectError.clipNotFound(clipID)
         }
@@ -3529,15 +3616,25 @@ public final class ProjectStore {
         // samples it for its own bar lines (`ContentView`: `beatsPerBar(atBeat:
         // clip.startBeat)`), so the new end lands on a line the user can see.
         let clip = tracks[t].clips[c]
-        let grownLength: Double? = ClipAutoExtend.coverage(of: ordered, ids: extendToCover)
-            .flatMap { span in
-                ClipAutoExtend.extendedLength(
+        // ⚠️ m25-a-2 — `.map { … } ?? .notNeeded`, NOT `.flatMap`, AND THE
+        // DIFFERENCE IS THE FEATURE. `coverage` returns nil when `extendToCover`
+        // is empty or names nothing in this submission — which is the ORDINARY
+        // case, not a refusal: the roll's DELETE key and the velocity lane reach
+        // this verb with an empty set on every single press. Folding that into
+        // the same `nil` as the three real refusals is exactly how a warning
+        // ends up firing on every delete keystroke.
+        let outcome = ClipAutoExtend.coverage(of: ordered, ids: extendToCover)
+            .map { span in
+                ClipAutoExtend.outcome(
                     currentLengthBeats: clip.lengthBeats,
                     coveringOnsetBeat: span.onsetBeat,
                     coveringEndBeat: span.endBeat,
                     beatsPerBar: transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
                     maxLengthBeats: trailingHeadroom(trackIndex: t, clipIndex: c))
-            }
+            } ?? .notNeeded
+        lastAutoExtendOutcome = outcome
+        var grownLength: Double?
+        if case .grew(let length) = outcome { grownLength = length }
 
         // ONE `performEdit`. `performEdit` is NOT re-entrant (it captures
         // before-state and journals unconditionally, with no depth counter), so
@@ -3935,6 +4032,43 @@ public final class ProjectStore {
         let name = tracks[t].takeGroups.first(where: { $0.id == gid })?.name
             ?? tracks[t].clips[c].name
         throw ProjectError.clipInTakeGroup(name, clipID: tracks[t].clips[c].id)
+    }
+
+    /// The ASK form of `requireNotCompMember` (m25-c-2): the refusal an ordinary
+    /// clip edit WOULD throw for this clip, or nil when it would pass.
+    ///
+    /// **FOR SURFACES THAT MUST REFUSE BEFORE THE PRESS, NOT AFTER IT.** The
+    /// Humanize and Quantize panels offered Apply on a comp member, the store
+    /// threw, a `try?` ate it and the panel closed having done nothing — the
+    /// whole of m25-c-2. They now ask this at open time, disable Apply, and print
+    /// `errorDescription` VERBATIM (the `ArrangeRefusalBubble` rule: the view
+    /// renders, it never composes — and the m25-a-2 rule that the words live in
+    /// the store, so one obstacle cannot start telling two stories).
+    ///
+    /// ⛔ **IMPLEMENTED BY CALLING THE GUARD, NEVER BY RE-TESTING `takeGroupID`.**
+    /// A second copy of "is this a comp member?" is exactly what the guard's own
+    /// doc says no caller needs, and a copy is free to drift from the throw it
+    /// exists to predict. Because the question and the answer are the same code,
+    /// ask-then-act cannot disagree with act-and-catch here.
+    ///
+    /// An UNKNOWN clip id answers `nil`, NOT a refusal: this method answers one
+    /// question — "would the comp guard bite?" — and a clip that is not in the
+    /// project is a different question its own caller already handles (the panel
+    /// openers `guard` on finding the clip; the mutation throws `clipNotFound`).
+    ///
+    /// **NO WIRE VERB, DELIBERATELY.** An agent already gets this exact sentence,
+    /// from this exact guard, as the error `clip.humanize` / `clip.quantize`
+    /// return — it was only the human surfaces that had the refusal and did not
+    /// show it. A query verb would be a second way to ask a question the wire
+    /// already answers, so `allCommands` and MCP are untouched by m25-c-2.
+    public func compEditRefusal(clipID: UUID) -> ProjectError? {
+        guard let (t, c) = locateClip(clipID) else { return nil }
+        do {
+            try requireNotCompMember(trackIndex: t, clipIndex: c)
+            return nil
+        } catch {
+            return error as? ProjectError
+        }
     }
 
     /// Clamps a fade pair to a clip length. Each fade is first pinned to

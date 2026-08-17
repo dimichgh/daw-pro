@@ -55,6 +55,61 @@ public enum SnapResolution: String, CaseIterable, Sendable {
         case .sixtyFourth: "1/64"
         }
     }
+
+    /// **THE ONE HOME FOR "which grid the note editor actually applies" (m25-ab).**
+    /// `ClipSnap.effective(density:picked:)`'s sibling, one input wider — and the
+    /// only place in the app allowed to answer this question.
+    ///
+    /// ⚠️⚠️ **IT EXISTS BECAUSE THERE WERE TWO HOMES AND THEY WORE THE SAME
+    /// LABEL.** The arrange toolbar's `SNAP:` chip writes `AppModel.clipSnap`; the
+    /// roll header's `SNAP:` chip wrote a `@State private var snap` nothing outside
+    /// the view could read, and the roll consulted only the latter. Both rendered
+    /// the identical string `"SNAP: \(label)"`. So a user who turned snap OFF and
+    /// then placed the playhead in the note editor watched it round to whole beats
+    /// — *"it still places at the start or end of the note grid"* (2026-08-16) —
+    /// while the same gesture in the arrange worked. **A duplicated LABEL is a
+    /// duplicated PROMISE**, and the fix has to be a single answer, not a second
+    /// conditional in the view.
+    ///
+    /// The rule, in the order it is evaluated:
+    ///
+    /// 1. **App-level OFF wins, everywhere in the roll.** This is the user's own
+    ///    ruling, quoted in `PianoRollPlayhead.scrubProjectBeat`'s doc: *"when I
+    ///    move playhead in track over the clip it would snap it to the position of
+    ///    the grid when snap is on, and anywhere in clip when it is [off]. When we
+    ///    implement playhead positioning in node editor, it should follow the same
+    ///    rules."* ONE snap model, BOTH surfaces.
+    /// 2. **Otherwise Simple locks to `.beat`** — the beginner scaffolding that
+    ///    was already here, unchanged.
+    /// 3. **Otherwise the roll's own pick**, so 16ths for notes while the arrange
+    ///    sits on bars stays possible. Only OFF crosses the boundary; the toolbar's
+    ///    chosen DIVISION never follows the user into the note editor.
+    ///
+    /// ⭐ **WHY OFF IS CHECKED BEFORE THE DENSITY LOCK, WHICH IS THE ONE REAL
+    /// DESIGN DECISION HERE.** The roll's own picker is Pro-only, so in Simple the
+    /// app-level chip is the ONLY snap control on screen. Letting Simple's `.beat`
+    /// lock override a visible "SNAP: Off" would re-create the exact surprise this
+    /// item was filed for, one degree quieter — a control that reads OFF and snaps
+    /// anyway. Ordering it the other way is not a tie-break, it is a regression.
+    ///
+    /// ⚠️ **`appSnap` IS THE SNAP IN FORCE, NOT THE RAW PICKER.** Callers pass
+    /// `AppModel.effectiveClipSnap` (`ClipSnap.effective(density:picked:)` over the
+    /// ARRANGE's density), for a reason worth stating: the toolbar chip is rendered
+    /// only when the arrange is Pro (`ContentView`'s `if arrangeIsPro`). A Simple
+    /// arrange therefore holds a `clipSnap` the user cannot see and does not have
+    /// in force — and an invisible `.off` silently unsnapping the note editor would
+    /// be a hidden preference acting at a distance. Feeding the in-force value
+    /// means the roll honours OFF exactly when OFF is on screen.
+    ///
+    /// Pure, so the view layer stays a thin read of a tested contract, and
+    /// non-destructive: nothing here mutates `picked`, so turning the app snap back
+    /// on restores the roll's own resolution instantly (the `ClipSnap.effective`
+    /// rule).
+    public static func effective(appSnap: ClipSnap, density: PanelDensity,
+                                 picked: SnapResolution) -> SnapResolution {
+        if appSnap == .off { return .off }
+        return density == .pro ? picked : .beat
+    }
 }
 
 /// Where inside a note a point landed — used to route a drag to move vs resize.

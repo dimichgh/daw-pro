@@ -40,6 +40,17 @@ public final class QuantizeModel {
     /// to `ProjectStore.extractGroove`; async because an audio clip detects
     /// transients on the engine). Args: clipID, name, gridBeats, cycleBeats.
     private let extractClosure: (UUID, String, Double, Double) async throws -> GrooveTemplate
+    /// Asks whether an ordinary note edit on a clip would be REFUSED by the store
+    /// before it happens (wired to `ProjectStore.compEditRefusal`, the ask form of
+    /// the same `requireNotCompMember` guard `quantizeClipNotes` runs; a recorder
+    /// in tests). The `HumanizeModel.compRefusalClosure` reasoning VERBATIM,
+    /// because m25-c-2 is one bug with two faces: a provider rather than a
+    /// `prepare` parameter, so no entry point can forget to ask.
+    ///
+    /// ⚠️ It gates APPLY ONLY. Extracting a groove READS the clip and the store
+    /// permits it on a comp member, so the extract affordance stays live — a
+    /// refusal must bite exactly where the store bites and nowhere else.
+    private let compRefusalClosure: (UUID) -> ProjectError?
 
     /// The built-in MPC swing presets (`GrooveTemplate.builtinNames` resolved), shown
     /// at the top of the groove picker. Injected so the app passes the canonical set
@@ -56,6 +67,15 @@ public final class QuantizeModel {
     /// is MIDI-only (matching `ProjectStore.quantizeClipNotes`); an audio target
     /// shows only the extract affordance (`groove.extract` supports both).
     public private(set) var targetIsMIDI: Bool = true
+
+    /// Why Apply cannot fire on this target — the STORE'S OWN refusal, asked at
+    /// `prepare` time instead of discovered by throwing after the press
+    /// (m25-c-2). Today that is only `clipInTakeGroup`: a take-comp member is
+    /// store-managed, so `quantizeClipNotes` rejects it before touching notes.
+    ///
+    /// ⚠️ **SET ON EVERY `prepare`, INCLUDING TO nil** — a value that survived an
+    /// open on another clip would read as a fresh refusal.
+    public private(set) var targetRefusal: ProjectError?
 
     // MARK: - Density (synced from the panel's SimpleProToggle; tests set directly)
 
@@ -94,16 +114,21 @@ public final class QuantizeModel {
     /// True while an extract is in flight (an audio clip awaits transient detection).
     public private(set) var isExtracting: Bool = false
 
+    /// `compRefusal` defaults to "nothing refuses" so a fixture that is not about
+    /// refusals says nothing about them; the APP must pass the real one, which is
+    /// pinned by `HumanizeQuantizeCompRefusalSiteTests`.
     public init(
         builtinGrooves: [GrooveTemplate],
         savedGrooves: @escaping () -> [GrooveTemplate],
         apply: @escaping (UUID, QuantizeSettings) -> Void,
-        extract: @escaping (UUID, String, Double, Double) async throws -> GrooveTemplate
+        extract: @escaping (UUID, String, Double, Double) async throws -> GrooveTemplate,
+        compRefusal: @escaping (UUID) -> ProjectError? = { _ in nil }
     ) {
         self.builtinGrooves = builtinGrooves
         self.savedGroovesProvider = savedGrooves
         self.applyClosure = apply
         self.extractClosure = extract
+        self.compRefusalClosure = compRefusal
     }
 
     // MARK: - Lifecycle
@@ -117,6 +142,10 @@ public final class QuantizeModel {
         targetClipID = clipID
         targetClipName = clipName
         targetIsMIDI = isMIDI
+        // Unconditional — see `targetRefusal`: a nil answer must overwrite a
+        // previous clip's refusal, or reopening on an ordinary clip would still
+        // show the comp member's message.
+        targetRefusal = compRefusalClosure(clipID)
         selectedGroove = nil
         isExtractExpanded = false
         extractName = ""
@@ -237,13 +266,34 @@ public final class QuantizeModel {
                                 swingPercent: swing, quantizeEnds: quantizeEnds)
     }
 
+    /// The user-facing sentence for `targetRefusal`, or nil when nothing refuses.
+    /// **DERIVED, NEVER STORED — one value, one message** (`lastAutoExtendRefusal`,
+    /// m25-a-2). The words are the store's `errorDescription` VERBATIM, the same
+    /// sentence the `clip.quantize` wire returns and the same one
+    /// `ArrangeRefusalBubble` prints.
+    public var refusalMessage: String? { targetRefusal.flatMap(\.errorDescription) }
+
+    /// Whether Apply can fire: a MIDI target with nothing refusing it (m25-c-2 —
+    /// this model had no `canApply` at all, so the panel offered APPLY QUANTIZE to
+    /// a take-comp member, the store threw, and the panel closed having changed
+    /// nothing). There is deliberately no strength/no-op conjunct here: unlike
+    /// Humanize's two amounts, a 0-strength quantize is not this item's business.
+    public var canApply: Bool {
+        targetClipID != nil && targetIsMIDI && targetRefusal == nil
+    }
+
     /// Applies the built settings to the target clip through the injected apply
-    /// closure (`ProjectStore.quantizeClipNotes`) — ONE undo step. A no-op with no
-    /// target. Note-quantize is MIDI-only, so audio targets never reach here (the
-    /// view hides Apply for audio); the guard keeps it safe regardless.
-    public func apply() {
-        guard let clipID = targetClipID, targetIsMIDI else { return }
+    /// closure (`ProjectStore.quantizeClipNotes`) — ONE undo step.
+    ///
+    /// **RETURNS WHETHER IT FIRED**, which is what lets the panel close on a real
+    /// apply and STAY OPEN on a refusal (m25-c-2). False with no target, an audio
+    /// target (the view hides Apply there; the guard keeps it safe regardless), or
+    /// a store refusal.
+    @discardableResult
+    public func apply() -> Bool {
+        guard canApply, let clipID = targetClipID else { return false }
         applyClosure(clipID, buildSettings())
+        return true
     }
 
     // MARK: - Extract affordance

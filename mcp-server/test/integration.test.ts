@@ -320,12 +320,40 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // a mutating tool, so it joined the strict-schema wrapper count) took it
   // 176 -> 177. m25-d's transport_set_stop_at_content_end (stop the transport
   // at the end of the last clip — a mutating tool, so it joined the strict-schema
-  // wrapper count) took it 177 -> 178.
+  // wrapper count) took it 177 -> 178. m25-z's audio_profile_file (windowed
+  // peak/RMS profile of a file on disk — read-only, but registered through the
+  // strict-schema wrapper anyway since it takes real params worth typo-catching)
+  // took it 178 -> 179. m23-ap-3's clip_detect_pitch (per-frame pitch
+  // detection over an audio clip — also read-only, also registered through
+  // the strict-schema wrapper for the SAME real-params-worth-typo-catching
+  // reason as audio_profile_file, not clip_detect_transients' single-knob
+  // shape) took it 179 -> 180. clip_get_notes (the read-only counterpart to
+  // clip_set_notes — pull one clip's notes, filtered by beat range and/or
+  // pitch, instead of paying for a whole project_snapshot) took it 180 -> 181;
+  // registered through the strict-schema wrapper for the same real-params-
+  // worth-typo-catching reason as audio_profile_file/clip_detect_pitch.
+  // m26-i's `instrument_describe_sampler` (read-only sibling of
+  // `au_describe_params` for the built-in Sampler — the answer to "which
+  // library is loaded and how is it mapped" without paying for a whole
+  // project_snapshot; registered through the strict-schema wrapper for the
+  // same real-params reason), `instrument_set_sampler_param` (set one
+  // sampler global) and `instrument_set_sampler_zones` (merge zones by id)
+  // took it 181 -> 184. The latter two have no 1:1 backing command of their
+  // own — both wrap `track.setInstrument` under a narrower name, so they
+  // live in `audit-tools.test.ts`'s EXCEPTION_TABLE_C rather than the
+  // mechanical command->tool rule.
+  // m26-k's `edit_paste_clips` (fire the app's own Cmd-V clipboard paste
+  // over the wire — a mutating tool, so it joined the strict-schema wrapper
+  // count; routes through the new TYPED `EditPasteControlling` app-layer
+  // seam, the `plugin.*` precedent, not `appCommandHandler`) took it
+  // 184 -> 185.
   // ⚠️ The DECOMPOSITION, because the total on its own has rotted before:
   // 34 `server.registerTool(` (pure reads, deliberately exempt from `.strict()`)
-  // + 144 `registerTool(` (the strict-schema wrappers — `vc_import_voice_model`
-  // and `transport_set_stop_at_content_end` joined those) = 178.
-  assert.equal(result.tools.length, 178);
+  // + 151 `registerTool(` (the strict-schema wrappers — `vc_import_voice_model`,
+  // `transport_set_stop_at_content_end`, `audio_profile_file`,
+  // `clip_detect_pitch`, `clip_get_notes`, m26-i's three sampler tools, and
+  // m26-k's `edit_paste_clips` joined those) = 185.
+  assert.equal(result.tools.length, 185);
 });
 
 // ---------------------------------------------------------------------------

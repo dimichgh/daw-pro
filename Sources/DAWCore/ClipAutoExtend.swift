@@ -138,23 +138,149 @@ public enum ClipAutoExtend {
         beatsPerBar: Int,
         maxLengthBeats: Double? = nil
     ) -> Double? {
-        // 1. Already covered → not an extension, not an edit.
-        guard coveringEndBeat > currentLengthBeats + epsilon else { return nil }
+        // ⚠️ A THIN WRAPPER, AND THAT IS THE POINT (m25-a-2). The rule lives in
+        // `outcome(...)` and NOWHERE ELSE. A sibling `reason(...)` recomputing
+        // the same decision from the same inputs would be a SECOND HOME that
+        // drifts the first time either is touched; this shape makes drift a
+        // compile error instead. It is also the report-only proof: m25-a-2
+        // changes which WORDS the user sees and not one growth decision, and the
+        // way you can tell is that every caller of this function still receives
+        // the number this function always returned.
+        if case .grew(let length) = outcome(
+            currentLengthBeats: currentLengthBeats,
+            coveringOnsetBeat: coveringOnsetBeat,
+            coveringEndBeat: coveringEndBeat,
+            beatsPerBar: beatsPerBar,
+            maxLengthBeats: maxLengthBeats) {
+            return length
+        }
+        return nil
+    }
+
+    /// What auto-extend DID, named (m25-a-2).
+    ///
+    /// ⭐ **THE CASE THAT MATTERS IS `.notNeeded`, AND IT IS NOT A REFUSAL.**
+    /// `extendedLength` collapses four distinct outcomes into one `nil`, and the
+    /// most common of them by far is "the notes already fit" — which fires on
+    /// essentially every note edit INSIDE a clip. Anything that warns the user on
+    /// a bare `nil` therefore warns on every ordinary edit, which is far worse
+    /// than the silence m25-a-2 exists to fix. Switch over this enum
+    /// EXHAUSTIVELY and never write `default:`: the compiler forcing a human to
+    /// say what `.notNeeded` means is the whole safety property.
+    public enum ExtendOutcome: Equatable, Sendable {
+        /// The notes already fit — nothing was wrong and nothing was done.
+        /// **Say nothing to the user.**
+        case notNeeded
+        /// The clip grew to this new length in beats.
+        case grew(Double)
+        /// Refused: the note is further past the clip's end than one gesture may
+        /// grow it (`maxGrowthBars`). Remedy: place the note nearer, or lengthen
+        /// the clip deliberately first.
+        case refusedByGrowthCap
+        /// Refused: the next clip on the same track is in the way. Remedy: move
+        /// that clip later, or place the note inside this one. **The tiebreak
+        /// when both ceilings bind** — see `outcome(...)`.
+        case refusedByNeighbour
+        /// Refused: no ceiling was in the way, but the onset still would not be
+        /// STRICTLY inside the grown clip, so the note would stay silent anyway.
+        ///
+        /// ⚠️ **REACHABLE ON THIS PURE FUNCTION (1,452,018 of a 52 M sweep), AND
+        /// ARGUED — NOT MEASURED — TO BE UNREACHABLE THROUGH THE STORE.** The
+        /// argument: `coverage(of:ids:)` takes the max onset and the max end over
+        /// the same notes, and `MIDINote.minLengthBeats` is 0.001, so the max
+        /// onset is always at least a hair BELOW the max end and therefore below
+        /// the bar-snapped target. That is CODE REASONING over a constant in
+        /// another file; no store-level fixture was ever observed reaching here,
+        /// which is a different and weaker statement than one that was.
+        /// It is kept because this function is public and
+        /// its two beat parameters are independent — a caller may pass anything,
+        /// and folding this into a ceiling case would make the message lie while
+        /// returning a length instead would change a growth decision. Do not
+        /// delete it on a reachability argument that rests on a constant in
+        /// another file.
+        case refusedOnsetStillLatent
+    }
+
+    /// THE decision, named. `extendedLength` is a wrapper over this.
+    ///
+    /// Same rule, same order, same arithmetic as before — the only thing added is
+    /// that each `nil` now says which of the four things happened.
+    ///
+    /// ## Which ceiling bound, and why the min-chain cannot answer it
+    ///
+    /// `target` is `min(barTarget, growthCeiling, maxLengthBeats)`. Once the mins
+    /// have run, a clamped `target` cannot say which ceiling clamped it — so this
+    /// compares the CEILING VALUES, which are both still in scope, rather than
+    /// re-deriving from the result. Naming the wrong one is not cosmetic: it
+    /// sends the user to move a neighbouring clip when the growth cap was the
+    /// real constraint, and the remedy it names does not work.
+    ///
+    /// ⭐ **TIEBREAK, PINNED BY A TEST: when the two ceilings sit at the SAME
+    /// value, the blame is `.refusedByNeighbour`.** It is the more actionable
+    /// obstacle and the only one of the two the user can actually SEE — a clip
+    /// sitting right there on the track, which they can drag. The growth cap is
+    /// an invisible policy constant.
+    ///
+    /// ## Where each refusal actually comes from — MEASURED, not assumed
+    ///
+    /// A 52,254,720-fixture sweep of this arithmetic (m25-a-2) found:
+    ///
+    ///  - **The "ceilings squeezed it flat" refusal is ALWAYS the neighbour.**
+    ///    `growthCeiling` is `currentLengthBeats + maxGrowthBars * bpb` with
+    ///    `bpb >= 1` and `maxGrowthBars` 16, so it is never within epsilon of the
+    ///    current length; only `maxLengthBeats` can push `target` down to it.
+    ///    Zero of the 52 M fixtures reached that refusal with `maxLengthBeats`
+    ///    nil, and zero reached it with the cap as the binding ceiling. That case
+    ///    means the neighbour is already FLUSH: no growth was ever possible.
+    ///  - **The growth cap bites at the AUDIBILITY test instead.** A note dozens
+    ///    of bars past the end clamps `target` to the cap, and the onset then
+    ///    sits far beyond it. Blaming that on "the note is exactly at the clip's
+    ///    edge" would be flatly false, which is why the audibility refusal is
+    ///    split by ceiling rather than reported as one thing.
+    public static func outcome(
+        currentLengthBeats: Double,
+        coveringOnsetBeat: Double,
+        coveringEndBeat: Double,
+        beatsPerBar: Int,
+        maxLengthBeats: Double? = nil
+    ) -> ExtendOutcome {
+        // 1. Already covered → not an extension, not an edit, and NOT A REFUSAL.
+        guard coveringEndBeat > currentLengthBeats + epsilon else { return .notNeeded }
 
         // 2. Next bar line at or after the covered end.
-        var target = barSnappedLength(coveringEndBeat, beatsPerBar: beatsPerBar)
+        let barTarget = barSnappedLength(coveringEndBeat, beatsPerBar: beatsPerBar)
 
-        // 3. Ceilings. Both are hard; either may break bar alignment.
+        // 3. Ceilings. Both are hard; either may break bar alignment. Kept as
+        //    NAMED VALUES rather than folded straight into `target`, because the
+        //    blame below needs them after the mins have collapsed them.
         let bpb = Double(Swift.max(1, beatsPerBar))
-        target = Swift.min(target, currentLengthBeats + Double(maxGrowthBars) * bpb)
+        let growthCeiling = currentLengthBeats + Double(maxGrowthBars) * bpb
+        var target = Swift.min(barTarget, growthCeiling)
         if let maxLengthBeats { target = Swift.min(target, maxLengthBeats) }
-        guard target > currentLengthBeats + epsilon else { return nil }
+
+        /// Which obstacle to name once we know the grow is refused.
+        ///
+        /// The comparisons are EXACT, deliberately without epsilon: `target` is
+        /// literally one of the three values, so `target < barTarget` is true
+        /// exactly when some ceiling clamped the ideal. An epsilon here would
+        /// only blur a decision that has no float error in it.
+        func blame() -> ExtendOutcome {
+            // Nothing clamped the bar-snapped ideal, so neither ceiling is the
+            // obstacle — the onset itself is.
+            guard target < barTarget else { return .refusedOnsetStillLatent }
+            // `<=`, not `<`: THE TIEBREAK. Equal ceilings blame the neighbour.
+            if let maxLengthBeats, maxLengthBeats <= growthCeiling { return .refusedByNeighbour }
+            return .refusedByGrowthCap
+        }
+
+        // 3b. No room at all after the ceilings.
+        guard target > currentLengthBeats + epsilon else { return blame() }
 
         // 4. Would the note actually sound? Engine truth is a STRICT `<` on the
         //    onset (`PianoRollModel.playableEndBeat`, `MIDISchedule.buildEvents`)
         //    — an onset exactly AT the new end is still latent.
-        guard coveringOnsetBeat < target else { return nil }
-        return target
+        guard coveringOnsetBeat < target else { return blame() }
+        return .grew(target)
     }
 
     /// `endBeat` rounded UP to a whole number of bars.

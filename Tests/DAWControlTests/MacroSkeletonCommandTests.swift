@@ -5,10 +5,13 @@ import DAWCore
 
 /// Control-protocol coverage for M7 (macro-c) `macro.songSkeleton`: field-named
 /// validation (missing genre), the unknown-genre error listing every valid
-/// name, the happy-path response shape (tracks + section clips + loop region),
-/// custom sections through the wire, and the ONE-undo-step guarantee proven at
-/// the wire (a single `edit.undo` restores the prior track count). Reuses
-/// `FakeMedia` from ControlTests.swift (same target).
+/// name, the happy-path response shape (tracks + section clips + markers + loop
+/// region), custom sections through the wire, and the ONE-undo-step guarantee
+/// proven at the wire (a single `edit.undo` restores the prior track count).
+/// The marker legs answer a measured field report: `marker.list` used to come
+/// back EMPTY on a project the macro had just laid a section layout onto, so
+/// every downstream agent had to be hand-fed the beat map. Reuses `FakeMedia`
+/// from ControlTests.swift (same target).
 @MainActor
 @Suite("Song skeleton — control protocol")
 struct MacroSkeletonCommandTests {
@@ -135,6 +138,105 @@ struct MacroSkeletonCommandTests {
         #expect(response.result?["loopEnd"]?.doubleValue == 24)
     }
 
+    @Test("the wire result carries a marker per section with real ids, names, and beats")
+    func markersInWireResult() async throws {
+        let (router, store) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "macro.songSkeleton",
+            params: ["genre": .string("pop")]
+        ))
+        #expect(response.ok)
+
+        // One marker per section, same {id,name,beat} shape marker.list uses.
+        let markers = try #require(response.result?["markers"]?.arrayValue)
+        #expect(markers.count == 8)
+        #expect(markers.map { $0["name"]?.stringValue }
+                == ["Intro", "Verse", "Chorus", "Verse", "Chorus", "Bridge", "Chorus", "Outro"])
+        #expect(markers.map { $0["beat"]?.doubleValue }
+                == [0, 16, 48, 80, 112, 144, 160, 192])
+
+        // Every id is a REAL marker id resolvable in the store, with the same
+        // name and beat the payload advertised.
+        for entry in markers {
+            let id = try #require(UUID(uuidString: entry["id"]?.stringValue ?? ""))
+            let stored = try #require(store.markers.first { $0.id == id })
+            #expect(stored.name == entry["name"]?.stringValue)
+            #expect(stored.beat == entry["beat"]?.doubleValue)
+        }
+
+        // The markers mirror the section clips: same names, beat == startBeat.
+        let clips = try #require(response.result?["sectionClips"]?.arrayValue)
+        #expect(markers.map { $0["name"]?.stringValue } == clips.map { $0["name"]?.stringValue })
+        #expect(markers.map { $0["beat"]?.doubleValue } == clips.map { $0["startBeat"]?.doubleValue })
+
+        // Existing keys are untouched (additive field only).
+        #expect(response.result?["genre"]?.stringValue == "pop")
+        #expect(response.result?["arrangementTrackId"]?.stringValue != nil)
+        #expect(response.result?["loopEnd"]?.doubleValue == 208)
+    }
+
+    @Test("marker.list after a skeleton returns exactly the scaffolded markers")
+    func markerListAfterSkeleton() async throws {
+        let (router, _) = makeRouter()
+        let apply = await router.handle(ControlRequest(
+            id: "1", command: "macro.songSkeleton",
+            params: [
+                "genre": .string("house"),
+                "sections": .array([
+                    .object(["name": .string("Intro"), "bars": .number(2)]),
+                    .object(["name": .string("Drop"), "bars": .number(4)]),
+                    .object(["name": .string("Drop"), "bars": .number(4)]),
+                ]),
+            ]
+        ))
+        #expect(apply.ok)
+        let scaffolded = try #require(apply.result?["markers"]?.arrayValue)
+
+        // The field report's exact complaint: marker.list must NOT come back
+        // empty on a project that visually has a section layout.
+        let list = await router.handle(ControlRequest(id: "2", command: "marker.list"))
+        #expect(list.ok)
+        let listed = try #require(list.result?["markers"]?.arrayValue)
+        #expect(!listed.isEmpty)
+
+        // Exactly the scaffolded set — ids, names, and beats, in the same order.
+        #expect(listed.map { $0["id"]?.stringValue } == scaffolded.map { $0["id"]?.stringValue })
+        #expect(listed.map { $0["name"]?.stringValue } == ["Intro", "Drop", "Drop"])
+        #expect(listed.map { $0["beat"]?.doubleValue } == [0, 8, 24])
+    }
+
+    @Test("a marker that pre-dates the skeleton survives it, in beat order")
+    func preExistingMarkerSurvivesThroughWire() async throws {
+        let (router, _) = makeRouter()
+        let seed = await router.handle(ControlRequest(
+            id: "seed", command: "marker.add",
+            params: ["name": .string("My Cue"), "beat": .number(100)]
+        ))
+        #expect(seed.ok)
+        let seedID = try #require(seed.result?["id"]?.stringValue)
+
+        let apply = await router.handle(ControlRequest(
+            id: "1", command: "macro.songSkeleton",
+            params: ["genre": .string("pop")]
+        ))
+        #expect(apply.ok)
+        // The result reports only what THIS call created — not the pre-existing one.
+        let created = try #require(apply.result?["markers"]?.arrayValue)
+        #expect(created.count == 8)
+        #expect(!created.contains { $0["id"]?.stringValue == seedID })
+
+        // marker.list carries the merged set, beat-sorted, with the seed
+        // INTERLEAVED (beat 100 sits between the 80 and 112 sections) — an
+        // append-without-sort would put it last.
+        let list = await router.handle(ControlRequest(id: "2", command: "marker.list"))
+        let listed = try #require(list.result?["markers"]?.arrayValue)
+        #expect(listed.count == 9)
+        #expect(listed.map { $0["beat"]?.doubleValue }
+                == [0, 16, 48, 80, 100, 112, 144, 160, 192])
+        #expect(listed[4]["id"]?.stringValue == seedID)
+        #expect(listed[4]["name"]?.stringValue == "My Cue")
+    }
+
     @Test("bad bars through the wire is a field-named error")
     func badBarsThroughWire() async {
         let (router, _) = makeRouter()
@@ -167,12 +269,16 @@ struct MacroSkeletonCommandTests {
         ))
         #expect(apply.ok)
         #expect(store.tracks.count > priorCount)
+        #expect(store.markers.count == 8)   // rock = 8 sections
 
-        // A single edit.undo reverts the ENTIRE scaffold.
+        // A single edit.undo reverts the ENTIRE scaffold — markers included.
         let undo = await router.handle(ControlRequest(id: "2", command: "edit.undo"))
         #expect(undo.ok)
         #expect(undo.result?["undone"]?.stringValue == "Song Skeleton 'Rock'")
         #expect(store.tracks.count == priorCount)
         #expect(!store.transport.isLoopEnabled)
+        #expect(store.markers.isEmpty)
+        let list = await router.handle(ControlRequest(id: "3", command: "marker.list"))
+        #expect(list.result?["markers"]?.arrayValue?.isEmpty == true)
     }
 }

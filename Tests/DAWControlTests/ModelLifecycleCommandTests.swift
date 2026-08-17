@@ -144,12 +144,18 @@ struct ModelLifecycleCommandTests {
     @Test("both verbs are registered at the END of allCommands; count 171 -> 173 -> 174")
     func commandsRegisteredAtTheEnd() {
         let all = CommandRouter.allCommands
-        #expect(all.count == 175)   // 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d (vc.importVoiceModel, then transport.setStopAtContentEnd, appended after)
-        #expect(all.dropLast(3).last == "ai.modelResidency")
-        #expect(all.dropLast(2).last == "ai.modelUnload")
-        #expect(all.dropLast().last == "vc.importVoiceModel")
+        #expect(all.count == 180)   // 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 (vc.importVoiceModel, transport.setStopAtContentEnd, audio.profileFile, clip.detectPitch, appended after) -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips)
+        #expect(all.dropLast(6).last == "ai.modelResidency")
+        #expect(all.dropLast(5).last == "ai.modelUnload")
+        #expect(all.dropLast(4).last == "vc.importVoiceModel")
         // m25-d appended transport.setStopAtContentEnd at the END (same law).
-        #expect(all.last == "transport.setStopAtContentEnd")
+        #expect(all.dropLast(3).last == "transport.setStopAtContentEnd")
+        // m25-z appended audio.profileFile at the END (same law).
+        #expect(all.dropLast(2).last == "audio.profileFile")
+        // m23-ap-3 appended clip.detectPitch at the END (same law).
+        #expect(all.dropLast().last == "clip.detectPitch")
+        // m26-k appended edit.pasteClips at the END (same law).
+        #expect(all.last == "edit.pasteClips")
         // Additive: every neighbouring lifecycle verb is untouched, in place.
         for name in ["ai.sidecarStatus", "ai.sidecarStart", "ai.sidecarStop",
                      "vc.sidecarStatus", "vc.sidecarStart", "vc.sidecarStop"] {

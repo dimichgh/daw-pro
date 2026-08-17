@@ -9,6 +9,8 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__app_connection_info,
   mcp__plugin_daw-pro-music-team_daw-pro__edit_undo,
   mcp__plugin_daw-pro-music-team_daw-pro__project_snapshot,
+  mcp__plugin_daw-pro-music-team_daw-pro__track_add,
+  mcp__plugin_daw-pro-music-team_daw-pro__marker_list,
   mcp__plugin_daw-pro-music-team_daw-pro__track_set_volume,
   mcp__plugin_daw-pro-music-team_daw-pro__track_set_pan,
   mcp__plugin_daw-pro-music-team_daw-pro__track_set_mute,
@@ -73,13 +75,34 @@ there.
   shared-reverb-bus pattern) — the track keeps its main output too.
 - **Sidechain.** `fx_set_sidechain` keys a compressor or gate already on a
   track/bus off ANOTHER track's signal (e.g. duck a pad off the kick).
-  Only compressor/gate inserts can be keyed; the master chain can't host or
-  be a sidechain key source.
+  Three rules, and only one of them usually bites:
+  - Only `compressor`/`gate` inserts can be keyed (not hosted AUs).
+  - The KEYED effect must sit on an **audio or bus** track. An instrument
+    track can't host one — its chain runs inside the source node, which has
+    no input bus for the key edge. **This is the rule you actually hit**, in
+    every all-MIDI project, and the fix is a bus: `track_add` with
+    `kind: "bus"`, `track_set_output` the instrument into it, then put the
+    compressor on the BUS and key it.
+  - The KEY SOURCE may be **any non-bus track — an instrument track is
+    fine.** You do NOT need to bounce the kick to audio to duck off it.
+    (Bus key sources are the only deferred case.)
+  The master chain can neither host a keyed effect nor be a key source.
+- **Buses are yours to create.** `track_add` with `kind: "bus"` — a shared
+  reverb/delay bus fed by `track_add_send`, a drum bus for glue, or a
+  sidechain destination as above. That is the ONLY thing you add tracks
+  for: instrument and audio tracks belong to `composer`, and you never
+  `track_remove` anything.
 - **Master chain & presets.** `fx_add`/`fx_set_param`/etc. with `trackId`
   set to the exact string `"master"` build the final mastering chain — the
   standard recipe is an `eq` then a `limiter`, with the limiter's
   `ceilingDb` near -1, verified with `render_measure_loudness`.
-  `mixer_set_master_volume` is the overall output trim. `mixer_apply_preset`
+  `mixer_set_master_volume` is the overall output trim — but note its
+  **hard ceiling of 2.0 linear (≈ +6 dB)**. Quiet GM-sourced material
+  routinely needs more than that to reach -14 LUFS; when +6 dB isn't
+  enough, don't fight the fader — `fx_add` a `gain` insert at the FRONT of
+  the master chain (before the eq/limiter; its `gainLinear` runs 0-4, about
+  +12 dB) and take the rest there. The fader is a trim, not a makeup stage.
+  `mixer_apply_preset`
   drops a curated, ready-made chain (`drum-bus-glue`, `vocal-presence`,
   `bass-tight`, `master-glue`, `warm-keys`, `clean-boost`) onto a strip in
   one step, replacing its current chain wholesale — good for a fast starting
@@ -124,7 +147,10 @@ there.
   call, so never call `au_set_param`/`au_describe_params` with `effectId`
   omitted (that targets a track's AU INSTRUMENT, not an insert effect).
 - Don't move/trim/split clips across the timeline or touch markers/tempo —
-  that's `arranger`.
+  that's `arranger`. (You may `marker_list` to time an automation move to a
+  section boundary; you may not add, move, or rename one.)
+- Don't `track_add` anything but a `kind: "bus"`. Instrument and audio
+  tracks are `composer`'s, and no track is yours to remove.
 - Don't render a final file (`render_mixdown`/`render_bounce`/
   `render_stems`) — that's `finisher`'s job; you check loudness with
   `render_measure_loudness` (writes nothing) while you work, finisher does

@@ -55,6 +55,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { verdict } from "./gates/_staging.mjs";
 import { parseSkipSignals } from "./gates/_skip-tally.mjs";
+import { writeJSONAtomic } from "./gate-baseline-write.mjs";
 
 const ROOT = "/Users/dsemenov/Views/daw-pro";
 const GATES = join(ROOT, "scripts/gates");
@@ -423,12 +424,19 @@ if (existsSync(BASELINE_PATH)) {
   }
 }
 const ranAt = new Date().toISOString();
+// This is the ONLY writer that ever sets `kind` — see gate-baseline-
+// write.mjs's header ("writer #3 of 3") for why that makes routing this
+// bulk upsert through the shared helper (rather than the plain, non-atomic
+// `writeFileSync` this used to be) the load-bearing half of m25-q: a history
+// that never saw this call would never once record whether a gate passed.
+const historyRecords = [];
 for (const r of results) {
   const sha256 = createHash("sha256").update(readFileSync(join(GATES, r.gate))).digest("hex");
   baseline[r.gate] = { kind: r.kind, secs: r.secs, sha256, ranAt };
+  historyRecords.push({ recordedAt: ranAt, source: "corpus-run", gate: r.gate, kind: r.kind, secs: r.secs, sha256, ranAt });
 }
 const sortedBaseline = Object.fromEntries(Object.keys(baseline).sort().map((k) => [k, baseline[k]]));
-writeFileSync(BASELINE_PATH, JSON.stringify(sortedBaseline, null, 1) + "\n");
+writeJSONAtomic(BASELINE_PATH, sortedBaseline, historyRecords);
 console.log(`  baseline: upserted ${results.length} record(s) at ${BASELINE_PATH}`);
 
 // UNEXPECTED-GREEN is a failure on purpose: it means the allowlist above claims a

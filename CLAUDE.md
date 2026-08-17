@@ -33,6 +33,18 @@ A professional, AI-native digital audio workstation for macOS. Goal: the feature
 
 Full Xcode (not just Command Line Tools) is required for app bundling, code signing, and AUv3 hosting entitlements — check with `xcodebuild -version` before working on those areas.
 
+## This machine (measured, not assumed)
+
+Three quirks that have each produced a **confident wrong answer** here, not merely an error. They share one shape, and the shape matters more than the list: **a tool that never ran and a tool that ran and found nothing produce identical output.**
+
+- **There is no `timeout(1)`.** It is GNU coreutils; this is macOS and `gtimeout` is not installed. `timeout 60 grep …` does not run a time-limited grep — it fails with `command not found`.
+- **`scripts/ace-step/` is ~56 GB and `scripts/rvc/` ~1.7 GB.** A bare `grep -r … scripts/` hangs. Always `--exclude-dir=ace-step --exclude-dir=rvc --exclude-dir=node_modules`, or name the files.
+- **`ffmpeg -v error` suppresses `ebur128`/`astats` summaries**, which log at INFO. Use `-hide_banner` when those numbers are the point.
+
+⚠️ **The rule that covers all three: never pair `2>/dev/null` with a command whose EMPTINESS you intend to interpret.** The redirect turns a loud failure into a quiet, clean, wrong negative. Combined with `timeout` above, that pairing produced two false conclusions in a single session — including "this file has no writers" about a file with three.
+
+⭐ **And when an absence CONFIRMS your hypothesis, that is exactly when to positive-control it** — run the same command shape against something you know exists, and show it can return non-zero. A negative result from a hand-built probe is the weakest evidence there is.
+
 ## Conventions
 
 - Swift 6 strict concurrency. UI + model mutation on `@MainActor`; the audio render path touches no actors.

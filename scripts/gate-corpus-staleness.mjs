@@ -84,10 +84,11 @@
 // standalone CLI invocation (a human/agent running this directly) still
 // prunes by default, which is the brief's literal "report it, and prune it".
 
-import { existsSync, readdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { verdict } from "./gates/_verdict.mjs";
+import { writeJSONAtomic } from "./gate-baseline-write.mjs";
 
 const ROOT = "/Users/dsemenov/Views/daw-pro";
 const GATES_DIR = process.env.STALENESS_GATES || join(ROOT, "scripts/gates");
@@ -98,21 +99,10 @@ const prune = !process.argv.includes("--no-prune");
 
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
-// Same atomicity contract as `_verdict.mjs`'s own writer (m23-ep-3 round 2):
-// temp-file-then-`rename()` so a process killed mid-write never leaves a
-// truncated baseline for the NEXT reader (this script or `verdict()`) to trip
-// over — a torn write here would otherwise land on the exact "parses as valid
-// JSON but isn't an object" / "fails to parse" paths this round hardened.
-function writeJSONAtomic(path, obj) {
-  const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
-  writeFileSync(tmp, JSON.stringify(obj, null, 1) + "\n");
-  try {
-    renameSync(tmp, path);
-  } catch (e) {
-    try { unlinkSync(tmp); } catch { /* best effort */ }
-    throw e;
-  }
-}
+// The atomic write + history append now live in one shared module
+// (scripts/gate-baseline-write.mjs, m25-q) — imported above as
+// `writeJSONAtomic`. See that module's header for the full "three writers"
+// contract; this file is writer #2 of 3 (the prune path).
 
 function printList(label, items) {
   console.log(`  ${label}: ${items.length}`);
@@ -210,9 +200,18 @@ if (removed.length) {
   printList("REMOVED (baseline record, no matching gate file)", removed);
   if (prune) {
     const kept = { ...baseline };
+    // Preserve the outgoing record in history BEFORE deleting it — pruning
+    // is the one path that would otherwise lose it for good (m25-q).
+    const recordedAt = new Date().toISOString();
+    const historyRecords = removed.map((k) => ({
+      recordedAt,
+      source: "staleness-prune",
+      gate: k,
+      ...baseline[k],
+    }));
     for (const k of removed) delete kept[k];
     const sorted = Object.fromEntries(Object.keys(kept).sort().map((k) => [k, kept[k]]));
-    writeJSONAtomic(BASELINE_PATH, sorted);
+    writeJSONAtomic(BASELINE_PATH, sorted, historyRecords);
     console.log(`      pruned ${removed.length} removed record(s) from the baseline`);
   } else {
     console.log(`      --no-prune: baseline left untouched`);

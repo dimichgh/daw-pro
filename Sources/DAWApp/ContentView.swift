@@ -668,6 +668,15 @@ struct ContentView: View {
                 // m23-c2: follow keeps the playhead in frame during PLAYBACK only.
                 isPlaying: store.transport.isPlaying,
                 densityStore: model.panelDensity,
+                // m25-ab — THE APP-LEVEL SNAP, so the note editor and the arrange
+                // stop being two surfaces with the same label and different
+                // answers. `effectiveClipSnap` (not the raw `clipSnap`) is the
+                // value IN FORCE: the toolbar chip renders only when the arrange
+                // is Pro, so feeding the raw picker would let an invisible `.off`
+                // silently unsnap this editor. The roll keeps its own DIVISION;
+                // only OFF crosses, and `SnapResolution.effective` is what
+                // combines them.
+                appSnap: model.effectiveClipSnap,
                 // m21-c: the shared layout store carries the persisted
                 // piano-roll zoom slot (`pianoRollPPB`) the editor scales by, and
                 // (m23-c2) the ONE `followPlayhead` flag both surfaces read.
@@ -679,9 +688,19 @@ struct ContentView: View {
                 // one lands past the clip end the store grows the clip to cover
                 // it IN THE SAME undo step (`ClipAutoExtend` decides how far);
                 // empty means the pre-m25-a behaviour, unchanged.
+                //
+                // m25-a-2 — and it hands the AUTO-EXTEND REFUSAL back, so the
+                // roll can say why nothing moved. Auto-extend refuses rather
+                // than partially growing (ratified), and until now it did so in
+                // total silence: the note was written, stayed latent, and
+                // nothing visible happened. `lastAutoExtendRefusal` is nil for
+                // the ordinary "the notes already fit" case AND for a successful
+                // grow — the store distinguishes those from the three real
+                // refusals so this call site never has to.
                 onCommit: { notes, cover in
                     _ = try? store.setClipNotes(clipID: clip.id, notes: notes,
                                                 extendToCover: cover)
+                    return store.lastAutoExtendRefusal
                 },
                 // Scrub seeks through the app's store seek (the existing transport.seek
                 // path), NOT the WebSocket. Refused mid-record → try? swallows it.
@@ -735,9 +754,15 @@ struct ContentView: View {
                 // than a switch to `setClipNotes(extendToCover:)` precisely
                 // because of the coalescing note above: the grow rule is shared
                 // (`ClipAutoExtend`), the journal key is not.
+                //
+                // m25-a-2 — the paste path reports its refusal too, through the
+                // SAME store channel and the same words. Wiring only `onCommit`
+                // would have left the paste silent, which is the half of the
+                // defect that is easiest to miss.
                 onPasteNotes: { notes, extendToCover in
                     _ = try? store.pasteNotes(clipID: clip.id, notes: notes,
                                               extendToCover: extendToCover)
+                    return store.lastAutoExtendRefusal
                 },
                 // The live clipboard's notes, so the roll's own context-menu
                 // Paste is titled and enabled from what is ACTUALLY on the

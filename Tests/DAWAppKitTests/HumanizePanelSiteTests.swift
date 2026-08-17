@@ -233,8 +233,9 @@ struct HumanizePanelSiteTests {
 
     /// m25-c is UI-ONLY. `clip.humanize` ALREADY exists on the wire and in MCP —
     /// the missing half was the human-clickable one. So the panel must add NO
-    /// command: `allCommands` stays 175 (pinned independently by
-    /// `AUParamCommandTests`) and MCP stays 178. Panel visibility is view chrome
+    /// command: `allCommands` stays whatever it was before this test landed
+    /// (pinned independently by `AUParamCommandTests`, 176 as of m25-z) and
+    /// MCP stays in step (179 as of m25-z). Panel visibility is view chrome
     /// and rides the existing `debug.panelLayout` echo, the
     /// `editorEscapeMountHits` precedent.
     @Test("the panel adds no wire surface — the capability already had one")

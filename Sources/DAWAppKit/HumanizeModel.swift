@@ -36,6 +36,15 @@ import DAWCore
 /// offered-then-errored — the "Convert to Voice…" rule in TimelineLanesView) and
 /// `canApply` refuses regardless, so the guard does not depend on the view.
 ///
+/// **KIND HIDES, STATE EXPLAINS (m25-c-2).** Audio-vs-MIDI is the clip's KIND —
+/// the panel makes no sense there, so the entry is hidden. Take-comp membership
+/// is STATE: the clip is exactly the right kind, the user can change the state
+/// (flatten the group), and the panel is reachable from the piano-roll HUMANIZE
+/// chip, which is not gated on anything. So that one is OFFERED, REFUSED IN
+/// PLACE, and EXPLAINED (`targetRefusal` / `refusalMessage`) rather than hidden —
+/// a disabled control with a reason beside it is neither an offer nor an error,
+/// and it is the treatment the sibling `isNoOp` refusal already ships.
+///
 /// NO VIOLET anywhere in the flow — humanize is standard editing chrome, not
 /// AI-generated content (docs/DESIGN-LANGUAGE.md Rule 3: violet is AI identity
 /// only). Cyan marks only earned active state (the SF Mono readouts, Apply).
@@ -50,6 +59,19 @@ public final class HumanizeModel {
     /// The seed is NOT a parameter: the panel always draws a fresh one.
     private let applyClosure: (UUID, Double, Int) -> Void
 
+    /// Asks whether an ordinary note edit on a clip would be REFUSED by the store
+    /// before it happens (wired to `ProjectStore.compEditRefusal`, which is the
+    /// ask form of the same `requireNotCompMember` guard `humanizeClipNotes`
+    /// runs; a recorder in tests). Injected exactly like `applyClosure` — the
+    /// model still never touches a store.
+    ///
+    /// ⚠️ **A PROVIDER, NOT A `prepare` PARAMETER, ON PURPOSE (m25-c-2).** There
+    /// are three ways in — the arrange clip menu, the piano-roll HUMANIZE chip,
+    /// and the `debug` staging seam — and a per-open parameter is a thing each
+    /// new entry point can forget, which is the shape of the bug this fixes. The
+    /// initializer is ONE site, and `prepare` consults it unconditionally.
+    private let compRefusalClosure: (UUID) -> ProjectError?
+
     // MARK: - Target context (the clip being humanized)
 
     /// The clip the flow acts on; nil until `prepare`.
@@ -60,6 +82,16 @@ public final class HumanizeModel {
     /// `ProjectStore.humanizeClipNotes`, which throws `notAMIDIClip` on audio),
     /// so an audio target shows an explanation and no Apply.
     public private(set) var targetIsMIDI: Bool = true
+
+    /// Why Apply cannot fire on this target — the STORE'S OWN refusal, asked at
+    /// `prepare` time instead of discovered by throwing after the press
+    /// (m25-c-2). Today that is only `clipInTakeGroup`: a take-comp member is
+    /// store-managed, so `humanizeClipNotes` rejects it before touching notes.
+    ///
+    /// ⚠️ **SET ON EVERY `prepare`, INCLUDING TO nil** (the `lastAutoExtendOutcome`
+    /// rule) — a value that survived an open on another clip would read as a
+    /// fresh refusal, which is a worse lie than the silence it replaces.
+    public private(set) var targetRefusal: ProjectError?
 
     // MARK: - Settings state
 
@@ -72,8 +104,13 @@ public final class HumanizeModel {
     /// reads it clamped.
     public var velocityRange: Int = HumanizeModel.defaultVelocityRange
 
-    public init(apply: @escaping (UUID, Double, Int) -> Void) {
+    /// `compRefusal` defaults to "nothing refuses" so a fixture that is not about
+    /// refusals says nothing about them; the APP must pass the real one, which is
+    /// pinned by `HumanizeQuantizeCompRefusalSiteTests`.
+    public init(apply: @escaping (UUID, Double, Int) -> Void,
+                compRefusal: @escaping (UUID) -> ProjectError? = { _ in nil }) {
         self.applyClosure = apply
+        self.compRefusalClosure = compRefusal
     }
 
     // MARK: - Catalog / bounds
@@ -102,6 +139,10 @@ public final class HumanizeModel {
         targetClipID = clipID
         targetClipName = clipName
         targetIsMIDI = isMIDI
+        // Unconditional — see `targetRefusal`: a nil answer must overwrite a
+        // previous clip's refusal, or reopening on an ordinary clip would still
+        // show the comp member's message.
+        targetRefusal = compRefusalClosure(clipID)
     }
 
     // MARK: - Built values
@@ -118,15 +159,35 @@ public final class HumanizeModel {
     /// nothing is a lie about what happened, not a safe default.
     public var isNoOp: Bool { effectiveTimingBeats == 0 && effectiveVelocityRange == 0 }
 
-    /// Whether Apply can fire: a MIDI target, and something to actually do.
-    public var canApply: Bool { targetClipID != nil && targetIsMIDI && !isNoOp }
+    /// The user-facing sentence for `targetRefusal`, or nil when nothing refuses.
+    /// **DERIVED, NEVER STORED — one value, one message** (`lastAutoExtendRefusal`,
+    /// m25-a-2). The words are the store's `errorDescription` VERBATIM, the same
+    /// sentence the `clip.humanize` wire returns and the same one
+    /// `ArrangeRefusalBubble` prints, so the human and the agent are told the
+    /// identical thing about the identical obstacle.
+    public var refusalMessage: String? { targetRefusal.flatMap(\.errorDescription) }
+
+    /// Whether Apply can fire: a MIDI target, nothing refusing it, and something
+    /// to actually do. The refusal conjunct is m25-c-2 — before it, a take-comp
+    /// member passed `canApply`, the closure fired, the store threw, and the
+    /// panel closed having changed nothing.
+    public var canApply: Bool {
+        targetClipID != nil && targetIsMIDI && targetRefusal == nil && !isNoOp
+    }
 
     /// Applies the current amounts through the injected closure
-    /// (`ProjectStore.humanizeClipNotes`) — ONE undo step, a FRESH seed. A no-op
-    /// with no target, an audio target, or both amounts at zero.
-    public func apply() {
-        guard canApply, let clipID = targetClipID else { return }
+    /// (`ProjectStore.humanizeClipNotes`) — ONE undo step, a FRESH seed.
+    ///
+    /// **RETURNS WHETHER IT FIRED**, which is what lets the panel close on a real
+    /// apply and STAY OPEN on a refusal (m25-c-2): a message that appears as the
+    /// panel vanishes underneath it is a bubble flashing at an empty screen.
+    /// False with no target, an audio target, a store refusal, or both amounts at
+    /// zero.
+    @discardableResult
+    public func apply() -> Bool {
+        guard canApply, let clipID = targetClipID else { return false }
         applyClosure(clipID, effectiveTimingBeats, effectiveVelocityRange)
+        return true
     }
 
     // MARK: - Readouts

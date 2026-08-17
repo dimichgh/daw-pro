@@ -236,6 +236,27 @@ public struct SongSkeletonResult: Sendable, Equatable {
         }
     }
 
+    /// One SESSION MARKER dropped at a section's start. Mirrors the
+    /// `SectionClipRef` for the same section — identical `name`, and `beat` ==
+    /// that section's `startBeat` — but carries a real `id` because markers are
+    /// individually addressable afterwards (`marker.rename` / `marker.move` /
+    /// `marker.remove`) where a guide clip is addressed through its track.
+    /// Resolvable against `ProjectStore.markers` (and `marker.list`) by id.
+    public struct MarkerRef: Sendable, Equatable {
+        /// The created marker's id — stable, and resolvable via `marker.list`.
+        public let id: UUID
+        /// The section's name, VERBATIM (never auto-numbered — see
+        /// `applySongSkeleton`); disambiguate repeats by `beat`.
+        public let name: String
+        /// Absolute timeline position in beats: the section's start.
+        public let beat: Double
+        public init(id: UUID, name: String, beat: Double) {
+            self.id = id
+            self.name = name
+            self.beat = beat
+        }
+    }
+
     /// The genre's kebab id that was scaffolded.
     public let genre: String
     /// The effective tempo applied (the caller's, else the genre default).
@@ -244,6 +265,12 @@ public struct SongSkeletonResult: Sendable, Equatable {
     public let tracks: [TrackRef]
     /// The contiguous guide clips on the Arrangement track, in timeline order.
     public let sectionClips: [SectionClipRef]
+    /// The session markers this call created — one per section, at that
+    /// section's START beat, in SECTION order (which is also beat-ascending,
+    /// since section starts are a running sum). Mirrors `sectionClips` 1:1.
+    /// NOTE: this is only what THIS call added; the project's `markers` array is
+    /// the merged, beat-sorted whole (markers that existed before survive).
+    public let markers: [MarkerRef]
     /// Loop region applied (always enabled): start and end in beats.
     public let loopStart: Double
     public let loopEnd: Double
@@ -251,12 +278,14 @@ public struct SongSkeletonResult: Sendable, Equatable {
     public let arrangementTrackID: UUID
 
     public init(genre: String, tempoBPM: Double, tracks: [TrackRef],
-                sectionClips: [SectionClipRef], loopStart: Double, loopEnd: Double,
+                sectionClips: [SectionClipRef], markers: [MarkerRef],
+                loopStart: Double, loopEnd: Double,
                 arrangementTrackID: UUID) {
         self.genre = genre
         self.tempoBPM = tempoBPM
         self.tracks = tracks
         self.sectionClips = sectionClips
+        self.markers = markers
         self.loopStart = loopStart
         self.loopEnd = loopEnd
         self.arrangementTrackID = arrangementTrackID
@@ -287,10 +316,26 @@ extension ProjectStore {
     /// genre's named tracks (with their mixer presets pre-applied as fresh
     /// chains), appends an INSTRUMENT "Arrangement" guide track carrying one
     /// contiguous empty MIDI clip per section (named per section, `startBeat` =
-    /// running sum, `lengthBeats` = bars × 4), and enables the loop over the
-    /// whole arrangement. ADDITIVE — it never wipes the project; existing tracks
-    /// and clips are untouched (a duplicate "Arrangement" name is fine — names
-    /// are not ids). Undo reverts the ENTIRE scaffold at once.
+    /// running sum, `lengthBeats` = bars × 4), drops a real SESSION MARKER at
+    /// every section start, and enables the loop over the whole arrangement.
+    /// ADDITIVE — it never wipes the project; existing tracks and clips are
+    /// untouched (a duplicate "Arrangement" name is fine — names are not ids)
+    /// and markers already in the project SURVIVE, merged into the store's
+    /// canonical beat order. Undo reverts the ENTIRE scaffold at once.
+    ///
+    /// MARKERS (the beat map, not decoration): every section start gets a
+    /// `Marker` whose name is the section's name VERBATIM — the SAME string the
+    /// guide clip gets, deliberately NOT auto-numbered even when a layout
+    /// repeats a name (pop's default is Intro/Verse/Chorus/Verse/Chorus/Bridge/
+    /// Chorus/Outro, so it lands two "Verse" and three "Chorus" markers, and
+    /// calling the macro twice lands the whole set twice). One source of truth
+    /// with the guide clips beats a prettier name that diverges from them;
+    /// callers disambiguate by BEAT (the result's `markers` carries both, and
+    /// each ref's id is directly addressable). Do not "fix" this into
+    /// "Verse 1"/"Verse 2" — the clips would then disagree with the markers.
+    /// A pre-existing marker sitting exactly ON a section start is KEPT
+    /// alongside the new one (no dedupe) and sorts FIRST, since the merge is
+    /// `markers + new` and the shared sort breaks ties by current index.
     ///
     /// Guards run OUTSIDE the edit body (the `applyMixerPreset` precedent):
     ///  - unknown `genre` → `songSkeletonGenreNotFound` whose message lists every
@@ -370,9 +415,13 @@ extension ProjectStore {
 
         // Build the Arrangement guide track: one contiguous empty MIDI clip per
         // section (notes: [] makes it a MIDI clip with no notes). startBeat is the
-        // running sum; lengthBeats is bars × 4.
+        // running sum; lengthBeats is bars × 4. The SAME loop mints the section
+        // marker off the SAME `cursorBeats` and the SAME name string, so the
+        // guide clips and the beat map can never disagree.
         var guideClips: [Clip] = []
         var sectionRefs: [SongSkeletonResult.SectionClipRef] = []
+        var sectionMarkers: [Marker] = []
+        var markerRefs: [SongSkeletonResult.MarkerRef] = []
         var cursorBeats = 0.0
         for section in effectiveSections {
             let lengthBeats = Double(section.bars) * Self.beatsPerSkeletonBar
@@ -380,6 +429,9 @@ extension ProjectStore {
                                    lengthBeats: lengthBeats, notes: []))
             sectionRefs.append(.init(name: section.name, startBeat: cursorBeats,
                                      lengthBeats: lengthBeats))
+            let marker = Marker(name: section.name, beat: cursorBeats)
+            sectionMarkers.append(marker)
+            markerRefs.append(.init(id: marker.id, name: marker.name, beat: marker.beat))
             cursorBeats += lengthBeats
         }
         let totalBeats = cursorBeats  // >= 4 (min 1 section × 1 bar) — a valid loop region.
@@ -393,13 +445,21 @@ extension ProjectStore {
         // entry (the journal only coalesces adjacent same-key edits inside an
         // 800 ms window — a scaffold's tempo/track/loop mutations carry different
         // keys), so we mutate directly here instead of calling addTrack/setTempo/
-        // setLoop. `tracks` is internal(set) (mutable from this extension); the
-        // transport (private setter) is folded in through the primary-file
-        // `applyTempoChange` / `applyLoopRegion` helpers, mirroring how
-        // `importGeneration` folds a tempo change into its single edit.
+        // setLoop — and, for the same reason, NOT the public `addMarker` (which
+        // journals its own "Add Marker '<name>'" edit per marker: a pop skeleton
+        // would cost eight extra undo steps). `tracks` and `markers` are
+        // internal(set) (mutable from this extension — the documented `markers`
+        // rule); the transport (private setter) is folded in through the
+        // primary-file `applyTempoChange` / `applyLoopRegion` helpers, mirroring
+        // how `importGeneration` folds a tempo change into its single edit.
+        // `markers` rides `EditState`, so undo reverts the beat map with the rest
+        // of the scaffold. The merge re-applies the SHARED `markersSortedByBeat`
+        // funnel (no second sort here) so pre-existing markers survive in the
+        // store's canonical order rather than being appended after them.
         performEdit("Song Skeleton '\(genre.displayName)'") {
             tracks.append(contentsOf: rosterTracks)
             tracks.append(arrangementTrack)
+            markers = Self.markersSortedByBeat(markers + sectionMarkers)
             applyTempoChange(tempo)
             applyLoopRegion(enabled: true, startBeat: loopStart, endBeat: loopEnd)
             engine?.tracksDidChange(tracks)
@@ -410,6 +470,7 @@ extension ProjectStore {
             tempoBPM: tempo,
             tracks: trackRefs,
             sectionClips: sectionRefs,
+            markers: markerRefs,
             loopStart: loopStart,
             loopEnd: loopEnd,
             arrangementTrackID: arrangementTrack.id)

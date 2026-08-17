@@ -64,7 +64,17 @@ extension ProjectStore {
         } else {
             ir = try DSPresetParser.parse(fileAt: url)
         }
-        let (params, report) = try SampleLibraryMapper.map(ir, force: force)
+        var (params, report) = try SampleLibraryMapper.map(ir, force: force)
+        // m26-h: record WHICH library this is, here and nowhere else. The
+        // mapper cannot do it — `SampleLibraryIR` carries only `baseDirectory`,
+        // not the main file — and no caller may do it, because a provenance an
+        // agent can assert is a provenance that can lie. Before this, an
+        // imported track read `kind: "sampler"` and nothing else, so "which
+        // bass is this?" meant dumping a ~1 MB snapshot and eyeballing a zone's
+        // directory (field report 2026-08-17, finding 13).
+        params.sourcePath = url.path
+        let stem = url.deletingPathExtension().lastPathComponent
+        params.displayName = stem.isEmpty ? url.lastPathComponent : stem
 
         if dryRun { return report }
         guard !params.zones.isEmpty else {

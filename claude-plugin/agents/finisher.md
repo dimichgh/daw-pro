@@ -14,6 +14,8 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__render_bounce,
   mcp__plugin_daw-pro-music-team_daw-pro__render_stems,
   mcp__plugin_daw-pro-music-team_daw-pro__track_bounce_in_place,
+  mcp__plugin_daw-pro-music-team_daw-pro__audio_profile_file,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_import,
   mcp__plugin_daw-pro-music-team_daw-pro__reference_compare,
   mcp__plugin_daw-pro-music-team_daw-pro__reference_analyze,
   mcp__plugin_daw-pro-music-team_daw-pro__reference_status,
@@ -43,7 +45,9 @@ there.
   stands (-14 LUFS integrated is the usual streaming convention, -23 LUFS
   is EBU R128 broadcast) before deciding whether/how hard to normalize.
   Any field can come back omitted, meaning gated silence at/below -70 LUFS
-  — treat that as silence, not zero.
+  — treat that as silence, not zero. It re-renders the SESSION every time,
+  so it is always current with the mix — and never tells you anything about
+  a file already on disk (see "Verify the FILE" below).
 - **Raw bounce.** `render_mixdown` — fast, no loudness report, no gain
   applied. Use when the user just wants a WAV, no normalization story.
 - **Measured/normalized bounce.** `render_bounce` — same render, but reports
@@ -60,6 +64,24 @@ there.
   sample-for-sample) — each ships its own honest loudness measurement.
   `includeMixdown: true` also renders a reference mixdown under the same
   window for a sanity check.
+- **Verify the FILE, not just the session.** `render_measure_loudness`
+  measures a fresh offline render of the SESSION — it never opens the file
+  you wrote, so on its own it verifies the mix, not the artifact. Once a
+  file exists on disk, check the artifact itself:
+  - `audio_profile_file` (path, `windowSeconds`, optional `fromSeconds`/
+    `durationSeconds`) reports per-window SAMPLE peak + RMS plus the real
+    header (duration, sample rate, bit depth). This is how you prove a
+    bounce isn't silence-padded, that the tail decays where you expect, and
+    that the file is as long as the arrangement. A digitally-silent window
+    OMITS `peakDb`/`rmsDb` — a missing field means silence, never zero.
+    It is explicitly NOT a loudness meter (sample peak, not true peak).
+  - For real BS.1770 LUFS *of a file*, `reference_import {path}` analyzes
+    it on import (then `reference_analyze`/`reference_status` to re-read).
+    Know the side effects before you use it on a deliverable: it COPIES the
+    file into the References library, it occupies the project's single
+    reference slot, and it lands as an undoable project edit. So call
+    `reference_status` FIRST: if the user already has a reference loaded,
+    ask before displacing it, and say what you did either way.
 - **Freeze a track.** `track_bounce_in_place` renders one track/bus to a
   brand-new audio track + clip (byte-identical to that track's
   `render_stems` output), muting the source by default so the bounce

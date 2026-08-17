@@ -1573,6 +1573,25 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// Output gain, 0...1.
     public var gain: Double
 
+    /// m26-h provenance — ADDITIVE-OPTIONAL, exactly like `SamplerZone`'s
+    /// m19-a / m19-b / m20-g fields: pre-existing project files decode both as
+    /// nil, and nil reproduces the original behaviour exactly (a sampler that
+    /// simply does not know where it came from, which is every sampler built by
+    /// hand over the wire or in the UI).
+    ///
+    /// The absolute path of the `.sfz` / `.dspreset` this sampler was imported
+    /// from. Recorded by `ProjectStore.importSampleLibrary` and by nothing
+    /// else — like `SoundBankConfig.displayName` (§6.1) this is DERIVED, not
+    /// caller-supplied, so it cannot claim a provenance that never happened.
+    /// It is a record of an import, NOT a live link: the file may since have
+    /// moved or changed, and nothing re-reads it.
+    public var sourcePath: String?
+    /// Human-readable name for the imported library — the source file's stem
+    /// ("Upright Bass" for `.../Upright Bass.sfz`), the answer to "which bass
+    /// is this?" that previously required dumping a ~1 MB snapshot and
+    /// eyeballing a zone's directory.
+    public var displayName: String?
+
     public static let attackRange: ClosedRange<Double> = 0...1
     public static let releaseRange: ClosedRange<Double> = 0.001...8
     public static let gainRange: ClosedRange<Double> = 0...1
@@ -1582,13 +1601,17 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         oneShot: Bool = false,
         attack: Double = 0.001,
         release: Double = 0.05,
-        gain: Double = 0.8
+        gain: Double = 0.8,
+        sourcePath: String? = nil,
+        displayName: String? = nil
     ) {
         self.zones = zones
         self.oneShot = oneShot
         self.attack = attack.clamped(to: Self.attackRange)
         self.release = release.clamped(to: Self.releaseRange)
         self.gain = gain.clamped(to: Self.gainRange)
+        self.sourcePath = sourcePath
+        self.displayName = displayName
     }
 }
 

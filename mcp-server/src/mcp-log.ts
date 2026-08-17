@@ -11,13 +11,18 @@
  * Where the seam is, and why
  * ---------------------------------------------------------------------------
  * `src/server.ts` has TWO registration paths into the same `McpServer`:
- * a local `registerTool` wrapper (142 mutating tools, `.strict()` schemas)
- * and 34 direct `server.registerTool(...)` calls (read-only tools). Patching
- * the local wrapper alone would miss every read — exactly the calls that
- * answer "what did the agent see when it decided that?" So this module
- * patches `McpServer.prototype`'s instance method `registerTool` ITSELF,
- * once, before any tool registers. Every one of the 177 registrations —
- * whichever path it takes — funnels through the same patched function.
+ * a local `registerTool` wrapper (151 tools, `.strict()` schemas — mostly
+ * mutating, plus a few reads like this file's own `audio_profile_file`/
+ * `clip_detect_pitch`/`clip_get_notes`/`instrument_describe_sampler` that
+ * take real params worth typo-catching) and 34 direct
+ * `server.registerTool(...)` calls (read-only tools). Patching the local
+ * wrapper alone would miss every read — exactly the calls that answer "what
+ * did the agent see when it decided that?" So this module patches
+ * `McpServer.prototype`'s instance method `registerTool` ITSELF, once,
+ * before any tool registers. Every one of the 185 registrations (151 + 34,
+ * re-measured after m26-k's `edit_paste_clips` joined the wrapper count at
+ * 150 -> 151) — whichever path it takes — funnels through the same patched
+ * function.
  *
  * `installMcpLogging` MUST run after `new McpServer(...)` but before the
  * first `registerTool(`/`server.registerTool(` call in server.ts. If it runs
@@ -36,12 +41,27 @@
  * `registerTool` actually runs. Registration is single-threaded, synchronous,
  * import-time work — there is no interleaving to race.
  *
- * Three of the 142 "mutating-wrapper" tools (`generate_lyrics`,
- * `generate_song_suno`, `generate_image` — server.ts's own comment names them
- * as Table-B) have no backing wire command at all: they call `src/ai.ts`
- * directly. A before-read against the DAW would be pure waste for them, so
- * they're excluded by name from before-capture (NO_WIRE_COMMAND_TOOLS below).
- * 142 - 3 = 139 is the real before-capture-eligible denominator.
+ * The "mutating-wrapper" family is EVERY registration through the local
+ * wrapper — currently 151 — because the wrapper calls
+ * `withMutatingRegistration` unconditionally; a few semantic reads that route
+ * through it for `.strict()` (the `audio_profile_file`/`clip_detect_pitch`/
+ * `clip_get_notes`/`instrument_describe_sampler` quartet named above) are
+ * flagged mutating here too. That is harmless (a wasted before-read at
+ * worst) but it means this denominator tracks the WRAPPER count, not a
+ * hand-maintained "how many tools mutate" tally. Three of the 151
+ * (`generate_lyrics`, `generate_song_suno`, `generate_image` — server.ts's
+ * own comment names them as Table-B) have no backing wire command at all:
+ * they call `src/ai.ts` directly. A before-read against the DAW would be
+ * pure waste for them, so they're excluded by name from before-capture
+ * (NO_WIRE_COMMAND_TOOLS below). 151 - 3 = 148 is the real
+ * before-capture-eligible denominator.
+ *
+ * ⚠️ These two numbers rot silently: `test/mcp-log.test.ts` pins the 185 TOTAL,
+ * so a new strict-wrapper registration reddens that assertion and gets the
+ * total fixed — while this paragraph's 151/148 sail through untouched. They
+ * were found stale at 142/139 (five behind) exactly that way, again at
+ * 147/144 (three behind, m26-i) the same way, and again at 150/147 (one
+ * behind, m26-k — the pair had already been found stale twice in one day).
  *
  * ---------------------------------------------------------------------------
  * Before-snapshot: what it costs and why `project.overview`, not
@@ -66,7 +86,7 @@
  * master volume/levels, and every track's volume/pan/mute/solo/routing/
  * sends/fx-bypass/clip-summary/automation-summary — which is to say: exactly
  * the master-fader question this item exists to answer, plus the large
- * majority of what the 139 mutating tools touch.
+ * majority of what the 148 before-capture-eligible tools touch.
  *
  * Before-capture is gated on `bridge.isConnected()` — a pure state read, never
  * a new connection attempt (see `DawBridge.isConnected`, bridge.ts). Two

@@ -1695,7 +1695,16 @@ struct CommandRouterTests {
             // IN the loop.
             if ["track.remove", "project.save", "project.open", "project.new",
                 "project.recover",
-                "edit.undo", "edit.redo", "clip.setNotes", "clip.remove",
+                "edit.undo", "edit.redo", "clip.setNotes",
+                // clip.getNotes needs a clip id like the other per-clip
+                // reads (the clip.analyzeAudio/clip.detectPitch rationale) —
+                // this loop's clip.addMIDI clip id is minted mid-loop, not
+                // known ahead of time. Proven by ClipGetNotesCommandTests
+                // (happy path, round trip, both filters, the totalNotes vs
+                // returnedNotes split, the read-only pin, and every
+                // rejection).
+                "clip.getNotes",
+                "clip.remove",
                 "clip.split", "clip.trim", "clip.move",
                 // clip.duplicate (m15-d) needs a clip id like the other per-clip
                 // edits; proven by ArrangeCommandTests (round-trip + overlap
@@ -1726,6 +1735,18 @@ struct CommandRouterTests {
                 // engine-default-throw path) and DAWCore
                 // AudioContentAnalyzerTests.
                 "clip.analyzeAudio",
+                // clip.detectPitch (m23-ap-3) needs a clip id like the other
+                // per-clip reads AND a REAL file on disk (detectClipPitch
+                // checks FileManager.fileExists before calling the engine) —
+                // this bare router's shared clip points at a path nothing
+                // wrote, so it would hit the missing-file invalidClipEdit
+                // even with an engine override. Proven by
+                // ClipDetectPitchCommandTests (happy path shape, honest
+                // absence, window clamping, MIDI/missing-file/unknown-clip
+                // rejections, and the engine-default-throw path) and
+                // DAWEngineTests ClipPitchAnalyzerTests (real SwiftF0
+                // inference).
+                "clip.detectPitch",
                 // clip.crossfade (m11-d) needs TWO adjacent audio clips with source
                 // material on each side of the seam — a fixture this shared, single-
                 // clip project doesn't have. Proven by ClipCrossfadeCommandTests
@@ -1760,6 +1781,17 @@ struct CommandRouterTests {
                 // shape, undo, offline-render gate) by SampleLibraryCommandTests
                 // with temp-dir fixtures.
                 "instrument.importSampleLibrary",
+                // instrument.describeSampler (m26-i) needs a track whose
+                // sampler is ACTUALLY configured (`instrument?.sampler !=
+                // nil`) — this loop's own `track.setInstrument` entry for
+                // `instTrackID` only sets `waveform` (a polySynth knob) and
+                // never touches `sampler`, so a bare call here would
+                // legitimately hit the "no sampler configured yet" refusal,
+                // the au.describeParams "no live hosted instance" rationale.
+                // Proven end-to-end (globals, provenance, zone-summary
+                // coverage/gaps, paging, every refusal) by
+                // InstrumentDescribeSamplerCommandTests.
+                "instrument.describeSampler",
                 // m23-k3: both MIDI-import verbs read a REAL .mid off disk — a
                 // fixture this bare loop doesn't stage — and clip.importMIDI
                 // additionally needs an existing MIDI clip. The
@@ -1829,6 +1861,12 @@ struct CommandRouterTests {
                 // plugin.listOpenUIs is NOT excluded: it answers ok with
                 // {available:false} when the seam is nil.
                 "plugin.openUI", "plugin.closeUI",
+                // edit.pasteClips (m26-k) routes through CommandRouter.editPaste,
+                // the same app-layer-seam-nil-on-a-bare-router rationale as
+                // plugin.openUI/closeUI above — it legitimately returns the
+                // actionable headless error here. Proven by
+                // EditPasteClipsCommandTests (router + a fake EditPasteControlling).
+                "edit.pasteClips",
                 // au.describeParams / au.setParam (hosted-AU parameter
                 // surface) need a LIVE `.ready` hosted Audio Unit behind the
                 // target — this bare router's FakeEngine hosts none (the
@@ -1880,6 +1918,15 @@ struct CommandRouterTests {
                 // throws, and stays IN the loop.
                 "reference.import", "reference.remove",
                 "reference.analyze",
+                // audio.profileFile (m25-z) needs BOTH a real file on disk
+                // (this bare loop stages no fixture, the vc.importVoiceModel/
+                // clip.transcribe rationale) AND the profileFile capability
+                // this bare FakeEngine doesn't override — the
+                // reference.analyze/clip.analyzeAudio rationale. Proven by
+                // AudioProfileFileCommandTests with an injected temp file + a
+                // profiling-capable fake, and by FileProfilerTests (real DSP,
+                // no fake) at the DAWEngine layer.
+                "audio.profileFile",
                 // reference.setOffset/setTrim/compare (m22-g P2) need a slot
                 // that only exists after the import this loop deliberately
                 // doesn't run (compare additionally needs a live loudness

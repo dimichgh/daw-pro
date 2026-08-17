@@ -63,12 +63,12 @@ beats-vs-seconds units, safety policy) preloaded into their context.
 
 | Agent | Role | Model |
 |---|---|---|
-| `producer` | Coordinator: plans a song from a brief, delegates by domain, keeps the arrangement coherent. Also owns project lifecycle (save/open/new), transport, `macro_song_skeleton`, and lyric writing. | inherit |
-| `composer` | Melody/harmony/rhythm: tracks, instruments (creation), MIDI clips, notes, quantize/humanize/groove, and the local AI song-generation pipeline. | sonnet |
+| `producer` | Coordinator: plans a song from a brief, lays the foundation (`macro_song_skeleton` plus the roster and section markers it owns via `track_*`/`marker_*`), and hands the calling session a delegation plan. Also owns project lifecycle (save/open/new), transport, and lyric writing. Note: a subagent has no Task/Agent tool of its own — the session that invokes producer does the delegating. | inherit |
+| `composer` | Melody/harmony/rhythm: tracks, instruments (creation), MIDI clips, notes (`clip_get_notes` to read one clip, `clip_set_notes` to whole-array replace), quantize/humanize/groove, pitch detection, and the local AI song-generation pipeline. | sonnet |
 | `arranger` | Song structure: markers, tempo/meter map, bar insert/delete, clip layout across the timeline, take comping. | sonnet |
 | `sound-designer` | Instrument selection/tuning, sound banks, sample libraries, effect chains and their parameters. | sonnet |
-| `mix-engineer` | Levels/pans/sends/buses, sidechain, automation lanes, the master chain, loudness analysis. | sonnet |
-| `finisher` | Renders: mixdown, stems, bounce-in-place, loudness measurement/verification. | sonnet |
+| `mix-engineer` | Levels/pans/sends, BUSES (`track_add kind:"bus"` — the only track kind it may create), sidechain, automation lanes, the master chain, loudness analysis. | sonnet |
+| `finisher` | Renders: mixdown, stems, bounce-in-place — plus verifying the FILE that was written (`audio_profile_file`, `reference_import`), not just the session. | sonnet |
 
 ### Skills (`skills/`)
 

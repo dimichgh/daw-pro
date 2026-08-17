@@ -238,7 +238,7 @@ struct FXSpectrumCommandTests {
         #expect(refusal.error?.contains("release") == true,
                 "the refusal must teach how to free a slot")
         #expect(engine.taps.count == 8, "the refused arm must not have recorded a 9th tap")
-        #expect(CommandRouter.allCommands.count == 175, "a cap-full refusal must not have touched allCommands")
+        #expect(CommandRouter.allCommands.count == 180, "a cap-full refusal must not have touched allCommands")
     }
 
     // MARK: - L4a/L4b: lease expiry — reporting vs cap-slot, deliberately split
@@ -431,26 +431,37 @@ struct FXSpectrumCommandTests {
         // fx.spectrum was the tail at m23-r4; m23-o1's frequency.reference,
         // m23-w's clip.removeMany/clip.moveMany, m23-af's transport.panic,
         // m23-aj-2's clip.moveManyByTracks/clip.moveManyToTrack, m23-dl's
-        // model-lifecycle pair, and m23-di-2a's vc.importVoiceModel are each
-        // additive-at-end AFTER it, so fx.spectrum is now ninth-from-last —
+        // model-lifecycle pair, m23-di-2a's vc.importVoiceModel, m25-d's
+        // transport.setStopAtContentEnd, m25-z's audio.profileFile, m23-ap-3's
+        // clip.detectPitch, and m26-k's edit.pasteClips are each
+        // additive-at-end AFTER it, so fx.spectrum is now tenth-from-last —
         // still contiguous, still unmoved, per the same law it was gated by.
-        #expect(CommandRouter.allCommands.dropLast(10).last == "fx.spectrum")
-        #expect(CommandRouter.allCommands.dropLast(9).last == "frequency.reference")
-        #expect(CommandRouter.allCommands.dropLast(8).last == "clip.removeMany")
-        #expect(CommandRouter.allCommands.dropLast(7).last == "clip.moveMany")
+        // (clip.getNotes and m26-i's instrument.describeSampler landed
+        // elsewhere in the array, next to their siblings, not at the tail —
+        // this chain is unaffected by either.)
+        #expect(CommandRouter.allCommands.dropLast(13).last == "fx.spectrum")
+        #expect(CommandRouter.allCommands.dropLast(12).last == "frequency.reference")
+        #expect(CommandRouter.allCommands.dropLast(11).last == "clip.removeMany")
+        #expect(CommandRouter.allCommands.dropLast(10).last == "clip.moveMany")
         // m23-af appended `transport.panic` after the m23-w pair.
-        #expect(CommandRouter.allCommands.dropLast(6).last == "transport.panic")
+        #expect(CommandRouter.allCommands.dropLast(9).last == "transport.panic")
         // m23-aj-2 appended clip.moveManyByTracks/clip.moveManyToTrack after that.
-        #expect(CommandRouter.allCommands.dropLast(5).last == "clip.moveManyByTracks")
-        #expect(CommandRouter.allCommands.dropLast(4).last == "clip.moveManyToTrack")
+        #expect(CommandRouter.allCommands.dropLast(8).last == "clip.moveManyByTracks")
+        #expect(CommandRouter.allCommands.dropLast(7).last == "clip.moveManyToTrack")
         // m23-dl appended the model-lifecycle pair after THAT.
-        #expect(CommandRouter.allCommands.dropLast(3).last == "ai.modelResidency")
-        #expect(CommandRouter.allCommands.dropLast(2).last == "ai.modelUnload")
+        #expect(CommandRouter.allCommands.dropLast(6).last == "ai.modelResidency")
+        #expect(CommandRouter.allCommands.dropLast(5).last == "ai.modelUnload")
         // m23-di-2a appended vc.importVoiceModel after THAT.
-        #expect(CommandRouter.allCommands.dropLast().last == "vc.importVoiceModel")
+        #expect(CommandRouter.allCommands.dropLast(4).last == "vc.importVoiceModel")
         // m25-d appended transport.setStopAtContentEnd at the END (same law).
-        #expect(CommandRouter.allCommands.last == "transport.setStopAtContentEnd")
-        #expect(CommandRouter.allCommands.count == 175)   // 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d
+        #expect(CommandRouter.allCommands.dropLast(3).last == "transport.setStopAtContentEnd")
+        // m25-z appended audio.profileFile at the END (same law).
+        #expect(CommandRouter.allCommands.dropLast(2).last == "audio.profileFile")
+        // m23-ap-3 appended clip.detectPitch at the END (same law).
+        #expect(CommandRouter.allCommands.dropLast().last == "clip.detectPitch")
+        // m26-k appended edit.pasteClips at the END (same law).
+        #expect(CommandRouter.allCommands.last == "edit.pasteClips")
+        #expect(CommandRouter.allCommands.count == 180)   // 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips)
     }
 
     // MARK: - L12: headless / no-capability both refuse honestly, never with a cap number

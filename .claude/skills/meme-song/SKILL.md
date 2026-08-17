@@ -1,6 +1,6 @@
 ---
 name: meme-song
-description: Turn a spoken or sung phrase into a rhythmic "Kiffness-style" meme song — chop the voice into fragments, pitch them into a melody, and build an arrangement around them. Works today without pitch detection; explains exactly which step gets easier when clip.detectPitch lands.
+description: Turn a spoken or sung phrase into a rhythmic "Kiffness-style" meme song — chop the voice into fragments, pitch them into a melody, and build an arrangement around them. Relative semitone offsets are the default and need no pitch detection; clip.detectPitch (shipped) is for matching a backing track's key or recovering the speaker's own melody.
 ---
 
 # Meme song (Kiffness mode)
@@ -128,10 +128,46 @@ name instead. Needs at least 2 detectable onsets.
 
 ---
 
-## 3. Pitch the fragments into a melody — and why you don't need pitch detection
+## 3. Pitch the fragments into a melody
 
-⭐⭐⭐ **THE KEY INSIGHT. `clip.detectPitch` does not ship yet (roadmap m23-ap-2b →
-m23-ap-3). It is NOT a blocker, because a melody is a set of RELATIVE intervals.**
+⭐⭐⭐ **THE KEY INSIGHT, AND IT SURVIVES THE DETECTOR SHIPPING: a melody is a set of
+RELATIVE intervals, so the offsets below work on ANY fragment without knowing its pitch.**
+Start here. It is fewer calls, it cannot be wrong, and it is what makes a meme song sound
+like a meme song rather than a transcription.
+
+### When to reach for `clip.detectPitch` (m23-ap-3, SHIPS)
+
+Detection is now available and it buys exactly **two** things — neither of them the melody:
+
+| Use detection when | Why relative offsets don't cover it |
+|---|---|
+| The vocal must sit **in the key of a backing track** | Offsets are relative to the *source*; matching an external key needs the source's absolute pitch |
+| You want the **natural melody the speaker already spoke** | Speech has real pitch movement; detection recovers it instead of imposing a scale |
+
+```
+clip_detect_pitch { clipId, fromSeconds?, durationSeconds?, confidenceThreshold? }
+  → { pitch: { frames: [{ timeSeconds, frequencyHz?, confidence, levelDbfs?, absence? }] } }
+```
+
+⚠️ **Frames are NESTED under `pitch` — `result.pitch.frames`, not `result.frames`.** This
+cost a debugging round when the verb shipped; a wrong path yields an empty array, and an
+empty array makes every downstream check pass VACUOUSLY.
+
+⚠️⚠️ **`frequencyHz` IS ABSENT on unvoiced frames — the key is missing, not zero.** Read it
+as `if (f.frequencyHz != null)`. `absence` says which kind of nothing: `belowLevel` (too
+quiet), `belowConfidence` (present but unclear), `outOfRange`. **Never coerce a missing
+pitch to 0 — it becomes a real note the moment anything reads it.** Frames are never
+dropped, so gaps are visible: that is how you tell two notes from one long one.
+
+To convert a frame to a semitone offset against a target:
+`semitones = 12 * log2(targetHz / frameHz)`. Take a **median over the voiced frames of a
+fragment**, never a single frame — one frame is noise, and a speech syllable glides.
+
+⚠️ Accuracy is ~0.5 cents median on harmonic material, **zero octave errors measured** —
+but every number so far is from synthetic tones. No real voice has been through it. Trust
+it for key-matching; listen before promising anything finer.
+
+### The relative-offset path — still the default
 
 To make a fragment play a tune you shift it by semitone offsets *relative to itself*. You
 never need to know what pitch the source actually is:

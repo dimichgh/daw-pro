@@ -53,6 +53,40 @@ public enum PianoRollZoom {
         return "\(Int(percent.rounded()))%"
     }
 
+    // MARK: - Anchor-preserving zoom (m25-b-3 — the no-jump rule, adopted)
+
+    /// The screen-x a NON-POINTER zoom (the header ± cluster, ⌘+/⌘−/⌘0, the
+    /// `debug.panelLayout` seam) anchors on in the roll: the PLAYHEAD's screen x
+    /// when there is a line to hold, else the viewport centre.
+    ///
+    /// ⭐ **THE OFFSET ARITHMETIC ITSELF IS NOT HERE AND MUST NOT COME HERE.**
+    /// `ArrangeZoom.offsetPreservingAnchor` is pure arithmetic with nothing
+    /// arrange-specific in it, and this type already borrows `pixelsPerBeatRange`
+    /// and `stepFactor` from the same enum (`:29`, `:32`). A second copy of the
+    /// anchor formula would fork a home that is already shared.
+    ///
+    /// ⚠️ **WHAT IS ROLL-SPECIFIC IS THE `nil`, AND IT IS THE m23-c1 OFF-CLIP
+    /// RULE.** The arrange's transport always has a line somewhere on its
+    /// timeline; the roll draws one only while the transport is inside the EDITED
+    /// clip (`PianoRollPlayhead.lineX` returns nil otherwise, and an
+    /// `OffClipEdgeCue` says which way it went). Anchoring on a line that is not
+    /// drawn would hold a point the user cannot see — so off-clip falls back to
+    /// the centre.
+    ///
+    /// ⚠️ **`?? .infinity` IS DELIBERATE AND IS NOT A TRICK TO TIDY AWAY.** "There
+    /// is no line in this clip" is delivered to the shared rule as "a playhead
+    /// that cannot be in frame", which is exactly the case that rule already
+    /// answers with its own centre. Writing `max(0, viewportWidth / 2)` here
+    /// instead would put a SECOND definition of "the centre" in the tree, and the
+    /// day the shared one changes the roll would silently keep the old one.
+    /// `PianoRollZoomTests` pins this against `ArrangeZoom`'s own fallback rather
+    /// than against a re-typed literal, so the delegation is observable.
+    public static func anchorScreenX(playheadContentX: CGFloat?, offset: CGFloat,
+                                     viewportWidth: CGFloat) -> CGFloat {
+        ArrangeZoom.anchorScreenX(playheadContentX: playheadContentX ?? .infinity,
+                                  offset: offset, viewportWidth: viewportWidth)
+    }
+
     // MARK: - Grid density (sub-beat lines fade with zoom, never fork)
 
     /// Below this line spacing a sub-beat hairline is pure noise — it draws at

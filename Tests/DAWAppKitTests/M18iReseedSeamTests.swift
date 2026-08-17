@@ -34,8 +34,14 @@ struct M18iReseedSeamTests {
 
     @Test("grid: length-only change (trim-extend) is stale — the boundary must move")
     func gridLengthOnlyChangeReseeds() {
-        let m = PianoRollModel(notes: notesABC(), clipLengthBeats: 8)
-        #expect(m.needsReseed(notes: notesABC(), clipLengthBeats: 13))
+        // Bound ONCE and reused: the notes must be genuinely content-equal (same
+        // ids) so only the length differs, otherwise the fresh-UUID-per-call
+        // `MIDINote.init` would make the note comparison in `needsReseed` the
+        // thing that fires, and this test would no longer pin the length check
+        // at all (m25-w).
+        let notes = notesABC()
+        let m = PianoRollModel(notes: notes, clipLengthBeats: 8)
+        #expect(m.needsReseed(notes: notes, clipLengthBeats: 13))
     }
 
     @Test("grid: dropped note (trim-shorter) is stale even at equal length")

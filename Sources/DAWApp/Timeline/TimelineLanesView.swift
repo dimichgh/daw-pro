@@ -3804,6 +3804,16 @@ private struct ClipBlock: View {
                 // audio clip, so the entry simply does not exist there (hidden,
                 // never offered-then-errored — the "Convert to Voice…" rule two
                 // entries down, and the sibling "Quantize…" above).
+                //
+                // ⛔ DO NOT ADD `clip.takeGroupID == nil` HERE (m25-c-2). Both
+                // store methods also refuse a take-comp member, and hiding the
+                // entry looks like the neighbouring guards at :1281 — but this
+                // menu is not the only way in: the piano-roll QUANTIZE/HUMANIZE
+                // chips (PianoRollView `quantizeChip`/`humanizeChip`) are gated on
+                // NOTHING and the roll opens on comp members. A conjunct here
+                // would leave the bug reachable one gesture away AND give the same
+                // refusal two treatments. It is handled once, in the panels: Apply
+                // is disabled and says why (kind hides, state explains).
                 Button("Humanize…") { onOpenHumanize() }
             }
             Button("Extract Groove…") { onExtractGroove() }

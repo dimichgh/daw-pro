@@ -297,11 +297,23 @@ public final class PanelLayoutStore {
         backing.storeValue(Double(arrangePPB), forKey: Self.arrangePPBKey)
     }
 
-    /// Sets the piano-roll horizontal zoom (m21-c). Clamped like every
-    /// dimension; a zoom does not re-pin an anchor beat under the cursor here,
-    /// so no offset recompute rides along (unlike `setArrangePPB`'s callers).
-    /// The roll DOES have a programmatic scroll seam as of m23-c2 (follow), but
-    /// it is a scroll-into-view, not an anchor re-pin.
+    /// Sets the piano-roll horizontal zoom (m21-c). Clamped like every dimension.
+    ///
+    /// ⭐⭐ **m25-b-3 — THE ANCHOR RULE NOW RIDES ON THIS SLOT, AND THIS COMMENT
+    /// USED TO SAY THE OPPOSITE.** It read *"a zoom does not re-pin an anchor beat
+    /// under the cursor here, so no offset recompute rides along (unlike
+    /// `setArrangePPB`'s callers)"*, and that sentence was the filed evidence for
+    /// the defect it described: the roll's content slid out from under the pointer
+    /// on every pinch and every ⌘±.
+    ///
+    /// The recompute is deliberately NOT here — this type is the storage, and it
+    /// has no scroll offset, no viewport width and no playhead. It hangs off the
+    /// roll's `onChange` of this value (`PianoRollView.repinZoomAnchor`), which is
+    /// the one event every driver shares. **The consequence for a caller is the
+    /// opposite of the old note: you do not need a special zoom entry point here —
+    /// writing this slot from anywhere (including `debug.panelLayout`) gets the
+    /// no-jump rule.** `setArrangePPB`'s callers still must route through
+    /// `setArrangeZoom`; that asymmetry is real and is explained on the funnel.
     public func setPianoRollPPB(_ value: CGFloat) {
         pianoRollPPB = value.clamped(to: Self.pianoRollPPBRange)
         backing.storeValue(Double(pianoRollPPB), forKey: Self.pianoRollPPBKey)

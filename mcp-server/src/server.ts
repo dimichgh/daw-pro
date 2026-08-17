@@ -74,8 +74,9 @@ export const server = new McpServer({
 
 // Append-only call logging (m23-ca, src/mcp-log.ts) — MUST install before the
 // first `registerTool(`/`server.registerTool(` call below, so every one of
-// the 177 registrations (both paths) is instrumented. See that file's header
-// for the full design (before-snapshot source/cost, redaction, seam choice).
+// the 185 registrations (151 local wrapper + 34 direct, re-measured at m26-k)
+// is instrumented. See that file's header for the full design (before-snapshot
+// source/cost, redaction, seam choice).
 installMcpLogging(server, bridge);
 
 /**
@@ -1016,8 +1017,20 @@ const samplerSchema = z
   .object({
     zones: z
       .array(samplerZoneSchema)
+      .optional()
       .describe(
-        "The sampler's keyzone map. For a played note, each GROUP of zones fires at most " +
+        "OPTIONAL. Omit it to leave the track's CURRENT zones exactly as they are — that " +
+          "is how you change a global (say `release`) on an imported 309-zone library " +
+          "without reading back and resending every zone. When PRESENT this array " +
+          "REPLACES the whole keyzone map, so `zones: []` is the deliberate way to clear " +
+          "a sampler, and a partial list silently drops the zones you left out. A zone's " +
+          "`id` (from a prior instrument_describe_sampler/project_snapshot) IS honoured " +
+          "when it already names a zone on THIS track; an id that doesn't (including one " +
+          "copied from a different track) is re-minted and the substitution is reported in " +
+          "the response's `remintedZoneIDs` — but this array can still only REPLACE, never " +
+          "MERGE. To edit a handful of zones by id and leave the rest of a large library " +
+          "completely untouched, use instrument_set_sampler_zones instead. " +
+          "The sampler's keyzone map. For a played note, each GROUP of zones fires at most " +
           "one voice: within a group, the first zone (array order) whose pitch AND velocity " +
           "ranges contain the note and whose round-robin/random gates pass is the one that " +
           "plays; zones in different `group`s layer simultaneously. Zones without the " +
@@ -1062,12 +1075,15 @@ const samplerSchema = z
       ),
   })
   .describe(
-    "Sampler configuration, used only when `kind` is (or already is) `sampler`. Providing " +
-      "this object REPLACES the sampler's entire configuration at once — `zones` is not " +
-      "merged with any zones already on the track, so to add/remove/edit one zone you must " +
-      "resend the complete `zones` array. Omit `sampler` entirely to leave the track's " +
-      "current sampler configuration untouched (e.g. when this call only changes `kind` or " +
-      "is switching a different track's instrument). Has no effect on `testTone`/`polySynth`."
+    "Sampler configuration, used only when `kind` is (or already is) `sampler`. Every field " +
+      "here is independently a PARTIAL update — omit a field and it keeps its current value " +
+      "— with ONE exception: a PRESENT `zones` array replaces the whole keyzone map at once " +
+      "(see `zones`'s own description for what 'replaces' means for zone ids). Omit " +
+      "`sampler` entirely to leave the track's current sampler configuration untouched (e.g. " +
+      "when this call only changes `kind` or is switching a different track's instrument). " +
+      "Has no effect on `testTone`/`polySynth`. For narrower, harder-to-misuse edits, prefer " +
+      "instrument_set_sampler_param (one global) or instrument_set_sampler_zones (merge " +
+      "zones by id) over building this object by hand."
   );
 
 const audioUnitSchema = z
@@ -1201,8 +1217,23 @@ registerTool(
       "instrument_list_audio_units first to discover what's installed). This " +
       "is a PARTIAL update: any field you omit keeps its current value, so you " +
       "can change just one knob (e.g. only `cutoffHz`) without resending the " +
-      "rest — EXCEPT `sampler`, which replaces the whole sampler configuration " +
-      "at once when provided (see its own description). The synth params only " +
+      "rest. For a single sampler GLOBAL (oneShot/attack/release/gain), prefer " +
+      "the narrower instrument_set_sampler_param — it wraps this same partial-" +
+      "update contract so you don't have to know it's safe. `sampler` here is " +
+      "partial too, at BOTH levels: omit `zones` and the track's existing " +
+      "zones stand, so `{sampler: {release: 0.4}}` retunes a 309-zone imported " +
+      "library without resending a single zone, and the globals you don't " +
+      "mention keep their values rather than snapping back to defaults. The " +
+      "one thing that is still wholesale is a PRESENT `zones` array — it " +
+      "REPLACES the zone list entirely, and an explicit `zones: []` is " +
+      "therefore how you deliberately clear a sampler. Zone ids ARE honoured " +
+      "on this replace path (a zone whose `id` already names a zone on this " +
+      "track keeps that identity; an id that doesn't is re-minted and the " +
+      "substitution is reported in the response's `remintedZoneIDs` — this is " +
+      "also how a zone map gets copied from one track onto another), but this " +
+      "array can still only REPLACE, never MERGE — to edit a handful of zones " +
+      "on a large library by id and leave the rest completely untouched, use " +
+      "instrument_set_sampler_zones instead. The synth params only " +
       "apply to `polySynth`: `waveform` is the oscillator shape (`saw`, " +
       "`square`, `triangle`, `sine` — saw is brightest/buzziest, sine is " +
       "purest/softest); `attack`/`decay`/`sustain`/`release` are the amplitude " +
@@ -1520,7 +1551,21 @@ registerTool(
       "again in a moment), `engineStopped`, `engineRebuilding`. It " +
       "deliberately IGNORES the user's in-app 'audition while editing' " +
       "preference, because that preference means 'do not sound notes while I " +
-      "drag', not 'never make sound'. Refused while a take is recording.",
+      "drag', not 'never make sound'. Refused while a take is recording. " +
+      "WHAT `audible:true` DOES AND DOES NOT MEAN: it is a signal-PATH check, " +
+      "not a measurement. It says the strip isn't muted or solo-excluded, the " +
+      "engine is running, and — for `soundBank`/`audioUnit` instruments — a " +
+      "prepared instrument existed at that instant. It measures no level and no " +
+      "spectrum: NOTHING here confirms a sound was actually produced, and " +
+      "nothing describes its TIMBRE. Do not A/B two candidate patches with this " +
+      "tool and report which sounded better — you would be inventing the " +
+      "difference. The reply also carries `instrumentStatus` for `soundBank`/ " +
+      "`audioUnit` tracks (\"pending\"/\"ready\"/\"missing\"/\"failed: …\", the " +
+      "same string project_snapshot's instrument object reports): a patch you " +
+      "set moments ago may still be loading, so a `pending` status means retry " +
+      "before you trust what you heard — `audible:true` alongside `pending` " +
+      "means the path is clear but THIS patch may not have been the thing that " +
+      "sounded.",
     inputSchema: {
       trackId: z
         .string()
@@ -1757,6 +1802,210 @@ registerTool(
         ...(dryRun !== undefined ? { dryRun } : {}),
         ...(force !== undefined ? { force } : {}),
       })
+    )
+);
+
+registerTool(
+  "instrument_describe_sampler",
+  {
+    title: "Read a track's Sampler configuration (read-only)",
+    description:
+      "Read the built-in Sampler's configuration on an instrument track — the ANSWER to " +
+      "'which library is loaded and how is it mapped' without paying for project_snapshot's " +
+      "whole-project cost (measured 296,809 bytes on a real song). Mirrors " +
+      "au_describe_params: a cheap describe you call BEFORE editing, so instrument_set_" +
+      "sampler_param/instrument_set_sampler_zones don't have to guess a track's current " +
+      "state. Works even when the track's ACTIVE instrument is something else right now — " +
+      "sampler configuration is carried across kind switches (like soundBank/audioUnit), so " +
+      "you can inspect a previously-built sampler map before switching back to it; the " +
+      "response's own `kind` field tells you whether `sampler` is actually the SOUNDING " +
+      "instrument or just preserved state. Refuses readably for an audio/bus track (only " +
+      "instrument tracks carry an instrument), an unknown trackId, or an instrument track " +
+      "that has never had a sampler configured at all (use instrument_import_sample_library " +
+      "or track_set_instrument {kind:\"sampler\", sampler:{zones:[...]}} first) — but a " +
+      "sampler that IS configured with zero zones (the deliberate `zones: []` clear) is a " +
+      "legal answer, not a refusal: you get `zoneSummary.count: 0` back. Returns {trackId, " +
+      "kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary}. " +
+      "`sourcePath`/`displayName` (provenance from an import; `displayName` is a file STEM " +
+      "and therefore NOT unique — two different folders can both hold a \"Bass.sfz\", so " +
+      "`sourcePath` is what actually disambiguates them) appear only when set — a hand-built " +
+      "sampler has neither. `zoneSummary` is {count, pitchCoverage?, velocityCoverage?, " +
+      "groupCount, distinctSampleFiles}: `pitchCoverage`/`velocityCoverage` are each " +
+      "{min, max, gaps?} — the UNION of every zone's range, not a naive min/max, so a keymap " +
+      "with a hole in the middle is visible as a `gaps` entry INSIDE the envelope instead of " +
+      "silently reading as full 0-127 coverage (this is exactly the bug class the field " +
+      "report hit twice: a bass silent below MIDI 35, a library silent above 45). Both are " +
+      "omitted entirely when the sampler has zero zones. `groupCount` counts distinct " +
+      "layering groups (an unset zone group counts as group 0, the classic first-match " +
+      "default) and `distinctSampleFiles` counts unique sample audio files across all zones. " +
+      "The zone list itself is a SEPARATE, opt-in page: omit both `offset` and `limit` and " +
+      "the response has no `zones` key at all (just the summary); pass either one and you " +
+      "get a paged `zones` array (the exact shape track_set_instrument echoes back, ids " +
+      "included) plus `offset`, `limit`, `returnedZones`, and `truncated` so you know " +
+      "whether to page further.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the instrument track to describe, from project_snapshot."),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe(
+          "Zero-based index into the sampler's zone list to start a page from. Providing " +
+            "EITHER `offset` or `limit` turns on paging and puts a `zones` array in the " +
+            "response; omitting both returns the summary only. Default 0 when `limit` is " +
+            "given alone. An offset past the end of the zone list is not an error — it " +
+            "returns an empty, untruncated page."
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(5000)
+        .optional()
+        .describe(
+          "Max zones to return in the page. Providing EITHER `offset` or `limit` turns on " +
+            "paging (see `offset`). Default 500 when `offset` is given alone; out-of-range " +
+            "values clamp silently into 1-5000 rather than erroring. Compare the response's " +
+            "`returnedZones` against `zoneSummary.count` (or check `truncated`) to know " +
+            "whether to page further."
+        ),
+    },
+  },
+  async ({ trackId, offset, limit }) =>
+    toToolResult(() => bridge.send("instrument.describeSampler", { trackId, offset, limit }))
+);
+
+const samplerGlobalParamSchema = z
+  .enum(["oneShot", "attack", "release", "gain"])
+  .describe(
+    "Which Sampler GLOBAL to set — exactly one per call, matching one of the four fields " +
+      "track_set_instrument's own `sampler` object carries. `oneShot` (boolean): true = " +
+      "every triggered sample always plays to completion regardless of note-off (drum hits " +
+      "and other percussive one-shots); false = the sample follows note-off, fading out " +
+      "over `release` seconds, like a sustained instrument. `attack` (seconds, number, " +
+      "clamps 0-1): how long a triggered note takes to reach full volume. `release` " +
+      "(seconds, number, clamps 0.001-8): how long the sample fades to silence after " +
+      "note-off — ignored while `oneShot` is true. `gain` (0-1, number): the sampler's " +
+      "overall output level, separate from each zone's own `gain` and from the track fader " +
+      "(track_set_volume)."
+  );
+
+registerTool(
+  "instrument_set_sampler_param",
+  {
+    title: "Set one Sampler global (oneShot, attack, release, or gain)",
+    description:
+      "Set exactly ONE global knob on a track's built-in Sampler — `oneShot`, `attack`, " +
+      "`release`, or `gain` — without touching anything else on the sampler. This is a " +
+      "thin, narrower wrapper around track_set_instrument {sampler: {<param>: value}}: the " +
+      "whole reason it exists is so you don't have to know that a partial sampler update is " +
+      "safe (added m26-g/h) — this call is GUARANTEED to leave the track's zones, " +
+      "`sourcePath`, and `displayName` exactly as they were, no matter which global you set " +
+      "or what an imported library's zone count is (tuning `release` on a 309-zone library " +
+      "through this tool can never touch a single zone). Has no audible effect unless the " +
+      "track's active instrument kind is `sampler` (see instrument_describe_sampler's " +
+      "`kind` field), though the value is still stored and takes effect the next time it is. " +
+      "Sending a boolean for a numeric param (or vice versa) is a readable error naming the " +
+      "mismatch; out-of-range numbers clamp silently through the same ranges " +
+      "track_set_instrument uses (see `param`'s own description for each range). Returns " +
+      "the full resolved instrument object, same shape as track_set_instrument.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the instrument track, from project_snapshot."),
+      param: samplerGlobalParamSchema,
+      value: z
+        .union([z.number(), z.boolean()])
+        .describe(
+          "The new value: a boolean for `param: \"oneShot\"`, a number (seconds, or a 0-1 " +
+            "level) for `attack`/`release`/`gain`. See `param`'s description for which type " +
+            "and range applies."
+        ),
+    },
+  },
+  async ({ trackId, param, value }) =>
+    toToolResult(() => bridge.send("track.setInstrument", { trackId, sampler: { [param]: value } }))
+);
+
+/** Shared per-zone field shape (the samplerZoneSchema precedent) with `path`
+ * made OPTIONAL and an `id` added and REQUIRED — a zonePatches element edits
+ * an EXISTING zone by id, so it may change zero or more fields (including
+ * swapping the sample file itself) rather than authoring a whole new zone.
+ * Reuses samplerZoneSchema's own field schemas (not retyped) so the two
+ * shapes cannot drift apart on range/default text. `.strict()` here is
+ * load-bearing, not decoration: `registerTool`'s wrapper only applies
+ * `.strict()` at the TOP level, so without this a typo'd field INSIDE one
+ * patch element (e.g. "maxPtich") would be silently stripped by zod's
+ * default parse mode, the patch would land with one fewer field than
+ * intended, and the call would still report success. */
+const samplerZonePatchSchema = z
+  .object({
+    id: z
+      .string()
+      .uuid()
+      .describe(
+        "REQUIRED. The zone to edit, by id — read it from a prior " +
+          "instrument_describe_sampler or project_snapshot call " +
+          "(instrument.sampler.zones[].id). Must already name a zone on THIS track: an id " +
+          "copied from a DIFFERENT track is a readable error naming the id — this tool " +
+          "never silently inserts a new zone or re-mints the id. To copy a zone map onto a " +
+          "different track, use track_set_instrument's wholesale `zones` array instead, " +
+          "which mints fresh ids automatically and reports the substitution in the " +
+          "response's `remintedZoneIDs`."
+      ),
+    ...samplerZoneSchema.shape,
+    path: samplerZoneSchema.shape.path
+      .optional()
+      .describe(
+        "Absolute path to REPLACE this zone's sample audio file with. Omit to keep the " +
+          "zone's CURRENT file — most patches touch only a mapping/envelope field and leave " +
+          "the audio alone."
+      ),
+  })
+  .strict();
+
+registerTool(
+  "instrument_set_sampler_zones",
+  {
+    title: "Edit existing Sampler zones by id, leaving every other zone standing",
+    description:
+      "Edit one or more of a track's EXISTING Sampler zones by id — a targeted MERGE, the " +
+      "opposite of track_set_instrument's `sampler.zones`, which REPLACES the whole keyzone " +
+      "map wholesale (and whose `zones: []` is the only way to CLEAR a sampler; that " +
+      "replace-vs-merge choice is not available here). This is the tool for touching one " +
+      "zone of a 309-zone imported library without resending the other 308: each entry in " +
+      "`zones` below names an existing zone by `id` and changes only the fields it mentions " +
+      "— everything else on that zone (and every zone not named at all) is left exactly as " +
+      "it was, INCLUDING fields left nil (e.g. an unset `pan` stays unset, not reset to an " +
+      "explicit 0). A patch can even swap a zone's sample file via `path` while keeping its " +
+      "pitch/velocity mapping. Under the hood this wraps track_set_instrument's " +
+      "`sampler.zonePatches` merge path (m26-g). Ids are per-track and this tool is STRICT " +
+      "about them: an id from a prior instrument_describe_sampler/project_snapshot call on " +
+      "a DIFFERENT track, or one that never existed, or one repeated twice in the same call, " +
+      "is a readable error naming the id, and nothing lands — never a silent insert. " +
+      "(track_set_instrument's OWN `zones` array behaves differently on an unrecognized id: " +
+      "it mints a fresh one and reports the substitution in `remintedZoneIDs`, because that " +
+      "path is also how a zone map gets copied from one track onto another — this tool is " +
+      "narrower on purpose.) Returns the full resolved instrument object, same shape as " +
+      "track_set_instrument.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the instrument track, from project_snapshot."),
+      zones: z
+        .array(samplerZonePatchSchema)
+        .describe(
+          "One or more zone edits, each naming the zone it applies to via `id` (required). " +
+            "Every other field is optional and PATCHES that one zone: omit a field to keep " +
+            "the zone's current value for it, unlike track_set_instrument's wholesale " +
+            "`zones` array where an omitted field falls back to a fresh-zone DEFAULT. Zones " +
+            "not named in this array are untouched. Zone ORDER on the track is preserved " +
+            "(a patch replaces its zone in place; it never reorders or appends), which " +
+            "matters because on an overlap the FIRST zone (array order) whose range " +
+            "contains a note wins."
+        ),
+    },
+  },
+  async ({ trackId, zones }) =>
+    toToolResult(() =>
+      bridge.send("track.setInstrument", { trackId, sampler: { zonePatches: zones } })
     )
 );
 
@@ -2315,9 +2564,13 @@ registerTool(
       "every kick hit (`fx_set_sidechain {trackId: pad, effectId: comp, sourceTrackId: kick}`). " +
       "Pass `sourceTrackId: null` (or omit it) to CLEAR the key and return the effect to " +
       "self-keyed. Only compressor and gate inserts can be keyed (hosted Audio Unit sidechain " +
-      "inputs are a later phase); the keyed effect must live on an audio or bus track (route an " +
-      "instrument to a bus first); the key source is another audio track (bus key sources are a " +
-      "later phase); and a key that would form a feedback loop is rejected with the exact path. " +
+      "inputs are a later phase). WHERE THE PIECES MAY LIVE: the KEYED EFFECT must sit on an " +
+      "AUDIO or BUS track — an instrument track cannot host one, so in an all-MIDI project " +
+      "add a bus (track_add kind:\"bus\"), route the instrument into it with track_set_output, " +
+      "and key the compressor ON THE BUS. The KEY SOURCE, by contrast, may be ANY NON-BUS " +
+      "track — an INSTRUMENT track is a perfectly valid key source, so ducking off a MIDI kick " +
+      "needs no audio bounce (only bus key sources are deferred). " +
+      "A key that would form a feedback loop is rejected with the exact path. " +
       "The MASTER chain cannot host a sidechain-keyed effect and the master output cannot be a " +
       "key source: passing \"master\" as `trackId` or `sourceTrackId` is rejected — key an " +
       "effect on a track or bus instead (unlike fx_add/fx_remove/fx_reorder/fx_set_bypass/" +
@@ -2342,7 +2595,8 @@ registerTool(
         .nullable()
         .optional()
         .describe(
-          "Id of the audio track to key FROM (e.g. the kick). Pass null or omit to CLEAR the " +
+          "Id of the track to key FROM (e.g. the kick) — any NON-BUS track, instrument tracks " +
+            "included; it does NOT have to be an audio track. Pass null or omit to CLEAR the " +
             "key and return the effect to self-keyed."
         ),
     },
@@ -2685,7 +2939,8 @@ registerTool(
     description:
       "Replace a MIDI clip's ENTIRE note array — the only note-editing " +
       "primitive. There is no add/remove-single-note tool: read the " +
-      "clip's current `notes` from project_snapshot, modify the array " +
+      "clip's current notes with clip_get_notes (preferred — one clip, not " +
+      "the whole project) or from project_snapshot, modify the array " +
       "(add, remove, or change notes) in your own code, then resubmit the " +
       "whole array here. One call = one undo step (edit_undo reverts the " +
       "entire replacement). `notes` may be empty to clear the clip. Errors " +
@@ -2703,6 +2958,80 @@ registerTool(
     },
   },
   async ({ clipId, notes }) => toToolResult(() => bridge.send("clip.setNotes", { clipId, notes }))
+);
+
+registerTool(
+  "clip_get_notes",
+  {
+    title: "Read a MIDI clip's notes (read-only)",
+    description:
+      "Read a MIDI clip's notes back — the read half of the clip_set_notes / " +
+      "clip_add_midi pair. Since clip_set_notes replaces the ENTIRE note " +
+      "array, you need the CURRENT array (with its real note ids) before " +
+      "you can edit a subset of notes and resubmit the whole thing; this " +
+      "tool gets you that array. PREFER THIS over project_snapshot for note " +
+      "data: project_snapshot serializes the WHOLE project and measured " +
+      "~290 KB on a modest 6-track/38-clip/2367-note session (2026-08-17), " +
+      "which can overflow your output budget — clip_get_notes returns just " +
+      "one clip. `fromBeat`/`toBeat` are CLIP-RELATIVE beats (same frame as " +
+      "a note's startBeat: 0 = the clip's own start, NOT the timeline) and " +
+      "HALF-OPEN — a note is included when startBeat >= fromBeat AND < " +
+      "toBeat, so adjacent windows never double-count a note sitting " +
+      "exactly on the shared boundary. `pitchMin`/`pitchMax` are INCLUSIVE " +
+      "on both ends. IMPORTANT: `totalNotes` in the response is always the " +
+      "clip's UNFILTERED note count, while `returnedNotes` is how many " +
+      "survived your filters (equal to notes.length) — if you filtered and " +
+      "then call clip_set_notes with only the filtered array, you will " +
+      "SILENTLY DESTROY every note you never saw, so always check " +
+      "totalNotes === returnedNotes before doing a whole-array replace, or " +
+      "merge your edits back into a full clip_get_notes {} read first. Size " +
+      "math: a note is roughly 90-120 bytes of JSON, so a 900-note drum " +
+      "clip is ~80-110 KB — for big clips, filter by fromBeat/toBeat rather " +
+      "than pulling the whole clip. This tool is STRICTLY READ-ONLY: no " +
+      "undo entry, nothing dirtied, no engine call — unlike the old " +
+      "clip_humanize-with-zero-jitter 'peek' trick, which still marks the " +
+      "project dirty and still fires an engine refresh even though the " +
+      "notes come back unchanged. Calling this is free.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI clip to read, from project_snapshot or clip_add_midi."),
+      fromBeat: z
+        .number()
+        .optional()
+        .describe(
+          "Only return notes whose startBeat is >= this (CLIP-RELATIVE beats, " +
+            "not timeline beats). Half-open with toBeat: a note starting exactly " +
+            "at fromBeat IS included. Omit for no lower bound."
+        ),
+      toBeat: z
+        .number()
+        .optional()
+        .describe(
+          "Only return notes whose startBeat is < this (CLIP-RELATIVE beats, " +
+            "not timeline beats). Half-open: a note starting exactly at toBeat is " +
+            "EXCLUDED (it belongs to the next window). Omit for no upper bound. " +
+            "Must be >= fromBeat when both are given."
+        ),
+      pitchMin: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe("Only return notes with pitch >= this, 0-127 INCLUSIVE. Omit for no lower bound."),
+      pitchMax: z
+        .number()
+        .int()
+        .min(0)
+        .max(127)
+        .optional()
+        .describe(
+          "Only return notes with pitch <= this, 0-127 INCLUSIVE. Omit for no " +
+            "upper bound. Must be >= pitchMin when both are given."
+        ),
+    },
+  },
+  async ({ clipId, fromBeat, toBeat, pitchMin, pitchMax }) =>
+    toToolResult(() => bridge.send("clip.getNotes", { clipId, fromBeat, toBeat, pitchMin, pitchMax }))
 );
 
 registerTool(
@@ -3227,7 +3556,15 @@ registerTool(
       "one. Either way the response includes `seedUsed` (the seed actually applied) alongside " +
       "the updated clip fields — feed that same value back as `seed` to reproduce this exact " +
       "take, or omit `seed` again to re-roll a different feel. MIDI CLIPS ONLY: an audio clip " +
-      "is rejected. Returns the updated clip plus `seedUsed`.",
+      "is rejected. Returns the updated clip plus `seedUsed`. " +
+      "NOT IDEMPOTENT — the jitter is added to each note's CURRENT position, not to a stored " +
+      "quantized original, so calling this twice COMPOUNDS the feel (and repeated runs pile " +
+      "onsets against the clip boundary, where they clamp). `seed` reproduces a result only " +
+      "from the SAME starting state — same seed applied twice in a row does NOT give you the " +
+      "same clip as applying it once. Nothing on the clip records that it was humanized, so " +
+      "an agent picking up someone else's clip cannot tell: to re-roll a feel, edit_undo the " +
+      "previous humanize FIRST, then re-apply. Prefer one pass with the right amount over " +
+      "several nudges.",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the MIDI clip to humanize, from project_snapshot."),
       timingBeats: z
@@ -3431,6 +3768,102 @@ registerTool(
         sensitivity,
         crossfadeMs,
         groove,
+      })
+    )
+);
+
+registerTool(
+  "clip_detect_pitch",
+  {
+    title: "Detect the pitch of an audio clip, frame by frame",
+    description:
+      "Analyze an AUDIO clip's current source window for PITCH, frame by frame (~62.5 " +
+      "frames/second) -- fundamental frequency, confidence, level, and (for a silent or " +
+      "unvoiced frame) WHY no pitch was named. This is the wiring for the app's pitch " +
+      "detector (SwiftF0, run on-device via ONNX Runtime) -- the first tool that lets you " +
+      "hear, in numbers, what note someone actually sang. Feeds Kiffness-style workflows " +
+      "(chop a vocal phrase into fragments with clip_detect_transients + clip_split, then " +
+      "learn each fragment's pitch here before pitch-shifting it with clip_set_stretch) " +
+      "and any 'is this take in tune' question. Read-only: nothing is edited, no undo entry, " +
+      "and nothing is cached -- a repeat call re-runs the detector. AUDIO CLIPS ONLY -- a " +
+      "MIDI clip is rejected (its notes already have a definite pitch). Returns " +
+      "`{pitch: {frames, frameCount, voicedFrameCount, voicedFraction, frameRateHz, " +
+      "analysisSampleRateHz, sourceSampleRateHz, windowStartSeconds, windowDurationSeconds, " +
+      "confidenceThreshold, silenceFloorDbfs, minFrequencyHz, maxFrequencyHz}, " +
+      "clipWindowDurationSeconds, stretchRatio, pitchShiftSemitones}`. Each entry in " +
+      "`frames` is `{timeSeconds, frequencyHz?, confidence, levelDbfs?, absence?}` -- " +
+      "`timeSeconds` is a SOURCE-FILE-absolute second (the SAME numbers clip_detect_transients' " +
+      "`sourceSeconds` and clip_analyze_audio's `windowStartSeconds` use, so you can line " +
+      "pitch frames up against transient markers with no arithmetic). HONEST ABSENCE: an " +
+      "unvoiced frame OMITS `frequencyHz` ENTIRELY (never 0, never a fabricated value) and " +
+      "instead carries `absence`, one of `belowConfidence` (the model wasn't sure enough), " +
+      "`belowLevel` (too quiet to trust -- SwiftF0 is confidence-blind to level, so this " +
+      "catches near-silence confidence alone would miss), or `outOfRange` (a real pitch " +
+      "outside `[minFrequencyHz, maxFrequencyHz]`). Frames are never dropped, so the array " +
+      "is a uniform time grid you can read holes out of directly -- 'the singer stopped " +
+      "here' and 'this frame is unreliable' are DIFFERENT reasons and stay distinguishable. " +
+      "`voicedFraction` (0..1) is a quick 'how much of this actually has a pitch' summary " +
+      "before you look at individual frames. `confidenceThreshold` (0..1, default 0.9) and " +
+      "`silenceFloorDbfs` (default -75) are the two tuning knobs that decide voicing -- " +
+      "`silenceFloorDbfs` in particular is UNTUNED against real vocal recordings (only " +
+      "synthetic fixtures so far), so if real-take results look wrong, retune it here rather " +
+      "than assuming the detector is broken. `fromSeconds`/`durationSeconds` narrow the " +
+      "analyzed range (both SOURCE-FILE-absolute, like clip_analyze_audio's window); omit " +
+      "both to analyze the clip's WHOLE current window -- for a multi-minute clip that can " +
+      "be a large response (roughly 60 KB per 10 seconds of audio), so pass an explicit " +
+      "range for a long clip if you only need part of it. `stretchRatio`/`pitchShiftSemitones` " +
+      "echo the clip's current state (results are measured on the SOURCE audio, before " +
+      "either is applied) so you can derive the sounding pitch yourself " +
+      "(`frequencyHz * 2^(pitchShiftSemitones/12)`) if the clip is pitch-shifted.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the AUDIO clip to analyze, from project_snapshot."),
+      fromSeconds: z
+        .number()
+        .min(0)
+        .optional()
+        .describe(
+          "Where to start, in SOURCE-FILE-absolute seconds (the clip_detect_transients/" +
+            "clip_analyze_audio domain) -- must fall inside the clip's current window. " +
+            "Omit to start at the clip's own window start."
+        ),
+      durationSeconds: z
+        .number()
+        .gt(0)
+        .optional()
+        .describe(
+          "How many seconds to analyze from fromSeconds. Must be > 0 when given. Omit for " +
+            "the rest of the clip's current window; a value that would run past the window " +
+            "end is clamped (never rejected) and the response's `pitch.windowDurationSeconds` " +
+            "reports what was actually analyzed."
+        ),
+      confidenceThreshold: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "Voicing confidence gate, 0..1 (default 0.9, SwiftF0's own documented default). " +
+            "A frame under this reads as unvoiced with absence:'belowConfidence'."
+        ),
+      silenceFloorDbfs: z
+        .number()
+        .optional()
+        .describe(
+          "RMS level gate in dBFS (default -75). A frame quieter than this reads as unvoiced " +
+            "with absence:'belowLevel', regardless of confidence -- needed because the " +
+            "detector can report high confidence on near-silence. UNTUNED against real vocal " +
+            "recordings; adjust this while listening if real-take results look wrong."
+        ),
+    },
+  },
+  async ({ clipId, fromSeconds, durationSeconds, confidenceThreshold, silenceFloorDbfs }) =>
+    toToolResult(() =>
+      bridge.send("clip.detectPitch", {
+        clipId,
+        fromSeconds,
+        durationSeconds,
+        confidenceThreshold,
+        silenceFloorDbfs,
       })
     )
 );
@@ -4130,7 +4563,15 @@ registerTool(
       "Set the master output gain of the whole mix, as a linear gain multiplier, " +
       "where 1.0 is unity gain (0 dB, no change). Range 0-2: 0 is silence, 1 is " +
       "unity, 2 is roughly +6 dB. This is linear gain, not decibels. To set an " +
-      "individual track's gain instead, use track_set_volume.",
+      "individual track's gain instead, use track_set_volume. " +
+      "2.0 is a HARD CEILING, not a soft one: a value above 2 is REJECTED by this " +
+      "tool's schema (it is not silently clamped), and 2.0 itself is the loudest " +
+      "this fader goes. When a mix needs more than +6 dB of makeup to reach a " +
+      "loudness target — common with quiet General-MIDI-sourced material — do NOT " +
+      "keep pushing here: add a `gain` insert at the FRONT of the master chain " +
+      "(fx_add with trackId \"master\", kind \"gain\", ahead of the eq/limiter) and " +
+      "take the remaining makeup there — its `gainLinear` param runs 0-4 (≈ +12 dB), " +
+      "and inserts stack if you somehow need more.",
     inputSchema: {
       volume: z
         .number()
@@ -4488,6 +4929,88 @@ registerTool(
   async () => toToolResult(() => bridge.send("reference.compare"))
 );
 
+registerTool(
+  "audio_profile_file",
+  {
+    title: "Windowed peak/RMS profile of a file on disk",
+    description:
+      "Read an ARBITRARY audio file on disk (any absolute path -- not a project track, not " +
+      "a clip, not the reference slot) and report SAMPLE peak + RMS per consecutive time " +
+      "window, plus a file-header block (duration, sample rate, channel count, on-disk bit " +
+      "depth/float-ness -- the ffprobe readback). This answers \"what is the peak level " +
+      "between 53s and 54s of this WAV\" -- a WINDOWING question. It is NOT a loudness " +
+      "meter and NOT a substitute for one: `peakDb` is the raw inter-sample maximum, NOT " +
+      "the 4x-oversampled BS.1770 true peak render_measure_loudness/reference_analyze " +
+      "report as `truePeakDbtp` -- a window can read under 0 dBFS sample peak here and " +
+      "still exceed 0 dBTP true peak between samples. Use render_measure_loudness (the " +
+      "rendered SESSION, before quantization) or reference_analyze (a whole file, occupying " +
+      "the project's one reference slot) for LUFS/true-peak questions; use this tool when " +
+      "you need to see what a specific stretch of a file on disk actually contains -- e.g. " +
+      "verifying a bounce/render landed correctly, or checking exactly where a tail decays " +
+      "to silence, without leaving the app. Returns `{durationSeconds, sampleRateHz, " +
+      "channelCount, bitDepth?, isFloat?, windows: [{startSeconds, durationSeconds, " +
+      "peakDb?, rmsDb?}]}`. The header `durationSeconds` is the WHOLE file, independent of " +
+      "any fromSeconds/durationSeconds sub-range requested; `bitDepth`/`isFloat` are " +
+      "omitted for formats with no fixed PCM bit depth (compressed codecs) -- never " +
+      "fabricated. Each window's own `durationSeconds` is usually the requested " +
+      "`windowSeconds`, except the LAST window of the profiled range, which truncates at " +
+      "EOF (or at fromSeconds+durationSeconds) and reads shorter -- read it rather than " +
+      "assuming every window is the same width. `rmsDb` combines all channels using the " +
+      "same rule as `peakDb` (max-abs peak across channels, combined-channel RMS -- " +
+      "deliberately never a mono downmix first, which would under-report anti-phase " +
+      "content, i.e. a loud-but-opposite-polarity L/R pair). A digitally-silent window " +
+      "OMITS `peakDb`/`rmsDb` rather than reporting 0 -- honest absence (JSON has no " +
+      "'-infinity dB'), the same convention render_measure_loudness/reference_analyze use " +
+      "for gated-silent audio; treat a missing field as silence, never as a number. " +
+      "Read-only: never writes anything, never copies the file, and never touches the " +
+      "project's reference slot or the References library -- call this as often as you " +
+      "like without side effects. Errors readably: no file at path (names the path); no " +
+      "audio engine attached (a profile is never fabricated, so this needs the app running).",
+    inputSchema: {
+      path: z
+        .string()
+        .describe(
+          "Required. Absolute (or ~-prefixed) path to ANY audio file on disk -- not a " +
+            "project track, clip id, or the reference slot. Read-only: never copied, " +
+            "never modified, never imported anywhere."
+        ),
+      windowSeconds: z
+        .number()
+        .gt(0)
+        .describe(
+          "Required, > 0. Width of each analysis window in seconds -- e.g. 1.0 for one " +
+            "peak/RMS reading per second of audio. Smaller windows give finer time " +
+            "resolution at the cost of more windows in the response."
+        ),
+      fromSeconds: z
+        .number()
+        .min(0)
+        .optional()
+        .default(0)
+        .describe(
+          "Start of the profiled range, in seconds from the start of the FILE itself (not " +
+            "the project timeline). Must be >= 0. Defaults to 0 (the start of the file). " +
+            "Every window's `startSeconds` is an ABSOLUTE file position, so fromSeconds=53 " +
+            "with windowSeconds=1 yields windows starting at 53, 54, 55, ..."
+        ),
+      durationSeconds: z
+        .number()
+        .gt(0)
+        .optional()
+        .describe(
+          "Length of the profiled range in seconds, starting at fromSeconds. Must be > 0 " +
+            "when given. Defaults to the rest of the file (everything from fromSeconds to " +
+            "EOF). The final window truncates at this boundary (or at EOF) and reports its " +
+            "own, shorter `durationSeconds`."
+        ),
+    },
+  },
+  async ({ path, windowSeconds, fromSeconds, durationSeconds }) =>
+    toToolResult(() =>
+      bridge.send("audio.profileFile", { path, windowSeconds, fromSeconds, durationSeconds })
+    )
+);
+
 server.registerTool(
   "engine_performance_stats",
   {
@@ -4713,15 +5236,23 @@ registerTool(
       "named tracks (instrument and audio, with curated mixer presets pre-applied where noted), lays " +
       "the song's sections out as named EMPTY MIDI clips on a dedicated instrument \"Arrangement\" " +
       "guide track (each clip positioned back-to-back: its start = the running sum of prior section " +
-      "lengths, its length = bars x 4 beats), and enables the loop region over the whole arrangement " +
+      "lengths, its length = bars x 4 beats), DROPS A REAL SESSION MARKER at every section start " +
+      "(so marker_list returns the song's beat map immediately — you do NOT have to lay the section " +
+      "map by hand or re-derive it for a later composer/mix step; each marker is named exactly like " +
+      "its section, repeats included, so disambiguate by beat, and each is addressable by " +
+      "marker_rename / marker_move / marker_remove), and enables the loop region over the whole " +
+      "arrangement " +
       "(start 0 to the total length). This is ADDITIVE — it never wipes the project: everything is " +
-      "appended to whatever is already there (use project_new first if you want a clean slate). A " +
+      "appended to whatever is already there (use project_new first if you want a clean slate), and " +
+      "markers that already existed survive, merged into beat order. A " +
       "single edit_undo reverts the ENTIRE scaffold at once. Pass `genre` (required) to use its " +
       "defaults, or override the tempo with `tempoBPM` (20-400) and/or the layout with `sections`. " +
       "An unknown genre returns an error listing every valid genre; a bad tempo or section is a " +
       "field-named error. Returns `{genre, tempoBPM, tracks: [{id, name}], sectionClips: [{name, " +
-      "startBeat, lengthBeats}], loopStart, loopEnd, arrangementTrackId}` with real ids — `tracks` " +
-      "lists every created track (the roster then the Arrangement track last).",
+      "startBeat, lengthBeats}], markers: [{id, name, beat}], loopStart, loopEnd, " +
+      "arrangementTrackId}` with real ids — `tracks` " +
+      "lists every created track (the roster then the Arrangement track last), and `markers` lists " +
+      "just the ones this call created (marker_list returns the whole project's).",
     inputSchema: {
       genre: songSkeletonGenreSchema,
       tempoBPM: z
@@ -5111,13 +5642,44 @@ registerTool(
       "usual streaming-platform convention (Spotify/YouTube/Apple " +
       "Music-style loudness normalization), -23 LUFS is EBU R128 broadcast " +
       "delivery. Any measurement field can come back OMITTED (absent/null) " +
-      "instead of a number — that means the program sits at or below the " +
-      "-70 LUFS absolute silence gate (JSON has no value for '-infinity " +
-      "dB'); always treat a missing field as gated silence, not zero. " +
+      "instead of a number — usually that means the program sits at or below " +
+      "the -70 LUFS absolute silence gate (JSON has no value for '-infinity " +
+      "dB'); treat a missing field as gated silence, not zero. The " +
+      "WINDOWED fields have a second, independent omission reason: a program " +
+      "shorter than the window has no value at all — 400 ms for " +
+      "maxMomentaryLufs, 3 s for maxShortTermLufs and loudnessRangeLu — so " +
+      "on a short excerpt those can be absent while integratedLufs and " +
+      "truePeakDbtp are perfectly healthy numbers. " +
       "Returns `{measurement: {integratedLufs?, truePeakDbtp?, " +
-      "maxMomentaryLufs?, maxShortTermLufs?}, durationSeconds, sampleRate}`. " +
+      "maxMomentaryLufs?, maxShortTermLufs?, loudnessRangeLu?}, " +
+      "durationSeconds, sampleRate}`. `loudnessRangeLu` is EBU Tech 3342 " +
+      "loudness range in LU — the 95th-minus-10th percentile spread of the " +
+      "gated short-term loudness distribution, i.e. how much the loudness " +
+      "MOVES rather than where it sits. It is the same figure " +
+      "reference_analyze reports under the same name, so a mix and a " +
+      "reference track are directly comparable on it. " +
       "Errors if the project has no clips in the requested window and no " +
-      "explicit `durationSeconds` was given.",
+      "explicit `durationSeconds` was given. " +
+      "TWO THINGS THIS TOOL IS NOT. (1) It measures a FRESH RENDER OF THE " +
+      "SESSION, never a file on disk — it cannot take a `path` (passing one is " +
+      "a hard error), so it verifies the MIX, not the artifact a render_bounce/" +
+      "render_mixdown wrote. To check a file that already exists, use " +
+      "audio_profile_file (windowed sample peak/RMS + real header — proves a " +
+      "bounce isn't silence-padded and where the tail decays) or, for true " +
+      "BS.1770 LUFS of a file, reference_import (which analyzes on import, but " +
+      "copies the file, occupies the project's single reference slot, and lands " +
+      "as an undoable edit). (2) A WINDOWED measurement is not an excerpt of the " +
+      "full render: a MIDI note whose note-ON falls BEFORE `fromBeat` is dropped " +
+      "entirely from the render (no note-on and no note-off), so measuring a " +
+      "window that starts mid-note reports gated silence for a passage that " +
+      "sounds perfectly fine from the top. A straddling AUDIO clip does NOT " +
+      "behave this way — it is entered mid-file and sounds. So an unexpectedly " +
+      "silent window over sustained MIDI (pads, held strings, long tails) is " +
+      "far more likely to be this scheduling rule than a real hole in your " +
+      "arrangement: re-measure from beat 0, or from the start of the clip in " +
+      "question, before reporting silence. Note the MIXED UNITS in one call: " +
+      "`fromBeat` is BEATS, `durationSeconds` is SECONDS, and there is no " +
+      "beat-range form.",
     inputSchema: {
       fromBeat: z
         .number()
@@ -5125,15 +5687,21 @@ registerTool(
         .optional()
         .default(0)
         .describe(
-          "Timeline position, in beats (quarter notes), to start measuring " +
-            "from. Must be >= 0. Defaults to 0 (the very start of the timeline)."
+          "Timeline position, in BEATS (quarter notes), to start measuring " +
+            "from. Must be >= 0. Defaults to 0 (the very start of the timeline). " +
+            "A non-zero value does NOT give you an excerpt of the whole render: " +
+            "MIDI notes already sounding at this beat (note-on earlier) are " +
+            "omitted from the render entirely, so a window starting mid-note " +
+            "under-reports, sometimes as total silence. Measure from 0 when the " +
+            "number has to be trustworthy."
         ),
       durationSeconds: z
         .number()
         .gt(0)
         .optional()
         .describe(
-          "How many seconds of audio to measure, starting at fromBeat. Must " +
+          "How many SECONDS of audio to measure (not beats — this tool mixes " +
+            "units deliberately), starting at fromBeat. Must " +
             "be > 0. When omitted, defaults to the extent of every track's " +
             "clips (audio AND instrument — broader than render_mixdown's " +
             "audio-only default) at the current tempo, plus a 2.0 s tail for " +
@@ -5836,6 +6404,59 @@ server.registerTool(
       "top of each stack).",
   },
   async () => toToolResult(() => bridge.send("edit.history"))
+);
+
+registerTool(
+  "edit_paste_clips",
+  {
+    title: "Paste the app's clipboard as clips",
+    description:
+      "Paste whatever CLIPS are currently on the DAW APP'S OWN clipboard — " +
+      "the same clipboard Cmd-C/Cmd-V use in the arrange view. This tool " +
+      "cannot PUT anything on that clipboard: there is no wire route to " +
+      "populate it, so a call only fires whatever the human user last " +
+      "copied in the app itself; if nothing has been copied (or the last " +
+      "copy was cleared by a later cut/copy elsewhere), there is nothing " +
+      "to paste. `trackId` is optional and overrides the destination for " +
+      "THIS paste only, without moving the app's own paste cursor — omit " +
+      "it to land on the same resolved active track a bare Cmd-V would " +
+      "use. One call is one undo step, reversible with edit_undo. The " +
+      "response NAMES which of four outcomes happened rather than a bare " +
+      "ok/fail, because 'nothing happened' has three different causes an " +
+      "agent needs to react to differently: (1) success — " +
+      "`{pasted:true, landings:[{clipId,trackId,startBeat}], skipped:[" +
+      "{sourceClipId,clipName,reason}], trimmedClipIDs:[string], " +
+      "removedClipIDs:[string]}` (`skipped`/`trimmedClipIDs`/" +
+      "`removedClipIDs` are usually empty — they only fill in when some " +
+      "pasted clips overlapped and had to be trimmed, removed, or dropped " +
+      "to make room, per the same placement policy Cmd-V uses); (2) " +
+      "`{pasted:false, reason:\"empty-clipboard\"}` — nothing has been " +
+      "copied yet; ask the user to copy a clip first, retrying will not " +
+      "help; (3) `{pasted:false, reason:\"wrong-payload-kind\", " +
+      "clipboardKind:\"notes\"}` — the clipboard holds copied MIDI NOTES " +
+      "(from inside the piano roll), not clips; there is no note-paste " +
+      "wire route, so read them with clip_get_notes and write them with " +
+      "clip_set_notes instead; (4) `{pasted:false, reason:<string>, " +
+      "skipped:[...]}` — the app deliberately refused the paste (e.g. no " +
+      "track can hold the payload, or every copied clip individually " +
+      "mismatched its destination, such as a MIDI clip landing on an " +
+      "audio track); `skipped` names each refused clip and why. Errors " +
+      "(distinct from all four outcomes above) only when this control " +
+      "session has no app UI attached (a headless session) — start " +
+      "DAWPro.app and retry.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "Track to paste into, from project_snapshot. Overrides the " +
+            "resolved active track for THIS paste only. Omit to use the " +
+            "same active-track resolution a bare Cmd-V would use."
+        ),
+    },
+  },
+  async ({ trackId }) => toToolResult(() => bridge.send("edit.pasteClips", { trackId }))
 );
 
 // ---------------------------------------------------------------------------

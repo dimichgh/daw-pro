@@ -14,7 +14,10 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__track_rename,
   mcp__plugin_daw-pro-music-team_daw-pro__track_remove,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_add_midi,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_get_notes,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_notes,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_detect_pitch,
+  mcp__plugin_daw-pro-music-team_daw-pro__marker_list,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_add_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_controller_lane,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_remove_controller_lane,
@@ -67,10 +70,29 @@ there.
   the timeline — `startBeat: 0` is the first beat of the clip, wherever
   `atBeat` placed it). `clip_add_audio` imports a wav/aiff/mp3/m4a file as a
   clip.
-- **Edit notes.** `clip_set_notes` replaces a clip's ENTIRE note array —
-  there's no add/remove-one-note tool. Read the clip's current notes (from
-  `project_snapshot`), change what you need to change in your own reasoning,
-  resubmit the whole array.
+- **Edit notes: READ, then whole-array replace.** `clip_get_notes` reads ONE
+  clip's notes (with their ids, optionally narrowed by `fromBeat`/`toBeat` —
+  clip-relative, half-open — and `pitchMin`/`pitchMax`, inclusive); it is
+  read-only, so it costs no undo step and dirties nothing. `clip_set_notes`
+  then replaces the clip's ENTIRE note array — there is no
+  add/remove-one-note tool. So the loop is: `clip_get_notes` → change what
+  you need in your own reasoning → resubmit the WHOLE array (ids and all).
+  ⚠️ **If you filtered the read, `totalNotes` will be bigger than
+  `returnedNotes` — writing back only what you read DELETES the rest.**
+  Either read the clip unfiltered before a whole-array write, or use the
+  filter purely to look and then re-read unfiltered to edit.
+  Do NOT reach for `project_snapshot` to get notes: it is ~290 KB on a
+  6-track song and will overflow your output budget.
+- **Match a recording's pitch.** `clip_detect_pitch` runs on-device pitch
+  tracking over an AUDIO clip and returns per-frame `{timeSeconds,
+  frequencyHz?, confidence, levelDbfs?}`. Use it to write a part in the
+  same key as an imported track, or to transcribe a sung/hummed melody into
+  MIDI. A low `confidence` or an absent `frequencyHz` is an honest "no
+  pitch here" (percussion, silence, noise), not a failure — never fabricate
+  a note from a frame that reported none.
+- **Section beats.** `marker_list` gives you the section map (name + beat)
+  the producer scaffolded, so you can write "the chorus" against real beat
+  numbers instead of numbers someone retyped into a brief.
 - **Performance controllers.** `clip_set_controller_lane` /
   `clip_remove_controller_lane` add mod wheel, sustain pedal, pitch bend, or
   expression moves alongside a clip's notes — raw MIDI values (0-127, or
@@ -79,7 +101,12 @@ there.
   `strength`, `swing`, or a saved `groove`); `clip_quantize_audio` does the
   audio equivalent by slicing at transients; `clip_humanize` nudges timing
   and velocity off the grid for a played feel (seeded/reproducible via
-  `seed`/`seedUsed`). `clip_detect_transients` finds onsets in an audio
+  `seed`/`seedUsed`). ⚠️ **`clip_humanize` is NOT idempotent** — the jitter
+  lands on each note's CURRENT position, so a second pass compounds the
+  first, and nothing on the clip records that it was ever humanized (so an
+  agent picking up someone else's clip cannot tell). One pass with the right
+  amount; to re-roll a feel, `edit_undo` the previous humanize FIRST.
+  `clip_detect_transients` finds onsets in an audio
   clip. `groove_extract`/`groove_list`/`groove_remove` capture and manage
   reusable groove templates (plus built-in MPC swing presets) to quantize
   other clips toward.
