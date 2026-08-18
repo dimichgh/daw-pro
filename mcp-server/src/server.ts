@@ -700,7 +700,16 @@ registerTool(
     description:
       "Set a track's fader volume as a linear gain multiplier, where 1.0 is " +
       "unity gain (0 dB, no change). Range 0-2: 0 is silence, 0.5 is roughly " +
-      "-6 dB, 2.0 is roughly +6 dB. This is linear gain, not decibels.",
+      "-6 dB, 2.0 is roughly +6 dB. This is linear gain, not decibels. " +
+      "⚠️ CHECK THE REPLY: it normally reads \"ok\", but comes back as " +
+      "`{automationControlled: true, automationPointCount}` when an active " +
+      "VOLUME AUTOMATION LANE — not the value you just passed — governs what " +
+      "is heard and what renders, so this call will NOT change the audible " +
+      "level. (The keys are absent when nothing is overriding you.) " +
+      "The write still lands: it is stored, undoable, moves " +
+      "the fader, and takes effect the moment the lane is disabled " +
+      "(automation_set_lane_enabled), emptied, or removed. To change an " +
+      "automated level, edit the lane with automation_set_points instead.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track, from project_snapshot."),
       volume: z
@@ -2945,7 +2954,16 @@ registerTool(
       "whole array here. One call = one undo step (edit_undo reverts the " +
       "entire replacement). `notes` may be empty to clear the clip. Errors " +
       "readably if `clipId` refers to an audio clip (audio clips have no " +
-      "notes).",
+      "notes). " +
+      "⭐ THE CLIP ID SURVIVES: this edits the clip in place and never " +
+      "creates a replacement, so `clipId` — and the clip's position, length " +
+      "and every other field — stay valid across a full replace. That makes " +
+      "RE-AUTHORING a clip wholesale a supported fallback when you cannot " +
+      "read it first (e.g. clip_get_notes is unavailable) AND you are the " +
+      "source of its content: rewrite the array you intended, and any ids " +
+      "your later steps depend on still resolve. Reading first remains " +
+      "preferred whenever the clip's notes came from anywhere else, since a " +
+      "whole-array write drops whatever you did not include.",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the MIDI clip to edit, from project_snapshot."),
       notes: z
@@ -5377,10 +5395,16 @@ registerTool(
       "`volume` target ONLY — a `pan`, `sendLevel`, or `effectParam` target on \"master\" is " +
       "rejected with a readable error (those lanes live on tracks — pass a track UUID). A " +
       "master volume lane is how you draw a final fade-out/fade-in or a level ride across the " +
-      "whole mix; it applies PRE-limiter (the fade feeds the master insert chain), and — like " +
-      "every master move — it is NOT baked into exported stems or a bounce, which stay " +
-      "fade-free by design (the master fade belongs to the mastered deliverable only, so stems " +
-      "hand off clean). The master lane rides project_snapshot's top-level `masterAutomation` " +
+      "whole mix; it applies PRE-limiter (the fade feeds the master insert chain, so the " +
+      "limiter rides ABOVE the fade — the professionally-correct order). WHAT RENDERS IT: " +
+      "render_mixdown and render_bounce DO bake the master fade — it lands in the " +
+      "deliverable, and you do NOT need to rebuild it as per-track lanes. render_stems " +
+      "deliberately EXCLUDES it (a fade is master performance, not material — baking it into " +
+      "every stem would destroy the re-mixable partition), and that exclusion also covers " +
+      "render_stems{includeMixdown}, whose file is confusingly named \"00 Mixdown.wav\" but " +
+      "is NOT a render_mixdown — use render_stems{includeMasteredMixdown} (\"00 Mastered " +
+      "Mix.wav\"), which DOES carry the fade. " +
+      "The master lane rides project_snapshot's top-level `masterAutomation` " +
       "array (same lane shape), absent when empty. " +
       "Returns `{lane: {id, target, points, isEnabled}}`.",
     inputSchema: {
@@ -5446,8 +5470,10 @@ registerTool(
       "inert. " +
       "MASTER: pass `trackId` as the exact string \"master\" (m15-c) to draw the whole-mix " +
       "master VOLUME curve — a final fade or level ride; values clamp to 0-2 (the master " +
-      "fader range) exactly like a track volume lane. The master fade applies pre-limiter and " +
-      "is NOT baked into exported stems or a bounce (they stay fade-free by design). " +
+      "fader range) exactly like a track volume lane. The master fade applies pre-limiter, and " +
+      "it IS baked into render_mixdown and render_bounce (it lands in the deliverable). Only " +
+      "render_stems excludes it — including that call's \"00 Mixdown.wav\", which despite the " +
+      "name is a stem-class file; \"00 Mastered Mix.wav\" carries the fade. " +
       "Returns `{lane: {id, target, points, isEnabled}}` with the lane exactly as " +
       "stored (reordered/clamped/capped).",
     inputSchema: {
@@ -5532,7 +5558,14 @@ registerTool(
       "Errors only if the render range holds no clips at all — " +
       "of ANY kind, audio or MIDI — and no explicit `durationSeconds` was " +
       "given, since there would be nothing to render and no way to infer a " +
-      "render length.",
+      "render length. " +
+      "MASTER MOVES ARE INCLUDED: the master fader, the master insert chain, " +
+      "and any MASTER VOLUME AUTOMATION LANE (a fade-out/fade-in or level " +
+      "ride) are all baked into this file, as is every per-track automation " +
+      "lane. You do NOT need to rebuild a master fade as per-track lanes to " +
+      "make it survive. (Only render_stems excludes master moves — including " +
+      "its \"00 Mixdown.wav\", which despite the name is a stem-class file " +
+      "and is NOT what this tool produces.)",
     inputSchema: {
       path: z
         .string()
@@ -5721,6 +5754,9 @@ registerTool(
       "Render the session offline to a stereo 48 kHz WAV and report its " +
       "loudness — the measured/normalizing sibling of render_mixdown (which " +
       "stays the raw, fast bounce with no loudness report and no gain). " +
+      "Like render_mixdown, this BAKES IN every master move: the master " +
+      "fader, the master insert chain, and any MASTER VOLUME AUTOMATION LANE " +
+      "— a fade-out lands in the bounce and needs no per-track workaround. " +
       "Pass `lufsTarget` to normalize toward a delivery target — -14 LUFS " +
       "integrated is the usual streaming-platform convention (Spotify/" +
       "YouTube/Apple Music-style), -23 LUFS is EBU R128 broadcast; OMIT it " +
@@ -6494,7 +6530,8 @@ server.registerTool(
       "automation lanes as a top-level `[{id, target, points, isEnabled}]` array (same " +
       "lane shape as a track's, driven by automation_add_lane/_set_points/_set_lane_" +
       "enabled/_remove_lane with `trackId: \"master\"`) — ABSENT when there is no master " +
-      "lane; the master fade it draws is pre-limiter and is NOT baked into stems or a bounce. " +
+      "lane; the master fade it draws is pre-limiter, IS baked into render_mixdown and " +
+      "render_bounce, and is excluded only from render_stems (see automation_add_lane). " +
       "May also include `engineNotices` (m15-e): a top-level array of schedule-time " +
       "DEGRADATION reports — cases where playback proceeded on time but not exactly as " +
       "the project describes (e.g. a fade or gain envelope that couldn't be prepared in " +
@@ -6579,9 +6616,14 @@ server.registerTool(
       "instrument tracks (it resolves to the default poly synth even when " +
       "unconfigured), omitted on audio/bus tracks. `sends` is each " +
       "`{destinationBusID, level, preFader}` (preFader is always false today " +
-      "— v0 sends are post-fader only). `fx` is each `{name, bypassed}` in " +
+      "— v0 sends are post-fader only). `fx` is each `{id, name, bypassed}` in " +
       "chain order (use fx_describe or project_snapshot for actual parameter " +
-      "values). `clips` summarizes every clip as `{id, name, startBeat, " +
+      "values). That `id` is the ADDRESSABLE effect id — pass it straight to " +
+      "fx_set_param / fx_set_bypass / fx_reorder / fx_remove. It means you can " +
+      "tune a chain you INHERITED (from a mixer preset, a genre skeleton, or " +
+      "another agent) without calling fx_add first purely to make the ids " +
+      "appear in a reply — reading no longer requires writing. `clips` " +
+      "summarizes every clip as `{id, name, startBeat, " +
       "lengthBeats, kind: \"audio\"|\"midi\", noteCount?, takeLaneCount?, " +
       "activeLane?, hasStretch?, hasFades?, gainDb?}` — COUNTS, never the " +
       "actual MIDI notes, and no file paths (fetch a clip's real note data or " +

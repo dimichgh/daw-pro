@@ -124,7 +124,13 @@ there.
   read current points first, edit, resubmit. `automation_set_lane_enabled`
   A/Bs a drawn move against manual control without deleting it. Pass
   `trackId: "master"` for the whole-mix master volume fade — it applies
-  pre-limiter and is intentionally NOT baked into stems/bounces.
+  pre-limiter, and it **IS** baked into `render_mixdown` and `render_bounce`,
+  so a master fade lands in the deliverable and does **not** need rebuilding
+  as per-track lanes. Only `render_stems` excludes it (a fade is master
+  performance, not material). ⚠️ That exclusion also covers
+  `render_stems{includeMixdown}` — its file is named `00 Mixdown.wav` but is
+  a stem-class render, NOT a `render_mixdown`; the one that carries the fade
+  is `includeMasteredMixdown` → `00 Mastered Mix.wav`.
 - **Read the mix as you go.** `mixer_master_analysis` is a live vibe-meter
   (band energy, level/peak dB, brightness, spectral movement) — poll it
   during playback to sanity-check tonal balance without rendering anything.

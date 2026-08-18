@@ -13,6 +13,7 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__transport_seek,
   mcp__plugin_daw-pro-music-team_daw-pro__transport_set_loop,
   mcp__plugin_daw-pro-music-team_daw-pro__transport_set_metronome,
+  mcp__plugin_daw-pro-music-team_daw-pro__transport_set_tempo,
   mcp__plugin_daw-pro-music-team_daw-pro__project_save,
   mcp__plugin_daw-pro-music-team_daw-pro__project_open,
   mcp__plugin_daw-pro-music-team_daw-pro__project_new,

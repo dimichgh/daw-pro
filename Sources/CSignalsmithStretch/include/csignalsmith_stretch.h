@@ -49,6 +49,16 @@ void css_set_formant_preserve(css_stretch *_Nonnull s, bool preserve);
 /// ahead of the processing position.
 int css_input_latency(const css_stretch *_Nonnull s);
 
+/// The analysis/synthesis hop in OUTPUT frames — signalsmith's
+/// `stft.defaultInterval()`. A new spectrum (and therefore a re-read of the
+/// transpose factor) happens once every this many output samples, so this is
+/// the resolution ceiling of any time-varying transpose curve. READ it, never
+/// derive it from `sampleRate * 0.03`: the preset's arithmetic and the
+/// configured interval are two different things (`configure` passes
+/// `intervalSamples + 1` to the STFT and then calls `setInterval`), and only
+/// the accessor reports the value the block loop actually compares against.
+int css_interval_samples(const css_stretch *_Nonnull s);
+
 /// Synthesis-side latency in output frames: delivered output lags the
 /// processing position by this much.
 int css_output_latency(const css_stretch *_Nonnull s);

@@ -169,8 +169,16 @@ public enum SongSkeletonCatalog {
         tracks: [
             SongSkeletonTrack(name: "Drums", kind: .instrument),
             SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight"),
-            SongSkeletonTrack(name: "Rhythm Guitar", kind: .audio),
-            SongSkeletonTrack(name: "Lead Guitar", kind: .audio),
+            // m26-n: these two were the ONLY playable parts typed `.audio` in
+            // this file — every other genre types every playable part
+            // `.instrument` (Drums/Bass/Keys/Lead/Synth/Pads/Piano/Strings) and
+            // reserves `.audio` for recorded material (Vocals, FX, Samples).
+            // As audio they could not host an instrument, so an all-MIDI brief
+            // had to REMOVE and RE-ADD them — which changes their ids and
+            // silently staled every id the macro had just returned to the
+            // caller (2026-08-17 field report, N4).
+            SongSkeletonTrack(name: "Rhythm Guitar", kind: .instrument),
+            SongSkeletonTrack(name: "Lead Guitar", kind: .instrument),
             SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
         ],
         defaultSections: [

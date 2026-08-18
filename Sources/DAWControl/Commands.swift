@@ -849,7 +849,31 @@ public final class CommandRouter {
             let id = try params.requireTrackID()
             let volume = try params.require("volume", \.doubleValue)
             guard store.setTrackVolume(id: id, volume: volume) else { throw ControlError.noTrack(id) }
-            return .success(request.id)
+            // m26-o: the write ALWAYS lands (it is stored, undoable, moves the
+            // fader, and rules again the moment the lane goes inactive) — but
+            // while an active volume lane exists the lane, not this value,
+            // governs what is heard and what renders. Before this reply the
+            // payload was a bare `{id, ok:true}`: an agent set a level, saw
+            // success, and had no way to learn the level it set was inaudible
+            // (2026-08-17 field report, N2). `activeLane` is DAWCore's single
+            // definition of "automation replaces the manual control" — the
+            // same predicate the render path uses, so this annotation cannot
+            // disagree with what is actually heard.
+            //
+            // OMITTED WHEN THERE IS NO LANE (the disk rule this file follows
+            // everywhere): the annotation appears exactly when it is
+            // actionable, so `track.setVolume` stays a void-result "ok" verb
+            // in the ordinary case — which also keeps it a valid subject for
+            // the bug-1 void-result regression guard. An absent key means
+            // "nothing is overriding you", which is what a caller assumes
+            // anyway; a present one is a fact they must act on.
+            guard let volumeLane = store.tracks.first(where: { $0.id == id })?
+                .automation.activeLane(for: .volume)
+            else { return .success(request.id) }
+            return .success(request.id, .object([
+                "automationControlled": .bool(true),
+                "automationPointCount": .number(Double(volumeLane.points.count)),
+            ]))
 
         case "track.setPan":
             try params.rejectUnknownKeys(
@@ -2370,6 +2394,19 @@ public final class CommandRouter {
         case "clip.setNotes":
             // params: clipId (required UUID), notes (required array, may be []).
             // clipNotFound/notAMIDIClip surface via the LocalizedError mapping.
+            //
+            // ⭐ THE CLIP ID SURVIVES (m26-o). This verb addresses the clip BY
+            // id and edits its notes in place — it never creates a replacement
+            // — so every id a caller is holding stays valid across a full
+            // replace, as does the clip's start/length and every other field.
+            // Worth stating because the whole-array semantics read as
+            // destructive: an agent in the 2026-08-17 field report correctly
+            // refused to edit velocities when `clip.getNotes` was unavailable,
+            // reasoning that writing without reading could silently drop
+            // notes. That caution is right in general, and the supported
+            // fallback is RE-AUTHORING the clip in full when you are the
+            // source of its content — the ids downstream work depends on do
+            // not move.
             try params.rejectUnknownKeys(
                 ["clipId", "notes"], verb: "clip.setNotes")
             let setClipID = try params.requireClipID()

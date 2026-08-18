@@ -38,6 +38,43 @@ struct SongSkeletonTests {
         }
     }
 
+    /// m26-o (2026-08-17 field report, N4). Rock's "Rhythm Guitar" and "Lead
+    /// Guitar" were the ONLY playable parts in the catalog typed `.audio`.
+    /// Audio tracks cannot host an instrument, so an all-MIDI brief had to
+    /// REMOVE and RE-ADD them — which changes their ids and silently staled
+    /// every id `macro.songSkeleton` had just handed back to the caller.
+    ///
+    /// Pinned as the CONVENTION rather than as two track names, because the
+    /// convention is the thing that was violated: `.audio` is for recorded
+    /// material (Vocals, FX, Samples); everything playable is `.instrument`.
+    @Test("only recorded-material strips are audio-typed; every playable part is an instrument")
+    func playablePartsAreInstrumentTracks() {
+        let recordedMaterial: Set<String> = ["Vocals", "FX", "Samples"]
+        var audioNames: [String] = []
+        for name in SongSkeletonCatalog.names {
+            let genre = try! #require(SongSkeletonCatalog.genre(named: name))
+            for strip in genre.tracks where strip.kind == .audio {
+                audioNames.append(strip.name)
+                #expect(recordedMaterial.contains(strip.name),
+                        """
+                        \(name)/\(strip.name) is audio-typed but is a playable \
+                        part — it cannot host an instrument, so an all-MIDI \
+                        brief would have to re-add it, staling the id the \
+                        macro returned
+                        """)
+            }
+        }
+        // ANTI-VACUITY: a catalog with NO audio tracks would pass the loop
+        // above without testing anything. Vocals are audio in four genres.
+        #expect(audioNames.count >= 4,
+                "expected the audio-typed strips to still exist; saw \(audioNames)")
+        // And the specific regression: rock's guitars host instruments.
+        let rock = try! #require(SongSkeletonCatalog.genre(named: "rock"))
+        for guitar in ["Rhythm Guitar", "Lead Guitar"] {
+            #expect(rock.tracks.first { $0.name == guitar }?.kind == .instrument)
+        }
+    }
+
     @Test("every genre has a display name, a roster, and sections — all well-formed")
     func genreMetadataWellFormed() {
         for genre in SongSkeletonCatalog.v1 {

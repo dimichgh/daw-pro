@@ -234,3 +234,23 @@ public struct AutomationLane: Identifiable, Codable, Sendable, Equatable {
         return last.value  // unreachable given the guards, but keeps this total
     }
 }
+
+extension Array where Element == AutomationLane {
+    /// The single ACTIVE lane driving `target`: enabled AND non-empty (an
+    /// empty lane is inert — the vii-a contract). At most one lane per target
+    /// is store-enforced, so the first match is THE match. This predicate is
+    /// the ONE definition of "automation replaces the manual control" — the
+    /// schedule build, the `applyParameters` override rule, and the control
+    /// plane's automation-controlled annotation all use it, so they can never
+    /// disagree.
+    ///
+    /// ⚠️ It lives in DAWCore, NOT DAWEngine, since m26-o. `track.setVolume`
+    /// must be able to tell a caller that a lane — not the value it just
+    /// passed — governs the level, and DAWControl imports DAWCore but not
+    /// DAWEngine. Moved rather than copied: a second copy could drift out of
+    /// agreement with the render path, and a wrong annotation is worse than
+    /// none because it would be believed.
+    public func activeLane(for target: AutomationTarget) -> AutomationLane? {
+        first { $0.target == target && $0.isEnabled && !$0.points.isEmpty }
+    }
+}

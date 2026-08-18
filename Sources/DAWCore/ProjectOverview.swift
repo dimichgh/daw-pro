@@ -78,6 +78,13 @@ public struct ProjectOverview: Codable, Sendable, Equatable {
     }
 
     public struct Effect: Codable, Sendable, Equatable {
+        /// The addressable id — the same one `fx.setParam` / `fx.setBypass` /
+        /// `fx.reorder` / `fx.remove` take. Carried because WITHOUT it the only
+        /// route to an inherited chain's ids was calling `fx.add`, whose reply
+        /// echoes the whole chain: reading state required WRITING state. Two
+        /// agents hit that independently in the 2026-08-17 field report, and
+        /// `Clip` below has always carried its id — effects were simply missed.
+        public var id: UUID
         public var name: String
         public var bypassed: Bool
     }
@@ -243,7 +250,8 @@ extension ProjectStore {
                 )
             },
             fx: track.effects.map {
-                ProjectOverview.Effect(name: $0.kind.rawValue, bypassed: $0.isBypassed)
+                ProjectOverview.Effect(
+                    id: $0.id, name: $0.kind.rawValue, bypassed: $0.isBypassed)
             },
             clips: track.clips.map { overviewClip($0, takeGroups: track.takeGroups) },
             automation: track.automation.map {

@@ -88,6 +88,12 @@ struct ProjectOverviewTests {
         #expect(audioOut.fx.count == 1)
         #expect(audioOut.fx[0].name == "eq")
         #expect(audioOut.fx[0].bypassed == false)
+        // m26-o: the id must be the REAL, addressable effect id — the same one
+        // fx.setParam/fx.setBypass/fx.reorder/fx.remove take. Asserting merely
+        // that the field is non-nil would pass on a fresh UUID, which is the
+        // one failure mode that would matter.
+        #expect(audioOut.fx[0].id == store.tracks.first { $0.id == audio.id }!
+            .effects[0].id)
 
         #expect(audioOut.clips.count == 1)
         let clipOut = audioOut.clips[0]
@@ -121,6 +127,40 @@ struct ProjectOverviewTests {
         }
         #expect(busOut.kind == "bus")
         #expect(busOut.clips.isEmpty)
+    }
+
+    /// m26-o (2026-08-17 field report, N3). The defect was not "a field is
+    /// missing" — it was that READING an inherited chain required WRITING to
+    /// the project: the only route to an effect's id was calling `fx.add`,
+    /// whose reply echoes the whole chain. Two agents hit it independently.
+    /// So the test is the round trip an agent actually needs: apply a preset
+    /// nobody captured ids from, then address its effects from the overview
+    /// ALONE.
+    @Test("an inherited chain's effects are addressable from the overview alone")
+    func inheritedChainIsAddressableWithoutMutating() throws {
+        let store = ProjectStore(projectName: "Inherited")
+        store.media = FakeMedia()
+        let track = store.addTrack(name: "Bass", kind: .instrument)
+        // A chain this caller never created and holds no ids for.
+        _ = try store.applyMixerPreset(trackID: track.id, presetName: "bass-tight")
+
+        let fx = try #require(
+            store.overview().tracks.first { $0.id == track.id }?.fx)
+        #expect(fx.count == 2, "bass-tight is eq + compressor")
+
+        // Every id from the overview must resolve against the real chain —
+        // that is what makes fx.setParam/fx.setBypass reachable without
+        // calling fx.add first.
+        let real = Set(store.tracks.first { $0.id == track.id }!.effects.map(\.id))
+        for entry in fx {
+            #expect(real.contains(entry.id),
+                    "overview fx id \(entry.id) does not address a real effect")
+        }
+        #expect(Set(fx.map(\.id)).count == fx.count, "ids must be distinct")
+
+        // ANTI-VACUITY: the assertion above would also pass if `real` held
+        // every UUID in existence. Show a foreign id is genuinely rejected.
+        #expect(!real.contains(UUID()))
     }
 
     @Test("audio clip gainDb is omitted (nil) when zero, present when non-zero")
