@@ -306,17 +306,25 @@ real conversion).
 
 `macro_song_skeleton` (held by `producer`) scaffolds tempo + a genre's track
 roster + section clips + **a marker at every section start** + a loop in one
-call, across five genres: `pop` (120 BPM), `house` (124 BPM), `hip-hop`
-(90 BPM), `rock` (140 BPM), `ballad` (72 BPM). It's additive — safe to call
-on an existing project — and a single `edit_undo` reverts the whole
-scaffold, markers included.
+call, across **fourteen genres**: `pop` (120 BPM), `house` (124 BPM),
+`hip-hop` (90 BPM), `rock` (140 BPM), `ballad` (72 BPM), `blues` (84 BPM),
+`jazz` (132 BPM), `country` (100 BPM), `r-and-b` (88 BPM), `funk` (108 BPM),
+`metal` (170 BPM), `folk` (96 BPM), `reggae` (76 BPM), `lo-fi` (78 BPM).
+Each differs in FORM as well as roster — `blues` is twelve-bar, `jazz` is
+32-bar head/solos/head, `lo-fi` is Loop A/Loop B rather than verse/chorus.
+It's additive — safe to call on an existing project — and a single
+`edit_undo` reverts the whole scaffold, markers included.
 
-Two things about its output nobody should be surprised by:
+Three things about its output nobody should be surprised by:
 
-- **The roster is a GENRE template, not the brief.** Every vocal genre
-  scaffolds a `Vocals` AUDIO track, which cannot host an instrument — dead
-  weight on an instrumental brief. `producer` owns reconciling this
+- **The roster is a GENRE template, not the brief.** Almost every genre
+  scaffolds a vocal AUDIO track, which cannot host an instrument — dead
+  weight on an instrumental brief. (`jazz` is the exception: a combo, so
+  every strip is an instrument.) `producer` owns reconciling this
   (`track_add`/`track_rename`/`track_remove`) before reporting the roster.
+- **A genre you don't see is not a wall.** `tracks` and `sections` each
+  override the genre's default outright, so any roster and any form is
+  reachable — keep the nearest `genre` for its tempo and pass your own.
 - **Marker names mirror the section names verbatim**, so a layout with two
   verses gives you two markers named "Verse". Disambiguate by beat, not by
   name — the result payload carries both.

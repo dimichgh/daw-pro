@@ -58,11 +58,15 @@ struct MacroSkeletonCommandTests {
         let (router, _) = makeRouter()
         let response = await router.handle(ControlRequest(
             id: "1", command: "macro.songSkeleton",
-            params: ["genre": .string("jazz")]
+            // ⚠️ WAS "jazz", WHICH m26-p MADE REAL. A negative fixture must be a
+            // string the catalog will never plausibly adopt, not one it merely
+            // lacks today — otherwise the test silently inverts when the
+            // catalog grows.
+            params: ["genre": .string("not-a-real-genre")]
         ))
         #expect(!response.ok)
         let error = response.error ?? ""
-        #expect(error.contains("jazz"))
+        #expect(error.contains("not-a-real-genre"))
         for name in SongSkeletonCatalog.names {
             #expect(error.contains(name), "error omits '\(name)': \(error)")
         }
@@ -251,6 +255,81 @@ struct MacroSkeletonCommandTests {
         ))
         #expect(!response.ok)
         #expect(response.error?.contains("sections[0].bars") == true)
+    }
+
+    /// The `tracks` roster override is an ADDITIVE optional param on the
+    /// EXISTING verb — no new command, no new result field. This leg exists
+    /// mostly to prove the param actually TRAVERSES the wire: a schema that
+    /// accepts `tracks` while the handler drops it typechecks perfectly and
+    /// silently scaffolds the genre's roster instead of the caller's.
+    @Test("a custom roster flows through the wire; the Arrangement track still lands last")
+    func customRosterThroughWire() async throws {
+        let (router, store) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "macro.songSkeleton",
+            params: [
+                "genre": .string("pop"),
+                "sections": .array([
+                    .object(["name": .string("A"), "bars": .number(2)]),
+                ]),
+                "tracks": .array([
+                    .object(["name": .string("Rhodes"), "kind": .string("instrument"),
+                             "mixerPreset": .string("warm-keys")]),
+                    .object(["name": .string("Talkbox"), "kind": .string("audio")]),
+                ]),
+            ]
+        ))
+        #expect(response.ok)
+
+        // The roster is the CALLER'S — pop's five default strips are not here.
+        let tracks = try #require(response.result?["tracks"]?.arrayValue)
+        #expect(tracks.map { $0["name"]?.stringValue } == ["Rhodes", "Talkbox", "Arrangement"])
+        #expect(store.tracks.map(\.name) == ["Rhodes", "Talkbox", "Arrangement"])
+
+        // The Arrangement track is LAST and is the id surfaced separately …
+        let arrangementID = try #require(response.result?["arrangementTrackId"]?.stringValue)
+        #expect(tracks.last?["id"]?.stringValue == arrangementID)
+        // … and the beat map the macro exists for survived the override.
+        #expect(response.result?["sectionClips"]?.arrayValue?.count == 1)
+        #expect(response.result?["markers"]?.arrayValue?.count == 1)
+        #expect(response.result?["markers"]?.arrayValue?.first?["name"]?.stringValue == "A")
+        #expect(store.markers.map(\.beat) == [0])
+
+        // The preset was applied, not merely echoed back.
+        let rhodes = try #require(store.tracks.first { $0.name == "Rhodes" })
+        #expect(!rhodes.effects.isEmpty)
+        #expect(store.tracks.first { $0.name == "Talkbox" }?.effects.isEmpty == true)
+    }
+
+    @Test("a bus-kinded roster track is rejected at the wire with a field-named error")
+    func busRosterTrackRejectedAtWire() async throws {
+        let (router, store) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "macro.songSkeleton",
+            params: [
+                "genre": .string("pop"),
+                "tracks": .array([
+                    .object(["name": .string("Sub Bus"), "kind": .string("bus")]),
+                ]),
+            ]
+        ))
+        #expect(!response.ok)
+        #expect(response.error?.contains("tracks[0].kind") == true)
+        #expect(store.tracks.isEmpty)
+
+        // ANTI-VACUITY: the identical call typed `audio` succeeds, so what the
+        // wire refused is the KIND and not the `tracks` param itself.
+        let ok = await router.handle(ControlRequest(
+            id: "2", command: "macro.songSkeleton",
+            params: [
+                "genre": .string("pop"),
+                "tracks": .array([
+                    .object(["name": .string("Sub Bus"), "kind": .string("audio")]),
+                ]),
+            ]
+        ))
+        #expect(ok.ok)
+        #expect(store.tracks.map(\.name) == ["Sub Bus", "Arrangement"])
     }
 
     @Test("the whole scaffold is ONE undo step at the wire")

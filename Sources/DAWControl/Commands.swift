@@ -1796,7 +1796,36 @@ public final class CommandRouter {
                 ["volume"], verb: "mixer.setMasterVolume")
             let volume = try params.require("volume", \.doubleValue)
             store.setMasterVolume(volume)
-            return .success(request.id, .object(["masterVolume": .number(store.masterVolume)]))
+            // m26-q: the same annotation `track.setVolume` grew in m26-o, for
+            // the same defect one level up. `ProjectStore.masterAutomation`'s
+            // own contract says the lane REPLACES the fader, and the render
+            // path gates on exactly this predicate — so without the annotation
+            // an agent sets the master level, is told `{masterVolume: 0.8}`,
+            // and has no way to learn that a master volume lane, not that
+            // value, decides what is heard and what renders.
+            //
+            // ADDITIVE and OMIT-WHEN-ABSENT, both load-bearing: `masterVolume`
+            // is still ALWAYS present (this verb was never void-result, so
+            // dropping it to copy `track.setVolume` literally would break every
+            // existing caller), and the two annotation keys appear ONLY when a
+            // lane actually governs. An always-present flag is what broke the
+            // bug-1 void-result regression guard once already; here it would
+            // also read as a warning on every ordinary call.
+            //
+            // `activeLane` is DAWCore's ONE definition of "automation replaces
+            // the manual control" — the same predicate the schedule build uses,
+            // so this annotation cannot disagree with what is actually heard. An
+            // EMPTY lane is inert by that definition (the vii-a contract), and
+            // so is a DISABLED one; neither is annotated.
+            var masterVolumePayload: [String: JSONValue] = [
+                "masterVolume": .number(store.masterVolume),
+            ]
+            if let masterVolumeLane = store.masterAutomation.activeLane(for: .volume) {
+                masterVolumePayload["automationControlled"] = .bool(true)
+                masterVolumePayload["automationPointCount"] =
+                    .number(Double(masterVolumeLane.points.count))
+            }
+            return .success(request.id, .object(masterVolumePayload))
 
         case "mixer.applyPreset":
             // params: trackId (required), preset (required string — one of the
@@ -2225,7 +2254,9 @@ public final class CommandRouter {
         case "macro.songSkeleton":
             // params: genre (required — a SongSkeletonCatalog kebab name),
             // tempoBPM? (20-400; default = genre's), sections? (array of
-            // {name, bars} — default = genre's layout). Scaffolds the whole
+            // {name, bars} — default = genre's layout), tracks? (array of
+            // {name, kind, mixerPreset?} — default = genre's roster).
+            // Scaffolds the whole
             // session (tempo, a genre track roster with mixer presets applied,
             // an "Arrangement" guide track of named empty MIDI clips, a real
             // SESSION MARKER at every section start — so `marker.list` returns
@@ -2244,16 +2275,25 @@ public final class CommandRouter {
             // a caller who omitted `genre` learned the valid values only after a
             // SECOND round trip (passing any string to trigger the store's own
             // teaching error). Naming the valid genres here too closes that gap.
+            //
+            // `tracks` (additive optional param — NOT a new verb) overrides the
+            // GENRE ROSTER ONLY. The "Arrangement" guide track is still appended
+            // LAST with its per-section clips and markers: the beat map is what
+            // the macro exists for, so no override can suppress or displace it.
+            // `genre` stays REQUIRED even with a full roster override — it
+            // supplies the default tempo and keeps the enum discoverable.
             try params.rejectUnknownKeys(
-                ["genre", "tempoBPM", "sections"], verb: "macro.songSkeleton")
+                ["genre", "tempoBPM", "sections", "tracks"], verb: "macro.songSkeleton")
             guard let genre = params["genre"]?.stringValue else {
                 let valid = SongSkeletonCatalog.names.joined(separator: ", ")
                 throw ControlError("missing or invalid required param 'genre' — valid: \(valid)")
             }
             let skeletonTempo = params["tempoBPM"]?.doubleValue
             let skeletonSections = try parseSkeletonSections(params["sections"])
+            let skeletonTracks = try parseSkeletonTracks(params["tracks"])
             let skeleton = try store.applySongSkeleton(
-                genre: genre, tempoBPM: skeletonTempo, sections: skeletonSections)
+                genre: genre, tempoBPM: skeletonTempo, sections: skeletonSections,
+                tracks: skeletonTracks)
             return .success(request.id, songSkeletonResult(skeleton))
 
         case "automation.addLane":
@@ -7177,6 +7217,59 @@ public final class CommandRouter {
             sections.append(SkeletonSection(name: name, bars: Int(barsValue)))
         }
         return sections
+    }
+
+    /// Parses the optional `tracks` param for `macro.songSkeleton` into
+    /// `[SongSkeletonTrack]?` — nil (omitted) tells the store to use the genre's
+    /// default roster. Present-but-malformed is a per-index error naming the
+    /// offending element (the `parseSkeletonSections` precedent).
+    ///
+    /// Only SHAPE is checked here (name is a string, kind maps to a `TrackKind`,
+    /// mixerPreset is a string when present); the store owns the CONTRACT (count
+    /// 1-24, name length, instrument/audio only, the preset resolving) as the
+    /// single source of truth, surfacing field-named `invalidSongSkeleton`
+    /// errors. That split is why `"bus"` parses cleanly HERE and is rejected
+    /// THERE: a caller who sends it gets the store's teaching error, the same
+    /// one a direct `applySongSkeleton` caller gets, rather than two different
+    /// wordings of the same rule.
+    private func parseSkeletonTracks(_ value: JSONValue?) throws -> [SongSkeletonTrack]? {
+        guard let value else { return nil }
+        guard let array = value.arrayValue else {
+            throw ControlError(
+                "'tracks' must be an array of "
+                + "{name: string, kind: \"instrument\"|\"audio\", mixerPreset?: string}")
+        }
+        var specs: [SongSkeletonTrack] = []
+        specs.reserveCapacity(array.count)
+        for (i, element) in array.enumerated() {
+            guard let name = element["name"]?.stringValue else {
+                throw ControlError("tracks[\(i)].name must be a string")
+            }
+            guard let rawKind = element["kind"]?.stringValue else {
+                throw ControlError(
+                    "tracks[\(i)].kind must be \"instrument\" or \"audio\"")
+            }
+            guard let kind = TrackKind(rawValue: rawKind) else {
+                throw ControlError(
+                    "tracks[\(i)].kind is not a track kind: '\(rawKind)' — "
+                    + "skeletons take \"instrument\" or \"audio\"")
+            }
+            // Absent and explicit-null both mean "no preset" — an agent that
+            // spells the empty case as `null` gets the same empty chain as one
+            // that omits the key, rather than a type error on a value that
+            // already says what it means.
+            var preset: String?
+            if let raw = element["mixerPreset"], raw != .null {
+                guard let presetName = raw.stringValue else {
+                    throw ControlError(
+                        "tracks[\(i)].mixerPreset must be a mixer-preset name (string), "
+                        + "or omitted for no preset")
+                }
+                preset = presetName
+            }
+            specs.append(SongSkeletonTrack(name: name, kind: kind, mixerPreset: preset))
+        }
+        return specs
     }
 
     /// Parses the optional `trackIds` param (`render.stems`) into `[UUID]?` —

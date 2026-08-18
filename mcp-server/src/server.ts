@@ -4589,7 +4589,15 @@ registerTool(
       "keep pushing here: add a `gain` insert at the FRONT of the master chain " +
       "(fx_add with trackId \"master\", kind \"gain\", ahead of the eq/limiter) and " +
       "take the remaining makeup there — its `gainLinear` param runs 0-4 (≈ +12 dB), " +
-      "and inserts stack if you somehow need more.",
+      "and inserts stack if you somehow need more. " +
+      "Returns `{masterVolume}` — and, ONLY when a master volume automation lane is " +
+      "actually governing (enabled and holding at least one point), also " +
+      "`{automationControlled: true, automationPointCount}`. Those two keys are ABSENT " +
+      "in the ordinary case. When they appear, your value was stored (it is undoable and " +
+      "rules again the moment the lane is disabled or emptied) but the LANE, not this " +
+      "fader, decides what is heard and what renders — edit the lane with " +
+      "automation_set_points (trackId \"master\"), or disable it with " +
+      "automation_set_lane_enabled, if you meant this level to be audible.",
     inputSchema: {
       volume: z
         .number()
@@ -4609,6 +4617,12 @@ const mixerPresetSchema = z
     "master-glue",
     "warm-keys",
     "clean-boost",
+    "bass-round",
+    "guitar-crunch",
+    "acoustic-sparkle",
+    "horn-section",
+    "drum-room",
+    "lofi-tape",
   ])
   .describe(
     "Which curated mixer preset to apply — each is a small, ready-made insert chain of " +
@@ -4621,7 +4635,17 @@ const mixerPresetSchema = z
       "ties a whole mix together and holds the peaks just under clipping (use on the master or " +
       "a mix bus). `warm-keys`: EQ only — eases off the top end and adds a little low-end body " +
       "for a warmer keyboard/synth tone. `clean-boost`: a single gain stage at about +3 dB " +
-      "with no tone change — a clean level lift."
+      "with no tone change — a clean level lift. `bass-round`: the deliberate OPPOSITE of " +
+      "bass-tight — a low-shelf lift for weight, then a LOW ~2.5:1 ratio with a SLOW 20 ms " +
+      "attack so each note blooms before it is caught; pick it for blues, jazz, soul and " +
+      "anything played with feel, and pick bass-tight when the bass must sit rock-steady under " +
+      "a dense mix. `guitar-crunch`: saturator grit then an EQ scooping low-mid mud and lifting " +
+      "bite — a driven electric guitar that cuts through a band. `acoustic-sparkle`: EQ only — " +
+      "takes out the boxy honk and brings back string shimmer and air on an acoustic guitar. " +
+      "`horn-section`: lifts the brassy core, softens the harsh edge, then ~3:1 compression so " +
+      "the loud stabs stop jumping out. `drum-room`: a short, damped reverb at a modest 18% mix " +
+      "— the kit breathes without the mix going wet. `lofi-tape`: gentle saturation plus a " +
+      "high-shelf cut for the warm, dulled sound of old tape or vinyl."
   );
 
 registerTool(
@@ -4636,7 +4660,10 @@ registerTool(
       "instrument, and bus tracks. Choose `preset` from: drum-bus-glue (glue a drum group), " +
       "vocal-presence (forward, clear lead vocal), bass-tight (steady, defined bass), master-glue " +
       "(tie a whole mix together and stop it clipping), warm-keys (warmer, softer synth/keys tone), " +
-      "clean-boost (a clean ~+3 dB level lift). To fine-tune afterwards, nudge individual effects " +
+      "clean-boost (a clean ~+3 dB level lift), bass-round (warm, blooming bass — the opposite of " +
+      "bass-tight), guitar-crunch (driven electric guitar), acoustic-sparkle (open, shimmering " +
+      "acoustic guitar), horn-section (bold, even brass), drum-room (a small live room around the " +
+      "kit), lofi-tape (warm, dulled tape/vinyl character). To fine-tune afterwards, nudge individual effects " +
       "with fx_set_param, or build a chain by hand with fx_add. Returns `{trackId, effects}`: the " +
       "strip's full new insert chain (same shape as project_snapshot's per-track `effects` array), " +
       "so you can see exactly what the preset laid down.",
@@ -5217,7 +5244,22 @@ server.registerTool(
 // ---------------------------------------------------------------------------
 
 const songSkeletonGenreSchema = z
-  .enum(["pop", "house", "hip-hop", "rock", "ballad"])
+  .enum([
+    "pop",
+    "house",
+    "hip-hop",
+    "rock",
+    "ballad",
+    "blues",
+    "jazz",
+    "country",
+    "r-and-b",
+    "funk",
+    "metal",
+    "folk",
+    "reggae",
+    "lo-fi",
+  ])
   .describe(
     "Which genre skeleton to scaffold — each sets a default tempo and a ready-made track roster. " +
       "`pop` (120 BPM): Drums, Bass (bass-tight preset), Keys (warm-keys), Lead, Vocals " +
@@ -5225,8 +5267,29 @@ const songSkeletonGenreSchema = z
       "`hip-hop` (90 BPM): Drums, 808 Bass (bass-tight), Samples, Lead, Vocals (vocal-presence). " +
       "`rock` (140 BPM): Drums, Bass (bass-tight), Rhythm Guitar, Lead Guitar, Vocals " +
       "(vocal-presence). `ballad` (72 BPM): Piano (warm-keys), Strings, Bass (bass-tight), Vocals " +
-      "(vocal-presence). Instrument tracks host built-in instruments; audio tracks take recordings " +
-      "or imports. Named mixer presets are applied to the strips shown in parentheses."
+      "(vocal-presence). `blues` (84 BPM): Drums (drum-room), Bass (bass-round), Rhythm Guitar, " +
+      "Lead Guitar (guitar-crunch), Organ (warm-keys), Vocals (vocal-presence) — and a genuine " +
+      "TWELVE-BAR form (Intro 4, Head 12, Verse 12, Solo 12, Verse 12, Outro 4). " +
+      "`jazz` (132 BPM): Drums (drum-room), Upright Bass (bass-round), Piano (warm-keys), Horn " +
+      "(horn-section), Guitar — a combo with no vocal track, in head/solos/head form with 32-bar " +
+      "choruses. `country` (100 BPM): Drums (drum-bus-glue), Bass (bass-round), Acoustic Guitar " +
+      "(acoustic-sparkle), Electric Guitar, Pedal Steel, Vocals (vocal-presence). " +
+      "`r-and-b` (88 BPM): Drums (drum-bus-glue), Bass (bass-round), Keys (warm-keys), Pads, Lead " +
+      "Vocal (vocal-presence), Backing Vocals — with a Pre-Chorus in the form. " +
+      "`funk` (108 BPM): Drums (drum-bus-glue), Bass (bass-tight — funk's bass wants the clamp), " +
+      "Rhythm Guitar, Clavinet (warm-keys), Horns (horn-section), Vocals (vocal-presence), with " +
+      "16-bar verses and a Breakdown. `metal` (170 BPM): Drums (drum-bus-glue), Bass (bass-tight), " +
+      "Rhythm Guitar L and Rhythm Guitar R (both guitar-crunch, for the hard-panned double-track), " +
+      "Lead Guitar (guitar-crunch), Vocals (vocal-presence). " +
+      "`folk` (96 BPM): Acoustic Guitar (acoustic-sparkle), Vocals (vocal-presence), Bass " +
+      "(bass-round), Fiddle, Percussion. `reggae` (76 BPM): Drums (drum-bus-glue), Bass " +
+      "(bass-round), Skank Guitar, Organ (warm-keys), Vocals (vocal-presence), with a Dub Break. " +
+      "`lo-fi` (78 BPM): Drums (lofi-tape), Bass (bass-round), Keys (warm-keys), Samples " +
+      "(lofi-tape), Vinyl FX — a loop-based form (Intro, Loop A, Loop B, Loop A, Outro) rather " +
+      "than verse/chorus. Instrument tracks host built-in instruments; audio tracks take recordings " +
+      "or imports. Named mixer presets are applied to the strips shown in parentheses. " +
+      "If none of these fits, keep the nearest `genre` and pass your own `tracks` roster and " +
+      "`sections` — both override the genre's defaults outright."
   );
 
 const songSkeletonSectionSchema = z
@@ -5244,6 +5307,30 @@ const songSkeletonSectionSchema = z
       .describe("Section length in bars (whole number, 1-64). 4/4 is assumed, so one bar = 4 beats."),
   })
   .describe("One arrangement section: a named span measured in bars.");
+
+const songSkeletonTrackSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(40)
+      .describe("Track name, e.g. \"Drums\", \"Rhodes\", \"Lead Vocal\" (1-40 characters)."),
+    kind: z
+      .enum(["instrument", "audio"])
+      .describe(
+        "\"instrument\" hosts a built-in instrument and takes MIDI clips (use it for every playable part); " +
+          "\"audio\" takes recordings and imported files. Skeletons never create buses — add one afterwards with track_add if you need it."
+      ),
+    mixerPreset: z
+      .string()
+      .optional()
+      .describe(
+        "Optional mixer preset applied to this strip as a fresh insert chain, by name (see mixer_apply_preset " +
+          "for the catalog — e.g. \"bass-tight\", \"vocal-presence\", \"warm-keys\"). Omit for an empty chain. " +
+          "An unknown name is a field-named error listing every valid preset."
+      ),
+  })
+  .describe("One roster track: a name, its kind, and an optional mixer preset.");
 
 registerTool(
   "macro_song_skeleton",
@@ -5264,8 +5351,14 @@ registerTool(
       "appended to whatever is already there (use project_new first if you want a clean slate), and " +
       "markers that already existed survive, merged into beat order. A " +
       "single edit_undo reverts the ENTIRE scaffold at once. Pass `genre` (required) to use its " +
-      "defaults, or override the tempo with `tempoBPM` (20-400) and/or the layout with `sections`. " +
-      "An unknown genre returns an error listing every valid genre; a bad tempo or section is a " +
+      "defaults, or override the tempo with `tempoBPM` (20-400), the layout with `sections`, and/or " +
+      "the track roster with `tracks`. `tracks` replaces THE GENRE ROSTER ONLY: the \"Arrangement\" " +
+      "guide track is ALWAYS added last, with its section clips and markers, no matter what you pass " +
+      "— you cannot suppress, reorder, or displace it (and a roster track of your own named " +
+      "\"Arrangement\" is allowed, it just sits in the roster with the real guide track after it). " +
+      "`genre` stays required even with a full roster override — it supplies the default tempo. " +
+      "An unknown genre returns an error listing every valid genre; a bad tempo, section, or roster " +
+      "track is a " +
       "field-named error. Returns `{genre, tempoBPM, tracks: [{id, name}], sectionClips: [{name, " +
       "startBeat, lengthBeats}], markers: [{id, name, beat}], loopStart, loopEnd, " +
       "arrangementTrackId}` with real ids — `tracks` " +
@@ -5289,10 +5382,22 @@ registerTool(
             "Each section is {name, bars}; sections are laid out contiguously in order. Omit to use the " +
             "genre's default sections."
         ),
+      tracks: z
+        .array(songSkeletonTrackSchema)
+        .min(1)
+        .max(24)
+        .optional()
+        .describe(
+          "Optional custom track roster (1-24 tracks), replacing the genre's default roster. Tracks are " +
+            "created in the order given, each {name, kind, mixerPreset?}. The \"Arrangement\" guide track " +
+            "is ALWAYS appended after this roster regardless — the section clips and beat-map markers are " +
+            "what this macro exists for, so an override can never remove or move them. Omit to use the " +
+            "genre's default roster."
+        ),
     },
   },
-  async ({ genre, tempoBPM, sections }) =>
-    toToolResult(() => bridge.send("macro.songSkeleton", { genre, tempoBPM, sections }))
+  async ({ genre, tempoBPM, sections, tracks }) =>
+    toToolResult(() => bridge.send("macro.songSkeleton", { genre, tempoBPM, sections, tracks }))
 );
 
 // ---------------------------------------------------------------------------
@@ -5404,6 +5509,9 @@ registerTool(
       "render_stems{includeMixdown}, whose file is confusingly named \"00 Mixdown.wav\" but " +
       "is NOT a render_mixdown — use render_stems{includeMasteredMixdown} (\"00 Mastered " +
       "Mix.wav\"), which DOES carry the fade. " +
+      "MIND THE WINDOW: a render's DEFAULT length comes from CLIP extents alone (+ a " +
+      "fixed 2.0 s tail) and never from automation, so points drawn past the last clip " +
+      "need an explicit render `durationSeconds` covering them or they are cut off. " +
       "The master lane rides project_snapshot's top-level `masterAutomation` " +
       "array (same lane shape), absent when empty. " +
       "Returns `{lane: {id, target, points, isEnabled}}`.",
@@ -5440,7 +5548,10 @@ registerTool(
       laneId: z
         .string()
         .min(1)
-        .describe("Id of the lane to remove, from automation_add_lane's result or project_snapshot."),
+        .describe(
+          "Id of the lane to remove, from project_overview's per-track `automation[].id`, " +
+            "project_snapshot, or automation_add_lane's result."
+        ),
     },
   },
   async ({ trackId, laneId }) =>
@@ -5474,6 +5585,9 @@ registerTool(
       "it IS baked into render_mixdown and render_bounce (it lands in the deliverable). Only " +
       "render_stems excludes it — including that call's \"00 Mixdown.wav\", which despite the " +
       "name is a stem-class file; \"00 Mastered Mix.wav\" carries the fade. " +
+      "MIND THE WINDOW: a render's DEFAULT length comes from CLIP extents alone (+ a " +
+      "fixed 2.0 s tail) and never from automation, so points drawn past the last clip " +
+      "need an explicit render `durationSeconds` covering them or they are cut off. " +
       "Returns `{lane: {id, target, points, isEnabled}}` with the lane exactly as " +
       "stored (reordered/clamped/capped).",
     inputSchema: {
@@ -5487,7 +5601,10 @@ registerTool(
       laneId: z
         .string()
         .min(1)
-        .describe("Id of the lane to edit, from automation_add_lane's result or project_snapshot."),
+        .describe(
+          "Id of the lane to edit, from project_overview's per-track `automation[].id`, " +
+            "project_snapshot, or automation_add_lane's result."
+        ),
       points: z
         .array(automationPointSchema)
         .max(4096)
@@ -5525,7 +5642,10 @@ registerTool(
       laneId: z
         .string()
         .min(1)
-        .describe("Id of the lane to toggle, from automation_add_lane's result or project_snapshot."),
+        .describe(
+          "Id of the lane to toggle, from project_overview's per-track `automation[].id`, " +
+            "project_snapshot, or automation_add_lane's result."
+        ),
       enabled: z
         .boolean()
         .describe(
@@ -5565,7 +5685,12 @@ registerTool(
       "lane. You do NOT need to rebuild a master fade as per-track lanes to " +
       "make it survive. (Only render_stems excludes master moves — including " +
       "its \"00 Mixdown.wav\", which despite the name is a stem-class file " +
-      "and is NOT what this tool produces.)",
+      "and is NOT what this tool produces.) " +
+      "BUT ONLY WITHIN THE RENDER WINDOW, and the DEFAULT window is computed " +
+      "from CLIP extents alone (+ a fixed 2.0 s tail) — automation extent is " +
+      "never consulted. So anything drawn past the last clip, or ringing " +
+      "longer than 2.0 s after it (a long fade-out, a reverb/delay tail), is " +
+      "CUT OFF unless you pass a `durationSeconds` that covers it.",
     inputSchema: {
       path: z
         .string()
@@ -5757,6 +5882,10 @@ registerTool(
       "Like render_mixdown, this BAKES IN every master move: the master " +
       "fader, the master insert chain, and any MASTER VOLUME AUTOMATION LANE " +
       "— a fade-out lands in the bounce and needs no per-track workaround. " +
+      "It lands only WITHIN THE RENDER WINDOW, though, and the DEFAULT window " +
+      "comes from CLIP extents alone (+ a fixed 2.0 s tail), never from " +
+      "automation: a fade or tail extending past the last clip is CUT OFF " +
+      "unless you pass a `durationSeconds` that covers it. " +
       "Pass `lufsTarget` to normalize toward a delivery target — -14 LUFS " +
       "integrated is the usual streaming-platform convention (Spotify/" +
       "YouTube/Apple Music-style), -23 LUFS is EBU R128 broadcast; OMIT it " +
@@ -6628,8 +6757,16 @@ server.registerTool(
       "activeLane?, hasStretch?, hasFades?, gainDb?}` — COUNTS, never the " +
       "actual MIDI notes, and no file paths (fetch a clip's real note data or " +
       "source file via project_snapshot/clip tools when you need it). " +
-      "`automation` summarizes every lane as `{target, enabled, pointCount}` " +
-      "— never the breakpoints themselves. `peakDb`/`rmsDb` are LEVELS in " +
+      "`automation` summarizes every lane as `{id, target, enabled, " +
+      "pointCount}` — never the breakpoints themselves. That `id` is the " +
+      "ADDRESSABLE lane id — pass it straight to automation_set_points / " +
+      "automation_set_lane_enabled / automation_remove_lane. Exactly like the " +
+      "effect ids above, it means you can drive a lane you INHERITED without " +
+      "calling automation_add_lane first purely to make its id appear in a " +
+      "reply — reading no longer requires writing. (MASTER volume lanes are " +
+      "not carried here; read their ids from project_snapshot's top-level " +
+      "`masterAutomation`, which has always included them.) " +
+      "`peakDb`/`rmsDb` are LEVELS in " +
       "dBFS (floor -80, always finite; a POSITIVE peakDb means it clipped), " +
       "carried BOTH per-track and on `master` — this is how you compare " +
       "loudness between tracks, and against the mix as a whole, without " +

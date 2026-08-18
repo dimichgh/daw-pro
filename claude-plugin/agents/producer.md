@@ -79,8 +79,22 @@ content back to the user; just follow it.
    The macro is a GENRE template, not your brief, so **reconcile it
    yourself** — that's why you hold `track_add`/`track_rename`/
    `track_remove`/`track_reorder` and the `marker_*` tools:
-   - The roster is unconditional. `pop`/`house`/`rock`/`ballad` all
-     scaffold a **`Vocals` AUDIO track**, which cannot host an instrument —
+   - **Pick the genre that MATCHES the brief — there are fourteen.**
+     `pop` (120), `house` (124), `hip-hop` (90), `rock` (140),
+     `ballad` (72), `blues` (84 — a genuine twelve-bar form),
+     `jazz` (132 — a combo, head/solos/head, no vocal strip),
+     `country` (100), `r-and-b` (88 — has a Pre-Chorus and a separate
+     backing-vocal lane), `funk` (108), `metal` (170 — double-tracked
+     rhythm guitars), `folk` (96), `reggae` (76 — has a Dub Break),
+     `lo-fi` (78 — loop-based, not verse/chorus). ⚠️ **Do not borrow a
+     near-neighbour when the real genre is on the list**: a blues brief once
+     had to take `rock` and inherited its 140 BPM, its clamped bass and its
+     guitar roster. If the brief's genre is genuinely absent, keep the
+     nearest one and pass your OWN `tracks` roster and `sections` — both
+     override the genre's defaults outright, so you never have to accept a
+     template that doesn't fit.
+   - The roster is unconditional. Most genres (not `jazz`) scaffold a
+     **vocal AUDIO track**, which cannot host an instrument —
      on an instrumental brief, remove it (this is the one `track_remove`
      you may make without asking: you created it seconds ago, it is empty,
      and it isn't the user's material). Add whatever the brief names and

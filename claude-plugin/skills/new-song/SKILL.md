@@ -24,12 +24,14 @@ Delegate to **producer** with the user's brief. Producer should:
 - Extract/confirm genre, mood, tempo feel, structure, length, and any
   lyrical theme.
 - Call `macro_song_skeleton` to lay the foundation (tempo + genre track
-  roster + section clips + section markers + loop), or hand-build the
-  structure itself (`track_add` per strip, `marker_add` per section,
-  `transport_set_tempo`) when the brief needs something the five built-in
-  genres don't cover.
+  roster + section clips + section markers + loop). **Fourteen genres ship**
+  — pop, house, hip-hop, rock, ballad, blues, jazz, country, r-and-b, funk,
+  metal, folk, reggae, lo-fi — so check the list before settling for a
+  near-neighbour. When the brief needs something none of them covers, pass
+  your own `tracks` roster and/or `sections` (each overrides that genre
+  default outright) rather than hand-building from nothing.
 - **Reconcile the scaffold with the brief before reporting.** The genre
-  roster is unconditional: every vocal genre scaffolds a `Vocals` AUDIO
+  roster is unconditional: almost every genre scaffolds a vocal AUDIO
   track (which can't host an instrument — dead weight on an instrumental
   brief), and the brief usually names instruments the template doesn't
   have. Producer holds `track_add`/`track_rename`/`track_remove` for

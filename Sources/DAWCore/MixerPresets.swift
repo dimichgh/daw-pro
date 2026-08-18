@@ -56,14 +56,26 @@ extension EffectDescriptor {
     }
 }
 
-/// The v1 curated preset catalog. Six musical intents mapped onto the real
+/// The v1 curated preset catalog. Twelve musical intents mapped onto the real
 /// built-in effect param surfaces (values kept sane; each choice is commented).
+/// `v1` GROWS IN PLACE — the six m26-p additions are appended AFTER the original
+/// six so catalog order (and therefore the MCP enum's order) stays stable, and
+/// no existing preset is retuned. The `CopilotToolCatalog` precedent: a version
+/// is a SHAPE, not a length.
 ///
-/// DESIGN NOTE — no dedicated high-pass filter exists in the built-in EQ, so
-/// every "rumble cut / sub trim" intent is expressed as the CLOSEST available
-/// shape: a low-shelf band with negative gain (attenuates the low end rather
-/// than steeply removing it). This is a deliberate approximation, not a missing
-/// effect — we never add new effect types for a preset.
+/// DESIGN NOTE — "rumble cut / sub trim" intents are expressed as a low-shelf
+/// band with NEGATIVE gain (attenuating the low end rather than steeply
+/// removing it), never as a high-pass.
+/// ⚠️ CORRECTED 2026-08-18 (m26-p): this note used to claim "no dedicated
+/// high-pass filter exists in the built-in EQ". That WAS true when the catalog
+/// was written and m22-a (EQ v2) made it FALSE — `EQParams.highPassFreq` /
+/// `highPassSlopeDbPerOct` / `highPassEnabled` are real fields today. The
+/// negative low-shelf survives as a DELIBERATE HOUSE STYLE, not as a
+/// workaround: every preset here predates the high-pass, retuning them would
+/// change the sound of existing projects, and a catalog where half the presets
+/// trim with a shelf and half with a filter is harder to reason about than one
+/// that is consistent. New presets follow the shelf. A preset still never adds
+/// a new effect TYPE for its own sake.
 public enum MixerPresetCatalog {
     /// Every v1 preset, in catalog order (matches the MCP enum ordering).
     public static let v1: [MixerPreset] = [
@@ -73,6 +85,13 @@ public enum MixerPresetCatalog {
         masterGlue,
         warmKeys,
         cleanBoost,
+        // m26-p additions — appended, never interleaved (order is wire-visible).
+        bassRound,
+        guitarCrunch,
+        acousticSparkle,
+        hornSection,
+        drumRoom,
+        lofiTape,
     ]
 
     /// Lookup by kebab-case name; `nil` when unknown.
@@ -185,6 +204,129 @@ public enum MixerPresetCatalog {
         summary: "Simply turns the track up by about 3 dB with no tone change — a clean level lift.",
         chain: [
             EffectDescriptor(kind: .gain, gain: GainParams(gainLinear: pow(10, 3.0 / 20.0))),
+        ])
+
+    // MARK: m26-p additions
+
+    /// ⭐ THE DELIBERATE COUNTERPART TO `bass-tight` (m26-p, from the 2026-08-17
+    /// field report's N6). A blues/jazz/soul bass wants to BLOOM — the note
+    /// swells after the pluck — and `bass-tight`'s firm 4:1 at a 5 ms attack
+    /// catches that swell and flattens it. This preset inverts BOTH of those
+    /// numbers on purpose:
+    ///
+    ///   | | `bass-tight` | `bass-round` |
+    ///   |---|---|---|
+    ///   | low end | −3 dB shelf (trimmed) | +2 dB shelf (weight) |
+    ///   | ratio | 4:1 | 2.5:1 |
+    ///   | attack | 5 ms (clamps the pluck) | 20 ms (lets it through) |
+    ///
+    /// The threshold is DELIBERATELY IDENTICAL (−20 dB) so the two presets
+    /// differ in HOW they compress, not in how much signal they see — that is
+    /// what makes the pair legible, and a test pins the ratio/attack direction
+    /// so a later "tidy-up" cannot quietly converge them.
+    static let bassRound = MixerPreset(
+        name: "bass-round",
+        displayName: "Bass Round",
+        summary: "Warm, singing bass that keeps its bloom — adds low-end weight and lets each note swell before compressing gently. Pick this over 'bass-tight' for blues, jazz, soul and anything played with feel; pick 'bass-tight' when the bass must sit rock-steady under a dense mix.",
+        chain: [
+            EffectDescriptor(kind: .eq, eq: EQParams(
+                lowShelfFreq: 80, lowShelfGainDb: 2,          // low-shelf LIFT for weight (bass-tight cuts here)
+                peak1Freq: 300, peak1GainDb: -1.5, peak1Q: 1, // gentle low-mid trim: clarity without thinning
+                highShelfFreq: 6_000, highShelfGainDb: -1.5)), // slight top roll-off: singing, not clacky
+            EffectDescriptor(kind: .compressor, compressor: CompressorParams(
+                thresholdDb: -20,  // SAME as bass-tight on purpose — only the shape differs
+                ratio: 2.5,        // LOW ratio: guides the level, never clamps it
+                attackMs: 20,      // SLOW attack: the note blooms before the compressor catches it
+                releaseMs: 150,    // longer release: no pumping between notes
+                kneeDb: 9)),       // softer knee than bass-tight's 6 — the reduction eases in
+        ])
+
+    /// Driven electric guitar. Saturator FIRST (it generates the harmonics),
+    /// then the EQ shapes what the drive produced — the reverse order would
+    /// distort an already-scooped signal and lose the bite the EQ just added.
+    static let guitarCrunch = MixerPreset(
+        name: "guitar-crunch",
+        displayName: "Guitar Crunch",
+        summary: "Gives an electric guitar a driven, gritty edge — adds harmonic crunch, clears the muddy low-mids, and lifts the bite that cuts through a band.",
+        chain: [
+            EffectDescriptor(kind: .saturator, saturator: SaturatorParams(
+                driveDb: 9,        // moderate grit (range 0...36; 12 is the default "obvious" drive)
+                mix: 0.8,          // mostly wet, a little clean signal left for pick definition
+                outputDb: -2)),    // trim back the level the drive added
+            EffectDescriptor(kind: .eq, eq: EQParams(
+                lowShelfFreq: 100, lowShelfGainDb: -2,           // trim boom that fights the bass
+                peak1Freq: 400, peak1GainDb: -3, peak1Q: 1.2,    // scoop the low-mid mud
+                peak2Freq: 2_500, peak2GainDb: 3, peak2Q: 1,     // lift the bite that cuts through
+                highShelfFreq: 10_000, highShelfGainDb: -1)),    // tame the fizz the drive adds up top
+        ])
+
+    /// Acoustic guitar, EQ-only (the `warm-keys` precedent — no dynamics where
+    /// the intent is purely tonal): out with the box, in with the string.
+    static let acousticSparkle = MixerPreset(
+        name: "acoustic-sparkle",
+        displayName: "Acoustic Sparkle",
+        summary: "Opens up an acoustic guitar — takes out the boxy honk, brings back the shimmer of the strings and a little air on top.",
+        chain: [
+            EffectDescriptor(kind: .eq, eq: EQParams(
+                lowShelfFreq: 90, lowShelfGainDb: -2,            // trim body boom (low-shelf, the house style)
+                peak1Freq: 300, peak1GainDb: -2.5, peak1Q: 1.2,  // the "boxy" band on a mic'd acoustic
+                peak2Freq: 5_000, peak2GainDb: 2, peak2Q: 1,     // string presence and pick detail
+                highShelfFreq: 10_000, highShelfGainDb: 2.5)),   // air
+        ])
+
+    /// Brass presence and control: shape first, then even the level. Horns swing
+    /// 10+ dB between a held note and a stab, so the compressor is the point —
+    /// but a 15 ms attack still lets the blat of the attack through.
+    static let hornSection = MixerPreset(
+        name: "horn-section",
+        displayName: "Horn Section",
+        summary: "Makes horns sound bold and even — brings out the brassy core, softens the harsh edge, and stops the loud stabs jumping out of the mix.",
+        chain: [
+            EffectDescriptor(kind: .eq, eq: EQParams(
+                lowShelfFreq: 80, lowShelfGainDb: -2,             // trim room rumble under the horns
+                peak1Freq: 800, peak1GainDb: 2, peak1Q: 1,        // the brassy core
+                peak2Freq: 3_500, peak2GainDb: -2.5, peak2Q: 1.5, // tame the harsh blare
+                highShelfFreq: 10_000, highShelfGainDb: 1)),      // a little sheen back on top
+            EffectDescriptor(kind: .compressor, compressor: CompressorParams(
+                thresholdDb: -16,
+                ratio: 3,          // ~3:1 — control, not clamp
+                attackMs: 15,      // slow enough to let the attack "blat" through
+                releaseMs: 120,
+                kneeDb: 6)),
+        ])
+
+    /// Kit in a room. A REVERB-ONLY chain (the `clean-boost` precedent — one
+    /// effect where one effect is the whole intent): a short, damped, modest-mix
+    /// space so the kit breathes without the mix going wet.
+    static let drumRoom = MixerPreset(
+        name: "drum-room",
+        displayName: "Drum Room",
+        summary: "Puts the drums in a small live room — they breathe and sound less flat, while staying dry and up front.",
+        chain: [
+            EffectDescriptor(kind: .reverb, reverb: ReverbParams(
+                roomSize: 0.35,    // small-to-medium room, not a hall (range 0...1)
+                damping: 0.6,      // soft walls: the tail loses its top quickly
+                mix: 0.18,         // MODEST — the kit stays dry and up front
+                preDelayMs: 12,    // keeps the stick attack clear of the tail
+                width: 0.9)),      // wide, just short of fully spread
+        ])
+
+    /// Tape/vinyl character. Saturator first for the tape-style harmonics, then
+    /// the EQ dulls what came out — the aged top end IS the effect, so the
+    /// high-shelf cut has to sit AFTER the drive that would otherwise re-add it.
+    static let lofiTape = MixerPreset(
+        name: "lofi-tape",
+        displayName: "Lo-Fi Tape",
+        summary: "Gives a track the warm, dulled sound of old tape or vinyl — soft harmonic fuzz, rolled-off treble and a boxy midrange.",
+        chain: [
+            EffectDescriptor(kind: .saturator, saturator: SaturatorParams(
+                driveDb: 6,        // gentle: character, not distortion
+                mix: 0.7,          // blended, so transients survive
+                outputDb: -1)),
+            EffectDescriptor(kind: .eq, eq: EQParams(
+                lowShelfFreq: 60, lowShelfGainDb: -2,           // thin the sub, like a worn tape
+                peak1Freq: 900, peak1GainDb: 1.5, peak1Q: 0.8,  // boxy "old radio" midrange bump
+                highShelfFreq: 6_000, highShelfGainDb: -4)),    // THE aged, dulled top end
         ])
 }
 

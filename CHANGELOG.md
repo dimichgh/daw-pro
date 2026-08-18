@@ -1,5 +1,51 @@
 # Changelog
 
+## 2026-08-18 — Nine genres, and a bass that is allowed to bloom
+
+A blues session had to ask for rock. It got rock's 140 BPM, rock's two guitars and, worst of the
+three, rock's `bass-tight` — a 4:1 compressor at a 5 ms attack, which catches a blues bass note
+before it has finished swelling and flattens exactly the part a blues bass is for. Nothing in that
+chain was broken. The template simply wasn't shaped for the job, and there was no other template to
+ask for.
+
+There are fourteen genres now: the original five plus **blues** (84), **jazz** (132), **country**
+(100), **r-and-b** (88), **funk** (108), **metal** (170), **folk** (96), **reggae** (76) and
+**lo-fi** (78). The bar each had to clear was distinctness in *form* as well as roster, because a
+genre that differs only in its track names is a roster override wearing a costume. Blues is
+genuinely twelve-bar — its body sections are 12 bars, not the 8 a pop layout hands back. Jazz is
+32-bar head/solos/head and carries no audio strip at all, since a combo is played rather than
+tracked. Lo-fi is Loop A / Loop B rather than verse/chorus. Metal has the hard-panned double rhythm
+guitar. A test enforces the bar: no two genres may share a tempo *and* a roster.
+
+Two genres were deliberately not added. There is no `latin`, because salsa, reggaetón, bachata and
+cumbia share almost no roster or tempo, and shipping them as one entry would recreate precisely the
+rock-serving-blues failure this work exists to fix. There is no catch-all `edm` for the same reason.
+Both are reachable through the roster override that landed last pass, with no release.
+
+Six presets joined them, each referenced by at least one roster rather than invented speculatively:
+`guitar-crunch`, `acoustic-sparkle`, `horn-section`, `drum-room`, `lofi-tape`, and **`bass-round`**.
+That last one is the actual fix, and it is a *pair* with `bass-tight` rather than a correction of it
+— the tight preset is right when a bass must sit rock-steady under a dense mix, and nothing about it
+changed. What is new is the sibling: the same threshold, so the two differ in how they compress
+rather than in how much signal they see, but 2.5:1 at a 20 ms attack with a low-shelf *lift* against
+tight's 4:1 at 5 ms with a low-shelf *cut*. The note blooms before the compressor catches it. A test
+pins the direction of both differences, so the pair cannot later be tidied into twelve names and
+eleven sounds.
+
+Nothing was renamed, retuned or removed, and no verb or tool was added — the catalogs grew in place
+and the additions are appended, so the wire-visible order is unchanged.
+
+Two things surfaced while doing it that are worth more than the feature. A negative test fixture went
+stale in the same commit that would have inverted it: both unknown-genre tests used `"jazz"` as their
+not-found string, so adding the genre would have left them asserting that something which exists
+does not. A negative fixture has to be a value the catalog will never plausibly adopt, not merely one
+it happens to lack today. And the preset catalog carried a false sentence: it documented the negative
+low-shelf as a workaround for the built-in EQ having no high-pass, which stopped being true when the
+EQ gained one. The shelf is kept — every existing preset uses it and retuning them would change how
+existing projects sound — but it is now documented as the house style it actually is. A wrong doc
+produces a report indistinguishable from a wrong implementation, which is the lesson the previous
+entry was already about.
+
 ## 2026-08-17 — Four answers, and one of them cost no code at all
 
 The open questions from the field report came back answered. Two have landed.

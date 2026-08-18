@@ -108,6 +108,12 @@ struct ProjectOverviewTests {
         #expect(audioOut.automation[0].target == "volume")
         #expect(audioOut.automation[0].enabled)
         #expect(audioOut.automation[0].pointCount == 12)
+        // O3-round sibling of the fx.id assertion above: the lane id must be
+        // the REAL, addressable one (`automation.setPoints` /
+        // `automation.setLaneEnabled` / `automation.removeLane` take it).
+        // Asserting non-nil would pass on a fresh UUID — the one failure mode
+        // that would matter.
+        #expect(audioOut.automation[0].id == lane.id)
 
         guard let instOut = overview.tracks.first(where: { $0.id == inst.id }) else {
             Issue.record("instrument track missing from overview"); return
@@ -161,6 +167,107 @@ struct ProjectOverviewTests {
         // ANTI-VACUITY: the assertion above would also pass if `real` held
         // every UUID in existence. Show a foreign id is genuinely rejected.
         #expect(!real.contains(UUID()))
+    }
+
+    /// O3 round (2026-08-18 field report, O2). The SAME defect as the effects
+    /// one above, one layer up: `automation.setPoints`, `automation.
+    /// setLaneEnabled` and `automation.removeLane` all address a lane by
+    /// `laneId`, but the overview reported `{target, enabled, pointCount}` and
+    /// no id — so the only route to an existing lane's id was calling
+    /// `automation.addLane`, i.e. MUTATING the project to read it. The test is
+    /// the round trip an agent actually needs: inherit lanes it never created,
+    /// then drive them from the overview ALONE.
+    @Test("inherited automation lanes are addressable from the overview alone")
+    func inheritedLanesAreAddressableWithoutMutating() throws {
+        let store = ProjectStore(projectName: "Inherited Automation")
+        store.media = FakeMedia()
+        let track = store.addTrack(name: "Pad", kind: .instrument)
+
+        // Lanes "somebody else" drew — a previous session, a genre skeleton,
+        // another agent. The ids below are deliberately NOT reused when
+        // addressing; they exist only so the assertions can prove the overview
+        // reports the REAL ones.
+        let volumeLane = try store.addAutomationLane(trackID: track.id, target: .volume)
+        _ = try store.setAutomationPoints(
+            trackID: track.id, laneID: volumeLane.id,
+            points: [AutomationPoint(beat: 0, value: 1),
+                     AutomationPoint(beat: 8, value: 0)])
+        let panLane = try store.addAutomationLane(trackID: track.id, target: .pan)
+
+        // ── The read. Nothing after this line mutates until the addressing
+        //    calls below, which is the whole point: no `automation.addLane`
+        //    round trip stands between reading an id and using it.
+        let lanes = try #require(
+            store.overview().tracks.first { $0.id == track.id }?.automation)
+        #expect(lanes.count == 2)
+
+        // Every overview id must resolve against the REAL lane array — a fresh
+        // UUID would satisfy "non-nil" and satisfy nothing else.
+        let real = store.tracks.first { $0.id == track.id }!.automation
+        let realIDs = Set(real.map(\.id))
+        for lane in lanes {
+            #expect(realIDs.contains(lane.id),
+                    "overview lane id \(lane.id) does not address a real lane")
+        }
+        #expect(Set(lanes.map(\.id)).count == lanes.count, "ids must be distinct")
+        // And each id must sit on the lane whose target the overview reported —
+        // two lanes on one track make a swap silently plausible otherwise.
+        #expect(lanes.first { $0.target == "volume" }?.id == volumeLane.id)
+        #expect(lanes.first { $0.target == "pan" }?.id == panLane.id)
+
+        // The round trip: address BOTH mutating verbs with an id that came from
+        // the overview and nowhere else, and check they actually took.
+        let readID = try #require(lanes.first { $0.target == "volume" }?.id)
+        _ = try store.setAutomationPoints(
+            trackID: track.id, laneID: readID,
+            points: [AutomationPoint(beat: 0, value: 1),
+                     AutomationPoint(beat: 4, value: 0.5),
+                     AutomationPoint(beat: 16, value: 0)])
+        try store.setAutomationLaneEnabled(trackID: track.id, laneID: readID, false)
+
+        let after = try #require(
+            store.overview().tracks.first { $0.id == track.id }?
+                .automation.first { $0.id == readID })
+        #expect(after.pointCount == 3)      // was 2
+        #expect(!after.enabled)
+
+        // ANTI-VACUITY: the resolution assertions would also pass if the store
+        // accepted any id at all. A foreign one must be refused by the same
+        // verbs the overview id just drove.
+        #expect(!realIDs.contains(UUID()))
+        #expect(throws: ProjectError.self) {
+            _ = try store.setAutomationPoints(trackID: track.id, laneID: UUID(), points: [])
+        }
+    }
+
+    /// The MASTER half of the same question, MEASURED (2026-08-18): the
+    /// overview's `master` carries `{volume, peakDb?, rmsDb?}` and NO
+    /// automation at all — there is no lane list there to be missing an id, so
+    /// the O2 fix has nothing to reach. A master lane's id comes from
+    /// `project.snapshot`'s top-level `masterAutomation`, which has carried
+    /// full lane fidelity ({id, target, points, isEnabled}) since m15-c. So the
+    /// mutate-to-read defect never existed on the master path; this pins that
+    /// it still doesn't, since the master fade is the case the reporter hit.
+    @Test("a master lane's id is readable from the snapshot without mutating")
+    func masterLaneIDIsReadableFromSnapshot() throws {
+        let store = ProjectStore(projectName: "Master Fade")
+        let masterLane = try store.addMasterAutomationLane(target: .volume)
+        _ = try store.setMasterAutomationPoints(
+            laneID: masterLane.id,
+            points: [AutomationPoint(beat: 0, value: 1),
+                     AutomationPoint(beat: 32, value: 0)])
+
+        let readID = try #require(store.snapshot().masterAutomation?.first?.id)
+        #expect(readID == masterLane.id)
+
+        // Addressable with the id read above and nothing else.
+        try store.setMasterAutomationLaneEnabled(laneID: readID, false)
+        #expect(store.masterAutomation.first { $0.id == readID }?.isEnabled == false)
+
+        // ANTI-VACUITY: a foreign id is refused, so "it took" means something.
+        #expect(throws: ProjectError.self) {
+            try store.setMasterAutomationLaneEnabled(laneID: UUID(), false)
+        }
     }
 
     @Test("audio clip gainDb is omitted (nil) when zero, present when non-zero")

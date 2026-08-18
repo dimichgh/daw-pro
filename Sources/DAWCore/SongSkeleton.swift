@@ -69,9 +69,30 @@ public struct SongSkeletonGenre: Sendable, Equatable {
     }
 }
 
-/// The v1 curated genre catalog — five genres, each a working starting point.
-/// 4/4 assumed throughout (bars → beats ×4). Mixer-preset references point only
-/// at `MixerPresetCatalog.v1` names; a catalog-integrity test enforces that.
+/// The v1 curated genre catalog — fourteen genres, each a working starting
+/// point. 4/4 assumed throughout (bars → beats ×4). Mixer-preset references
+/// point only at `MixerPresetCatalog.v1` names; a catalog-integrity test
+/// enforces that.
+///
+/// m26-p (route ⓑ) grew this from five to fourteen. `v1` GROWS IN PLACE and the
+/// nine additions are appended AFTER the original five, so catalog order — which
+/// the MCP enum mirrors — stays stable and no existing genre is retuned. Route ⓐ
+/// (the free-form `tracks` roster override) already landed and covers ANY genre;
+/// these curated defaults exist for DISCOVERABILITY, because the enum's
+/// description is how an agent learns what a genre actually contains.
+///
+/// ⚠️ THE BAR FOR A SLOT: a genre must be distinct in ROSTER AND FORM. That is
+/// why there is no `latin` (salsa, reggaetón, bachata and cumbia share almost no
+/// roster or tempo — shipping them as one entry would recreate exactly the
+/// rock-serving-blues failure this work exists to fix) and no catch-all `edm`
+/// (house is here already; trance/DnB/techno differ by 40+ BPM). The roster
+/// override reaches all of those with no release.
+///
+/// ⚠️ TRACK KIND IS A CONTRACT, NOT A LABEL (m26-o, N4): `.audio` is reserved
+/// for RECORDED material (Vocals, Backing Vocals, FX, Samples, Vinyl FX); every
+/// PLAYABLE part is `.instrument`, because an audio track cannot host an
+/// instrument and an all-MIDI brief would have to remove and re-add it — staling
+/// the very ids the macro just returned. A test pins this across every genre.
 public enum SongSkeletonCatalog {
     /// Every v1 genre, in catalog order (matches the MCP enum ordering).
     public static let v1: [SongSkeletonGenre] = [
@@ -80,6 +101,16 @@ public enum SongSkeletonCatalog {
         hipHop,
         rock,
         ballad,
+        // m26-p additions — appended, never interleaved (order is wire-visible).
+        blues,
+        jazz,
+        country,
+        rAndB,
+        funk,
+        metal,
+        folk,
+        reggae,
+        loFi,
     ]
 
     /// Lookup by kebab-case name; `nil` when unknown.
@@ -212,6 +243,242 @@ public enum SongSkeletonCatalog {
             SkeletonSection(name: "Chorus", bars: 8),
             SkeletonSection(name: "Outro", bars: 4),
         ])
+
+    // MARK: Genres (m26-p additions)
+
+    /// ⭐ Blues at 84 BPM — the genre whose ABSENCE caused the 2026-08-17 field
+    /// report: a twelve-bar blues brief had to borrow `rock`, and inherited
+    /// rock's 140 BPM, its `bass-tight` clamp, and (then) audio-typed guitars.
+    /// The form is genuinely twelve-bar: every body section is 12 bars, not the
+    /// 8 a pop layout would give, so the section markers land on the real chorus
+    /// boundaries a blues player expects. `bass-round` over `bass-tight` and
+    /// `drum-room` over a dry kit are the two choices that make it sound blues
+    /// rather than rock-at-84.
+    static let blues = SongSkeletonGenre(
+        name: "blues",
+        displayName: "Blues",
+        defaultTempoBPM: 84,
+        tracks: [
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-room"),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
+            SongSkeletonTrack(name: "Rhythm Guitar", kind: .instrument),
+            SongSkeletonTrack(name: "Lead Guitar", kind: .instrument, mixerPreset: "guitar-crunch"),
+            SongSkeletonTrack(name: "Organ", kind: .instrument, mixerPreset: "warm-keys"),
+            SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
+        ],
+        defaultSections: [
+            SkeletonSection(name: "Intro", bars: 4),
+            SkeletonSection(name: "Head", bars: 12),   // the twelve-bar form, stated once…
+            SkeletonSection(name: "Verse", bars: 12),  // …and repeated, as it is played
+            SkeletonSection(name: "Solo", bars: 12),
+            SkeletonSection(name: "Verse", bars: 12),
+            SkeletonSection(name: "Outro", bars: 4),
+        ])
+
+    /// Jazz at 132 BPM: a combo, not a band — no vocal track at all, and the
+    /// form is head/solos/head with 32-bar choruses, so the markers map onto
+    /// where a player actually trades. The ONLY genre here with no `.audio`
+    /// strip; that is correct, not an oversight (a combo is played, not tracked).
+    static let jazz = SongSkeletonGenre(
+        name: "jazz",
+        displayName: "Jazz",
+        defaultTempoBPM: 132,
+        tracks: [
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-room"),
+            SongSkeletonTrack(name: "Upright Bass", kind: .instrument, mixerPreset: "bass-round"),
+            SongSkeletonTrack(name: "Piano", kind: .instrument, mixerPreset: "warm-keys"),
+            SongSkeletonTrack(name: "Horn", kind: .instrument, mixerPreset: "horn-section"),
+            SongSkeletonTrack(name: "Guitar", kind: .instrument),
+        ],
+        defaultSections: [
+            SkeletonSection(name: "Intro", bars: 8),
+            SkeletonSection(name: "Head", bars: 32),
+            SkeletonSection(name: "Piano Solo", bars: 32),
+            SkeletonSection(name: "Horn Solo", bars: 32),
+            SkeletonSection(name: "Head", bars: 32),
+            SkeletonSection(name: "Outro", bars: 8),
+        ])
+
+    /// Country at 100 BPM: the roster is the tell — an acoustic AND an electric
+    /// guitar AND a pedal steel, which no other genre here carries. Standard
+    /// verse/chorus form with a bridge.
+    static let country = SongSkeletonGenre(
+        name: "country",
+        displayName: "Country",
+        defaultTempoBPM: 100,
+        tracks: [
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue"),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
+            SongSkeletonTrack(name: "Acoustic Guitar", kind: .instrument, mixerPreset: "acoustic-sparkle"),
+            SongSkeletonTrack(name: "Electric Guitar", kind: .instrument),
+            SongSkeletonTrack(name: "Pedal Steel", kind: .instrument),
+            SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
+        ],
+        defaultSections: [
+            SkeletonSection(name: "Intro", bars: 4),
+            SkeletonSection(name: "Verse", bars: 8),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Verse", bars: 8),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Bridge", bars: 8),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Outro", bars: 4),
+        ])
+
+    /// R&B at 88 BPM: the only genre with a SEPARATE backing-vocal lane (stacked
+    /// harmonies are the genre's signature), and the only one whose form carries
+    /// a Pre-Chorus — the 4-bar lift into the hook that defines modern R&B
+    /// structure. Both vocal strips are `.audio`: they are sung, not played.
+    static let rAndB = SongSkeletonGenre(
+        name: "r-and-b",
+        displayName: "R&B",
+        defaultTempoBPM: 88,
+        tracks: [
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue"),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
+            SongSkeletonTrack(name: "Keys", kind: .instrument, mixerPreset: "warm-keys"),
+            SongSkeletonTrack(name: "Pads", kind: .instrument),
+            SongSkeletonTrack(name: "Lead Vocal", kind: .audio, mixerPreset: "vocal-presence"),
+            SongSkeletonTrack(name: "Backing Vocals", kind: .audio),
+        ],
+        defaultSections: [
+            SkeletonSection(name: "Intro", bars: 4),
+            SkeletonSection(name: "Verse", bars: 8),
+            SkeletonSection(name: "Pre-Chorus", bars: 4),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Verse", bars: 8),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Bridge", bars: 8),
+            SkeletonSection(name: "Outro", bars: 4),
+        ])
+
+    /// Funk at 108 BPM: `bass-tight` DELIBERATELY (funk's bass is percussive and
+    /// wants the clamp — it is the one new genre where the tight preset is the
+    /// right answer, which is precisely why `bass-round` is a sibling and not a
+    /// replacement). Long 16-bar verses to vamp over, and a Breakdown where the
+    /// band drops to the rhythm section.
+    static let funk = SongSkeletonGenre(
+        name: "funk",
+        displayName: "Funk",
+        defaultTempoBPM: 108,
+        tracks: [
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue"),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight"),
+            SongSkeletonTrack(name: "Rhythm Guitar", kind: .instrument),
+            SongSkeletonTrack(name: "Clavinet", kind: .instrument, mixerPreset: "warm-keys"),
+            SongSkeletonTrack(name: "Horns", kind: .instrument, mixerPreset: "horn-section"),
+            SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
+        ],
+        defaultSections: [
+            SkeletonSection(name: "Intro", bars: 8),
+            SkeletonSection(name: "Verse", bars: 16),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Breakdown", bars: 8),
+            SkeletonSection(name: "Verse", bars: 16),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Outro", bars: 8),
+        ])
+
+    /// Metal at 170 BPM: the fastest genre here, and the only one with a DOUBLE
+    /// rhythm-guitar roster ("Rhythm Guitar L"/"R" — the hard-panned double-track
+    /// that is the sound). All three guitars carry `guitar-crunch`. The form ends
+    /// on a Chorus with no Outro, after a Breakdown and a 16-bar Solo.
+    static let metal = SongSkeletonGenre(
+        name: "metal",
+        displayName: "Metal",
+        defaultTempoBPM: 170,
+        tracks: [
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue"),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight"),
+            SongSkeletonTrack(name: "Rhythm Guitar L", kind: .instrument, mixerPreset: "guitar-crunch"),
+            SongSkeletonTrack(name: "Rhythm Guitar R", kind: .instrument, mixerPreset: "guitar-crunch"),
+            SongSkeletonTrack(name: "Lead Guitar", kind: .instrument, mixerPreset: "guitar-crunch"),
+            SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
+        ],
+        defaultSections: [
+            SkeletonSection(name: "Intro", bars: 8),
+            SkeletonSection(name: "Verse", bars: 16),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Verse", bars: 16),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Breakdown", bars: 8),
+            SkeletonSection(name: "Solo", bars: 16),
+            SkeletonSection(name: "Chorus", bars: 8),
+        ])
+
+    /// Folk at 96 BPM: the ONLY genre whose roster leads with a guitar and a
+    /// voice rather than drums — the order is the arrangement advice. Percussion
+    /// rather than a kit, and a fiddle instead of a lead guitar.
+    static let folk = SongSkeletonGenre(
+        name: "folk",
+        displayName: "Folk",
+        defaultTempoBPM: 96,
+        tracks: [
+            SongSkeletonTrack(name: "Acoustic Guitar", kind: .instrument, mixerPreset: "acoustic-sparkle"),
+            SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
+            SongSkeletonTrack(name: "Fiddle", kind: .instrument),
+            SongSkeletonTrack(name: "Percussion", kind: .instrument),
+        ],
+        defaultSections: [
+            SkeletonSection(name: "Intro", bars: 4),
+            SkeletonSection(name: "Verse", bars: 8),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Verse", bars: 8),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Bridge", bars: 8),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Outro", bars: 4),
+        ])
+
+    /// Reggae at 76 BPM — the slowest genre here after the ballad. "Skank
+    /// Guitar" is named for the off-beat chop it plays, so the roster tells the
+    /// player what the part IS, and the form carries a Dub Break where the mix
+    /// strips to drum and bass.
+    static let reggae = SongSkeletonGenre(
+        name: "reggae",
+        displayName: "Reggae",
+        defaultTempoBPM: 76,
+        tracks: [
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue"),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
+            SongSkeletonTrack(name: "Skank Guitar", kind: .instrument),
+            SongSkeletonTrack(name: "Organ", kind: .instrument, mixerPreset: "warm-keys"),
+            SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
+        ],
+        defaultSections: [
+            SkeletonSection(name: "Intro", bars: 4),
+            SkeletonSection(name: "Verse", bars: 8),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Verse", bars: 8),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Dub Break", bars: 8),
+            SkeletonSection(name: "Chorus", bars: 8),
+            SkeletonSection(name: "Outro", bars: 4),
+        ])
+
+    /// Lo-fi at 78 BPM: the only LOOP-BASED form here — Loop A / Loop B / Loop A
+    /// rather than verse/chorus, because that is how the music is actually built.
+    /// Two strips carry `lofi-tape` (the kit and the sample lane), and the Vinyl
+    /// FX lane is `.audio` because crackle is a recording, not a played part.
+    static let loFi = SongSkeletonGenre(
+        name: "lo-fi",
+        displayName: "Lo-Fi",
+        defaultTempoBPM: 78,
+        tracks: [
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "lofi-tape"),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
+            SongSkeletonTrack(name: "Keys", kind: .instrument, mixerPreset: "warm-keys"),
+            SongSkeletonTrack(name: "Samples", kind: .audio, mixerPreset: "lofi-tape"),
+            SongSkeletonTrack(name: "Vinyl FX", kind: .audio),
+        ],
+        defaultSections: [
+            SkeletonSection(name: "Intro", bars: 8),
+            SkeletonSection(name: "Loop A", bars: 16),
+            SkeletonSection(name: "Loop B", bars: 16),
+            SkeletonSection(name: "Loop A", bars: 16),
+            SkeletonSection(name: "Outro", bars: 8),
+        ])
 }
 
 // MARK: - Result
@@ -316,12 +583,21 @@ extension ProjectStore {
     static let songSkeletonSectionCountRange: ClosedRange<Int> = 1...16
     /// Per-section bar bounds for a custom `sections` override.
     static let songSkeletonSectionBarsRange: ClosedRange<Int> = 1...64
-    /// Max section-name length (a guide-clip label, not prose).
+    /// Max section-name length (a guide-clip label, not prose). Also the bound
+    /// for a custom roster's TRACK names — one home deliberately, so the two
+    /// label bounds can never drift apart (the MCP schema pins 40 for both).
     static let songSkeletonSectionNameMaxLength = 40
+    /// Track-count bounds for a custom `tracks` roster override. The ceiling is
+    /// generous (a big session roster) but finite: the roster is created inside
+    /// ONE undoable edit, so an unbounded array would be an unbounded edit.
+    /// The "Arrangement" guide track is NOT counted here — it is appended on
+    /// top of the roster, always, so the real ceiling is 24 + 1 tracks.
+    static let songSkeletonTrackCountRange: ClosedRange<Int> = 1...24
 
     /// Scaffolds a working session for `genre` in ONE undoable edit
     /// ("Song Skeleton '<GenreDisplayName>'"): sets the tempo, appends the
-    /// genre's named tracks (with their mixer presets pre-applied as fresh
+    /// roster's named tracks (the genre's, or the caller's `tracks` override —
+    /// with their mixer presets pre-applied as fresh
     /// chains), appends an INSTRUMENT "Arrangement" guide track carrying one
     /// contiguous empty MIDI clip per section (named per section, `startBeat` =
     /// running sum, `lengthBeats` = bars × 4), drops a real SESSION MARKER at
@@ -345,21 +621,40 @@ extension ProjectStore {
     /// alongside the new one (no dedupe) and sorts FIRST, since the merge is
     /// `markers + new` and the shared sort breaks ties by current index.
     ///
+    /// ROSTER OVERRIDE (`tracks`): replaces THE GENRE ROSTER, and ONLY that.
+    /// The "Arrangement" guide track is ALWAYS appended LAST regardless — an
+    /// override can never suppress it, reorder it, or displace it from last
+    /// position, because producing that beat map (a clip and a real session
+    /// marker per section) is the macro's entire reason to exist. So
+    /// `SongSkeletonResult.tracks`' documented order — roster first, the
+    /// Arrangement track last — holds for every call, overridden or not. A
+    /// caller roster may itself contain a track NAMED "Arrangement": names are
+    /// not ids (this method already tolerates duplicates), so it is simply a
+    /// roster track and the real guide track still lands after it. Not
+    /// special-cased, not rejected. `genre` stays REQUIRED even under a full
+    /// override — it still supplies everything the caller did not override
+    /// (the default tempo today) and keeps the wire contract stable.
+    ///
     /// Guards run OUTSIDE the edit body (the `applyMixerPreset` precedent):
     ///  - unknown `genre` → `songSkeletonGenreNotFound` whose message lists every
     ///    valid genre name;
     ///  - out-of-range `tempoBPM` (20...400) → `invalidSongSkeleton`;
     ///  - a bad `sections` override (count, name length, bar count) →
-    ///    field-named `invalidSongSkeleton`.
+    ///    field-named `invalidSongSkeleton`;
+    ///  - a bad `tracks` roster (count 1...24, name length, a `.bus` kind, an
+    ///    unresolvable `mixerPreset` — whose message lists every valid preset)
+    ///    → field-named `invalidSongSkeleton`.
     /// The whole scaffold publishes through a SINGLE `performEdit` snapshot — the
     /// tempo and loop mutations fold in via `applyTempoChange` / `applyLoopRegion`
     /// (which do NOT open their own edits) rather than the public `setTempo` /
     /// `setLoop` (which would each journal a separate undo step). `tempoBPM` nil
-    /// means the genre default; `sections` nil means the genre's default layout.
+    /// means the genre default; `sections` nil means the genre's default layout;
+    /// `tracks` nil means the genre's default roster.
     @discardableResult
     public func applySongSkeleton(genre genreID: String,
                                   tempoBPM: Double? = nil,
-                                  sections: [SkeletonSection]? = nil) throws -> SongSkeletonResult {
+                                  sections: [SkeletonSection]? = nil,
+                                  tracks: [SongSkeletonTrack]? = nil) throws -> SongSkeletonResult {
         // Genre guard — message lists every valid name (the mixerPresetNotFound
         // precedent).
         guard let genre = SongSkeletonCatalog.genre(named: genreID) else {
@@ -399,16 +694,57 @@ extension ProjectStore {
             }
         }
 
+        // Roster: caller's override else the genre default, validated field by
+        // field the same way `sections` is — and validated on the EFFECTIVE
+        // roster, so the catalog is held to exactly the contract a caller is.
+        // This override replaces the GENRE ROSTER ONLY; the Arrangement guide
+        // track below is appended unconditionally and is not reachable from
+        // here (that is the whole safety argument — see the doc comment).
+        let effectiveRoster = tracks ?? genre.tracks
+        guard Self.songSkeletonTrackCountRange.contains(effectiveRoster.count) else {
+            throw ProjectError.invalidSongSkeleton(
+                "tracks must have between \(Self.songSkeletonTrackCountRange.lowerBound) and "
+                + "\(Self.songSkeletonTrackCountRange.upperBound) entries — got \(effectiveRoster.count)")
+        }
+        for (i, spec) in effectiveRoster.enumerated() {
+            let trimmed = spec.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, spec.name.count <= Self.songSkeletonSectionNameMaxLength else {
+                throw ProjectError.invalidSongSkeleton(
+                    "tracks[\(i)].name must be a non-empty string of at most "
+                    + "\(Self.songSkeletonSectionNameMaxLength) characters")
+            }
+            // v1 skeletons never make buses: a skeleton's job is playable parts
+            // plus the guide track, and a bus with nothing routed into it is
+            // dead weight the caller then has to clean up. Rejected by name
+            // rather than silently coerced to `.audio`.
+            guard spec.kind == .instrument || spec.kind == .audio else {
+                throw ProjectError.invalidSongSkeleton(
+                    "tracks[\(i)].kind must be 'instrument' or 'audio' — got "
+                    + "'\(spec.kind.rawValue)'; v1 skeletons never create buses "
+                    + "(add one afterwards with track.add if you need it)")
+            }
+            // The message LISTS every valid preset (the songSkeletonGenreNotFound
+            // precedent) so one round trip teaches the whole vocabulary.
+            if let presetName = spec.mixerPreset,
+               MixerPresetCatalog.preset(named: presetName) == nil {
+                let valid = MixerPresetCatalog.names.joined(separator: ", ")
+                throw ProjectError.invalidSongSkeleton(
+                    "tracks[\(i)].mixerPreset is unknown: '\(presetName)' — valid: \(valid)")
+            }
+        }
+
         // Build the roster tracks with fresh preset chains — NO model mutation
         // yet (everything is staged, then published in one edit below).
         var rosterTracks: [Track] = []
         var trackRefs: [SongSkeletonResult.TrackRef] = []
-        for spec in genre.tracks {
+        for spec in effectiveRoster {
             var effects: [EffectDescriptor] = []
             if let presetName = spec.mixerPreset {
-                // Reuse the mixer-preset chain machinery directly (macro-b): a
-                // catalog-integrity test guarantees this never fails, but we throw
-                // the same listing error rather than crash if the catalogs drift.
+                // Reuse the mixer-preset chain machinery directly (macro-b). The
+                // up-front roster guard above already rejected an unresolvable
+                // preset with a field-named error, so this branch is unreachable
+                // — it stays as the total-function fallback (the alternative is a
+                // force-unwrap that would CRASH if the catalogs ever drift).
                 guard let preset = MixerPresetCatalog.preset(named: presetName) else {
                     let valid = MixerPresetCatalog.names.joined(separator: ", ")
                     throw ProjectError.mixerPresetNotFound(
@@ -464,13 +800,18 @@ extension ProjectStore {
         // of the scaffold. The merge re-applies the SHARED `markersSortedByBeat`
         // funnel (no second sort here) so pre-existing markers survive in the
         // store's canonical order rather than being appended after them.
+        //
+        // `self.tracks` is spelled out here because the `tracks:` ROSTER OVERRIDE
+        // parameter shadows the store's `tracks` property inside this body. The
+        // two are different things and the compiler would reject the mistake, but
+        // an explicit `self.` says WHICH one at a glance.
         performEdit("Song Skeleton '\(genre.displayName)'") {
-            tracks.append(contentsOf: rosterTracks)
-            tracks.append(arrangementTrack)
+            self.tracks.append(contentsOf: rosterTracks)
+            self.tracks.append(arrangementTrack)
             markers = Self.markersSortedByBeat(markers + sectionMarkers)
             applyTempoChange(tempo)
             applyLoopRegion(enabled: true, startBeat: loopStart, endBeat: loopEnd)
-            engine?.tracksDidChange(tracks)
+            engine?.tracksDidChange(self.tracks)
         }
 
         return SongSkeletonResult(

@@ -103,10 +103,18 @@ there.
   the master chain (before the eq/limiter; its `gainLinear` runs 0-4, about
   +12 dB) and take the rest there. The fader is a trim, not a makeup stage.
   `mixer_apply_preset`
-  drops a curated, ready-made chain (`drum-bus-glue`, `vocal-presence`,
-  `bass-tight`, `master-glue`, `warm-keys`, `clean-boost`) onto a strip in
-  one step, replacing its current chain wholesale — good for a fast starting
-  point before hand-tuning with `fx_set_param`.
+  drops a curated, ready-made chain onto a strip in one step, replacing its
+  current chain wholesale — good for a fast starting point before hand-tuning
+  with `fx_set_param`. **Twelve presets:** `drum-bus-glue`, `vocal-presence`,
+  `bass-tight`, `master-glue`, `warm-keys`, `clean-boost`, `bass-round`,
+  `guitar-crunch`, `acoustic-sparkle`, `horn-section`, `drum-room`,
+  `lofi-tape`. ⭐ **The two bass presets are a deliberate PAIR, not
+  duplicates** — `bass-tight` is 4:1 at a 5 ms attack (the bass sits
+  rock-steady under a dense mix); `bass-round` is 2.5:1 at 20 ms with a
+  low-shelf lift, so each note blooms before it's caught. Reach for
+  `bass-round` on blues, jazz, soul, folk, reggae and anything played with
+  feel; reaching for `bass-tight` there is what flattened a blues bass in a
+  real session.
 - **Hosted AU insert effects.** The master chain hosts BUILT-IN effects only
   (never a plugin), but a bus/track insert you're using for mix glue can be a
   hosted Audio Unit — `fx_set_param` only works by name for built-in kinds,

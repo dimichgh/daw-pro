@@ -90,6 +90,15 @@ public struct ProjectOverview: Codable, Sendable, Equatable {
     }
 
     public struct AutomationLane: Codable, Sendable, Equatable {
+        /// The addressable id — the same one `automation.setPoints` /
+        /// `automation.setLaneEnabled` / `automation.removeLane` take. Carried
+        /// for exactly the reason `Effect.id` above is: WITHOUT it the only
+        /// route to an existing lane's id was calling `automation.addLane`
+        /// (whose no-op-on-duplicate reply echoes the existing lane), so
+        /// reading a lane required WRITING to the project. Same defect as the
+        /// effects one, one layer up — and `Clip` below has always carried
+        /// its id.
+        public var id: UUID
         public var target: String
         public var enabled: Bool
         public var pointCount: Int
@@ -256,6 +265,7 @@ extension ProjectStore {
             clips: track.clips.map { overviewClip($0, takeGroups: track.takeGroups) },
             automation: track.automation.map {
                 ProjectOverview.AutomationLane(
+                    id: $0.id,
                     target: overviewTargetName($0.target),
                     enabled: $0.isEnabled,
                     pointCount: $0.points.count
