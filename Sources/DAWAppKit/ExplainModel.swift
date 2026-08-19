@@ -271,6 +271,15 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// surface — no violet.
     case polySynthEditor
 
+    // MARK: Sampler editor (m26-i)
+    /// The built-in SAMPLER editor card — the TUNE affordance on the instrument
+    /// picker's Sampler row AND the card it opens share this ONE id, the same
+    /// shared-control + honest-scope rules the poly synth's entry follows: the
+    /// globals, the zone map and the per-zone inspector are one coherent
+    /// surface, so per-knob entries would fake curation. NOT an AI surface —
+    /// no violet.
+    case samplerEditor
+
     // MARK: AI panels (violet affordances — Rule 3)
     case aiCopilot
     case aiSketchpad
@@ -608,6 +617,11 @@ public enum ExplainCatalog {
         .polySynthEditor: ExplainEntry(
             title: "Poly Synth Controls",
             body: "The tuning panel for the built-in synth. Pick its basic wave shape, set how each note fades in and out, brighten or darken the tone with the filter, and set its level. Drag a knob to hear the change live; double-click resets it."),
+
+        // MARK: Sampler editor (m26-i)
+        .samplerEditor: ExplainEntry(
+            title: "Sampler Controls",
+            body: "The tuning panel for the built-in sampler. The top row sets the whole instrument; the list below shows every sample and which keys it answers to. Pick one to change its tuning, envelope, level and looping. Drag a knob and let go to apply."),
 
         // MARK: AI panels (violet affordances — Rule 3)
         .aiCopilot: ExplainEntry(

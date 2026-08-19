@@ -1592,9 +1592,73 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// eyeballing a zone's directory.
     public var displayName: String?
 
+    /// Continuous-expression depth for the MOD WHEEL (CC1) and BREATH (CC2)
+    /// controllers, 0...1 — ADDITIVE-OPTIONAL, nil = 0 = OFF, which is the
+    /// pre-m27 behaviour byte-for-byte.
+    ///
+    /// Why these two need an opt-in when CC11 does not (the trap this param
+    /// exists to avoid): `MIDIControllerType.neutralDefault` is **127 for
+    /// CC11** but **0 for CC1 and CC2**, and the schedule's chase prefix
+    /// injects that neutral at every block anchor when a lane of the type is
+    /// present. An unconditional CC1/CC2 attenuator would therefore render
+    /// SILENCE from block start until the lane's first authored point.
+    /// CC11 attenuates unconditionally because its neutral is full scale;
+    /// CC1/CC2 attenuate only as far as this depth allows.
+    ///
+    /// The law, with d = this depth and dyn = min(CC1, CC2) normalised (each
+    /// defaults to FULL internally until its first event arrives — an
+    /// untouched controller is not a closed one):
+    ///
+    ///     amplitude multiplier = (CC11/127) × (1 − d × (1 − dyn))
+    ///
+    /// d = 0 collapses the right factor to exactly 1.0, an IEEE identity.
+    public var expressionModDepth: Double?
+
+    /// m27 leg C — how far the expression controller sweeps a per-voice
+    /// low-pass cutoff, 0...1. ADDITIVE-OPTIONAL, nil = 0 = OFF, and OFF means
+    /// the filter is skipped entirely on the render path (not run at unity),
+    /// so a project that never opts in is byte-identical to pre-m27.
+    ///
+    /// This is the answer for a SINGLE-LAYER library — one that has no pp/mf/ff
+    /// samples to crossfade between (the overwhelming majority of free SFZ
+    /// instruments, including every one on this machine). A real wind or bowed
+    /// instrument gets BRIGHTER as it is played harder, not merely louder;
+    /// with one recorded layer the only honest way to move brightness is a
+    /// filter. It is a 6 dB/oct one-pole, deliberately gentle — a steeper
+    /// filter starts sounding like a synth sweep rather than a player.
+    ///
+    /// Cutoff is interpolated LOGARITHMICALLY (the perceptual axis) between
+    /// `expressionFilterLowHz` at controller 0 and `expressionFilterHighHz` at
+    /// controller 127, scaled by this depth:
+    ///
+    ///     cutoff = low × (high/low)^(1 − depth × (1 − controller/127))
+    ///
+    /// At depth 0 the exponent is 1 for every controller value — cutoff pinned
+    /// wide open — which is why 0 can be implemented as "skip".
+    public var expressionFilterDepth: Double?
+    /// Which controller drives the leg-C filter: nil = 11 (expression). CC1
+    /// and CC2 are the other sensible choices for a breath patch, and unlike
+    /// the amplitude path they need no depth opt-in here, because a filter
+    /// sitting at its low cutoff is dark, not SILENT — the neutral-0 hazard
+    /// that gates `expressionModDepth` does not apply to brightness.
+    public var expressionFilterCC: Int?
+
     public static let attackRange: ClosedRange<Double> = 0...1
     public static let releaseRange: ClosedRange<Double> = 0.001...8
     public static let gainRange: ClosedRange<Double> = 0...1
+    /// m27: 0 = off (the nil default), 1 = CC1/CC2 attenuate to silence.
+    public static let expressionModDepthRange: ClosedRange<Double> = 0...1
+    /// m27 leg C: 0 = off (the nil default), 1 = the full low→high sweep.
+    public static let expressionFilterDepthRange: ClosedRange<Double> = 0...1
+    /// Cutoff at controller 0 with depth 1 — dark but still clearly the
+    /// instrument, not a mute. Documented as a constant rather than exposed:
+    /// two more optionals would multiply the round-trip matrix for a knob
+    /// nobody has yet asked to turn.
+    public static let expressionFilterLowHz: Double = 400
+    /// Cutoff at controller 127 — above the top of most sampled material, so
+    /// full expression is effectively unfiltered (a one-pole at 20 kHz is
+    /// −1 dB at 10 kHz).
+    public static let expressionFilterHighHz: Double = 20_000
 
     public init(
         zones: [SamplerZone] = [],
@@ -1603,7 +1667,10 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         release: Double = 0.05,
         gain: Double = 0.8,
         sourcePath: String? = nil,
-        displayName: String? = nil
+        displayName: String? = nil,
+        expressionModDepth: Double? = nil,
+        expressionFilterDepth: Double? = nil,
+        expressionFilterCC: Int? = nil
     ) {
         self.zones = zones
         self.oneShot = oneShot
@@ -1612,6 +1679,17 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         self.gain = gain.clamped(to: Self.gainRange)
         self.sourcePath = sourcePath
         self.displayName = displayName
+        self.expressionModDepth = expressionModDepth.map {
+            $0.clamped(to: Self.expressionModDepthRange)
+        }
+        self.expressionFilterDepth = expressionFilterDepth.map {
+            $0.clamped(to: Self.expressionFilterDepthRange)
+        }
+        // A controller number outside 0...127 is not a controller; clamp
+        // rather than reject, matching every other field here.
+        self.expressionFilterCC = expressionFilterCC.map {
+            $0.clamped(to: MIDIControllerType.cc(controller: 0).valueRange)
+        }
     }
 }
 
@@ -1635,6 +1713,72 @@ public struct SamplerParams: Codable, Sendable, Equatable {
 /// release. A looping zone's voices are never one-shot (loopMode wins over
 /// `oneShot` — see SamplerInstrument).
 public enum SamplerLoopMode: String, Codable, Sendable { case sustain, continuous }
+
+/// SFZ dynamic-layer crossfade for one zone (m27 leg B) — the industry
+/// technique for "blowing harder": a library records pp/mf/ff SEPARATELY and a
+/// continuous value fades between them, so the brightness change comes from
+/// differently-PLAYED samples rather than from a filter shaping one sample.
+///
+/// Two independent domains, exactly as SFZ defines them, and a zone may use
+/// either or both (their gains multiply):
+///  · CC domain (`xfin_locc<N>`/`xfin_hicc<N>`/`xfout_locc<N>`/`xfout_hicc<N>`)
+///    — CONTINUOUS: re-evaluated while the note sounds, so a held note really
+///    does change layer as the controller moves.
+///  · VELOCITY domain (`xfin_lovel`/`xfin_hivel`/`xfout_lovel`/`xfout_hivel`)
+///    — fixed at note-on, because velocity is. It smooths layer transitions
+///    ACROSS notes; it cannot change anything WITHIN one.
+///
+/// `xfin_*` fades the zone IN as the value rises through [lo, hi]; `xfout_*`
+/// fades it OUT. Absent bounds mean "no fade in this direction" and resolve to
+/// a gain of exactly 1.0, which is what keeps a zone without these opcodes
+/// bit-identical to pre-m27.
+///
+/// Curve: SFZ's `xf_cccurve`/`xf_velcurve` default is **power** (equal-power
+/// RMS), verified against sfzformat.com, and that is what the engine
+/// implements — `sqrt` of the linear ramp. No library on this machine
+/// overrides it, and `sqrt(1.0) == 1.0`, so the identity above holds either
+/// way. The curve opcodes themselves are not parsed; they are reason-coded
+/// into the import report's ignored tally like every other out-of-subset
+/// opcode, so a file that asks for `gain` is not silently given `power`.
+public struct SamplerCrossfade: Codable, Sendable, Equatable {
+    /// CC number driving the CC-domain crossfade; nil = velocity-only.
+    public var controller: Int?
+    /// CC-domain fade-in / fade-out bounds, raw MIDI 0...127.
+    public var ccInLo: Int?
+    public var ccInHi: Int?
+    public var ccOutLo: Int?
+    public var ccOutHi: Int?
+    /// Velocity-domain bounds, raw MIDI 0...127.
+    public var velInLo: Int?
+    public var velInHi: Int?
+    public var velOutLo: Int?
+    public var velOutHi: Int?
+
+    /// True when nothing here can ever change a gain — the mapper drops such a
+    /// crossfade rather than persisting an inert object.
+    public var isNoOp: Bool {
+        (controller == nil || (ccInLo == nil && ccInHi == nil
+                               && ccOutLo == nil && ccOutHi == nil))
+            && velInLo == nil && velInHi == nil && velOutLo == nil && velOutHi == nil
+    }
+
+    public init(controller: Int? = nil,
+                ccInLo: Int? = nil, ccInHi: Int? = nil,
+                ccOutLo: Int? = nil, ccOutHi: Int? = nil,
+                velInLo: Int? = nil, velInHi: Int? = nil,
+                velOutLo: Int? = nil, velOutHi: Int? = nil) {
+        let range = 0...127
+        self.controller = controller.map { $0.clamped(to: range) }
+        self.ccInLo = ccInLo.map { $0.clamped(to: range) }
+        self.ccInHi = ccInHi.map { $0.clamped(to: range) }
+        self.ccOutLo = ccOutLo.map { $0.clamped(to: range) }
+        self.ccOutHi = ccOutHi.map { $0.clamped(to: range) }
+        self.velInLo = velInLo.map { $0.clamped(to: range) }
+        self.velInHi = velInHi.map { $0.clamped(to: range) }
+        self.velOutLo = velOutLo.map { $0.clamped(to: range) }
+        self.velOutHi = velOutHi.map { $0.clamped(to: range) }
+    }
+}
 
 public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
     public let id: UUID
@@ -1710,6 +1854,9 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
     /// clamps both into the real playable span.
     public var loopStart: Int?
     public var loopEnd: Int?
+    /// Dynamic-layer crossfade (m27 leg B). nil = hard velocity/pitch
+    /// switching, the pre-m27 law byte-for-byte. See `SamplerCrossfade`.
+    public var crossfade: SamplerCrossfade?
 
     public static let pitchRange: ClosedRange<Int> = 0...127
     /// m19-b (A5): 0...2 (+6 dB), relaxed from 0...1 — decode-safe for every
@@ -1752,7 +1899,8 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
         release: Double? = nil,
         loopMode: SamplerLoopMode? = nil,
         loopStart: Int? = nil,
-        loopEnd: Int? = nil
+        loopEnd: Int? = nil,
+        crossfade: SamplerCrossfade? = nil
     ) {
         self.id = id
         self.audioFileURL = audioFileURL
@@ -1807,6 +1955,10 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
         let ls = loopStart.map { max(0, $0) }
         self.loopStart = ls
         self.loopEnd = loopEnd.map { max($0, (ls ?? 0) + 1) }   // raise, never swap
+        // An all-nil crossfade cannot change a gain; storing it would only add
+        // a persisted object that means nothing (and would break the
+        // omit-when-nil zone shape the wire tests pin).
+        self.crossfade = crossfade.flatMap { $0.isNoOp ? nil : $0 }
     }
 
     public func contains(pitch: Int) -> Bool { pitch >= minPitch && pitch <= maxPitch }

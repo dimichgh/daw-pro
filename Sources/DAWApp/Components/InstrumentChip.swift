@@ -27,8 +27,36 @@ struct InstrumentChip: View {
     /// Opens the picker for this track.
     var onOpen: () -> Void
 
-    private var name: String { InstrumentPickerModel.displayName(for: descriptor) }
+    /// The chip's label. For a `.sampler` track that carries m26-h provenance
+    /// this is the IMPORTED LIBRARY's name ("Tenor Sax") rather than the
+    /// generic kind label — "which bass is this?" was previously answerable
+    /// only by dumping a ~1 MB snapshot and eyeballing a zone's directory, and
+    /// every sampler track in a session read the same word.
+    ///
+    /// ⚠️ `displayName` is a FILE STEM and therefore NOT unique — two
+    /// `Bass.sfz` in different folders collide. `sourcePath` is what
+    /// disambiguates, so it rides the tooltip (see `helpText`) rather than
+    /// being dropped.
+    ///
+    /// Falls back to the shared `InstrumentPickerModel.displayName` for every
+    /// other kind AND for a sampler with no provenance (a zone list built over
+    /// the wire, or a project saved before m26-h) — a blank chip would be worse
+    /// than a generic one.
+    private var name: String {
+        if kind == .sampler, let library = descriptor?.sampler?.displayName,
+           !library.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return library
+        }
+        return InstrumentPickerModel.displayName(for: descriptor)
+    }
     private var kind: InstrumentDescriptor.Kind { (descriptor ?? .default).kind }
+
+    /// The imported library's full path, when this track has one — the
+    /// disambiguator for two same-named libraries.
+    private var librarySourcePath: String? {
+        guard kind == .sampler else { return nil }
+        return descriptor?.sampler?.sourcePath
+    }
 
     /// The instrument-family glyph: a synth wave for built-ins, keys for a sound
     /// bank, a plugin puzzle-piece for a hosted Audio Unit.
@@ -117,6 +145,12 @@ struct InstrumentChip: View {
     private var helpText: String {
         if let failureReason { return "\(name) — \(failureReason). Click to pick another." }
         if isPending { return "\(name) — loading… Click to change the instrument." }
+        // The library's PATH is what tells two same-named libraries apart, so
+        // an imported sampler track's tooltip carries it (m26-h).
+        if let librarySourcePath {
+            return "\(name) — sample library at \(librarySourcePath). "
+                 + "Click to change this track's instrument."
+        }
         return "\(name) — click to change this track's instrument."
     }
 }

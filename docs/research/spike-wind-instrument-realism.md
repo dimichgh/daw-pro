@@ -7,6 +7,25 @@
 
 ---
 
+## 0.0 ⚠️ EMPIRICAL CORRECTION (2026-08-18, AFTER this doc was written) — §3.1/§7's instrument ranking is FALSIFIED
+
+**The user swapped the GM sound bank for an SFZ tenor-sax library and the part now plays continuously — with NO legato authoring, NO overlap, NO CC work.** That directly contradicts this doc's repeated claim that a better sample library "does not by itself fix the discreteness."
+
+**Measured from the live project's own snapshot:** the imported library gives the sax **46 zones, all `loopMode: "continuous"`, with `release: 0.5`** (47 zones at 0.5 s; the remainder 0.15/0.05). At the project's 72 BPM a beat is 833 ms, so a **500 ms release = 0.60 beats** — and the field report's measured gaps were 0.25 beats (208 ms) and 0.5 beats (417 ms). **The release tail covers both gaps entirely.**
+
+**So the mechanism is unchanged and the conclusion inverts.** Every note-on still starts a fresh voice — §3.1 is correct about that. But the previous note is *still sounding through its release* when the next attack lands, so the transient is masked and the silence is filled. **That is the SAME masking §1.1 prescribes via note overlap, delivered from the patch side instead of the MIDI side.**
+
+⭐⭐⭐ **THE REASONING ERROR, NAMED SO IT IS NOT REPEATED: this doc treated "a retrigger occurs" as the audible defect. The audible defect is an *UNMASKED* retrigger. Release length decides which one you hear, and no part of this research compared release length between the GM DLS patch and a real library — it reasoned from voice-allocation alone and never checked the envelope.** A GM patch with a short release exposes every retrigger; a well-sampled library with a 0.5 s release hides them without any help from the MIDI.
+
+**Revised ranking for a "discrete-sounding" wind part:**
+1. **Check the patch's release first.** It is one snapshot read, and if the release is long the problem may not exist. This is now the FIRST thing to try, not the third.
+2. Legato authoring (overlap/gate) — still valuable, and still the ONLY lever when the patch has a short release. **Every GM `.soundBank` track is in that category, which is the app's default**, so this is not obviated.
+3. CC11/CC1/bend shaping — orthogonal to both; it addresses flatness, not discreteness.
+
+⚠️ **What this does NOT change:** overlap still only MASKS a retrigger, never removes it (§3.1), and true legato still needs a scripted AU or engine work. The ceiling is real — the correction is about which lever reaches it cheapest.
+
+---
+
 ## 0. Executive summary — the premise needs a correction first
 
 The task described the instrument as "a General MIDI sound bank... [that] exposes NO parameter surface at all — no amplitude envelope, no filter — so there is nothing on the patch side to soften an attack." **Half of that is right and half is wrong, and the wrong half changes the whole plan.**
@@ -27,7 +46,7 @@ One caveat carried through the rest of this doc: whether the *specific* stock ma
 | 2 | **No CC11/CC2 dynamic contour at all** — flat, un-shaped loudness on every note. If a future pass DOES author CC11 without knowing it defaults to 127, any lane that peaks below 127 is a *cut*, not a shape (confirmed in our own model: `Model.swift:294-305`, `case 11: return 127 // expression (full)`) | `clip_set_controller_lane` exists, unused for generated wind parts | **Tier 0** |
 | 3 | **No CC1 vibrato, no pitch-bend gestures** (scoops/falls/doits) — the sax has zero of the pitch motion that signals a human embouchure | Same tool, unused; bend already wired end-to-end (fixed ±2 st on the custom sampler; range unverified but unconfigured on AUSampler — see §2.4) | **Tier 0**, with one headroom caveat (§2.4/§6) |
 | 4 | **No tongued/slurred distinction, no breath rests** — a real player's phrase has texture (some attacks harder, some notes blend); this part has neither | Pure MIDI-authoring gap, nothing engine-side blocks it | **Tier 0** |
-| 5 | **Instrument quality itself** — GM DLS bank sax is a decades-old, generically-authored patch (single/few samples per octave, pitch-shifted across range, no velocity crossfade, unverified modulator depth) | Forum consensus (§3), architecture confirms no per-patch shaping exists to add on top even if we wanted to | **Tier 2** — needs a better sample source, not just better MIDI |
+| 5 | **Instrument quality itself** — GM DLS bank sax is a decades-old, generically-authored patch (single/few samples per octave, pitch-shifted across range, no velocity crossfade, unverified modulator depth) | Forum consensus (§3), architecture confirms no per-patch shaping exists to add on top **for a `.soundBank` track** (corrected — `.sampler` does expose a full per-zone ADSR; see §3.3) | **Tier 2** — needs a better sample source, not just better MIDI |
 
 Sections 1-2 are the practitioner research (what real playing looks like, numerically, where numbers exist). Section 3 is the DAW Pro-specific "what's actually broken and where" analysis. Section 4 surveys better instruments. Section 5 surveys how other tools automate this. Section 6 is the recommended parameter table. Section 7 is the actionable takeaways.
 
@@ -114,9 +133,17 @@ Traced end-to-end: `AUHostRegistry.swift` synthesizes a real `AUSampler` (`kAudi
 
 (Contrast: DAW Pro's *other* built-in path — the custom `SamplerInstrument` used for imported SFZ libraries — is deliberately more limited: it honors only CC64 sustain and its fixed ±2-st pitch bend, and drops every other CC by design (`SamplerInstrument.swift:754-758`, comment: "every other CC is deliberately ignored here... hosted AUs receive them all"). **This limitation does not apply to the GM sound-bank track the field report is about** — it would matter only if the fix path in §4 leads to importing a plain SFZ library rather than hosting a scripted AU instrument. Worth being precise about which of DAW Pro's three instrument kinds (`.soundBank` / `.sampler` / `.audioUnit`) is in play before assuming what CC surface is available.)
 
-### 3.3 Confirmed: no per-patch envelope/filter exists to expose, for either instrument kind (fixable: no, not from the MIDI/FX side)
+### 3.3 Confirmed: no per-patch envelope/filter exists to expose **on a `.soundBank` track** (fixable: no, not from the MIDI/FX side)
+
+⚠️ **This heading previously read "for either instrument kind" and that was FALSE — corrected 2026-08-18 after the user asked whether the sampler is tunable.** The body below was always scoped correctly to `.soundBank`; the heading over-generalized it to `.sampler` as well, and the heading is what gets scanned. Read literally it would have argued *against* the change that actually fixed the user's sax — an imported SFZ whose zones carry `release: 0.5`. **`.sampler` is deeply tunable; `.soundBank` is not. Never state a shaping limit without naming which of the three instrument kinds it applies to.**
 
 `SoundBankConfig` has no envelope fields (§0). Even DAW Pro's own custom sampler's per-zone ADSR (`SamplerZone`, used for imported SFZ libraries, m19-b) is **not** exposed for `.soundBank` tracks, which read whatever attack/decay/sustain/release the DLS/SF2 file's own generator data specifies and nothing else. There is genuinely no UI or wire lever here today for a GM-bank instrument.
+
+**What `.sampler` exposes, by contrast (verified in `Sources/DAWCore/Model.swift`, 2026-08-18):** four instrument-level globals — `attack`, `release`, `gain`, `oneShot` — plus roughly twenty per-zone fields including a **full per-zone ADSR** (`attack`/`decay`/`sustain`/`release`), `loopMode`/`loopStart`/`loopEnd`, `tuneCents` (±4800), `pan`, `ampVelTrack`, `gain`, velocity spans, layering `group`, round-robin (`seqLength`/`seqPosition`), and random alternation (`randMin`/`randMax`). There is **no filter** — `cutoffHz`/`resonance` belong to `PolySynthParams`, not to the sampler. Nearly all of it is reachable over the wire via `track.setInstrument {sampler: {…}}` and the three `instrument_*_sampler_*` MCP tools; `zonePatches` merges by zone id, so a global can be tuned on a 309-zone library without touching a zone.
+
+⚠️ **One exception, and it is the one that matters most for a sustained wind part: the three LOOP fields are wire-settable but NOT MCP-settable.** `parseZoneFields` has accepted `loopMode`/`loopStart`/`loopEnd` since m20-g and the engine honours them, but `mcp-server/src/server.ts`'s `samplerZoneSchema` has never exposed them, so **no MCP agent has ever been able to set a loop point** (ROADMAP m26-j). This is not academic here: the SFZ that fixed the user's sax carries `loopMode: "continuous"` on all 46 zones, and a sustaining loop is precisely what lets a held note *keep sounding* instead of decaying through its sample. An agent asked to fix a discrete-sounding wind patch **cannot reach that control today** — only the SFZ import path sets it. Wire capability and agent capability are not the same surface; check both before concluding a knob is unreachable.
+
+**The real gap is the UI, not the model.** Measured the same day: **zero** files under `Sources/DAWApp` reference `SamplerParams`, `SamplerZone`, `tuneCents`, or `ampVelTrack` (positive controls in the same probe: `QuantizeModel` = 2 files, `HumanizeModel` = 2, so the search was working). AU plugins are not a counterexample — `AUParameter` is also 0 in DAWApp, because those open the plugin's *own* window via `plugin_open_ui`. **The sampler is the only instrument kind with a deep parameter set and no editing surface of any kind**, which is the user-side face of field-report finding 10. Everything above is agent-reachable and human-unreachable.
 
 ### 3.4 Available today but unused: FX-side softening (fixable: yes, zero engine work, cheapest possible lever)
 

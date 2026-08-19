@@ -50,7 +50,7 @@ struct VoiceModelImportCommandTests {
         #expect(CommandRouter.allCommands.dropLast().last == "clip.detectPitch")
         // m26-k appended edit.pasteClips at the END (same law).
         #expect(CommandRouter.allCommands.last == "edit.pasteClips")
-        #expect(CommandRouter.allCommands.count == 180)   // 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips)
+        #expect(CommandRouter.allCommands.count == 181)   // 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail)
         // Additive: the rest of the vc.* family is untouched.
         for name in ["vc.sidecarStatus", "vc.sidecarStart", "vc.sidecarStop",
                      "vc.convertVocals", "vc.trainVoice", "vc.listVoices"] {

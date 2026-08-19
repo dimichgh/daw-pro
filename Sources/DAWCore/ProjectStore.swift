@@ -6085,6 +6085,25 @@ public final class ProjectStore {
         return tracks[t].clips[c]
     }
 
+    /// Whether a controller lane of `type` on this clip's track will actually
+    /// reach the sound, and one sentence naming the controller and the reason
+    /// when it will not (m27). nil = it sounds.
+    ///
+    /// Deliberately SEPARATE from `setControllerLane` rather than folded into
+    /// its return: the accept path must keep returning the updated `Clip` (its
+    /// callers, the wire echo and the piano-roll strip, all depend on that),
+    /// and a warning is not a property of a clip. Callers pair the two — the
+    /// wire injects this into the response's `warnings` array, the same idiom
+    /// media import uses for a successful-but-degraded result.
+    ///
+    /// Read-only and non-throwing: an unknown clip simply has nothing to warn
+    /// about, and this must never be able to fail an edit that succeeded.
+    public func controllerLaneWarning(clipID: UUID, type: MIDIControllerType) -> String? {
+        guard let (t, _) = locateClip(clipID) else { return nil }
+        return MIDIControllerRouting.inertLaneWarning(
+            for: type, instrument: tracks[t].instrument)
+    }
+
     /// Removes the clip's controller lane of `type` (m16-b). MIDI clips only
     /// (`notAMIDIClip` naming `clip.removeControllerLane` otherwise — m16-g
     /// controller-specific copy). If the clip has no lane of that type, throws

@@ -44519,6 +44519,37 @@ registerTool(
   },
   async ({ trackId, armed }) => toToolResult(() => bridge.send("track.setArm", { trackId, armed }))
 );
+var samplerCrossfadeSchema = external_exports.object({
+  controller: external_exports.number().int().min(0).max(127).optional().describe(
+    "CC number driving the CONTINUOUS crossfade domain (SFZ `xfin_locc<N>`/`xfin_hicc<N>`/`xfout_locc<N>`/`xfout_hicc<N>`) \u2014 re-evaluated while a note SOUNDS, so a held note really does change layer as this controller moves. Omitted = the CC domain is off; the velocity-domain bounds below (if any) still apply."
+  ),
+  ccInLo: external_exports.number().int().min(0).max(127).optional().describe(
+    "CC value (raw MIDI 0-127, SFZ `xfin_locc`) where this zone starts fading IN. Only meaningful with `controller` set. Together with `ccInHi` this zone's gain ramps 0\u21921 (equal-power curve) as the controller rises through [ccInLo, ccInHi]."
+  ),
+  ccInHi: external_exports.number().int().min(0).max(127).optional().describe(
+    "CC value (raw MIDI 0-127, SFZ `xfin_hicc`) where this zone finishes fading in. See `ccInLo`."
+  ),
+  ccOutLo: external_exports.number().int().min(0).max(127).optional().describe(
+    "CC value (raw MIDI 0-127, SFZ `xfout_locc`) where this zone starts fading OUT. Together with `ccOutHi` this zone's gain ramps 1\u21920 as the controller rises through [ccOutLo, ccOutHi]."
+  ),
+  ccOutHi: external_exports.number().int().min(0).max(127).optional().describe(
+    "CC value (raw MIDI 0-127, SFZ `xfout_hicc`) where this zone finishes fading out. See `ccOutLo`."
+  ),
+  velInLo: external_exports.number().int().min(0).max(127).optional().describe(
+    "Note-on velocity (raw MIDI 0-127, SFZ `xfin_lovel`) where this zone starts fading IN. FIXED AT NOTE-ON, unlike the CC domain above \u2014 this smooths layer choice ACROSS successive notes and cannot change anything within one held note. Together with `velInHi` this zone's gain ramps 0\u21921 as note-on velocity rises through [velInLo, velInHi]."
+  ),
+  velInHi: external_exports.number().int().min(0).max(127).optional().describe(
+    "Note-on velocity (raw MIDI 0-127, SFZ `xfin_hivel`) where this zone finishes fading in. See `velInLo`."
+  ),
+  velOutLo: external_exports.number().int().min(0).max(127).optional().describe(
+    "Note-on velocity (raw MIDI 0-127, SFZ `xfout_lovel`) where this zone starts fading OUT. Together with `velOutHi` this zone's gain ramps 1\u21920 as note-on velocity rises through [velOutLo, velOutHi]."
+  ),
+  velOutHi: external_exports.number().int().min(0).max(127).optional().describe(
+    "Note-on velocity (raw MIDI 0-127, SFZ `xfout_hivel`) where this zone finishes fading out. See `velOutLo`."
+  )
+}).optional().describe(
+  "Dynamic-layer crossfade for THIS zone \u2014 the SFZ pp/mf/ff-layer technique: fade this zone's gain in/out against a CC stream and/or note-on velocity instead of a hard keyzone/velocity-range switch, so a library with separately-recorded dynamic layers blends between them rather than clicking from one to the next. Two INDEPENDENT domains, and a zone may use either or both (their gains multiply): the CC domain (`controller` + `ccInLo`/`ccInHi`/`ccOutLo`/`ccOutHi`) re-evaluates continuously while a note holds; the velocity domain (`velInLo`/`velInHi`/`velOutLo`/`velOutHi`) is fixed at note-on. Any bound you omit means \"no fade in that direction\" and resolves to a gain of exactly 1.0 \u2014 so a zone with every field omitted (the default) is bit-identical to having no crossfade at all. Curve is SFZ's documented default, power (equal-power / constant loudness through the fade); there is no way to select a different curve. Typical use: give the LOUD/BRIGHT layer's zone `ccInLo`/`ccInHi` (or `velInLo`/`velInHi`) to fade it IN as the controller/velocity rises, and give the SOFT/DARK layer's zone the matching `ccOutLo`/`ccOutHi` (or `velOutLo`/`velOutHi`) to fade it OUT over the same span."
+);
 var samplerZoneSchema = external_exports.object({
   path: external_exports.string().min(1).describe(
     "REQUIRED. Absolute file path to this zone's sample audio file (wav/aiff/etc.). The file is copied into the project bundle on project_save, so the project stays portable \u2014 always pass the original source path here, not a bundle-relative one."
@@ -44585,7 +44616,17 @@ var samplerZoneSchema = external_exports.object({
   ),
   release: external_exports.number().min(1e-3).max(8).optional().describe(
     "Per-zone amplitude envelope RELEASE in seconds, 0.001-8: fade-out time after note-off. Overrides the sampler's global `release` for this zone only \u2014 give a piano-like zone a longer tail than the kit around it. Omitted = use the global release."
-  )
+  ),
+  loopMode: external_exports.enum(["sustain", "continuous"]).optional().describe(
+    "Loop this zone's playback across `loopStart`/`loopEnd` instead of playing the sample once start-to-end. \"sustain\": loops while the note continues (held, or held-by-sustain-pedal/CC64), then plays out past `loopEnd` to the sample's real end on release \u2014 the classic library idiom for a stable middle plus a natural tail. \"continuous\": loops straight through release as well, with no tail. LOOPING WINS OVER ONE-SHOT: a zone with `loopMode` set is NEVER treated as one-shot, even when the sampler's global `oneShot` or this zone's own `oneShot` says otherwise \u2014 a loop needs a note-off (or held-through-release) boundary to mean anything, so one-shot is simply not consulted once a loop is set. Omitted = no loop (the pre-existing behavior): the zone plays its span once per trigger."
+  ),
+  loopStart: external_exports.number().int().min(0).optional().describe(
+    "First SOURCE-FILE frame (inclusive) of the loop, in the sample file's own frames \u2014 same convention as `startFrame`. Only takes effect when `loopMode` is also set. Omitted = 0 (loop from the file's start, or from `startFrame` if that's set \u2014 the engine further clamps into the zone's real playable span)."
+  ),
+  loopEnd: external_exports.number().int().min(1).optional().describe(
+    "Last SOURCE-FILE frame of the loop, EXCLUSIVE \u2014 matching `endFrame`'s convention. Only takes effect when `loopMode` is also set. Must exceed `loopStart`: a value at or below it is RAISED to loopStart+1 (never swapped, matching `endFrame`'s own rule), and both clamp to the zone's real playable span. Omitted = the zone's resolved end (its `endFrame`, or the sample's own end)."
+  ),
+  crossfade: samplerCrossfadeSchema
 });
 var samplerSchema = external_exports.object({
   zones: external_exports.array(samplerZoneSchema).optional().describe(
@@ -44602,6 +44643,15 @@ var samplerSchema = external_exports.object({
   ),
   gain: external_exports.number().min(0).max(1).optional().describe(
     "The sampler's overall output level, 0-1, separate from each zone's own `gain` and from the track fader set by track_set_volume. Defaults to 0.8."
+  ),
+  expressionModDepth: external_exports.number().min(0).max(1).optional().describe(
+    "How far CC 1 (mod wheel) and CC 2 (breath) attenuate loudness, 0-1. NIL/0 IS OFF, not neutral-at-full: at 0 the CC1/CC2 attenuator is skipped and CC 11 (expression) alone drives continuous loudness on the built-in Sampler \u2014 clip_set_controller_lane's own description explains why (CC1/CC2's rest value is 0, so attenuating unconditionally would silence a clip until the lane's first point). At 1, an untouched CC1/CC2 (or one driven fully open) has no effect and a fully-closed one silences the voice. Set this above 0 before a CC1/CC2 controller lane will audibly do anything on this track's Sampler. Has no effect on `testTone`/`polySynth`."
+  ),
+  expressionFilterDepth: external_exports.number().min(0).max(1).optional().describe(
+    "How far the expression controller (CC 11 by default, or `expressionFilterCC`) sweeps a per-voice low-pass filter, 0-1 \u2014 the BRIGHTNESS complement to CC 11's own LOUDNESS control, for making a held sax/string note read as a player leaning into it rather than a flat sustain. NIL/0 MEANS THE FILTER IS SKIPPED ENTIRELY, not run at unity/neutral \u2014 this is a real distinction: a project that never sets this is byte-identical to the pre-existing engine path, not merely 'filter wide open'. At depth 1 cutoff sweeps logarithmically from a dark ~400 Hz at controller 0 up to ~20 kHz (effectively unfiltered) at controller 127; intermediate depths compress that sweep toward the open end. Has no effect on `testTone`/`polySynth`."
+  ),
+  expressionFilterCC: external_exports.number().int().min(0).max(127).optional().describe(
+    "Which CC drives the `expressionFilterDepth` brightness sweep. Omitted = 11 (expression) \u2014 the same controller that drives loudness, so a played expression pedal/lane makes a note both louder AND brighter together. Set to 1 or 2 to drive brightness from mod wheel/breath instead (that does NOT require `expressionModDepth` to be set \u2014 the neutral-0 silencing hazard that gates the loudness path does not apply here, because a filter sitting at its low cutoff is dark, not silent). Only takes effect once `expressionFilterDepth` is above 0."
   )
 }).describe(
   "Sampler configuration, used only when `kind` is (or already is) `sampler`. Every field here is independently a PARTIAL update \u2014 omit a field and it keeps its current value \u2014 with ONE exception: a PRESENT `zones` array replaces the whole keyzone map at once (see `zones`'s own description for what 'replaces' means for zone ids). Omit `sampler` entirely to leave the track's current sampler configuration untouched (e.g. when this call only changes `kind` or is switching a different track's instrument). Has no effect on `testTone`/`polySynth`. For narrower, harder-to-misuse edits, prefer instrument_set_sampler_param (one global) or instrument_set_sampler_zones (merge zones by id) over building this object by hand."
@@ -44885,19 +44935,27 @@ registerTool(
   },
   async ({ trackId, offset, limit: limit3 }) => toToolResult(() => bridge.send("instrument.describeSampler", { trackId, offset, limit: limit3 }))
 );
-var samplerGlobalParamSchema = external_exports.enum(["oneShot", "attack", "release", "gain"]).describe(
-  "Which Sampler GLOBAL to set \u2014 exactly one per call, matching one of the four fields track_set_instrument's own `sampler` object carries. `oneShot` (boolean): true = every triggered sample always plays to completion regardless of note-off (drum hits and other percussive one-shots); false = the sample follows note-off, fading out over `release` seconds, like a sustained instrument. `attack` (seconds, number, clamps 0-1): how long a triggered note takes to reach full volume. `release` (seconds, number, clamps 0.001-8): how long the sample fades to silence after note-off \u2014 ignored while `oneShot` is true. `gain` (0-1, number): the sampler's overall output level, separate from each zone's own `gain` and from the track fader (track_set_volume)."
+var samplerGlobalParamSchema = external_exports.enum([
+  "oneShot",
+  "attack",
+  "release",
+  "gain",
+  "expressionModDepth",
+  "expressionFilterDepth",
+  "expressionFilterCC"
+]).describe(
+  "Which Sampler GLOBAL to set \u2014 exactly one per call, matching one of the seven fields track_set_instrument's own `sampler` object carries at this level (everything else there, i.e. `zones`, is per-zone and out of reach of this narrower tool). `oneShot` (boolean): true = every triggered sample always plays to completion regardless of note-off (drum hits and other percussive one-shots); false = the sample follows note-off, fading out over `release` seconds, like a sustained instrument. `attack` (seconds, number, clamps 0-1): how long a triggered note takes to reach full volume. `release` (seconds, number, clamps 0.001-8): how long the sample fades to silence after note-off \u2014 ignored while `oneShot` is true. `gain` (0-1, number): the sampler's overall output level, separate from each zone's own `gain` and from the track fader (track_set_volume). `expressionModDepth` (0-1, number): how far CC 1 (mod wheel) / CC 2 (breath) attenuate loudness \u2014 NIL/0 IS OFF (the attenuator is skipped, not run at neutral), so a CC1/CC2 controller lane does nothing audible on this track's Sampler until this is set above 0. `expressionFilterDepth` (0-1, number): how far the expression controller sweeps a per-voice brightness (low-pass) filter \u2014 NIL/0 IS OFF, the filter branch is skipped entirely, not run at unity. `expressionFilterCC` (integer 0-127): which CC drives that filter sweep; omitted/nil = 11 (expression, the same controller that already drives loudness) \u2014 set it to 1 or 2 to drive brightness from mod wheel/breath instead. See track_set_instrument's `sampler` object for the full field-by-field description of each."
 );
 registerTool(
   "instrument_set_sampler_param",
   {
-    title: "Set one Sampler global (oneShot, attack, release, or gain)",
-    description: "Set exactly ONE global knob on a track's built-in Sampler \u2014 `oneShot`, `attack`, `release`, or `gain` \u2014 without touching anything else on the sampler. This is a thin, narrower wrapper around track_set_instrument {sampler: {<param>: value}}: the whole reason it exists is so you don't have to know that a partial sampler update is safe (added m26-g/h) \u2014 this call is GUARANTEED to leave the track's zones, `sourcePath`, and `displayName` exactly as they were, no matter which global you set or what an imported library's zone count is (tuning `release` on a 309-zone library through this tool can never touch a single zone). Has no audible effect unless the track's active instrument kind is `sampler` (see instrument_describe_sampler's `kind` field), though the value is still stored and takes effect the next time it is. Sending a boolean for a numeric param (or vice versa) is a readable error naming the mismatch; out-of-range numbers clamp silently through the same ranges track_set_instrument uses (see `param`'s own description for each range). Returns the full resolved instrument object, same shape as track_set_instrument.",
+    title: "Set one Sampler global (oneShot/attack/release/gain/expression*)",
+    description: "Set exactly ONE global knob on a track's built-in Sampler \u2014 `oneShot`, `attack`, `release`, `gain`, `expressionModDepth`, `expressionFilterDepth`, or `expressionFilterCC` \u2014 without touching anything else on the sampler. This is a thin, narrower wrapper around track_set_instrument {sampler: {<param>: value}}: the whole reason it exists is so you don't have to know that a partial sampler update is safe (added m26-g/h) \u2014 this call is GUARANTEED to leave the track's zones, `sourcePath`, and `displayName` exactly as they were, no matter which global you set or what an imported library's zone count is (tuning `release` on a 309-zone library through this tool can never touch a single zone). Has no audible effect unless the track's active instrument kind is `sampler` (see instrument_describe_sampler's `kind` field), though the value is still stored and takes effect the next time it is. Sending a boolean for a numeric param (or vice versa) is a readable error naming the mismatch; out-of-range numbers clamp silently through the same ranges track_set_instrument uses (see `param`'s own description for each range). Returns the full resolved instrument object, same shape as track_set_instrument.",
     inputSchema: {
       trackId: external_exports.string().min(1).describe("Id of the instrument track, from project_snapshot."),
       param: samplerGlobalParamSchema,
       value: external_exports.union([external_exports.number(), external_exports.boolean()]).describe(
-        'The new value: a boolean for `param: "oneShot"`, a number (seconds, or a 0-1 level) for `attack`/`release`/`gain`. See `param`\'s description for which type and range applies.'
+        'The new value: a boolean for `param: "oneShot"`, a number for every other `param` (seconds for `attack`/`release`, a 0-1 level for `gain`/`expressionModDepth`/`expressionFilterDepth`, an integer CC 0-127 for `expressionFilterCC`). See `param`\'s description for which type and range applies.'
       )
     }
   },
@@ -45683,7 +45741,7 @@ registerTool(
   "clip_set_controller_lane",
   {
     title: "Write a MIDI clip's controller lane (mod wheel, sustain, pitch bend, ...)",
-    description: "Create or WHOLESALE-REPLACE one controller lane on a MIDI clip \u2014 mod wheel, sustain pedal, pitch bend, expression, channel pressure, or any other numbered MIDI CC \u2014 the performance data that rides ALONGSIDE a clip's notes (clip_set_notes), not instead of them. Points are STEPWISE: a value HOLDS until the next point, so two points make a flat STEP, not a ramp \u2014 draw a smooth ramp as a dense run of points (exactly what a live recording produces). `points` REPLACES the lane's entire point list wholesale \u2014 there is no add/remove-single-point tool: read the clip's current lanes from project_snapshot's `controllerLanes` array (there each lane is `{type: {type, controller?}, points}` \u2014 NOTE the NESTED `type` object on read-back, unlike the FLAT `type`/`controller` params this tool takes as input), modify the array yourself, then resubmit the whole thing here. Values are RAW MIDI: 0-16383 for a `pitchBend` lane (8192 = the center/no-bend position; built-in instruments apply it as +/-2 semitones), 0-127 for `cc`/`channelPressure` lanes (CC 1 = mod wheel, CC 64 = sustain pedal \u2014 a value >= 64 counts as pedal-down). Built-in instruments only honor pitch bend and CC 64 sustain today; every other CC/channelPressure value is forwarded to hosted Audio Unit instruments and otherwise safely ignored by the built-ins. Controller values CHASE at play and at seek: the latest value at or before the playhead stays in effect, so a pedal held or a bend applied earlier in the clip is still sounding after a jump \u2014 you don't need to re-state a value at every seek target. clip_quantize/clip_humanize move only NOTES, never these lanes. Per-note (poly) aftertouch is not supported yet \u2014 only channel-wide values. A clip may hold at most 16 controller lanes (one per type/CC number) and each lane at most 16384 points. MIDI clips only \u2014 an audio clip is rejected readably. Repeated calls to the SAME lane (e.g. while drawing) coalesce into one undo step. Returns the updated clip (the stored lane echoes back in its `controllerLanes`).",
+    description: "Create or WHOLESALE-REPLACE one controller lane on a MIDI clip \u2014 mod wheel, sustain pedal, pitch bend, expression, channel pressure, or any other numbered MIDI CC \u2014 the performance data that rides ALONGSIDE a clip's notes (clip_set_notes), not instead of them. Points are STEPWISE: a value HOLDS until the next point, so two points make a flat STEP, not a ramp \u2014 draw a smooth ramp as a dense run of points (exactly what a live recording produces). `points` REPLACES the lane's entire point list wholesale \u2014 there is no add/remove-single-point tool: read the clip's current lanes from project_snapshot's `controllerLanes` array (there each lane is `{type: {type, controller?}, points}` \u2014 NOTE the NESTED `type` object on read-back, unlike the FLAT `type`/`controller` params this tool takes as input), modify the array yourself, then resubmit the whole thing here. Values are RAW MIDI: 0-16383 for a `pitchBend` lane (8192 = the center/no-bend position; built-in instruments apply it as +/-2 semitones), 0-127 for `cc`/`channelPressure` lanes (CC 1 = mod wheel, CC 64 = sustain pedal \u2014 a value >= 64 counts as pedal-down). WHAT ACTUALLY SOUNDS depends on the track's instrument, and this tool now TELLS you: a lane the instrument cannot consume still succeeds and is still stored, but the response carries a `warnings` array naming the controller and why it will be silent \u2014 read it. The built-in SAMPLER honors pitch bend, CC 64 (sustain) and, for continuous breath/air expression, CC 11 (expression, unconditional), plus CC 1 (mod wheel) and CC 2 (breath) once `sampler.expressionModDepth` is set above 0 on the instrument \u2014 those two are gated because their neutral value is 0, so routing them unconditionally would silence a clip until its lane's first point. The built-in POLY SYNTH honors pitch bend and CC 64 only. Hosted Audio Unit and sound-bank instruments receive every CC as raw MIDI. Note that CC 11 on the sampler scales LOUDNESS; for continuous BRIGHTNESS set `sampler.expressionFilterDepth` (and optionally `expressionFilterCC`), which sweeps a per-voice low-pass \u2014 that is what makes a long held sax or string note read as a player leaning into it rather than a flat sustain. Controller values CHASE at play and at seek: the latest value at or before the playhead stays in effect, so a pedal held or a bend applied earlier in the clip is still sounding after a jump \u2014 you don't need to re-state a value at every seek target. clip_quantize/clip_humanize move only NOTES, never these lanes. Per-note (poly) aftertouch is not supported yet \u2014 only channel-wide values. A clip may hold at most 16 controller lanes (one per type/CC number) and each lane at most 16384 points. MIDI clips only \u2014 an audio clip is rejected readably. Repeated calls to the SAME lane (e.g. while drawing) coalesce into one undo step. Returns the updated clip (the stored lane echoes back in its `controllerLanes`).",
     inputSchema: {
       clipId: external_exports.string().uuid().describe("Id of the MIDI clip to edit, from project_snapshot."),
       type: external_exports.enum(["cc", "pitchBend", "channelPressure"]).describe(
@@ -45715,6 +45773,98 @@ registerTool(
     }
   },
   async ({ clipId, type, controller }) => toToolResult(() => bridge.send("clip.removeControllerLane", { clipId, type, controller }))
+);
+registerTool(
+  "clip_apply_breath_contour",
+  {
+    title: "Make a MIDI clip's held notes breathe (expression swell + delayed vibrato)",
+    description: "Make held notes BREATHE \u2014 the single highest-value fix for a wind, brass, string or sustained-vocal part that sounds like a synthesizer holding a key down. In ONE call it writes the correlated performance contour a real player puts on a sustained note, which is otherwise dozens of hand-placed points per note via clip_set_controller_lane:\n\u2022 an EXPRESSION (CC 11) swell \u2014 a small dip just after the attack as the air column settles, a rise to a peak about two-thirds through the note, then a taper. On the built-in sampler CC 11 moves LOUDNESS always, and BRIGHTNESS too whenever the track's `sampler.expressionFilterDepth` is above 0 \u2014 that pairing is what reads as a player leaning in, and it is why this beats a volume-automation swell, which can only ever sound like a fader move.\n\u2022 DELAYED VIBRATO on the pitch-bend lane \u2014 straight for the first half second, then blooming from nothing to about \xB112 cents at 5.5 Hz, and relaxing back to exact centre before the note ends. Constant vibrato from the attack is the classic MIDI giveaway; the delay is the whole point.\n\u2022 a few cents of MICRO-SHARPENING at the top of the swell, resolving as it falls (blowing harder pushes a wind instrument sharp).\nShapes EVERY note in the clip by default, or only the ones in `noteIds`. It MERGES with whatever is already on those two lanes: points outside the shaped notes' spans survive exactly as authored, so you can run it note by note across a phrase, or after hand-drawing something else, without wiping your earlier work \u2014 unlike clip_set_controller_lane, which replaces a lane wholesale by contract. Notes too short for the straight opening plus one whole vibrato cycle get the expression contour ONLY and no pitch-bend lane at all; that is the intended shape for short notes, not a failure, and the response says how many. \u26A0\uFE0F Pitch bend is CHANNEL-WIDE in MIDI, so the vibrato bends every voice sounding on that track \u2014 correct for the monophonic wind or vocal line this is built for, wrong for a chordal part (pass `vibratoDepthCents: 0` there and keep just the swell). Every parameter is optional and the defaults are a complete, musical result \u2014 reach for them only when the default shape is not what the part needs. One call = one undo step. MIDI clips only. Returns the updated clip (both lanes echo back in `controllerLanes`) plus `notesTouched`, `notesWithVibrato`, `expressionPointCount`, `pitchBendPointCount`, `perNotePointBudget`, and a `warnings` array \u2014 READ THE WARNINGS: they are how a contour that will only be half audible (e.g. brightness off, or no note long enough for vibrato) tells you so.",
+    inputSchema: {
+      clipId: external_exports.string().uuid().describe("Id of the MIDI clip to shape, from project_snapshot."),
+      noteIds: external_exports.array(external_exports.string().uuid().describe("A note id from clip_get_notes.")).optional().describe(
+        "Ids of the notes to shape, from clip_get_notes. OMIT to shape EVERY note in the clip (the usual call). An id that is not in the clip is refused outright and nothing is written \u2014 a partly-applied contour would leave you unable to tell which notes got one."
+      ),
+      depth: external_exports.number().min(0).max(1).optional().describe(
+        "How far the swell falls below its peak, as a fraction of `peakValue`. Default 0.25 \u2014 about 2.5 dB from peak to trough, which is the INVOLUNTARY contour of a note held steady rather than a written crescendo. Raise toward 0.5 for a hairpin. 0 turns the swell off (a flat lane at `peakValue`)."
+      ),
+      peakValue: external_exports.number().int().min(0).max(127).optional().describe(
+        "Raw CC value at the top of the swell, 0-127. Default 127, which is the expression lane's own neutral: the loudest instant of the note comes out exactly as loud as it would with no contour at all, so applying this can never quietly drop the level of a part you already balanced. Lower it to leave headroom above the peak for a later hand edit."
+      ),
+      peakPosition: external_exports.number().min(0.05).max(0.95).optional().describe(
+        "Where the peak of the swell sits, as a fraction of the note's length. Default 0.65 \u2014 past the middle, so the note takes longer arriving than leaving, which is the asymmetry that reads as effort rather than as a tremolo."
+      ),
+      attackSettleSeconds: external_exports.number().min(0).max(1).optional().describe(
+        "Seconds from the attack to the bottom of the settling dip. Default 0.05. Automatically clamped to a quarter of the note, so a staccato note gets a scaled-down version of the same curve instead of being all dip."
+      ),
+      expressionCC: external_exports.number().int().min(0).max(127).optional().describe(
+        "Which CC number carries the swell. Default 11 (expression) \u2014 the one the built-in sampler routes to amplitude with no opt-in, and the default target of its brightness filter, so one lane moves both. Change it only if you have pointed `sampler.expressionFilterCC` somewhere else."
+      ),
+      expressionSpacingSeconds: external_exports.number().min(1e-3).max(1).optional().describe(
+        "Seconds between emitted expression points. Default 0.02. Controller lanes are STEPWISE (a value holds until the next point), so a dense run is what makes a smooth swell instead of a staircase. Note this sets the finest step TIMING, not the point count: redundant points are dropped, so the run is only ever as long as the number of distinct CC values the contour passes through."
+      ),
+      vibratoOnsetSeconds: external_exports.number().min(0).max(10).optional().describe(
+        "Seconds of STRAIGHT playing before vibrato begins. Default 0.5. A note shorter than this plus one whole vibrato cycle gets no pitch-bend lane at all \u2014 lower this to bring vibrato to shorter notes."
+      ),
+      vibratoRateHz: external_exports.number().min(0.2).max(20).optional().describe(
+        "Vibrato rate in Hz. Default 5.5, the middle of the 5-7 Hz band conventionally quoted for instrumental vibrato."
+      ),
+      vibratoDepthCents: external_exports.number().min(0).max(200).optional().describe(
+        "Peak vibrato width in CENTS \u2014 a \xB1 figure, so 12 spans 24 cents. Default 12, deliberately conservative: pitch bend is channel-wide and will bend any overlapping neighbouring note's tail too. 0 turns vibrato off entirely and writes no pitch-bend lane beyond the micro-sharpening."
+      ),
+      vibratoBloomSeconds: external_exports.number().min(0).max(10).optional().describe(
+        "Seconds over which the vibrato widens from nothing to full depth after it starts. Default 0.7 (about four cycles at the default rate)."
+      ),
+      vibratoReleaseSeconds: external_exports.number().min(0).max(10).optional().describe(
+        "Seconds before the note's end over which the vibrato relaxes back to centre. Default 0.08. Players do ease off, and it guarantees the lane lands on exact centre so the NEXT note cannot start detuned by this one's last vibrato phase."
+      ),
+      sharpenCents: external_exports.number().min(-200).max(200).optional().describe(
+        "Peak micro-sharpening in CENTS at the top of the swell, resolving to nothing as the contour falls. Default 4 \u2014 on its own that is below the ear's pitch threshold, but it is CORRELATED with the loudness swell, and that correlation is what is heard as effort. Negative values flatten instead."
+      ),
+      bendSpacingSeconds: external_exports.number().min(1e-3).max(1).optional().describe(
+        "Seconds between emitted pitch-bend points. Default 0.008. Unlike expression, the bend run IS the vibrato waveform (nothing smooths it), so this is its sample rate \u2014 about 23 points per cycle at the default. Coarsening it much past 0.02 stops sounding like vibrato."
+      ),
+      bendRangeSemitones: external_exports.number().min(0.01).max(48).optional().describe(
+        "The instrument's pitch-bend range in semitones for a full \xB18192 deflection, so the cents figures above land correctly. Default 2, which is exactly what the built-in sampler uses. A hosted Audio Unit may differ \u2014 if the vibrato comes out wider or narrower than asked, this is the parameter to correct it with."
+      )
+    }
+  },
+  async ({
+    clipId,
+    noteIds,
+    depth,
+    peakValue,
+    peakPosition,
+    attackSettleSeconds,
+    expressionCC,
+    expressionSpacingSeconds,
+    vibratoOnsetSeconds,
+    vibratoRateHz,
+    vibratoDepthCents,
+    vibratoBloomSeconds,
+    vibratoReleaseSeconds,
+    sharpenCents,
+    bendSpacingSeconds,
+    bendRangeSemitones
+  }) => toToolResult(
+    () => bridge.send("clip.applyBreathContour", {
+      clipId,
+      noteIds,
+      depth,
+      peakValue,
+      peakPosition,
+      attackSettleSeconds,
+      expressionCC,
+      expressionSpacingSeconds,
+      vibratoOnsetSeconds,
+      vibratoRateHz,
+      vibratoDepthCents,
+      vibratoBloomSeconds,
+      vibratoReleaseSeconds,
+      sharpenCents,
+      bendSpacingSeconds,
+      bendRangeSemitones
+    })
+  )
 );
 registerTool(
   "arrange_insert_bars",

@@ -35,6 +35,12 @@ struct InstrumentPickerOverlay: View {
     /// TUNE affordance — wired to `AppModel.openPolySynthEditorFromPicker`,
     /// which replaces this modal with the editor; one centered card at a time).
     var onTunePolySynth: () -> Void
+    /// Opens the SAMPLER editor card for this track (the Sampler row's TUNE
+    /// affordance — wired to `AppModel.openSamplerEditorFromPicker`, the
+    /// `onTunePolySynth` twin; it replaces this modal, one centered card at a
+    /// time). The sampler is the OTHER built-in kind with no plugin window
+    /// (m26-i).
+    var onTuneSampler: () -> Void
     var onClose: () -> Void
 
     /// The picker's stable panel ID for the shared density store.
@@ -165,19 +171,24 @@ struct InstrumentPickerOverlay: View {
                 // button precedent below).
                 sectionLabel("BUILT-IN", trailing: AnyView(sampleLibraryImportButton))
                 ForEach(items) { item in
-                    // The Poly Synth row grows a TUNE affordance while it is the
+                    // A built-in row grows a TUNE affordance while it is the
                     // track's CURRENT instrument (the `EffectEditorButton` idiom
-                    // — the built-in kind that has no plugin window gets the
-                    // slider glyph instead). ONLY the poly synth: sound banks
-                    // pick programs, AUs open their own plugin window.
+                    // — a built-in kind that has no plugin window gets the
+                    // slider glyph instead).
+                    //
+                    // ⚠️ TWO kinds qualify, not one. This gate was scoped to
+                    // `.polySynth` and its comment asserted that was the only
+                    // built-in without a plugin window — but the SAMPLER is the
+                    // other one, and it was simply never covered (m26-i). Test
+                    // Tone is deliberately still out: it has nothing to tune.
+                    // Sound banks pick programs; AUs open their own window.
                     row(title: item.name, subtitle: item.detail, glyph: "waveform.path",
                         isCurrent: model.isCurrent(item.choice),
-                        accessory: item.kind == .polySynth && model.isCurrent(item.choice)
-                            ? AnyView(
-                                EffectEditorButton(action: onTunePolySynth)
-                                    .help("Tune the Poly Synth — wave shape, envelope, filter, and level")
-                                    .explainable(.polySynthEditor))
-                            : nil) {
+                        accessory: Self.tuneAccessory(
+                            kind: item.kind,
+                            isCurrent: model.isCurrent(item.choice),
+                            onTunePolySynth: onTunePolySynth,
+                            onTuneSampler: onTuneSampler)) {
                         onChoose(item.choice)
                     }
                 }
@@ -185,6 +196,34 @@ struct InstrumentPickerOverlay: View {
                     inlineNotice(notice)
                 }
             }
+        }
+    }
+
+    /// The TUNE affordance for a built-in row, or nil. Factored out of the
+    /// `row(...)` call because a two-kind ternary inline is where a third kind
+    /// gets silently dropped — which is exactly how the sampler went uncovered.
+    static func tuneAccessory(
+        kind: InstrumentDescriptor.Kind,
+        isCurrent: Bool,
+        onTunePolySynth: @escaping () -> Void,
+        onTuneSampler: @escaping () -> Void
+    ) -> AnyView? {
+        guard isCurrent else { return nil }
+        switch kind {
+        case .polySynth:
+            return AnyView(
+                EffectEditorButton(action: onTunePolySynth)
+                    .help("Tune the Poly Synth — wave shape, envelope, filter, and level")
+                    .explainable(.polySynthEditor))
+        case .sampler:
+            return AnyView(
+                EffectEditorButton(action: onTuneSampler)
+                    .help("Tune the Sampler — its zone map, envelopes, tuning, level and looping")
+                    .explainable(.samplerEditor))
+        case .testTone, .soundBank, .audioUnit:
+            // Test Tone has nothing to tune; sound banks pick a program in this
+            // same picker; a hosted AU opens its own plugin window.
+            return nil
         }
     }
 

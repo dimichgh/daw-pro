@@ -206,6 +206,19 @@ final class AppModel {
     /// ever a track whose current instrument is the built-in poly synth.
     var polySynthEditorTrackID: UUID?
 
+    /// The built-in SAMPLER editor's headless model (m26-i's UI half) — the
+    /// `polySynthEditor` twin pointed at the OTHER built-in instrument with no
+    /// plugin window: the globals, the zone map + coverage health, and the
+    /// per-zone inspector. Owned here (like `polySynthEditor`) so
+    /// `debug.samplerEditor` drives the SAME instance `debug.captureUI`
+    /// renders.
+    let samplerEditor: SamplerEditorModel
+
+    /// The track the Sampler editor is open for (nil = closed). Set by the
+    /// instrument picker's TUNE affordance (which replaces the picker modal)
+    /// and `debug.samplerEditor`; the card renders as a centered overlay.
+    var samplerEditorTrackID: UUID?
+
     /// The Quantize & Groove panel's headless model (m11-a): the grid/strength/
     /// swing/ends state, the groove picker (built-in swings + saved templates), and
     /// the extract affordance. Owned here (like `instrumentPicker`) so the
@@ -2135,6 +2148,7 @@ final class AppModel {
     var isModalPresented: Bool {
         instrumentPickerTrackID != nil
             || (polySynthEditorTrackID != nil && polySynthEditor.targetIsPolySynth)
+            || (samplerEditorTrackID != nil && samplerEditor.targetIsSampler)
             || effectPickerTrackID != nil
             || quantizePanelClipID != nil
             || humanizePanelClipID != nil
@@ -4058,6 +4072,36 @@ final class AppModel {
                 _ = try store.setInstrument(id: trackID, waveform: waveform)
             })
 
+        // The Sampler editor model (m26-i). Same two injectors as the poly
+        // synth, and the descriptor one is INTENTIONALLY IDENTICAL: it filters
+        // on `track.kind == .instrument` and NOTHING ELSE.
+        //
+        // ⛔ DO NOT "TIGHTEN" IT TO `.sampler`. `SamplerEditorModel.mutate`
+        // reads nil as "the track is gone or is not an instrument track" and,
+        // on nil, deliberately writes a FRESH `SamplerParams()` through to the
+        // store so the USER reads the store's own teaching refusal instead of
+        // an invented message — safe only because both of those cases write
+        // nothing. A descriptor injector that returned nil for a LIVE sampler
+        // track would turn that path into a wholesale write of an empty
+        // sampler, i.e. silently erasing the user's zones. The kind check that
+        // matters is the model's own `descriptor.kind == .sampler`, which
+        // refuses loudly.
+        //
+        // The apply is the whole-struct `setInstrument(id:sampler:)` — the
+        // exact method `track.setInstrument`'s sampler payload calls, so UI ==
+        // wire. It is NOT cheap (it re-validates every zone file), which is why
+        // the card's knobs commit once on release; see `DeferredKnob`.
+        self.samplerEditor = SamplerEditorModel(
+            descriptor: { [weak store] trackID in
+                guard let track = store?.tracks.first(where: { $0.id == trackID }),
+                      track.kind == .instrument else { return nil }
+                return track.instrument ?? .default
+            },
+            applySampler: { [weak store] trackID, params in
+                guard let store else { throw DebugError("project store unavailable") }
+                _ = try store.setInstrument(id: trackID, sampler: params)
+            })
+
         // The Quantize & Groove model (m11-a): the built-in MPC swings are computed
         // once; the saved-template list, Apply, and Extract all route through the
         // store methods the wire uses (`quantizeClipNotes` = ONE undo step via its
@@ -4567,6 +4611,8 @@ final class AppModel {
                 return try self.effectEditorDebug(params)
             case "debug.synthEditor":
                 return try self.synthEditorDebug(params)
+            case "debug.samplerEditor":
+                return try self.samplerEditorDebug(params)
             case "debug.explainMode":
                 return try self.setExplainMode(params)
             case "debug.explainFrames":
@@ -9216,6 +9262,119 @@ final class AppModel {
         guard let trackID = instrumentPickerTrackID else { return }
         closeInstrumentPicker()
         openPolySynthEditor(trackID: trackID)
+    }
+
+    // MARK: - Sampler editor (m26-i)
+
+    /// Opens the Sampler editor card for a track. Guarded to a track whose
+    /// CURRENT instrument is the built-in sampler — the poly synth has its own
+    /// card, sound banks pick programs, and hosted AUs open their own plugin
+    /// window, so none of them ever reaches this one.
+    ///
+    /// ⚠️ Unlike the poly synth, a nil instrument does NOT resolve here: the
+    /// default descriptor is the poly synth, so `?? .polySynth` would be the
+    /// wrong fallback and an explicit `.sampler` is required.
+    func openSamplerEditor(trackID: UUID) {
+        guard let track = store.tracks.first(where: { $0.id == trackID }),
+              track.kind == .instrument,
+              track.instrument?.kind == .sampler else { return }
+        samplerEditor.prepare(trackID: trackID, targetLabel: "on \(track.name)")
+        samplerEditorTrackID = trackID
+    }
+
+    /// Closes the Sampler editor (scrim click, ✕, or replacing modal flows).
+    func closeSamplerEditor() {
+        samplerEditorTrackID = nil
+        samplerEditor.clear()
+    }
+
+    /// The instrument picker's TUNE affordance on the Sampler row: drills from
+    /// the picker into the Sampler editor for the same track — replacing the
+    /// picker modal (one centered card at a time, the house replacing-modal
+    /// rule). The `openPolySynthEditorFromPicker` twin.
+    func openSamplerEditorFromPicker() {
+        guard let trackID = instrumentPickerTrackID else { return }
+        closeInstrumentPicker()
+        openSamplerEditor(trackID: trackID)
+    }
+
+    /// `debug.samplerEditor {trackId?, open?, zoneId?, close?}` — stages the
+    /// Sampler editor for captures/E2E (app-level, debug tier — off
+    /// `allCommands`/MCP, the `debug.synthEditor` precedent, so this adds ZERO
+    /// wire surface). `open:true` opens the card for the given track, else the
+    /// first `.sampler` instrument track; `zoneId` selects a zone so the
+    /// per-zone inspector can be captured; `close:true` dismisses. A bare call
+    /// is READ-ONLY (echoes state, never re-opens — the m11-a law).
+    ///
+    /// ⛔ IT DELIBERATELY EXPOSES NO PARAM SETTER, and that absence is a
+    /// statement rather than an omission. `debug.synthEditor` drives
+    /// `PolySynthEditorModel.set` directly, which BYPASSES the gesture — so on
+    /// this card a `param`/`value` pair could not observe the one thing that
+    /// matters about it, that a knob applies ONCE on release rather than per
+    /// drag frame. A verb that looks like it verifies the cadence and cannot is
+    /// worse than no verb; the cadence is structural (`DeferredKnob` holds the
+    /// only `onCommit` call site) and pinned headlessly instead.
+    private func samplerEditorDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        if params["close"]?.boolValue == true {
+            closeSamplerEditor()
+            return samplerEditorStateResponse()
+        }
+        if params["open"]?.boolValue == true {
+            let trackID: UUID
+            if let raw = params["trackId"]?.stringValue {
+                guard let id = UUID(uuidString: raw),
+                      store.tracks.contains(where: { $0.id == id }) else {
+                    throw DebugError("trackId is not a known track UUID: \(raw)")
+                }
+                trackID = id
+            } else if let track = store.tracks.first(where: { track in
+                track.kind == .instrument && track.instrument?.kind == .sampler
+            }) {
+                trackID = track.id
+            } else {
+                // Deliberately NOT auto-created: an empty sampler needs a real
+                // sample library to be worth capturing, and inventing one here
+                // would make the failure look like a success.
+                throw DebugError("no track plays the built-in Sampler — "
+                                 + "set one with track.setInstrument first")
+            }
+            openSamplerEditor(trackID: trackID)
+            guard samplerEditorTrackID != nil else {
+                throw DebugError("track does not play the built-in Sampler")
+            }
+        }
+        if let raw = params["zoneId"]?.stringValue {
+            guard samplerEditorTrackID != nil else {
+                throw DebugError("no sampler editor is open — pass open:true first")
+            }
+            guard let id = UUID(uuidString: raw) else {
+                throw DebugError("zoneId is not a UUID: \(raw)")
+            }
+            guard samplerEditor.params.zones.contains(where: { $0.id == id }) else {
+                throw DebugError("zoneId is not a zone of this sampler: \(raw)")
+            }
+            samplerEditor.select(zoneID: id)
+        }
+        return samplerEditorStateResponse()
+    }
+
+    private func samplerEditorStateResponse() -> JSONValue {
+        let coverage = samplerEditor.coverage
+        let values: [String: JSONValue] = Dictionary(
+            uniqueKeysWithValues: SamplerEditorModel.specs.map {
+                ($0.name, JSONValue.number(samplerEditor.value(for: $0)))
+            })
+        return .object([
+            "visible": .bool(samplerEditorTrackID != nil && samplerEditor.targetIsSampler),
+            "trackId": samplerEditorTrackID.map { JSONValue.string($0.uuidString) } ?? .null,
+            "zoneCount": .number(Double(coverage.zoneCount)),
+            "headline": .string(coverage.headline),
+            "gapCount": .number(Double(coverage.gapCount)),
+            "selectedZoneId": samplerEditor.selectedZoneID.map { JSONValue.string($0.uuidString) } ?? .null,
+            "oneShot": .bool(samplerEditor.oneShot),
+            "values": .object(values),
+            "error": samplerEditor.lastErrorMessage.map { JSONValue.string($0) } ?? .null,
+        ])
     }
 
     /// `debug.synthEditor {trackId?, open?, param?, value?, waveform?, close?}`

@@ -197,12 +197,18 @@ struct SFZParserTests {
     func excludedOpcodes() throws {
         let ir = parse("""
         <group> cutoff=800 resonance=2
-        <region> sample=a.wav xfin_lovel=0
+        <region> sample=a.wav xfin_lovel=0 fil_veltrack=9600
         <region> sample=b.wav on_locc64=127
         """)
         #expect(ir.regions[0].ignored.contains("cutoff"))
         #expect(ir.regions[0].ignored.contains("resonance"))
-        #expect(ir.regions[0].ignored.contains("xfin_lovel"))
+        #expect(ir.regions[0].ignored.contains("fil_veltrack"))
+        // m27 leg B CHANGED THIS LINE'S SUBJECT, deliberately: `xfin_lovel`
+        // used to stand here as an example of an unparsed opcode. It is now
+        // CONSUMED into the velocity-crossfade fields, so asserting it is
+        // still ignored would be asserting the feature does not work.
+        #expect(!ir.regions[0].ignored.contains("xfin_lovel"))
+        #expect(ir.regions[0].xfVelInLo == 0)
         #expect(ir.regions[0].ccTriggered == false)
         #expect(ir.regions[1].ccTriggered == true)
         #expect(!ir.regions[1].ignored.contains("on_locc64"))  // consumed as policy input

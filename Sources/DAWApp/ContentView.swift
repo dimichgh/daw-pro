@@ -362,6 +362,7 @@ struct ContentView: View {
                 onImport: { model.importSoundBankViaPanel() },
                 onImportSampleLibrary: { model.importSampleLibraryViaPanel() },
                 onTunePolySynth: { withAnimation(.easeOut(duration: 0.15)) { model.openPolySynthEditorFromPicker() } },
+                onTuneSampler: { withAnimation(.easeOut(duration: 0.15)) { model.openSamplerEditorFromPicker() } },
                 onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeInstrumentPicker() } }
             )
         }
@@ -376,6 +377,22 @@ struct ContentView: View {
             PolySynthEditorOverlay(
                 model: model.polySynthEditor,
                 onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closePolySynthEditor() } }
+            )
+        }
+        // Sampler editor (m26-i's UI half): the poly synth card's twin for the
+        // OTHER built-in instrument with no plugin window — opened by the
+        // instrument picker's TUNE affordance on the Sampler row (replacing the
+        // picker; one centered card at a time) and `debug.samplerEditor`. The
+        // same kind gate drops the card honestly if the instrument is swapped
+        // while open.
+        //
+        // ⛔ Its knobs commit ONCE ON RELEASE, not per drag frame — a sampler
+        // apply re-validates (and re-opens) every sample file in the library
+        // and can force an engine rebuild. See `DeferredKnob`.
+        if model.samplerEditorTrackID != nil, model.samplerEditor.targetIsSampler {
+            SamplerEditorOverlay(
+                model: model.samplerEditor,
+                onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeSamplerEditor() } }
             )
         }
         // AU-effect picker (m13-g, audit F6): opened by a Pro channel/bus strip's

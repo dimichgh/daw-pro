@@ -347,13 +347,18 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // count; routes through the new TYPED `EditPasteControlling` app-layer
   // seam, the `plugin.*` precedent, not `appCommandHandler`) took it
   // 184 -> 185.
+  // m27 leg D's `clip_apply_breath_contour` (generate a realistic breath
+  // contour over a MIDI clip's notes — the expression swell plus delayed
+  // vibrato; a mutating tool, so it joined the strict-schema wrapper count)
+  // took it 185 -> 186.
   // ⚠️ The DECOMPOSITION, because the total on its own has rotted before:
   // 34 `server.registerTool(` (pure reads, deliberately exempt from `.strict()`)
   // + 151 `registerTool(` (the strict-schema wrappers — `vc_import_voice_model`,
   // `transport_set_stop_at_content_end`, `audio_profile_file`,
   // `clip_detect_pitch`, `clip_get_notes`, m26-i's three sampler tools, and
-  // m26-k's `edit_paste_clips` joined those) = 185.
-  assert.equal(result.tools.length, 185);
+  // m26-k's `edit_paste_clips` and m27 leg D's `clip_apply_breath_contour`
+  // joined those) = 186.
+  assert.equal(result.tools.length, 186);
 });
 
 // ---------------------------------------------------------------------------

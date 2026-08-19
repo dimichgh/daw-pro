@@ -72,7 +72,9 @@ struct CopilotCatalogTests {
         // group delete/move, and strictly better undo atomicity for a
         // capability (clip.remove/clip.move) already IN the catalog — took it
         // 69 -> 71.
-        #expect(CopilotToolCatalog.v1.count == 75)   // 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd)
+        #expect(CopilotToolCatalog.v1.count == 76)   // 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd) -> 76 at m27 leg D (clip.applyBreathContour)
+        #expect(CopilotToolCatalog.tool(command: "clip.applyBreathContour") != nil,
+                "clip.applyBreathContour missing from the catalog — the copilot is exactly\n                 the caller that should reach for a breath contour, and m21-b2 requires a\n                 new user-facing capability to be visible to it")
         #expect(CopilotToolCatalog.tool(command: "transport.setStopAtContentEnd") != nil,
                 "transport.setStopAtContentEnd missing from the catalog — m21-b2: a new\n                 user-facing capability must be visible to the in-app copilot")
         #expect(CopilotToolCatalog.tool(command: "clip.removeMany") != nil,

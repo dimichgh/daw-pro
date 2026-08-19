@@ -76,6 +76,98 @@ struct SampleLibraryMapperTests {
         return try SampleLibraryMapper.map(ir, force: force)
     }
 
+    // MARK: - m27 leg B: dynamic-layer crossfade opcodes
+
+    @Test("xfin_locc/xfout_hicc import as a CONTINUOUS crossfade naming their CC")
+    func ccCrossfadeImports() throws {
+        let dir = tempDir()
+        try writeSample("pp.wav", in: dir)
+        try writeSample("ff.wav", in: dir)
+        let (params, report) = try map("""
+        <region> sample=pp.wav xfout_locc11=48 xfout_hicc11=96
+        <region> sample=ff.wav xfin_locc11=48 xfin_hicc11=96
+        """, in: dir)
+        #expect(params.zones.count == 2)
+        let soft = try #require(params.zones[0].crossfade)
+        #expect(soft.controller == 11)
+        #expect(soft.ccOutLo == 48)
+        #expect(soft.ccOutHi == 96)
+        #expect(soft.ccInLo == nil)          // untouched stays untouched
+        let loud = try #require(params.zones[1].crossfade)
+        #expect(loud.controller == 11)
+        #expect(loud.ccInLo == 48)
+        #expect(loud.ccInHi == 96)
+        // The report must distinguish continuous from velocity crossfade.
+        let sentence = try #require(report.degradations.first {
+            $0.contains("dynamic-layer crossfade") })
+        print("[measured] cc crossfade report: \(sentence)")
+        #expect(sentence.contains("CONTINUOUS"))
+        #expect(sentence.contains("equal-power"))
+        #expect(!sentence.contains("VELOCITY"))
+    }
+
+    @Test("xfin_lovel/xfout_hivel import as a VELOCITY crossfade, named as note-on-only")
+    func velocityCrossfadeImports() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let (params, report) = try map("""
+        <region> sample=a.wav xfin_lovel=25 xfin_hivel=60 xfout_lovel=61 xfout_hivel=84
+        """, in: dir)
+        let xf = try #require(params.zones[0].crossfade)
+        #expect(xf.controller == nil)        // velocity domain names no CC
+        #expect(xf.velInLo == 25)
+        #expect(xf.velInHi == 60)
+        #expect(xf.velOutLo == 61)
+        #expect(xf.velOutHi == 84)
+        let sentence = try #require(report.degradations.first {
+            $0.contains("dynamic-layer crossfade") })
+        print("[measured] velocity crossfade report: \(sentence)")
+        #expect(sentence.contains("VELOCITY"))
+        // The honesty this exists for: velocity crossfade CANNOT change a
+        // held note, and the sentence must not let it read as if it could.
+        #expect(sentence.contains("not within one"))
+    }
+
+    @Test("a library with no crossfade opcodes imports crossfade-free — no inert object")
+    func noCrossfadeOpcodesMeansNil() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let (params, report) = try map("""
+        <region> sample=a.wav lovel=0 hivel=89
+        <region> sample=a.wav lovel=90 hivel=127
+        """, in: dir)
+        // This is the shape of the user's OWN tenor sax: a hard velocity
+        // switch at 90 and no xf opcodes anywhere. Leg B must not invent one.
+        #expect(params.zones.allSatisfy { $0.crossfade == nil })
+        #expect(!report.degradations.contains { $0.contains("dynamic-layer crossfade") })
+    }
+
+    @Test("a second CC crossfade on one region is reason-coded, never blended in")
+    func twoControllersOnOneRegionIsReasonCoded() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let (params, report) = try map("""
+        <region> sample=a.wav xfin_locc1=0 xfin_hicc1=64 xfin_locc11=0 xfin_hicc11=64
+        """, in: dir)
+        let xf = try #require(params.zones[0].crossfade)
+        #expect(xf.controller == 1)          // lowest opcode name wins, deterministically
+        // The CC11 pair is DROPPED — and said so.
+        #expect(report.ignoredOpcodes["xfin_locc11"] == 1)
+        #expect(report.ignoredOpcodes["xfin_hicc11"] == 1)
+    }
+
+    @Test("xf_cccurve is reason-coded rather than silently given the engine's curve")
+    func curveOpcodeIsReasonCoded() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let (_, report) = try map("""
+        <region> sample=a.wav xfin_locc11=0 xfin_hicc11=64 xf_cccurve=gain
+        """, in: dir)
+        // We implement SFZ's DEFAULT (power). A file asking for `gain` gets
+        // power — so it must be told, not quietly obliged.
+        #expect(report.ignoredOpcodes["xf_cccurve"] == 1)
+    }
+
     // MARK: - Skip rules (reason-coded)
 
     @Test("trigger=release/first/legato regions are skipped, counted by reason")

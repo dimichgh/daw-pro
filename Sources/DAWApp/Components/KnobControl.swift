@@ -38,10 +38,32 @@ struct KnobControl: View {
     var onChange: (Double) -> Void
     /// Double-click reset (nil = no reset affordance).
     var onReset: (() -> Void)? = nil
+    /// Fired ONCE when a drag that actually MOVED the value is released
+    /// (nil = the knob has no separate commit phase, the default — a knob whose
+    /// apply path is cheap just writes through `onChange` every tick).
+    ///
+    /// ⛔ THIS EXISTS FOR APPLY PATHS THAT ARE NOT FREE (m26-i). The built-in
+    /// SAMPLER's apply re-validates every zone — a `fileExists` plus a media
+    /// open per zone, on the main actor — and any per-zone scalar edit flips
+    /// `instrumentNodeIdentityChanged`, forcing an engine rebuild. At drag
+    /// cadence that opens hundreds of files per second. `DeferredKnob` pairs
+    /// this hook with an optimistic local value so the cap still moves at
+    /// 60 fps while the model is written exactly once.
+    ///
+    /// ⚠️ THE "ACTUALLY MOVED" GUARD IS LOAD-BEARING, NOT TIDINESS. The gesture
+    /// is `DragGesture(minimumDistance: 0)`, so a plain CLICK is a complete
+    /// drag sequence with zero translation, and a double-click reset is two of
+    /// them. Committing unconditionally in `onEnded` would make every stray
+    /// click on the cap pay the full apply cost, and would fire a redundant
+    /// write either side of every `onReset`.
+    var onCommit: (() -> Void)? = nil
 
     /// Travel fraction captured at drag start, for relative (hardware-feel)
     /// drag — the `PanKnob` gesture contract.
     @State private var dragStart: Double?
+    /// Whether the live drag has yet produced a fraction different from the one
+    /// it started on — the `onCommit` gate (see `onCommit`).
+    @State private var dragMovedValue = false
     @State private var hovering = false
 
     private static let knobSize: CGFloat = 36
@@ -139,10 +161,21 @@ struct KnobControl: View {
                     if dragStart == nil { dragStart = start }
                     let fine = NSEvent.modifierFlags.contains(.option) ? 0.25 : 1.0
                     let moved = -Double(value.translation.height) * fine
-                    onChange(MixerMath.adjustedFraction(
-                        start: start, dragPoints: moved, throwPoints: 120))
+                    let next = MixerMath.adjustedFraction(
+                        start: start, dragPoints: moved, throwPoints: 120)
+                    // Latched, never recomputed from the CURRENT tick: a drag
+                    // that swings away and lands back on its start value has
+                    // still moved, and its release must still commit.
+                    if next != start { dragMovedValue = true }
+                    onChange(next)
                 }
-                .onEnded { _ in dragStart = nil; DragCursor.clear() }
+                .onEnded { _ in
+                    let committed = dragMovedValue
+                    dragStart = nil
+                    dragMovedValue = false
+                    DragCursor.clear()
+                    if committed { onCommit?() }
+                }
         )
         .simultaneousGesture(TapGesture(count: 2).onEnded { onReset?() })
         // Glow earned by interaction state — never on static chrome.

@@ -131,6 +131,14 @@ there.
   actually is, and it is the single largest quality defect we have measured in
   a finished song — 225 sax notes, not one of them overlapping. A real player
   slurs most of a phrase and tongues selectively.
+  - **CHECK THE PATCH'S RELEASE FIRST — it is one read and it may end the problem.**
+    A note's retrigger is only audible if the previous note has gone SILENT by the
+    time the next one starts. A well-sampled library with a long release (~0.5 s) is
+    still sounding through the gap, so it masks its own retriggers and needs no legato
+    authoring at all — measured: a 0.5 s release covers 0.60 beats at 72 BPM, more than
+    the gaps that made a GM sax read as keyboard-entered. Read `release` on the track's
+    sampler zones in `project_snapshot`. **Short release (GM `soundBank` patches, which
+    are the default) → everything below matters. Long release → it may already be fine.**
   - **Overlap notes within a phrase.** Either author the overlap directly in
     `clip_set_notes` lengths, or write the notes plainly and then call
     `clip_humanize` with `legatoOverlapBeats`. **~20-40 ms** is the useful

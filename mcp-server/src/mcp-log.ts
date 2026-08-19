@@ -19,10 +19,10 @@
  * wrapper alone would miss every read — exactly the calls that answer "what
  * did the agent see when it decided that?" So this module patches
  * `McpServer.prototype`'s instance method `registerTool` ITSELF, once,
- * before any tool registers. Every one of the 185 registrations (151 + 34,
- * re-measured after m26-k's `edit_paste_clips` joined the wrapper count at
- * 150 -> 151) — whichever path it takes — funnels through the same patched
- * function.
+ * before any tool registers. Every one of the 186 registrations (152 + 34,
+ * re-measured after m27 leg D's `clip_apply_breath_contour` joined the
+ * wrapper count at 151 -> 152) — whichever path it takes — funnels through
+ * the same patched function.
  *
  * `installMcpLogging` MUST run after `new McpServer(...)` but before the
  * first `registerTool(`/`server.registerTool(` call in server.ts. If it runs
@@ -53,15 +53,16 @@
  * own comment names them as Table-B) have no backing wire command at all:
  * they call `src/ai.ts` directly. A before-read against the DAW would be
  * pure waste for them, so they're excluded by name from before-capture
- * (NO_WIRE_COMMAND_TOOLS below). 151 - 3 = 148 is the real
+ * (NO_WIRE_COMMAND_TOOLS below). 152 - 3 = 149 is the real
  * before-capture-eligible denominator.
  *
- * ⚠️ These two numbers rot silently: `test/mcp-log.test.ts` pins the 185 TOTAL,
+ * ⚠️ These two numbers rot silently: `test/mcp-log.test.ts` pins the 186 TOTAL,
  * so a new strict-wrapper registration reddens that assertion and gets the
  * total fixed — while this paragraph's 151/148 sail through untouched. They
  * were found stale at 142/139 (five behind) exactly that way, again at
  * 147/144 (three behind, m26-i) the same way, and again at 150/147 (one
  * behind, m26-k — the pair had already been found stale twice in one day).
+ * Updated again at m27 leg D (150 -> 151 -> 152 wrapper, 186 total).
  *
  * ---------------------------------------------------------------------------
  * Before-snapshot: what it costs and why `project.overview`, not

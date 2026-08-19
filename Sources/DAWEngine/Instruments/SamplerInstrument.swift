@@ -10,9 +10,19 @@ import Foundation
 ///
 /// m16-b2 controllers (design-m16b §4.3): honors PITCH BEND (±2 st GM range,
 /// playback-rate factor 2^(semitones/12) on every voice) and SUSTAIN (CC64 ≥
-/// 64: noteOffs defer until pedal-up; one-shot mode is unaffected). All other
-/// CCs and channel pressure are safely ignored (documented); `reset()`
-/// re-centers bend and lifts the pedal.
+/// 64: noteOffs defer until pedal-up; one-shot mode is unaffected).
+///
+/// m27 continuous expression: CC11 (expression), CC2 (breath) and CC1 (mod
+/// wheel) now reach the voice as a SMOOTHED per-voice amplitude multiplier —
+/// the thing a wind player actually does mid-note, which no amount of
+/// per-note velocity can express. CC11 attenuates unconditionally; CC1/CC2
+/// only as far as `SamplerParams.expressionModDepth` allows, because their
+/// MIDI neutral is 0 and an unconditional reading would render silence until
+/// a lane's first authored point (see that field's doc). Channel pressure and
+/// every other CC remain safely ignored (documented, and now WARNED at the
+/// lane-accept path rather than silently swallowed — see
+/// `MIDIControllerRouting`). `reset()` re-centers bend, lifts the pedal, and
+/// neutralises the expression controllers.
 ///
 /// Zone audio is loaded FULLY in init — reconcile time, never the render
 /// thread — into immutable deinterleaved Float32 buffers at each file's
@@ -139,6 +149,23 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         var loopLen: Double          // Double(loopEndExcl - loopStart), precomputed
         var loopXfade: Int           // min(512, loopStart, loopEndExcl - loopStart); 0 = raw wrap
         var invLoopXfade: Float      // loopXfade > 0 ? 1/Float(loopXfade) : 0
+        // m27 leg B dynamic-layer crossfade, RESOLVED AT LOAD (design: the
+        // render path must never recompute a range from the model zone).
+        // Bounds carry SFZ's OWN defaults — xfin 0/0 and xfout 127/127 — which
+        // make both fades evaluate to exactly 1.0, so a zone without the
+        // opcodes needs no flag to be bit-identical. The flags exist only to
+        // skip the arithmetic.
+        var xfCC: Int32              // controller driving the CC fade; -1 = none
+        var hasCcXfade: Bool
+        var xfCcInLo: Float
+        var xfCcInHi: Float
+        var xfCcOutLo: Float
+        var xfCcOutHi: Float
+        var hasVelXfade: Bool
+        var xfVelInLo: Float
+        var xfVelInHi: Float
+        var xfVelOutLo: Float
+        var xfVelOutHi: Float
     }
 
     // MARK: - Published scalar snapshot
@@ -150,12 +177,21 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         var attack: Double
         var release: Double
         var gain: Double
+        /// m27: CC1/CC2 amplitude depth, 0 = off (see `SamplerParams`).
+        var expressionModDepth: Double
+        /// m27 leg C: filter sweep depth, 0 = off (filter SKIPPED, not run at
+        /// unity — that is what keeps an opted-out project byte-identical).
+        var expressionFilterDepth: Double
+        var expressionFilterCC: Int
 
         init(_ params: SamplerParams) {
             oneShot = params.oneShot
             attack = params.attack
             release = params.release
             gain = params.gain
+            expressionModDepth = params.expressionModDepth ?? 0
+            expressionFilterDepth = params.expressionFilterDepth ?? 0
+            expressionFilterCC = params.expressionFilterCC ?? 11
         }
     }
 
@@ -211,6 +247,34 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                                      // disarmed at release start for sustain mode
         var loopMode: UInt8 = 0      // zone.loopMode copy — the disarm rule reads
                                      // it without a zones deref in the noteOff path
+        // m27 continuous expression (design: breath/air §A). A SEPARATE
+        // multiplier from `gainL`/`gainR` ON PURPOSE: those are trigger-time
+        // constants and the release anchor (`releaseFrom`/`releaseSlope`) is
+        // written against a stable gain, so mutating them mid-note would
+        // corrupt every release ramp. This one rides the SAME product but is
+        // free to move.
+        //
+        // `expGainTarget` is recomputed at CC-EVENT rate (a handful of times
+        // per quantum) and at trigger; `expGain` chases it with a one-pole
+        // ramp per frame because controller lanes are STEPWISE — an
+        // unsmoothed multiply is one click per lane point, i.e. zipper noise
+        // on exactly the long held notes this feature exists to improve.
+        //
+        // Both default to 1.0 so a freed voice (`voices[i] = Voice()`) and an
+        // instrument that never sees a CC carry an exact IEEE identity.
+        var expGain: Float = 1
+        var expGainTarget: Float = 1
+        // m27 leg C: one-pole low-pass state, one per output channel. This is
+        // the ONLY genuinely per-voice piece of the filter — the coefficient
+        // is shared (the controller is instrument-wide, there being exactly
+        // one controller stream per instrument track), so 64 voices cost 2
+        // floats each and no per-voice coefficient math whatsoever.
+        var lpZ1L: Float = 0
+        var lpZ1R: Float = 0
+        // m27 leg B: the VELOCITY half of the crossfade is fixed at note-on
+        // (velocity is), so it is resolved once here and folded into every
+        // later target recompute. 1.0 = no velocity crossfade.
+        var velXfade: Float = 1
     }
 
     private static let voiceCount = 64
@@ -258,6 +322,73 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     private var attackStep: Float = 0              // level units per sample
     private var releaseSlope: Float = 0            // fraction of releaseFrom per sample
     private var outputGain: Float = 0
+
+    // MARK: - m27 continuous expression (render-thread scalars)
+
+    /// Raw controller values, normalised 0...1, single-writer in
+    /// `apply(event:)` exactly like `bendFactor`/`pedalDown`.
+    ///
+    /// ⚠️ Each defaults to FULL (1.0), NOT to `MIDIControllerType.neutral-
+    /// Default`. That enum's neutral is 127 for CC11 but **0 for CC1 and
+    /// CC2**, and it describes what the SCHEDULE injects at a block anchor
+    /// when a lane of that type EXISTS. Here the question is different: what
+    /// does an instrument that has never been sent this controller do? The
+    /// only safe answer for an attenuator is "do not attenuate" — an
+    /// untouched controller is not a closed one. A track with no CC lane at
+    /// all therefore renders byte-identically to pre-m27.
+    /// 128 controller values, normalised 0...1, allocated in init and never
+    /// resized. ONE source of truth: the amplitude path (CC11/CC2/CC1), the
+    /// leg-C filter's selected controller, and every zone's leg-B crossfade
+    /// controller all read the same table, so they cannot drift apart.
+    ///
+    /// ⚠️ This DIVERGES from SFZ, deliberately: SFZ's `set_ccN` default is 0,
+    /// which would make a zone that fades IN with a rising controller silent
+    /// until the user touches that controller. Full is the safe default for an
+    /// attenuator (see the note above) and it is the safe default here too —
+    /// with a properly authored pp/ff pair it means the ff layer sounds until
+    /// the controller moves, rather than nothing sounding at all.
+    private let ccValues: UnsafeMutablePointer<Float>
+    /// Which controllers are worth a target recompute — CC1/CC2/CC11, the
+    /// filter's controller, and every controller some zone crossfades on.
+    /// Without it a dense unrelated lane (CC7, say) would drive an O(64) voice
+    /// sweep per point for no reason. Allocated in init; 128 bytes.
+    private let ccInteresting: UnsafeMutablePointer<Bool>
+    /// The combined amplitude multiplier the voices chase — recomputed only
+    /// when a routed CC arrives or a new snapshot lands, never per frame.
+    private var ampMultiplier: Float = 1
+    /// CC1/CC2 depth from the live snapshot; 0 (the default) makes the
+    /// CC1/CC2 factor exactly 1.0. See `SamplerParams.expressionModDepth`.
+    private var expressionModDepth: Float = 0
+    /// One-pole coefficient per sample for the `expGain` chase, derived from
+    /// `expressionSmoothingSeconds` and the graph rate in `prepare()`/
+    /// `recomputeCoefficients`. Never recomputed per frame.
+    private var expressionRampCoeff: Float = 1
+    /// Controller smoothing time constant. ~12 ms de-zippers a stepwise lane
+    /// without audibly lagging a breath gesture (a real player's fastest
+    /// useful dynamic inflection is far slower than this).
+    private static let expressionSmoothingSeconds = 0.012
+    /// Below this distance the exponential chase is snapped to its target,
+    /// once per quantum — an exponential approach never arrives, and letting
+    /// the difference decay forever is how a denormal tail is born.
+    private static let expressionSnapEpsilon: Float = 1e-6
+
+    // m27 leg C — per-voice low-pass driven by the expression controller.
+    /// False (the default) SKIPS the filter branch entirely, which is the
+    /// byte-identity guarantee for every project that never opts in.
+    private var filterEnabled = false
+    private var filterDepth: Float = 0
+    private var filterCC: Int32 = 11
+    /// One-pole coefficient `g` in `y += g × (x − y)`. Smoothed toward
+    /// `filterGTarget` once per FRAME (not per voice) for the same
+    /// stepwise-lane reason the amplitude is smoothed: an abrupt cutoff jump
+    /// on a sustaining voice is an audible thump.
+    private var filterG: Float = 1
+    private var filterGTarget: Float = 1
+    /// Below this magnitude the filter memory is flushed to true zero once per
+    /// quantum. A one-pole fed silence decays geometrically forever, which is
+    /// precisely the denormal tail the pre-m27 comment could truthfully say
+    /// this instrument did not have.
+    private static let denormalFloor: Float = 1e-20
 
     // Main-actor-only publish state (same retire-bin contract as
     // PolySynthInstrument / InstrumentRenderer).
@@ -406,7 +537,27 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                     loopEndExcl: loopEndExcl,
                     loopLen: Double(loopEndExcl - loopStart),
                     loopXfade: loopXfade,
-                    invLoopXfade: loopXfade > 0 ? 1 / Float(loopXfade) : 0))
+                    invLoopXfade: loopXfade > 0 ? 1 / Float(loopXfade) : 0,
+                    // m27 leg B — RESOLVED HERE, at load, never per frame.
+                    // SFZ's own defaults (in 0/0, out 127/127) make an
+                    // unauthored fade evaluate to exactly 1.0.
+                    xfCC: Int32(zone.crossfade?.controller ?? -1),
+                    hasCcXfade: zone.crossfade.map {
+                        $0.controller != nil && ($0.ccInLo != nil || $0.ccInHi != nil
+                            || $0.ccOutLo != nil || $0.ccOutHi != nil)
+                    } ?? false,
+                    xfCcInLo: Float(zone.crossfade?.ccInLo ?? 0),
+                    xfCcInHi: Float(zone.crossfade?.ccInHi ?? 0),
+                    xfCcOutLo: Float(zone.crossfade?.ccOutLo ?? 127),
+                    xfCcOutHi: Float(zone.crossfade?.ccOutHi ?? 127),
+                    hasVelXfade: zone.crossfade.map {
+                        $0.velInLo != nil || $0.velInHi != nil
+                            || $0.velOutLo != nil || $0.velOutHi != nil
+                    } ?? false,
+                    xfVelInLo: Float(zone.crossfade?.velInLo ?? 0),
+                    xfVelInHi: Float(zone.crossfade?.velInHi ?? 0),
+                    xfVelOutLo: Float(zone.crossfade?.velOutLo ?? 127),
+                    xfVelOutHi: Float(zone.crossfade?.velOutHi ?? 127)))
             } catch {
                 zoneLoadNotes.append(
                     "zone skipped (\(zone.audioFileURL.lastPathComponent)): "
@@ -440,6 +591,24 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
 
         voices = .allocate(capacity: Self.voiceCount)
         voices.initialize(repeating: Voice(), count: Self.voiceCount)
+        // m27: the controller table and its interest mask — fixed 128-entry
+        // blocks allocated HERE, at reconcile time, so the render path only
+        // ever indexes them.
+        ccValues = .allocate(capacity: 128)
+        ccValues.initialize(repeating: 1, count: 128)
+        ccInteresting = .allocate(capacity: 128)
+        ccInteresting.initialize(repeating: false, count: 128)
+        ccInteresting[1] = true    // mod wheel  → amplitude (depth-gated)
+        ccInteresting[2] = true    // breath     → amplitude (depth-gated)
+        ccInteresting[11] = true   // expression → amplitude, unconditional
+        // Every controller some zone crossfades on. `zones` is fully built
+        // above, so this sees the final set.
+        for index in 0..<zoneCount {
+            let controller = zones[index].xfCC
+            if zones[index].hasCcXfade, controller >= 0, controller < 128 {
+                ccInteresting[Int(controller)] = true
+            }
+        }
         paramsSlot = .allocate(capacity: 1)
         daw_atomic_ptr_init(paramsSlot)
         // Initial publish: nothing renders yet, so a plain exchange is safe.
@@ -455,6 +624,10 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         paramsSlot.deallocate()
         voices.deinitialize(count: Self.voiceCount)
         voices.deallocate()
+        ccValues.deinitialize(count: 128)
+        ccValues.deallocate()
+        ccInteresting.deinitialize(count: 128)
+        ccInteresting.deallocate()
         zones.deinitialize(count: zoneCount)
         zones.deallocate()
         rrCounters.deinitialize(count: max(1, zoneCount))
@@ -532,11 +705,26 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         }
 
         // NaN/Inf guard, once per quantum: a blown-up voice is hard-killed.
-        // (No recursive filter state here, so there is no denormal tail to
-        // flush — the envelope frees voices at exact 0.)
+        // The envelope frees voices at exact 0, so IT has no denormal tail —
+        // but the m27 expression chase is an exponential approach that never
+        // arrives, so its residual difference IS a denormal source and is
+        // snapped here. `expGain` joins the finiteness sweep for the same
+        // reason `level` is in it: a NaN in a multiplier propagates forever
+        // and nothing downstream would ever catch it.
         for index in 0..<Self.voiceCount where voices[index].active {
-            if !(voices[index].level.isFinite && voices[index].position.isFinite) {
+            if !(voices[index].level.isFinite && voices[index].position.isFinite
+                 && voices[index].expGain.isFinite
+                 && voices[index].lpZ1L.isFinite && voices[index].lpZ1R.isFinite) {
                 voices[index] = Voice()
+                continue
+            }
+            if abs(voices[index].expGainTarget - voices[index].expGain)
+                < Self.expressionSnapEpsilon {
+                voices[index].expGain = voices[index].expGainTarget
+            }
+            if filterEnabled {
+                if abs(voices[index].lpZ1L) < Self.denormalFloor { voices[index].lpZ1L = 0 }
+                if abs(voices[index].lpZ1R) < Self.denormalFloor { voices[index].lpZ1R = 0 }
             }
         }
 
@@ -565,6 +753,17 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         }
         bendFactor = 1.0
         pedalDown = false
+        // m27: controller state neutralises with the voice wipe, exactly like
+        // the bend re-centre above. A stale attenuator surviving a stop/seek
+        // would quietly duck the next notes; if a lane really is present, the
+        // schedule's chase prefix re-delivers its true value at the next block
+        // anchor before any note sounds.
+        for controller in 0..<128 { ccValues[controller] = 1 }
+        ampMultiplier = 1
+        // The voice wipe above already zeroed every filter memory (`Voice()`),
+        // so the cutoff just returns to its neutral-controller position.
+        refreshFilterTarget()
+        filterG = filterGTarget
     }
 
     // MARK: - Per-sample playback (render thread)
@@ -573,6 +772,12 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     private func renderFrame() -> (left: Float, right: Float) {
         var left: Float = 0
         var right: Float = 0
+        // m27 leg C: the cutoff coefficient is INSTRUMENT-wide (one controller
+        // stream per instrument track), so it is smoothed ONCE per frame here
+        // rather than 64 times inside the voice loop.
+        if filterEnabled {
+            filterG += (filterGTarget - filterG) * expressionRampCoeff
+        }
         for index in 0..<Self.voiceCount where voices[index].active {
             // 1. Envelope — linear segments through the m19-b 4-stage machine
             //    (the PolySynthInstrument pattern), per-voice coefficients
@@ -606,6 +811,15 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                     continue
                 }
             }
+
+            // 1b. m27 expression chase — ONE one-pole step per voice per
+            //     frame (sub, mul, add). Placed here so BOTH the looping and
+            //     non-looping branches below see the same updated value
+            //     exactly once. When target == current == 1.0 this is
+            //     `1 + 0 × c = 1`, bit-exact, which is what keeps a
+            //     lane-free project byte-identical to pre-m27.
+            voices[index].expGain += (voices[index].expGainTarget
+                - voices[index].expGain) * expressionRampCoeff
 
             // 2. Source read at the CURRENT playhead with linear
             //    interpolation, then advance. The looping branch (m20-g §3.5)
@@ -653,8 +867,19 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                         sR += (iR - sR) * g
                     }
                 }
-                left += sL * (voices[index].level * voices[index].gainL)
-                right += sR * (voices[index].level * voices[index].gainR)
+                // m27 leg C: filter the SOURCE, before the amplitude product —
+                // the gain is no longer constant, so filter-after-amp would
+                // not be the same system. Skipped entirely when disabled.
+                if filterEnabled {
+                    voices[index].lpZ1L += (sL - voices[index].lpZ1L) * filterG
+                    sL = voices[index].lpZ1L
+                    voices[index].lpZ1R += (sR - voices[index].lpZ1R) * filterG
+                    sR = voices[index].lpZ1R
+                }
+                // m27: expGain multiplies LAST, so at 1.0 the product is the
+                // pre-m27 one bit-for-bit (×1.0 is an IEEE identity).
+                left += sL * (voices[index].level * voices[index].gainL * voices[index].expGain)
+                right += sR * (voices[index].level * voices[index].gainR * voices[index].expGain)
                 voices[index].position = position + voices[index].increment
             } else {
                 let position = voices[index].position
@@ -669,8 +894,20 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                 let r0 = zone.right[idx]
                 let l1 = next < zone.endFrame ? zone.left[next] : 0
                 let r1 = next < zone.endFrame ? zone.right[next] : 0
-                left += (l0 + (l1 - l0) * frac) * (voices[index].level * voices[index].gainL)
-                right += (r0 + (r1 - r0) * frac) * (voices[index].level * voices[index].gainR)
+                // Hoisted into locals so leg C's filter can sit between the
+                // source read and the amplitude product; the arithmetic and
+                // its ORDER are unchanged from pre-m27, which is what keeps
+                // the filter-disabled path bit-exact.
+                var sL = l0 + (l1 - l0) * frac
+                var sR = r0 + (r1 - r0) * frac
+                if filterEnabled {
+                    voices[index].lpZ1L += (sL - voices[index].lpZ1L) * filterG
+                    sL = voices[index].lpZ1L
+                    voices[index].lpZ1R += (sR - voices[index].lpZ1R) * filterG
+                    sR = voices[index].lpZ1R
+                }
+                left += sL * (voices[index].level * voices[index].gainL * voices[index].expGain)
+                right += sR * (voices[index].level * voices[index].gainR * voices[index].expGain)
                 voices[index].position = position + voices[index].increment
             }
         }
@@ -687,6 +924,122 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         attackStep = Float(1.0 / max(1.0, params.attack * sampleRate))
         releaseSlope = Float(1.0 / max(1.0, params.release * sampleRate))
         outputGain = Float(params.gain)
+        // m27: the ramp coefficient is rate-dependent, so it belongs here (and
+        // `prepare()` already forces a re-adopt on a rate change). One `exp`
+        // per SNAPSHOT — never per frame, never per event.
+        expressionRampCoeff = Float(
+            1.0 - exp(-1.0 / max(1.0, Self.expressionSmoothingSeconds * sampleRate)))
+        expressionModDepth = Float(params.expressionModDepth)
+        filterDepth = Float(params.expressionFilterDepth)
+        filterCC = Int32(params.expressionFilterCC)
+        let wasEnabled = filterEnabled
+        filterEnabled = params.expressionFilterDepth > 0
+        if filterEnabled, filterCC >= 0, filterCC < 128 {
+            ccInteresting[Int(filterCC)] = true
+        }
+        if filterEnabled, !wasEnabled {
+            // Turning the filter ON mid-flight starts every voice's memory
+            // from silence rather than from stale garbage.
+            for index in 0..<Self.voiceCount {
+                voices[index].lpZ1L = 0
+                voices[index].lpZ1R = 0
+            }
+            filterG = 1          // start open; the chase takes it down
+        }
+        refreshExpressionTargets()
+        refreshFilterTarget()
+    }
+
+    /// Maps the driving controller to a one-pole coefficient. ALL the
+    /// expensive math — one `exp`, one `pow` — happens HERE, at CC-event and
+    /// snapshot rate, never per frame and never per voice. The render loop
+    /// sees only `y += g × (x − y)`.
+    ///
+    /// The precedent for a libm call on this thread is the pitch-bend branch's
+    /// `exp2` (one per applied bend event); this is the same bounded shape.
+    @inline(__always)
+    private func refreshFilterTarget() {
+        guard filterEnabled else {
+            filterGTarget = 1
+            return
+        }
+        let driver = ccValues[Int(filterCC)]
+        // cutoff = low × (high/low)^(1 − depth × (1 − driver)), log-interpolated.
+        let low = SamplerParams.expressionFilterLowHz
+        let high = SamplerParams.expressionFilterHighHz
+        let exponent = Double(1 - filterDepth * (1 - driver))
+        let cutoff = low * pow(high / low, exponent)
+        // g = 1 − e^(−2π fc / fs), the standard one-pole. Clamped to ≤ 1 so a
+        // cutoff above Nyquist can never make the filter unstable.
+        let g = 1.0 - exp(-2.0 * Double.pi * cutoff / max(1.0, sampleRate))
+        filterGTarget = Float(min(1.0, max(0.0, g)))
+    }
+
+    /// Recomputes the amplitude multiplier and pushes it to every sounding
+    /// voice. Called at CC-event rate and on a snapshot change — NOT per
+    /// frame. The O(64) in-place sweep is the SAME shape the pitch-bend branch
+    /// has always used (see `apply(_:)`, the `voices[index].increment` loop):
+    /// bounded, allocation-free, no locks, no ObjC.
+    @inline(__always)
+    private func refreshExpressionTargets() {
+        // min(), not a product: CC1 and CC2 are alternative spellings of the
+        // same gesture ("how hard am I blowing"), and multiplying two
+        // attenuators that both mean it would double-attenuate a player who
+        // sends both. Each sits at 1.0 until its first event, so a lane on
+        // only one of them is that one's value exactly.
+        let dynamics = min(ccValues[2], ccValues[1])
+        // depth 0 → (1 − 0 × x) = 1.0 exactly → ampMultiplier == CC11.
+        ampMultiplier = ccValues[11] * (1 - expressionModDepth * (1 - dynamics))
+        for index in 0..<Self.voiceCount where voices[index].active {
+            // m27 leg B: the CONTINUOUS half of the crossfade re-evaluates
+            // here, so a held note really does change layer as the controller
+            // moves; the VELOCITY half was fixed at note-on. Both are exactly
+            // 1.0 for a zone without crossfade opcodes.
+            voices[index].expGainTarget = ampMultiplier * voices[index].velXfade
+                * ccCrossfadeGain(zones[Int(voices[index].zoneIndex)])
+        }
+    }
+
+    /// Equal-power fade-in × fade-out for the CC domain. SFZ's documented
+    /// DEFAULT curve is `power` (verified at sfzformat.com), i.e. the square
+    /// root of the linear ramp; `xf_cccurve`/`xf_velcurve` are not read, and
+    /// the importer reason-codes them so a file asking for `gain` is never
+    /// silently given `power`. Returns EXACTLY 1.0 for a zone with no
+    /// crossfade, because the resolved defaults (in 0/0, out 127/127) make
+    /// both halves saturate — `sqrt(1) == 1`, an IEEE identity.
+    @inline(__always)
+    private func ccCrossfadeGain(_ zone: LoadedZone) -> Float {
+        guard zone.hasCcXfade, zone.xfCC >= 0 else { return 1 }
+        let value = ccValues[Int(zone.xfCC)] * 127
+        return Self.fadeIn(value, zone.xfCcInLo, zone.xfCcInHi)
+            * Self.fadeOut(value, zone.xfCcOutLo, zone.xfCcOutHi)
+    }
+
+    /// The velocity domain, evaluated once at note-on.
+    @inline(__always)
+    private func velocityCrossfadeGain(_ zone: LoadedZone, velocity: Float) -> Float {
+        guard zone.hasVelXfade else { return 1 }
+        return Self.fadeIn(velocity, zone.xfVelInLo, zone.xfVelInHi)
+            * Self.fadeOut(velocity, zone.xfVelOutLo, zone.xfVelOutHi)
+    }
+
+    /// 0 below `lo`, 1 at/above `hi`, equal-power between. `hi <= lo` is a
+    /// hard step at `lo` — which is exactly what SFZ's default 0/0 gives, and
+    /// why an unauthored fade-in is 1.0 everywhere.
+    @inline(__always)
+    private static func fadeIn(_ value: Float, _ lo: Float, _ hi: Float) -> Float {
+        if value >= hi { return 1 }
+        if value <= lo || hi <= lo { return 0 }
+        return ((value - lo) / (hi - lo)).squareRoot()
+    }
+
+    /// 1 at/below `lo`, 0 at/above `hi`, equal-power between. SFZ's default
+    /// 127/127 makes it 1.0 for every legal value.
+    @inline(__always)
+    private static func fadeOut(_ value: Float, _ lo: Float, _ hi: Float) -> Float {
+        if value <= lo { return 1 }
+        if value >= hi || hi <= lo { return 0 }
+        return ((hi - value) / (hi - lo)).squareRoot()
     }
 
     // MARK: - Voice allocation (render thread)
@@ -776,6 +1129,21 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                     }
                 }
                 pedalDown = down
+            } else if event.pitch < 128 {
+                // m27: every controller lands in the table (one source of
+                // truth), but only an INTERESTING one — CC1/CC2/CC11, the
+                // leg-C filter's controller, or a controller some zone
+                // crossfades on — pays for a target recompute. THE ONE DATA
+                // RULE: pitch is the controller number, velocity the value.
+                // Nothing here allocates, locks, or logs; the O(64) sweep
+                // inside `refreshExpressionTargets` is the pitch-bend
+                // branch's shape.
+                let controller = Int(event.pitch)
+                ccValues[controller] = Float(min(event.velocity, 127)) * (1.0 / 127.0)
+                if ccInteresting[controller] {
+                    refreshExpressionTargets()
+                    refreshFilterTarget()
+                }
             }
         } else if event.kind == ScheduledMIDIEvent.pitchBend {
             // m16-b2: data1 = LSB, data2 = MSB (THE ONE DATA RULE); center
@@ -841,6 +1209,16 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         let amp = velocityAmp * zone.gain
         voice.gainL = amp * zone.panL
         voice.gainR = amp * zone.panR
+        // m27: a new voice starts AT the live expression value rather than
+        // ramping up to it — the amp envelope is what shapes an attack, and
+        // ramping here would make a note struck at low expression bloom
+        // wrongly. With no CC ever received this is 1.0 (an IEEE identity).
+        // m27 leg B: the velocity half is fixed now, for good; the CC half
+        // keeps moving with the controller. Both are 1.0 without opcodes.
+        voice.velXfade = velocityCrossfadeGain(zone, velocity: Float(event.velocity))
+        let target = ampMultiplier * voice.velXfade * ccCrossfadeGain(zone)
+        voice.expGainTarget = target
+        voice.expGain = target
         // Envelope coefficients (design §4.4): four divides at trigger; the
         // -1 sentinel falls back to the LIVE global coefficients, so nil
         // zones keep following global attack/release hot-swaps for voices

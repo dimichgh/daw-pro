@@ -333,6 +333,15 @@ public enum SFZParser {
             region.trigger = trigger.lowercased()
         }
 
+        // m27 leg B — dynamic-layer crossfade. The VELOCITY forms are plain
+        // names; the CC forms carry their controller number in the NAME
+        // (`xfin_locc11`), so they are matched by prefix below and cannot live
+        // in the static `consumed` set.
+        take("xfin_lovel", SFZSyntax.integer, into: \.xfVelInLo)
+        take("xfin_hivel", SFZSyntax.integer, into: \.xfVelInHi)
+        take("xfout_lovel", SFZSyntax.integer, into: \.xfVelOutLo)
+        take("xfout_hivel", SFZSyntax.integer, into: \.xfVelOutHi)
+
         let consumed: Set<String> = [
             "sample", "default_path", "key", "lokey", "hikey",
             "pitch_keycenter", "lovel", "hivel", "seq_length", "seq_position",
@@ -341,15 +350,45 @@ public enum SFZParser {
             "ampeg_sustain", "ampeg_release", "sw_last", "sw_default",
             "loop_mode", "loopmode", "trigger",
             "loop_start", "loopstart", "loop_end", "loopend",
+            "xfin_lovel", "xfin_hivel", "xfout_lovel", "xfout_hivel",
         ]
-        for name in merged.keys where !consumed.contains(name) {
+        // m27: the four CC-domain crossfade prefixes, longest-first so
+        // `xfout_locc` is never shadowed by a shorter sibling. Keyed by the
+        // Region field each fills.
+        let ccCrossfadePrefixes: [(String, WritableKeyPath<SampleLibraryIR.Region, Int?>)] = [
+            ("xfin_locc", \.xfCcInLo), ("xfin_hicc", \.xfCcInHi),
+            ("xfout_locc", \.xfCcOutLo), ("xfout_hicc", \.xfCcOutHi),
+        ]
+        // Sorted so a region naming several CC-crossfade opcodes resolves its
+        // controller deterministically (dictionary order is not stable).
+        for name in merged.keys.sorted() where !consumed.contains(name) {
             // CC-triggered regions (`on_loccN`/`on_hiccN`) are a §2.3 SKIP
             // input, consumed by the mapper — not an "ignored" opcode.
             if name.hasPrefix("on_locc") || name.hasPrefix("on_hicc") {
                 region.ccTriggered = true
-            } else {
-                ignored.append(name)
+                continue
             }
+            if let (prefix, keyPath) = ccCrossfadePrefixes.first(
+                where: { name.hasPrefix($0.0) }),
+               let controller = SFZSyntax.integer(from: String(name.dropFirst(prefix.count))),
+               (0...127).contains(controller),
+               let raw = merged[name] {
+                // A region may only drive ONE CC crossfade; the first
+                // controller seen (lowest opcode name) wins and any other is
+                // reason-coded rather than silently blended in.
+                if region.xfCC == nil { region.xfCC = controller }
+                guard region.xfCC == controller else {
+                    ignored.append(name)
+                    continue
+                }
+                if let value = SFZSyntax.integer(from: raw) {
+                    region[keyPath: keyPath] = value
+                } else {
+                    ignored.append(name)
+                }
+                continue
+            }
+            ignored.append(name)
         }
         region.ignored = ignored.sorted()
         return region

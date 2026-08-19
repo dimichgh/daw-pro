@@ -274,6 +274,27 @@ public final class CommandRouter {
         "clip.setGainEnvelope",
         "clip.setControllerLane",
         "clip.removeControllerLane",
+        // m27 leg D: generate a realistic breath contour over a MIDI clip's
+        // notes — the correlated expression swell plus delayed vibrato and
+        // micro-sharpening that legs A and C made audible. The authoring
+        // primitive ABOVE the two verbs directly here; they stay the raw
+        // wholesale-replace / delete pair. NOTE: no quoted string in this
+        // comment, deliberately (the m25-d rule).
+        //
+        // ⚠️ Placed HERE, next to its siblings, and NOT at the tail — the
+        // clip.getNotes / instrument.describeSampler precedent, which
+        // `FXSpectrumCommandTests.registeredAtEndOfAllCommands` records
+        // explicitly ("landed elsewhere in the array, next to their siblings,
+        // not at the tail — this chain is unaffected by either"). The
+        // additive-at-end law exists so the tail-chain pins stay meaningful;
+        // an insertion 117 elements from the end leaves every end-relative
+        // assertion in the tree (46 `dropLast` sites across 8 files, plus
+        // three `suffix(19)`/`suffix(21)` windows) true by construction, so
+        // only the 16 explicit count pins move. Verified before moving it:
+        // there is not one absolute `allCommands[i]` index anywhere in
+        // Tests/ or Sources/ (0 hits, positive-controlled against the 46
+        // dropLast hits with the same command shape).
+        "clip.applyBreathContour",
         "clip.setFades",
         "clip.crossfade",
         "clip.setStretch",
@@ -1283,6 +1304,18 @@ public final class CommandRouter {
             }
             if let displayName = describeSamplerParams.displayName {
                 describeSamplerResult["displayName"] = .string(displayName)
+            }
+            // m27: only-when-SET, so a sampler that never opted in keeps its
+            // pre-m27 wire shape. Settable-but-unreadable would be the same
+            // silent discard this round exists to end.
+            if let modDepth = describeSamplerParams.expressionModDepth {
+                describeSamplerResult["expressionModDepth"] = .number(modDepth)
+            }
+            if let filterDepth = describeSamplerParams.expressionFilterDepth {
+                describeSamplerResult["expressionFilterDepth"] = .number(filterDepth)
+            }
+            if let filterCC = describeSamplerParams.expressionFilterCC {
+                describeSamplerResult["expressionFilterCC"] = .number(Double(filterCC))
             }
             if params["offset"] != nil || params["limit"] != nil {
                 let describeSamplerOffset = try Self.parseZonePageOffset(params)
@@ -2787,7 +2820,19 @@ public final class CommandRouter {
             let lanePoints = try parseControllerPoints(params["points"], type: laneType)
             let lanedClip = try store.setControllerLane(
                 clipID: laneClipID, type: laneType, points: lanePoints)
-            return .success(request.id, try JSONValue(encoding: lanedClip))
+            // m27: a lane the track's instrument will NOT consume comes back
+            // with a `warnings` sentence naming the controller and the reason
+            // (the media-import idiom above). The lane is still stored and the
+            // call still succeeds — but accepting data we discard, silently,
+            // is exactly the defect that produced seven inert CC11 lanes.
+            var lanedResult = try JSONValue(encoding: lanedClip)
+            if let laneWarning = store.controllerLaneWarning(
+                clipID: laneClipID, type: laneType),
+               case .object(var lanedObject) = lanedResult {
+                lanedObject["warnings"] = .array([.string(laneWarning)])
+                lanedResult = .object(lanedObject)
+            }
+            return .success(request.id, lanedResult)
 
         case "clip.removeControllerLane":
             // params: clipId (required), type ("cc"|"pitchBend"|"channelPressure",
@@ -5116,6 +5161,89 @@ public final class CommandRouter {
             let pasteResult = editPaste.pasteClips(intoTrack: pasteIntoTrack)
             return .success(request.id, editPasteResultJSON(pasteResult))
 
+        case "clip.applyBreathContour":
+            // m27 leg D. params: clipId (required), noteIds? (array of note
+            // UUIDs — omit to shape EVERY note in the clip), plus the fifteen
+            // contour options, every one optional and bounded below. Generates
+            // the correlated performance contour a wind/bowed player puts on a
+            // held note — an expression (CC) swell that moves LOUDNESS and (when
+            // the sampler's expressionFilterDepth is on) BRIGHTNESS together,
+            // plus DELAYED vibrato and micro-sharpening on the pitch-bend lane.
+            //
+            // The two lanes are MERGED, not replaced: points outside every
+            // touched note's span survive exactly as authored, so this composes
+            // with a hand-drawn shape and accumulates across per-note calls.
+            // That is the difference from clip.setControllerLane, which is the
+            // raw wholesale-replace primitive and stays unchanged.
+            //
+            // Notes too short for the straight opening plus one vibrato cycle
+            // get the expression contour ONLY and no bend lane at all — the
+            // result says how many, and it is the intended shape, not an error.
+            // ONE undoable step ("Breath Contour"). MIDI clips ONLY — an audio
+            // clip surfaces notAMIDIClip verbatim; clipNotFound via the
+            // LocalizedError mapping. Response: the updated clip fields PLUS
+            // notesTouched, notesWithVibrato, expressionPointCount,
+            // pitchBendPointCount, perNotePointBudget and `warnings` — read the
+            // warnings, they are how a half-audible result announces itself.
+            try params.rejectUnknownKeys(
+                ["clipId", "noteIds", "depth", "peakValue", "peakPosition",
+                 "attackSettleSeconds", "expressionCC", "expressionSpacingSeconds",
+                 "vibratoOnsetSeconds", "vibratoRateHz", "vibratoDepthCents",
+                 "vibratoBloomSeconds", "vibratoReleaseSeconds", "sharpenCents",
+                 "bendSpacingSeconds", "bendRangeSemitones"],
+                verb: "clip.applyBreathContour")
+            let breathClipID = try params.requireClipID()
+            let breathNoteIDs = params["noteIds"] == nil
+                ? nil
+                : try parseClipIDs(params["noteIds"], field: "noteIds",
+                                   requirement: " (the notes to shape — omit to shape every note)")
+            // Every bound below is the SAME domain `BreathContour.Options
+            // .sanitized()` heals to, stated here so the wire REFUSES a bad
+            // value with a teaching sentence instead of silently clamping it —
+            // an agent that asked for a 40 Hz vibrato and got 20 would have no
+            // way to find out (m23's silent-discard defect class).
+            var breath = BreathContour.Options()
+            breath.depth = try boundedOption(params, "depth", 0, 1, breath.depth,
+                                             "how far the swell falls below its peak, as a fraction of peakValue")
+            breath.peakValue = try boundedIntOption(params, "peakValue", 0, 127, breath.peakValue,
+                                                    "the CC value at the top of the swell; 127 = the lane's neutral, so the peak is as loud as no lane at all")
+            breath.peakPosition = try boundedOption(params, "peakPosition", 0.05, 0.95, breath.peakPosition,
+                                                    "where the peak sits, as a fraction of the note's length")
+            breath.attackSettleSeconds = try boundedOption(params, "attackSettleSeconds", 0, 1, breath.attackSettleSeconds,
+                                                           "seconds from the attack to the settling dip; clamped to a quarter of a short note")
+            breath.expressionCC = try boundedIntOption(params, "expressionCC", 0, 127, breath.expressionCC,
+                                                       "which CC carries the swell; 11 is the one the built-in sampler routes to amplitude with no opt-in")
+            breath.expressionSpacingSeconds = try boundedOption(params, "expressionSpacingSeconds", 0.001, 1, breath.expressionSpacingSeconds,
+                                                                 "seconds between expression points; controller lanes are STEPWISE, so this is what makes a swell instead of a staircase")
+            breath.vibratoOnsetSeconds = try boundedOption(params, "vibratoOnsetSeconds", 0, 10, breath.vibratoOnsetSeconds,
+                                                            "seconds of STRAIGHT playing before vibrato starts; a note too short for this plus one cycle gets no vibrato at all")
+            breath.vibratoRateHz = try boundedOption(params, "vibratoRateHz", 0.2, 20, breath.vibratoRateHz,
+                                                      "vibrato rate in Hz")
+            breath.vibratoDepthCents = try boundedOption(params, "vibratoDepthCents", 0, 200, breath.vibratoDepthCents,
+                                                          "peak vibrato width in cents (a ± figure); 0 turns vibrato off")
+            breath.vibratoBloomSeconds = try boundedOption(params, "vibratoBloomSeconds", 0, 10, breath.vibratoBloomSeconds,
+                                                            "seconds for the vibrato to widen from nothing to full depth")
+            breath.vibratoReleaseSeconds = try boundedOption(params, "vibratoReleaseSeconds", 0, 10, breath.vibratoReleaseSeconds,
+                                                              "seconds before the note's end over which vibrato relaxes back to centre")
+            breath.sharpenCents = try boundedOption(params, "sharpenCents", -200, 200, breath.sharpenCents,
+                                                     "peak micro-sharpening in cents at the top of the swell, resolving as it falls")
+            breath.bendSpacingSeconds = try boundedOption(params, "bendSpacingSeconds", 0.001, 1, breath.bendSpacingSeconds,
+                                                           "seconds between pitch-bend points; the bend run IS the vibrato waveform, so this is its sample rate")
+            breath.bendRangeSemitones = try boundedOption(params, "bendRangeSemitones", 0.01, 48, breath.bendRangeSemitones,
+                                                           "the instrument's pitch-bend range in semitones for a full deflection; the built-in sampler is exactly 2")
+            let breathResult = try store.applyBreathContour(
+                clipID: breathClipID, noteIDs: breathNoteIDs, options: breath)
+            var breathObj = try JSONValue(encoding: breathResult.clip).objectValue ?? [:]
+            breathObj["notesTouched"] = .number(Double(breathResult.notesTouched))
+            breathObj["notesWithVibrato"] = .number(Double(breathResult.notesWithVibrato))
+            breathObj["expressionPointCount"] = .number(Double(breathResult.expressionPointCount))
+            breathObj["pitchBendPointCount"] = .number(Double(breathResult.pitchBendPointCount))
+            breathObj["perNotePointBudget"] = .number(Double(breathResult.perNotePointBudget))
+            if !breathResult.warnings.isEmpty {
+                breathObj["warnings"] = .array(breathResult.warnings.map { .string($0) })
+            }
+            return .success(request.id, .object(breathObj))
+
         case "plugin.openUI":
             // Opens (or focuses) the floating window of the LIVE hosted Audio
             // Unit for a track's instrument or one insert effect (M3 vi-b) —
@@ -7161,6 +7289,44 @@ public final class CommandRouter {
     /// requirement so it stays a single source of truth; `clip.removeMany`/
     /// `clip.moveMany` have no minimum at all (an empty `ids` is a legal
     /// no-op, mirroring `ProjectStore.removeClips`/`moveClips`).
+    /// One optional, RANGE-CHECKED numeric option for `clip.applyBreathContour`
+    /// (m27 leg D). Fifteen of them share this rather than fifteen hand-written
+    /// guards: the `what` clause carries the parameter's own meaning so the
+    /// error still teaches, and one shape means one place for the bounds to be
+    /// wrong.
+    ///
+    /// REFUSES rather than clamps. `BreathContour.Options.sanitized()` heals
+    /// the same domains defensively, but healing at the wire would mean an
+    /// agent that asked for a 40 Hz vibrato silently got 20 — the accept-and-
+    /// discard shape this whole round exists to end.
+    private func boundedOption(_ params: [String: JSONValue], _ key: String,
+                               _ low: Double, _ high: Double,
+                               _ fallback: Double, _ what: String) throws -> Double {
+        guard let raw = params[key] else { return fallback }
+        guard let value = raw.doubleValue, (low...high).contains(value) else {
+            throw ControlError(
+                "'\(key)' must be a number between \(low) and \(high) "
+                + "(default \(fallback) — \(what))")
+        }
+        return value
+    }
+
+    /// The integer twin of `boundedOption`: rejects a fractional value outright
+    /// rather than truncating it (the m23-aj-2 finding that the ordinary
+    /// `Int(double)` path truncates silently).
+    private func boundedIntOption(_ params: [String: JSONValue], _ key: String,
+                                  _ low: Int, _ high: Int,
+                                  _ fallback: Int, _ what: String) throws -> Int {
+        guard let raw = params[key] else { return fallback }
+        guard let value = raw.doubleValue, value == value.rounded(),
+              (Double(low)...Double(high)).contains(value) else {
+            throw ControlError(
+                "'\(key)' must be a whole number between \(low) and \(high) "
+                + "(default \(fallback) — \(what))")
+        }
+        return Int(value)
+    }
+
     private func parseClipIDs(
         _ value: JSONValue?, field: String = "clipIds",
         requirement: String = " (at least 2, to form a take group)"
@@ -7818,6 +7984,7 @@ public final class CommandRouter {
         var loopMode: SamplerLoopMode?
         var loopStart: Int?
         var loopEnd: Int?
+        var crossfade: SamplerCrossfade?
     }
 
     /// Parses one zone object's fields. `label` is the wire path prefix
@@ -7864,6 +8031,7 @@ public final class CommandRouter {
         }
         f.loopStart = try optionalInteger(zone["loopStart"], "\(label).loopStart")
         f.loopEnd = try optionalInteger(zone["loopEnd"], "\(label).loopEnd")
+        f.crossfade = try parseCrossfade(zone["crossfade"], "\(label).crossfade")
         return f
     }
 
@@ -7997,7 +8165,8 @@ public final class CommandRouter {
             release: f.release ?? base.release,
             loopMode: f.loopMode ?? base.loopMode,
             loopStart: f.loopStart ?? base.loopStart,
-            loopEnd: f.loopEnd ?? base.loopEnd)
+            loopEnd: f.loopEnd ?? base.loopEnd,
+            crossfade: f.crossfade ?? base.crossfade)
     }
 
     /// A brand-new zone: every unmentioned field resolves to the MODEL DEFAULT.
@@ -8030,7 +8199,32 @@ public final class CommandRouter {
             release: f.release,
             loopMode: f.loopMode,
             loopStart: f.loopStart,
-            loopEnd: f.loopEnd)
+            loopEnd: f.loopEnd,
+            crossfade: f.crossfade)
+    }
+
+    /// Parses a zone's optional `crossfade` object (m27 leg B). Absent → nil.
+    /// Present-but-not-an-object, or a non-integer member, is a field-path
+    /// error naming the offender — the `parseZoneFields` convention. Ranges
+    /// are left to the model's clamping init. An object whose members are all
+    /// absent resolves to nil through `SamplerCrossfade.isNoOp`, so an empty
+    /// `{}` is a no-op rather than an inert stored object.
+    private static func parseCrossfade(_ value: JSONValue?,
+                                       _ label: String) throws -> SamplerCrossfade? {
+        guard let value else { return nil }
+        guard case .object(let obj) = value else {
+            throw ControlError("\(label) must be an object")
+        }
+        return SamplerCrossfade(
+            controller: try optionalInteger(obj["controller"], "\(label).controller"),
+            ccInLo: try optionalInteger(obj["ccInLo"], "\(label).ccInLo"),
+            ccInHi: try optionalInteger(obj["ccInHi"], "\(label).ccInHi"),
+            ccOutLo: try optionalInteger(obj["ccOutLo"], "\(label).ccOutLo"),
+            ccOutHi: try optionalInteger(obj["ccOutHi"], "\(label).ccOutHi"),
+            velInLo: try optionalInteger(obj["velInLo"], "\(label).velInLo"),
+            velInHi: try optionalInteger(obj["velInHi"], "\(label).velInHi"),
+            velOutLo: try optionalInteger(obj["velOutLo"], "\(label).velOutLo"),
+            velOutHi: try optionalInteger(obj["velOutHi"], "\(label).velOutHi"))
     }
 
     /// - Parameter reminted: OUT — the ids the caller SENT on the `zones` path
@@ -8143,7 +8337,18 @@ public final class CommandRouter {
             // stay IGNORED rather than rejected, precisely so that echo cannot
             // become an error.
             sourcePath: fallback.sourcePath,
-            displayName: fallback.displayName
+            displayName: fallback.displayName,
+            // m27 continuous expression: same fall-back-to-current rule as the
+            // four scalars above, so tuning one knob never resets this one.
+            expressionModDepth: try Self.optionalNumber(
+                obj["expressionModDepth"], "sampler.expressionModDepth")
+                ?? fallback.expressionModDepth,
+            expressionFilterDepth: try Self.optionalNumber(
+                obj["expressionFilterDepth"], "sampler.expressionFilterDepth")
+                ?? fallback.expressionFilterDepth,
+            expressionFilterCC: try Self.optionalInteger(
+                obj["expressionFilterCC"], "sampler.expressionFilterCC")
+                ?? fallback.expressionFilterCC
         )
     }
 
@@ -8528,6 +8733,17 @@ public final class CommandRouter {
             "release": .number(sampler.release),
             "gain": .number(sampler.gain),
         ]
+        // m27 expression, all only-when-SET so a sampler that never opted in
+        // keeps its pre-m27 wire shape byte-for-byte.
+        if let modDepth = sampler.expressionModDepth {
+            samplerObject["expressionModDepth"] = .number(modDepth)
+        }
+        if let filterDepth = sampler.expressionFilterDepth {
+            samplerObject["expressionFilterDepth"] = .number(filterDepth)
+        }
+        if let filterCC = sampler.expressionFilterCC {
+            samplerObject["expressionFilterCC"] = .number(Double(filterCC))
+        }
         if let sourcePath = sampler.sourcePath {
             samplerObject["sourcePath"] = .string(sourcePath)
         }
@@ -8611,6 +8827,19 @@ public final class CommandRouter {
         if let loopEnd = zone.loopEnd {
             object["loopEnd"] = .number(Double(loopEnd))
         }
+        if let crossfade = zone.crossfade {
+            var xf: [String: JSONValue] = [:]
+            if let v = crossfade.controller { xf["controller"] = .number(Double(v)) }
+            if let v = crossfade.ccInLo { xf["ccInLo"] = .number(Double(v)) }
+            if let v = crossfade.ccInHi { xf["ccInHi"] = .number(Double(v)) }
+            if let v = crossfade.ccOutLo { xf["ccOutLo"] = .number(Double(v)) }
+            if let v = crossfade.ccOutHi { xf["ccOutHi"] = .number(Double(v)) }
+            if let v = crossfade.velInLo { xf["velInLo"] = .number(Double(v)) }
+            if let v = crossfade.velInHi { xf["velInHi"] = .number(Double(v)) }
+            if let v = crossfade.velOutLo { xf["velOutLo"] = .number(Double(v)) }
+            if let v = crossfade.velOutHi { xf["velOutHi"] = .number(Double(v)) }
+            object["crossfade"] = .object(xf)
+        }
         return .object(object)
     }
 
@@ -8624,16 +8853,15 @@ public final class CommandRouter {
     /// an error.
     private static func samplerZoneSummaryJSON(_ zones: [SamplerZone]) -> JSONValue {
         var obj: [String: JSONValue] = ["count": .number(Double(zones.count))]
-        if let pitch = Self.zoneCoverage(zones.map { ($0.minPitch, $0.maxPitch) }) {
+        if let pitch = SamplerZoneCoverage.pitchCoverage(of: zones) {
             obj["pitchCoverage"] = Self.coverageJSON(pitch)
         }
         // minVelocity/maxVelocity nil means the FULL 0...127 span (the
         // model's own documented default), never 0 — folding nil to 0 here
-        // would silently report a velocity hole that does not exist.
-        let velocityIntervals = zones.map { zone in
-            (zone.minVelocity ?? 0, zone.maxVelocity ?? 127)
-        }
-        if let velocity = Self.zoneCoverage(velocityIntervals) {
+        // would silently report a velocity hole that does not exist. That fold
+        // lives in `SamplerZoneCoverage.velocityCoverage` so the editor UI
+        // reads it the same way.
+        if let velocity = SamplerZoneCoverage.velocityCoverage(of: zones) {
             obj["velocityCoverage"] = Self.coverageJSON(velocity)
         }
         let groups = Set(zones.map { $0.group ?? 0 })
@@ -8643,43 +8871,11 @@ public final class CommandRouter {
         return .object(obj)
     }
 
-    private struct ZoneCoverage {
-        var lowerBound: Int
-        var upperBound: Int
-        var gaps: [(lowerBound: Int, upperBound: Int)]
-    }
-
-    /// Merges a list of INCLUSIVE (lowerBound, upperBound) ranges into their
-    /// union, then reports the outer envelope plus every INTERIOR gap — the
-    /// space the envelope's own min/max cannot see. A naive min-of-lower/
-    /// max-of-upper reports "0-127, fully covered" for a keymap with a hole
-    /// in the middle; this is the fix (m26-i, written against the field
-    /// report's own two examples — a bass silent below MIDI 35, a library
-    /// silent above 45 — both of which sit at the envelope's OWN edges and
-    /// so are already visible in a naive min/max; an interior hole between
-    /// two zone islands is the case a naive envelope hides).
-    private static func zoneCoverage(_ ranges: [(Int, Int)]) -> ZoneCoverage? {
-        guard !ranges.isEmpty else { return nil }
-        let sorted = ranges.sorted { $0.0 < $1.0 }
-        var merged: [(lowerBound: Int, upperBound: Int)] = []
-        for range in sorted {
-            if let last = merged.last, range.0 <= last.upperBound + 1 {
-                merged[merged.count - 1].upperBound = max(last.upperBound, range.1)
-            } else {
-                merged.append((lowerBound: range.0, upperBound: range.1))
-            }
-        }
-        var gaps: [(lowerBound: Int, upperBound: Int)] = []
-        for i in 1..<merged.count {
-            let gapStart = merged[i - 1].upperBound + 1
-            let gapEnd = merged[i].lowerBound - 1
-            if gapStart <= gapEnd { gaps.append((lowerBound: gapStart, upperBound: gapEnd)) }
-        }
-        return ZoneCoverage(
-            lowerBound: merged.first!.lowerBound, upperBound: merged.last!.upperBound, gaps: gaps)
-    }
-
-    private static func coverageJSON(_ coverage: ZoneCoverage) -> JSONValue {
+    /// The JSON shaping for one coverage envelope. The COMPUTATION moved to
+    /// `DAWCore.SamplerZoneCoverage` at m26-i's UI half so the built-in Sampler
+    /// editor (in DAWAppKit, which cannot see DAWControl) reports the same
+    /// gaps this verb does; only this wire shaping stayed here.
+    private static func coverageJSON(_ coverage: SamplerZoneCoverage) -> JSONValue {
         var obj: [String: JSONValue] = [
             "min": .number(Double(coverage.lowerBound)),
             "max": .number(Double(coverage.upperBound)),

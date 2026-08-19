@@ -104,9 +104,14 @@ struct AudioProfileFileCommandTests {
         #expect(CommandRouter.allCommands.contains("audio.profileFile"))
         #expect(CommandRouter.allCommands
             .filter { $0 == "audio.profileFile" }.count == 1)
-        // edit.pasteClips (m26-k) is now the very last command, appended after
+        // edit.pasteClips (m26-k) is the very last command, appended after
         // clip.detectPitch (m23-ap-3); profileFile is third-to-last — still
-        // adjacent, still an exact prefix of HEAD.
+        // adjacent, still an exact prefix of HEAD. (m27 leg D's
+        // clip.applyBreathContour did NOT extend this chain: it landed next to
+        // its controller-lane siblings 116 elements from the end, the
+        // clip.getNotes / instrument.describeSampler precedent, so every
+        // end-relative assertion here is untouched by it.)
+        #expect(CommandRouter.allCommands.last == "edit.pasteClips")
         #expect(CommandRouter.allCommands.dropLast(2).last == "audio.profileFile")
         #expect(CommandRouter.allCommands.dropLast(3).last == "transport.setStopAtContentEnd")
     }

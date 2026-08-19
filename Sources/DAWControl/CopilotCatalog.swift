@@ -576,6 +576,58 @@ public enum CopilotToolCatalog {
             ], required: ["clipId", "type", "points"])
         ),
         CopilotTool(
+            command: "clip.applyBreathContour",
+            description: "Make held notes BREATHE — the single best fix for a wind, brass, string or vocal part that sounds like a synthesizer holding a key down. Generates the correlated performance contour a real player puts on a sustained note: an expression (CC 11) swell that dips just after the attack, peaks about two-thirds through, then tapers — moving LOUDNESS and, when the track's sampler has expressionFilterDepth above 0, BRIGHTNESS together — plus DELAYED vibrato (straight for the first ~0.5 s, then blooming to ±12 cents at 5.5 Hz) and a few cents of micro-sharpening at the top of the swell. Constant vibrato from the attack is the classic MIDI giveaway; this is the fix. Shapes every note in the clip by default, or just the ones in noteIds. MERGES with what is already on the lanes: points outside the shaped notes survive untouched, so you can run it note by note, or after hand-drawing something else. Notes too short for the straight opening plus one vibrato cycle get the swell only and no vibrato — that is deliberate, and the result says how many. Prefer this over hand-placing points with clip.setControllerLane, and over a volume-automation swell, which reads as a fader move rather than a player leaning in. One undo step. MIDI clips only. Read the response's `warnings`: they say when the contour will only be half audible.",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the MIDI clip to shape, from project.snapshot.")),
+                ("noteIds", arraySchema(
+                    "Ids of the notes to shape (from clip.getNotes). OMIT to shape every note in the clip. An id not in the clip is refused outright — nothing is written.",
+                    items: stringSchema("A note id."))),
+                ("depth", numberSchema(
+                    "How far the swell falls below its peak, as a fraction of peakValue. Default 0.25 (about -2.5 dB peak to trough, the involuntary contour of a note held steady). Raise toward 0.5 for a written crescendo.",
+                    minimum: 0, maximum: 1)),
+                ("peakValue", integerSchema(
+                    "CC value at the top of the swell, 0-127. Default 127 — the lane's neutral, so the loudest instant is exactly as loud as the note with no contour at all and applying this can never quietly drop a balanced part.",
+                    minimum: 0, maximum: 127)),
+                ("peakPosition", numberSchema(
+                    "Where the peak sits as a fraction of the note's length. Default 0.65 — past the middle, so the note takes longer arriving than leaving.",
+                    minimum: 0.05, maximum: 0.95)),
+                ("attackSettleSeconds", numberSchema(
+                    "Seconds from the attack to the settling dip (the air column settling). Default 0.05, clamped to a quarter of a short note.",
+                    minimum: 0, maximum: 1)),
+                ("expressionCC", integerSchema(
+                    "Which CC carries the swell. Default 11 (expression) — the one the built-in sampler routes to amplitude with no opt-in, and the default target of its brightness filter.",
+                    minimum: 0, maximum: 127)),
+                ("expressionSpacingSeconds", numberSchema(
+                    "Seconds between expression points. Default 0.02. Controller lanes are STEPWISE, so a dense run is what makes a swell instead of a staircase.",
+                    minimum: 0.001, maximum: 1)),
+                ("vibratoOnsetSeconds", numberSchema(
+                    "Seconds of STRAIGHT playing before vibrato starts. Default 0.5. A note shorter than this plus one vibrato cycle gets no vibrato at all.",
+                    minimum: 0, maximum: 10)),
+                ("vibratoRateHz", numberSchema(
+                    "Vibrato rate in Hz. Default 5.5 (the middle of the 5-7 Hz band quoted for instrumental vibrato).",
+                    minimum: 0.2, maximum: 20)),
+                ("vibratoDepthCents", numberSchema(
+                    "Peak vibrato width in cents (a ± figure). Default 12 — deliberately conservative, because pitch bend is CHANNEL-WIDE and bends every voice sounding on the track. 0 turns vibrato off.",
+                    minimum: 0, maximum: 200)),
+                ("vibratoBloomSeconds", numberSchema(
+                    "Seconds for the vibrato to widen from nothing to full depth. Default 0.7.",
+                    minimum: 0, maximum: 10)),
+                ("vibratoReleaseSeconds", numberSchema(
+                    "Seconds before the note's end over which vibrato relaxes back to centre. Default 0.08.",
+                    minimum: 0, maximum: 10)),
+                ("sharpenCents", numberSchema(
+                    "Peak micro-sharpening in cents at the top of the swell, resolving as it falls (blowing harder pushes a wind instrument sharp). Default 4 — below the pitch JND on its own, but correlated with the swell, which is what reads as effort.",
+                    minimum: -200, maximum: 200)),
+                ("bendSpacingSeconds", numberSchema(
+                    "Seconds between pitch-bend points. Default 0.008. The bend run IS the vibrato waveform, so this is its sample rate.",
+                    minimum: 0.001, maximum: 1)),
+                ("bendRangeSemitones", numberSchema(
+                    "The instrument's pitch-bend range in semitones for a full deflection, so cents map correctly. Default 2 — exactly what the built-in sampler uses.",
+                    minimum: 0.01, maximum: 48)),
+            ], required: ["clipId"])
+        ),
+        CopilotTool(
             command: "clip.crossfade",
             description: "Crossfade two ADJACENT (or already-overlapping) audio clips on one track: creates a sanctioned overlap of the given beats with complementary equal-power fades so one clip fades out as the next fades in, with no click or volume bump. Pass the two clip ids in any order.",
             schema: schemaObject([

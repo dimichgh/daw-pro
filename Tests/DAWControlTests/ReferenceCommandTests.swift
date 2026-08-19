@@ -140,7 +140,7 @@ struct ReferenceCommandTests {
                          "reference.status", "reference.analyze",
                          "reference.setMonitor", "reference.setOffset",
                          "reference.setTrim", "reference.compare"])
-        #expect(CommandRouter.allCommands.count == 180)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips)
+        #expect(CommandRouter.allCommands.count == 181)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail)
         #expect(CommandRouter.allCommands.dropLast(4).last == "vc.importVoiceModel")  // m23-di-2a (ai.modelUnload was last at m23-dl)
         #expect(CommandRouter.allCommands.dropLast(3).last == "transport.setStopAtContentEnd")  // m25-d
         #expect(CommandRouter.allCommands.dropLast(2).last == "audio.profileFile")  // m25-z

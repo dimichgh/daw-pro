@@ -242,6 +242,76 @@ struct ControllerLaneModelTests {
         let back = try JSONDecoder().decode(Clip.self, from: JSONEncoder().encode(clip))
         #expect(back.controllerLanes == clip.controllerLanes)
     }
+
+    // MARK: - m27 routing table
+
+    /// The ONE definition of "does this controller reach the sound". If this
+    /// table and `SamplerInstrument.apply(_:)` ever disagree, the warning is
+    /// worse than useless — it becomes a confident wrong answer.
+    @Test("the routing table matches what each built-in instrument actually consumes")
+    func routingTableMatchesTheInstruments() {
+        let sampler = InstrumentDescriptor(kind: .sampler, sampler: SamplerParams())
+        // Consumed by SamplerInstrument.apply(_:): CC64 + m27's CC11, and bend.
+        #expect(MIDIControllerRouting.inertLaneWarning(
+            for: .cc(controller: 11), instrument: sampler) == nil)
+        #expect(MIDIControllerRouting.inertLaneWarning(
+            for: .cc(controller: 64), instrument: sampler) == nil)
+        #expect(MIDIControllerRouting.inertLaneWarning(
+            for: .pitchBend, instrument: sampler) == nil)
+        // Dropped at the voice.
+        #expect(MIDIControllerRouting.inertLaneWarning(
+            for: .cc(controller: 7), instrument: sampler) != nil)
+        #expect(MIDIControllerRouting.inertLaneWarning(
+            for: .channelPressure, instrument: sampler) != nil)
+        // CC1/CC2: wired, but gated by a depth that defaults to off. The
+        // verdict must be `routedButDisabled`, NOT `inert` — the difference is
+        // "turn this knob up" versus "this will never work here".
+        if case .routedButDisabled(let reason) = MIDIControllerRouting.routing(
+            for: .cc(controller: 1), instrument: sampler) {
+            #expect(reason.contains("expressionModDepth"))
+        } else {
+            Issue.record("CC1 on a depth-0 sampler must be routedButDisabled")
+        }
+        let opted = InstrumentDescriptor(
+            kind: .sampler, sampler: SamplerParams(expressionModDepth: 0.5))
+        #expect(MIDIControllerRouting.inertLaneWarning(
+            for: .cc(controller: 2), instrument: opted) == nil)
+
+        // PolySynthInstrument.apply(_:) honours CC64 and bend only.
+        let poly = InstrumentDescriptor(kind: .polySynth)
+        #expect(MIDIControllerRouting.inertLaneWarning(
+            for: .cc(controller: 64), instrument: poly) == nil)
+        #expect(MIDIControllerRouting.inertLaneWarning(
+            for: .pitchBend, instrument: poly) == nil)
+        #expect(MIDIControllerRouting.inertLaneWarning(
+            for: .cc(controller: 11), instrument: poly) != nil)
+
+        // TestToneInstrument.apply(_:) has no controller branch at all.
+        #expect(MIDIControllerRouting.inertLaneWarning(
+            for: .cc(controller: 64), instrument: .init(kind: .testTone)) != nil)
+
+        // HostedAUInstrument emits raw 0xB0 for every CC — never warn.
+        for kind in [InstrumentDescriptor.Kind.audioUnit, .soundBank] {
+            #expect(MIDIControllerRouting.inertLaneWarning(
+                for: .cc(controller: 74), instrument: .init(kind: kind)) == nil)
+        }
+
+        // A track with no instrument consumes nothing, and says so.
+        let none = MIDIControllerRouting.inertLaneWarning(
+            for: .cc(controller: 11), instrument: nil)
+        #expect(none?.contains("no instrument") == true)
+    }
+
+    @Test("warning copy names the controller in words a user can act on")
+    func warningCopyNamesTheController() {
+        #expect(MIDIControllerRouting.describe(.cc(controller: 11)) == "CC11 (expression)")
+        #expect(MIDIControllerRouting.describe(.cc(controller: 2)) == "CC2 (breath)")
+        #expect(MIDIControllerRouting.describe(.cc(controller: 99)) == "CC99")
+        #expect(MIDIControllerRouting.describe(.pitchBend) == "pitch bend")
+        let text = try! #require(MIDIControllerRouting.inertLaneWarning(
+            for: .cc(controller: 74), instrument: InstrumentDescriptor(kind: .polySynth)))
+        #expect(text.hasPrefix("CC74 (brightness) is stored but will not sound:"))
+    }
 }
 
 /// m16-b2 — the store edit boundary (create/replace/remove, value/cap
@@ -515,5 +585,235 @@ struct ControllerLaneStoreTests {
         try reopened.openProject(at: path)
         let restored = try #require(reopened.tracks.first?.clips.first)
         #expect(restored.controllerLanes == store.tracks[0].clips[0].controllerLanes)
+    }
+
+    // MARK: - m27 leg D: applyBreathContour
+    //
+    // Folded into THIS suite rather than getting its own: the tree is at its
+    // 330-`@MainActor`-suite ceiling, and these tests are about the controller-
+    // lane store boundary, which is exactly what this suite is.
+
+    /// A clip of held notes on a SAMPLER track, so the routing warnings have a
+    /// real instrument to reason about. 120 BPM ⇒ 1 beat = 0.5 s, and each note
+    /// is 4 beats = 2 s, comfortably past the vibrato threshold.
+    private func breathStore(noteCount: Int = 3,
+                             noteLengthBeats: Double = 4,
+                             filterDepth: Double? = nil)
+    throws -> (store: ProjectStore, clip: Clip) {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .instrument)
+        _ = try store.setInstrument(
+            id: track.id, kind: .sampler,
+            sampler: SamplerParams(zones: [], expressionFilterDepth: filterDepth))
+        let notes = (0..<noteCount).map {
+            MIDINote(pitch: 69, startBeat: Double($0) * noteLengthBeats,
+                     lengthBeats: noteLengthBeats)
+        }
+        let clip = try store.addMIDIClip(toTrack: track.id,
+                                         lengthBeats: noteLengthBeats * Double(noteCount) + 1,
+                                         notes: notes)
+        return (store, clip)
+    }
+
+    // 16.
+    @Test("applyBreathContour writes BOTH lanes, is one undo step, and reports what it did")
+    func breathContourWritesBothLanes() throws {
+        let (store, clip) = try breathStore()
+        let result = try store.applyBreathContour(clipID: clip.id)
+        print("[measured] 3×4-beat notes → \(result.expressionPointCount) expression + "
+              + "\(result.pitchBendPointCount) bend points; vibrato on "
+              + "\(result.notesWithVibrato)/\(result.notesTouched); budget "
+              + "\(result.perNotePointBudget); warnings \(result.warnings)")
+        #expect(result.notesTouched == 3)
+        #expect(result.notesWithVibrato == 3)
+        #expect(result.expressionPointCount > 100)
+        #expect(result.pitchBendPointCount > 300)
+        #expect(result.perNotePointBudget == 16384)
+
+        let lanes = store.tracks[0].clips[0].controllerLanes
+        #expect(lanes.contains { $0.type == .cc(controller: 11) })
+        #expect(lanes.contains { $0.type == .pitchBend })
+        // ONE undo step restoring the exact prior (empty) lanes.
+        #expect(try store.undo() == "Breath Contour")
+        #expect(store.tracks[0].clips[0].controllerLanes.isEmpty)
+    }
+
+    // 17.
+    @Test("THE MERGE: points outside the touched notes survive; points inside are replaced")
+    func breathContourMergesRatherThanReplacing() throws {
+        // Two notes at beats 0-4 and 4-8 on a 9-beat clip; hand-author CC11
+        // points inside note 1 AND out past both notes.
+        let (store, clip) = try breathStore(noteCount: 2)
+        _ = try store.setControllerLane(clipID: clip.id, type: .cc(controller: 11), points: [
+            MIDIControllerPoint(beat: 1, value: 40),      // INSIDE note 1 → replaced
+            MIDIControllerPoint(beat: 8.5, value: 33),    // OUTSIDE both  → survives
+        ])
+        // Shape ONLY note 1 (beats 0...4).
+        let firstNoteID = try #require(store.tracks[0].clips[0].notes?.first?.id)
+        let result = try store.applyBreathContour(clipID: clip.id, noteIDs: [firstNoteID])
+        let lane = try #require(store.tracks[0].clips[0].controllerLanes
+            .first { $0.type == .cc(controller: 11) })
+        let hand = lane.points.filter { $0.value == 33 }
+        let stale = lane.points.filter { $0.beat == 1 && $0.value == 40 }
+        let insideNote2 = lane.points.filter { $0.beat > 4.0001 && $0.beat < 8 }
+        print("[measured] merge: \(lane.points.count) points; hand-authored survivors "
+              + "\(hand.map(\.beat)); stale in-span points \(stale.count); "
+              + "points inside the untouched note 2: \(insideNote2.count)")
+        #expect(hand.count == 1 && hand[0].beat == 8.5)   // untouched, exactly as authored
+        #expect(stale.isEmpty)                            // in-span point replaced
+        #expect(insideNote2.isEmpty)                      // note 2 was NOT selected
+        #expect(result.notesTouched == 1)
+    }
+
+    // 18.
+    @Test("running it note by note across a phrase ACCUMULATES instead of wiping the last call")
+    func breathContourAccumulatesAcrossCalls() throws {
+        let (store, clip) = try breathStore(noteCount: 3)
+        let ids = try #require(store.tracks[0].clips[0].notes?.map(\.id))
+        var counts: [Int] = []
+        for id in ids {
+            counts.append(try store.applyBreathContour(clipID: clip.id,
+                                                       noteIDs: [id]).expressionPointCount)
+        }
+        let all = try store.applyBreathContour(clipID: clip.id).expressionPointCount
+        print("[measured] per-note accumulation: \(counts) → whole-clip run \(all)")
+        #expect(counts[0] < counts[1] && counts[1] < counts[2])   // each call ADDS
+        #expect(counts[2] == all)                                 // and lands where one call does
+    }
+
+    // 19.
+    @Test("an unknown note id is an ALL-OR-NOTHING rejection naming it")
+    func breathContourRejectsUnknownNote() throws {
+        let (store, clip) = try breathStore()
+        let ghost = UUID()
+        let real = try #require(store.tracks[0].clips[0].notes?.first?.id)
+        let error = projectError {
+            _ = try store.applyBreathContour(clipID: clip.id, noteIDs: [real, ghost])
+        }
+        #expect(error?.errorDescription?.contains(ghost.uuidString) == true)
+        // Nothing was written — the partial application is what is refused.
+        #expect(store.tracks[0].clips[0].controllerLanes.isEmpty)
+    }
+
+    // 20.
+    @Test("an audio clip and a note-less MIDI clip are both refused readably")
+    func breathContourRefusesWrongClips() throws {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .instrument)
+        let empty = try store.addMIDIClip(toTrack: track.id, lengthBeats: 4)
+        let noNotes = projectError { _ = try store.applyBreathContour(clipID: empty.id) }
+        #expect(noNotes?.errorDescription?.contains("no notes to shape") == true)
+        let missing = projectError { _ = try store.applyBreathContour(clipID: UUID()) }
+        if case .clipNotFound = missing {} else { Issue.record("expected clipNotFound") }
+    }
+
+    // 21.
+    @Test("THE HALF-SUCCESS WARNING: a sampler with expressionFilterDepth off is told so")
+    func breathContourWarnsWhenBrightnessCannotMove() throws {
+        let (offStore, offClip) = try breathStore(filterDepth: nil)
+        let off = try offStore.applyBreathContour(clipID: offClip.id)
+        let (onStore, onClip) = try breathStore(filterDepth: 0.6)
+        let on = try onStore.applyBreathContour(clipID: onClip.id)
+        print("[measured] filterDepth nil warnings: \(off.warnings)")
+        print("[measured] filterDepth 0.6 warnings: \(on.warnings)")
+        #expect(off.warnings.contains { $0.contains("LOUDNESS but not BRIGHTNESS") })
+        #expect(!on.warnings.contains { $0.contains("LOUDNESS but not BRIGHTNESS") })
+        // The lane is written either way — this warns, it does not refuse.
+        #expect(off.expressionPointCount > 0)
+    }
+
+    // 22.
+    @Test("short notes get the expression contour only, and the result SAYS no vibrato happened")
+    func breathContourReportsShortNotes() throws {
+        // 0.5-beat notes at 120 BPM = 0.25 s — under the 0.5 s straight opening.
+        let (store, clip) = try breathStore(noteCount: 4, noteLengthBeats: 0.5)
+        let result = try store.applyBreathContour(clipID: clip.id)
+        print("[measured] 4×0.25 s notes: vibrato on \(result.notesWithVibrato)/"
+              + "\(result.notesTouched), bend points \(result.pitchBendPointCount), "
+              + "warnings \(result.warnings)")
+        #expect(result.notesWithVibrato == 0)
+        #expect(result.pitchBendPointCount == 0)
+        #expect(!store.tracks[0].clips[0].controllerLanes.contains { $0.type == .pitchBend })
+        #expect(result.warnings.contains { $0.contains("no note got vibrato") })
+        #expect(result.expressionPointCount > 0)          // it still breathes
+    }
+
+    // 23.
+    @Test("THE CLIP-WIDE BUDGET: many long notes are coarsened, and the result reports it")
+    func breathContourHonoursTheClipWideBudget() throws {
+        // 60 notes × 8 beats (4 s) each. Per note that is ~640 bend points —
+        // each clears 16384 alone, together they are ~38400.
+        let (store, clip) = try breathStore(noteCount: 60, noteLengthBeats: 8)
+        let result = try store.applyBreathContour(clipID: clip.id)
+        print("[measured] 60×4 s notes: \(result.pitchBendPointCount) bend + "
+              + "\(result.expressionPointCount) expression points, per-note budget "
+              + "\(result.perNotePointBudget), warnings \(result.warnings)")
+        #expect(result.pitchBendPointCount <= ProjectStore.maxControllerPointsPerLane)
+        #expect(result.expressionPointCount <= ProjectStore.maxControllerPointsPerLane)
+        #expect(result.perNotePointBudget < 16384)
+        #expect(result.warnings.contains { $0.contains("coarsened to fit") })
+        // Coarsened, NOT dropped: every note still got a contour.
+        #expect(result.notesTouched == 60)
+        #expect(result.notesWithVibrato == 60)
+    }
+
+    // 24.
+    @Test("the contour is anchored in seconds: the same notes at 240 BPM lose their vibrato")
+    func breathContourFollowsTheProjectTempo() throws {
+        let (fast, fastClip) = try breathStore(noteCount: 2, noteLengthBeats: 2)
+        try fast.setTempoMap(TempoMap(constantBPM: 240))       // 2 beats = 0.5 s
+        let fastResult = try fast.applyBreathContour(clipID: fastClip.id)
+        let (slow, slowClip) = try breathStore(noteCount: 2, noteLengthBeats: 2)
+        try slow.setTempoMap(TempoMap(constantBPM: 60))        // 2 beats = 2.0 s
+        let slowResult = try slow.applyBreathContour(clipID: slowClip.id)
+        print("[measured] same 2-beat notes: @240 BPM vibrato on "
+              + "\(fastResult.notesWithVibrato), @60 BPM on \(slowResult.notesWithVibrato)")
+        #expect(fastResult.notesWithVibrato == 0)
+        #expect(slowResult.notesWithVibrato == 2)
+    }
+
+    // 25.
+    @Test("the shared boundary beat belongs to the note STARTING, whatever order the notes are stored in")
+    func breathContourIsIndependentOfNoteArrayOrder() throws {
+        // Two abutting notes, 0…4 and 4…8. Beat 4 is inside BOTH closed spans,
+        // so both notes generate a point there and `canonicalPoints` resolves
+        // the tie LAST-WINS. The musically right winner is note 2's ONSET, not
+        // note 1's taper end.
+        //
+        // ⚠️ The reordering below is not a contrived state. `Clip.init`
+        // canonicalises, and so do `setClipNotes` and the paste/arrange paths —
+        // but `Clip.notes` is a plain `var` and `ProjectStore+Humanize.swift:241`
+        // assigns `tracks[t].clips[c].notes = humanized` DIRECTLY, deliberately
+        // preserving input order. A timing pass that pushes one onset past the
+        // next note's leaves exactly this array.
+        func laneValues(reversingStoredNotes: Bool) throws -> [MIDIControllerPoint] {
+            let (store, clip) = try breathStore(noteCount: 2)
+            if reversingStoredNotes {
+                let stored = try #require(store.tracks[0].clips[0].notes)
+                store.tracks[0].clips[0].notes = stored.reversed()
+            }
+            _ = try store.applyBreathContour(clipID: clip.id)
+            return try #require(store.tracks[0].clips[0].controllerLanes
+                .first { $0.type == .cc(controller: 11) }).points
+        }
+        let ascending = try laneValues(reversingStoredNotes: false)
+        let descending = try laneValues(reversingStoredNotes: true)
+        let boundary = ascending.filter { abs($0.beat - 4) < 1e-9 }
+        let atZero = ascending.filter { abs($0.beat - 0) < 1e-9 }
+        print("[measured] order-independence: ascending \(ascending.count) points, "
+              + "stored-reversed \(descending.count); boundary@4 "
+              + "\(boundary.map(\.value)) vs onset@0 \(atZero.map(\.value)); "
+              + "taper end \(ascending.last.map { "\($0.value)@\($0.beat)" } ?? "none")")
+        // Byte-for-byte identical: the sort makes the stored array order
+        // unobservable. Without it this comparison is what fails.
+        #expect(ascending == descending,
+                "the contour changed when the SAME notes were stored in a different array order")
+        // Both notes are 4 beats long, so their contours are shape-identical:
+        // the boundary must carry the onset value, not the release value.
+        #expect(boundary.count == 1)
+        #expect(atZero.count == 1)
+        #expect(boundary.first?.value == atZero.first?.value,
+                "beat 4 carries note 1's taper value — the note that is STARTING should own it")
+        #expect(boundary.first?.value != ascending.last?.value)
     }
 }

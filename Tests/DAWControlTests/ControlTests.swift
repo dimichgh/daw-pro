@@ -1719,6 +1719,16 @@ struct CommandRouterTests {
                 // ControllerLaneCommandTests (round-trip + teaching errors) and
                 // DAWCore ControllerLaneStoreTests.
                 "clip.setControllerLane", "clip.removeControllerLane",
+                // clip.applyBreathContour (m27 leg D) needs a MIDI clip id for
+                // the same reason as the two directly above — it is the
+                // authoring primitive over that pair, and a bare call is the
+                // ordinary "missing or invalid required param 'clipId'"
+                // refusal this loop cannot express (it sends no params).
+                // Proven by ControllerLaneCommandTests (every-parameter
+                // round-trip through a real router call, plus the teaching
+                // errors) and DAWCore ControllerLaneStoreTests / DAWEngine
+                // SamplerTests' offline-render gate.
+                "clip.applyBreathContour",
                 "clip.setFades",
                 // clip.fitToContent (m21-d) needs a clip id like the other
                 // per-clip edits; proven by ClipFitToContentCommandTests

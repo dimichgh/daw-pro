@@ -144,7 +144,7 @@ struct ModelLifecycleCommandTests {
     @Test("both verbs are registered at the END of allCommands; count 171 -> 173 -> 174")
     func commandsRegisteredAtTheEnd() {
         let all = CommandRouter.allCommands
-        #expect(all.count == 180)   // 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 (vc.importVoiceModel, transport.setStopAtContentEnd, audio.profileFile, clip.detectPitch, appended after) -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips)
+        #expect(all.count == 181)   // 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 (vc.importVoiceModel, transport.setStopAtContentEnd, audio.profileFile, clip.detectPitch, appended after) -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail)
         #expect(all.dropLast(6).last == "ai.modelResidency")
         #expect(all.dropLast(5).last == "ai.modelUnload")
         #expect(all.dropLast(4).last == "vc.importVoiceModel")
