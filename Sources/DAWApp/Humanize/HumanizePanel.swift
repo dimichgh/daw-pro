@@ -36,7 +36,7 @@ import DAWAppKit
 /// membership is state the user can change and the piano-roll HUMANIZE chip is
 /// ungated: hiding would have to happen in two places and would explain nothing.
 ///
-/// **NO SIMPLE/PRO CHIP.** The panel is two amounts and one button in every
+/// **NO SIMPLE/PRO CHIP.** The panel is the same amounts and one button in every
 /// density — there is no Pro delta to expose, and `QuantizePanel` states the
 /// rule for exactly this case: a chip whose modes coincide is a do-nothing
 /// toggle (docs/DESIGN-LANGUAGE.md "Panels"). **NO RE-ROLL BUTTON either** —
@@ -81,6 +81,7 @@ struct HumanizePanel: View {
                 blurb
                 timingRow
                 velocityRow
+                legatoRow
                 applyButton
             } else {
                 audioNote
@@ -121,7 +122,7 @@ struct HumanizePanel: View {
     /// One sentence saying what the panel DOES, in the beginner's words — the
     /// inverse of Quantize, which is the only reference point most users have.
     private var blurb: some View {
-        Text("Nudges each note slightly off the grid and varies how hard it's played, so the part sounds played rather than programmed.")
+        Text("Nudges each note slightly off the grid, varies how hard it's played, and can stretch notes into each other so the part sounds played rather than programmed.")
             .font(.system(size: 10.5))
             .foregroundStyle(DAWTheme.textDim)
             .fixedSize(horizontal: false, vertical: true)
@@ -155,6 +156,33 @@ struct HumanizePanel: View {
         }
     }
 
+    // MARK: - Legato
+
+    /// The third amount (m27-o ⓑ): how far each note stretches PAST the start of
+    /// the next one. Same visual language as the two above — label + SF Mono
+    /// readout + `ValueSlider` + dim caption — because it is the same kind of
+    /// control and a different treatment would imply a different kind of thing.
+    ///
+    /// It sits LAST because it is the only one that rewrites note LENGTHS and
+    /// the only one that defaults to OFF: the two feel amounts above are what
+    /// this panel has always done, and the reading order matches what a press of
+    /// Apply will do to the part.
+    ///
+    /// ⚠️ The caption comes from `HumanizeModel.legatoDescription`, which is
+    /// deliberately worded to what happens to the NOTES. Overlap masks each
+    /// note's fresh attack under the previous note's tail; the engine has no
+    /// legato-hold mode, so the retrigger is still there. Do not "improve" this
+    /// copy into a promise of a smooth, continuous line.
+    private var legatoRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            rowLabel("LEGATO", trailing: AnyView(readout(model.legatoReadout)))
+            ValueSlider(value: model.legatoOverlapBeats,
+                        range: HumanizeModel.legatoBounds,
+                        onChange: { model.legatoOverlapBeats = $0 })
+            caption(model.legatoDescription)
+        }
+    }
+
     // MARK: - Apply
 
     private var applyButton: some View {
@@ -183,10 +211,10 @@ struct HumanizePanel: View {
             if let refusal = model.refusalMessage {
                 PanelRefusalLine(message: refusal)
             } else if model.isNoOp {
-                // Both amounts at zero is a LEGAL no-op in the store — it would
+                // Every amount at zero is a LEGAL no-op in the store — it would
                 // spend an undo step and change nothing. Say why the button is
                 // dark rather than letting it look broken.
-                caption("Both amounts are zero — raise one to change anything.")
+                caption("Every amount is zero — raise one to change anything.")
             }
         }
     }

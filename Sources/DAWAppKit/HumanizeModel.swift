@@ -2,14 +2,15 @@ import Foundation
 import Observation
 import DAWCore
 
-/// Headless state machine for the Humanize flow (m25-c): the two amounts —
-/// timing jitter and velocity spread — that `ProjectStore.humanizeClipNotes`
-/// takes, plus the beginner-readable descriptions the panel prints beside them.
+/// Headless state machine for the Humanize flow (m25-c): the amounts —
+/// timing jitter, velocity spread and (m27-o ⓑ) legato overlap — that
+/// `ProjectStore.humanizeClipNotes` takes, plus the beginner-readable
+/// descriptions the panel prints beside them.
 /// No SwiftUI, no AppKit — the panel view is thin over this and the tests drive
 /// it against an injected closure (the `QuantizeModel` precedent: all logic
 /// here, testable without a window OR a store).
 ///
-/// The model NEVER touches the store directly. It hands its two amounts to an
+/// The model NEVER touches the store directly. It hands its amounts to an
 /// injected apply closure wired to `ProjectStore.humanizeClipNotes` — the SAME
 /// method the `clip.humanize` wire verb uses (one mutation path, never a
 /// parallel one). Humanize was already reachable by MCP/Copilot and by nothing
@@ -55,9 +56,10 @@ public final class HumanizeModel {
 
     /// Applies the current amounts to the target clip (wired to
     /// `ProjectStore.humanizeClipNotes` — ONE `performEdit("Humanize")` undo
-    /// step; a recorder in tests). Args: clipID, timingBeats, velocityRange.
-    /// The seed is NOT a parameter: the panel always draws a fresh one.
-    private let applyClosure: (UUID, Double, Int) -> Void
+    /// step; a recorder in tests). Args: clipID, timingBeats, velocityRange,
+    /// legatoOverlapBeats, maxGapBeats. The seed is NOT a parameter: the panel
+    /// always draws a fresh one.
+    private let applyClosure: (UUID, Double, Int, Double, Double) -> Void
 
     /// Asks whether an ordinary note edit on a clip would be REFUSED by the store
     /// before it happens (wired to `ProjectStore.compEditRefusal`, which is the
@@ -104,10 +106,43 @@ public final class HumanizeModel {
     /// reads it clamped.
     public var velocityRange: Int = HumanizeModel.defaultVelocityRange
 
+    /// How far each note is stretched PAST the start of the note that follows
+    /// it, in beats — the LEGATO amount (m27-o ⓑ). Raw here;
+    /// `effectiveLegatoOverlapBeats` reads it clamped.
+    ///
+    /// **ONE-SIDED, unlike the two above** (they are ± spreads; this is a
+    /// distance in one direction), which is why its readout carries no `±`.
+    /// Zero is OFF, and is the default: the pass is the only thing in this flow
+    /// that rewrites note LENGTHS, so it has to be asked for.
+    ///
+    /// ⚠️ It closes gaps and overlaps notes so that each new note's attack lands
+    /// under the previous note's decaying tail. **It does not make the part
+    /// legato in the instrument** — nothing in this engine has a legato-hold
+    /// mode, so every note still retriggers; the overlap only masks it
+    /// (`ProjectStore.humanizeClipNotes`,
+    /// `docs/research/spike-wind-instrument-realism.md` §3.1). Every user-facing
+    /// string below is worded to that, and must stay worded to that.
+    public var legatoOverlapBeats: Double = HumanizeModel.defaultLegatoOverlapBeats
+
+    /// The largest gap the legato pass will close, in beats. A wider gap is a
+    /// REST — for a wind part, a breath — and survives untouched.
+    ///
+    /// **NOT ON THE PANEL, deliberately.** The panel asks one question the user
+    /// can answer by ear ("how connected should this sound?"); "how big is a
+    /// rest, in beats?" is a different, expert question, and a slider whose
+    /// meaning has to be explained before it can be moved is the do-nothing
+    /// control docs/DESIGN-LANGUAGE.md "Panels" warns about. The default carries
+    /// its musical justification in DAWCore (`HumanizeLegato.defaultMaxGapBeats`
+    /// — below the shortest breath the research will name), the legato caption
+    /// tells the user rests are kept, and an agent that needs the knob has it on
+    /// `clip.humanize`. It still lives HERE rather than being defaulted inside
+    /// the store call, so the model's apply is fully specified and testable.
+    public var maxGapBeats: Double = HumanizeLegato.defaultMaxGapBeats
+
     /// `compRefusal` defaults to "nothing refuses" so a fixture that is not about
     /// refusals says nothing about them; the APP must pass the real one, which is
     /// pinned by `HumanizeQuantizeCompRefusalSiteTests`.
-    public init(apply: @escaping (UUID, Double, Int) -> Void,
+    public init(apply: @escaping (UUID, Double, Int, Double, Double) -> Void,
                 compRefusal: @escaping (UUID) -> ProjectError? = { _ in nil }) {
         self.applyClosure = apply
         self.compRefusalClosure = compRefusal
@@ -123,11 +158,26 @@ public final class HumanizeModel {
     /// The velocity bound, VERBATIM from the same wire validation
     /// (`guard (0...64).contains(velocityRange)`), integers only.
     public static let velocityBounds: ClosedRange<Int> = 0...64
+    /// The legato-overlap bound, VERBATIM from the same wire validation
+    /// (`guard (0...0.25).contains(legatoOverlapBeats)`) — restated here for the
+    /// same reason as the two above, not derived, and pinned by a test.
+    public static let legatoBounds: ClosedRange<Double> = 0...0.25
+    /// The breath-rest ceiling's bound, VERBATIM from the wire
+    /// (`guard (0...4).contains(maxGapBeats)`). No slider reads it (see
+    /// `maxGapBeats`), but `effectiveMaxGapBeats` clamps to it so a value set
+    /// programmatically can never be one `clip.humanize` would reject.
+    public static let maxGapBounds: ClosedRange<Double> = 0...4
 
-    /// Defaults, matching the `clip.humanize` wire defaults (0.02 beats / ±8) so
-    /// the panel's out-of-the-box feel is the one an agent gets by default too.
+    /// Defaults, matching the `clip.humanize` wire defaults (0.02 beats / ±8 /
+    /// legato off) so the panel's out-of-the-box feel is the one an agent gets by
+    /// default too.
     public static let defaultTimingBeats: Double = 0.02
     public static let defaultVelocityRange: Int = 8
+    /// Legato defaults to OFF — the wire default, and the only honest one: it is
+    /// the one amount here that rewrites note LENGTHS, so opening the panel and
+    /// pressing Apply must not silently restructure a part the user only wanted
+    /// nudged.
+    public static let defaultLegatoOverlapBeats: Double = 0
 
     // MARK: - Lifecycle
 
@@ -153,11 +203,27 @@ public final class HumanizeModel {
     /// The velocity amount actually applied — clamped into the wire's range.
     public var effectiveVelocityRange: Int { velocityRange.clamped(to: Self.velocityBounds) }
 
-    /// Both amounts at zero. `humanizeClipNotes` accepts this and round-trips the
+    /// The legato overlap actually applied — clamped into the wire's range.
+    public var effectiveLegatoOverlapBeats: Double {
+        legatoOverlapBeats.clamped(to: Self.legatoBounds)
+    }
+
+    /// The breath-rest ceiling actually applied — clamped into the wire's range.
+    public var effectiveMaxGapBeats: Double { maxGapBeats.clamped(to: Self.maxGapBounds) }
+
+    /// EVERY amount at zero. `humanizeClipNotes` accepts this and round-trips the
     /// clip BIT-IDENTICALLY — it is a legal no-op, not an error. The panel still
     /// refuses to fire it, because an APPLY that spends an undo step and changes
     /// nothing is a lie about what happened, not a safe default.
-    public var isNoOp: Bool { effectiveTimingBeats == 0 && effectiveVelocityRange == 0 }
+    ///
+    /// `maxGapBeats` is NOT a conjunct here and must never become one: it is a
+    /// ceiling on the legato pass, so on its own it does nothing at all — a
+    /// no-op that called itself an edit because a threshold was set would be the
+    /// same lie in a new place.
+    public var isNoOp: Bool {
+        effectiveTimingBeats == 0 && effectiveVelocityRange == 0
+            && effectiveLegatoOverlapBeats == 0
+    }
 
     /// The user-facing sentence for `targetRefusal`, or nil when nothing refuses.
     /// **DERIVED, NEVER STORED — one value, one message** (`lastAutoExtendRefusal`,
@@ -181,12 +247,13 @@ public final class HumanizeModel {
     /// **RETURNS WHETHER IT FIRED**, which is what lets the panel close on a real
     /// apply and STAY OPEN on a refusal (m25-c-2): a message that appears as the
     /// panel vanishes underneath it is a bubble flashing at an empty screen.
-    /// False with no target, an audio target, a store refusal, or both amounts at
+    /// False with no target, an audio target, a store refusal, or every amount at
     /// zero.
     @discardableResult
     public func apply() -> Bool {
         guard canApply, let clipID = targetClipID else { return false }
-        applyClosure(clipID, effectiveTimingBeats, effectiveVelocityRange)
+        applyClosure(clipID, effectiveTimingBeats, effectiveVelocityRange,
+                     effectiveLegatoOverlapBeats, effectiveMaxGapBeats)
         return true
     }
 
@@ -201,6 +268,20 @@ public final class HumanizeModel {
 
     /// The velocity readout, e.g. `"±8"` — same two-sided reasoning.
     public var velocityReadout: String { "±\(effectiveVelocityRange)" }
+
+    /// The legato readout, e.g. `"+0.030 beats"` — and `"off"` at zero.
+    ///
+    /// **NO `±` HERE, and that is the point.** The two readouts above are ±
+    /// because their jitter is two-sided; this amount is a distance in ONE
+    /// direction (how far past the next note's start each note reaches), so a ±
+    /// would describe an operation that does not exist. `"off"` rather than
+    /// `"+0.000 beats"` at zero because zero is a MODE, not a small amount: the
+    /// pass does not run, and note lengths are not touched at all.
+    public var legatoReadout: String {
+        effectiveLegatoOverlapBeats == 0
+            ? "off"
+            : String(format: "+%.3f beats", effectiveLegatoOverlapBeats)
+    }
 
     /// A beginner-readable word for the timing amount, printed beside the number
     /// so the panel says what the value MEANS and not only what it is
@@ -222,5 +303,27 @@ public final class HumanizeModel {
         if v <= 6 { return "subtly uneven" }
         if v <= 20 { return "naturally uneven" }
         return "strongly dynamic"
+    }
+
+    /// The same for the legato amount.
+    ///
+    /// ⚠️ **THE HIGHEST-RISK STRINGS IN THIS FILE.** They must not promise
+    /// legato, smoothness, or a continuous line: the engine retriggers every
+    /// note no matter what this slider says, and the overlap only hides the
+    /// restart under the previous note's tail (`humanizeClipNotes`, spike §3.1).
+    /// A caption that oversold this would be exactly the wrong-doc defect this
+    /// project has been burned by — a user hearing the retrigger would conclude
+    /// the feature is broken rather than that it is doing what it says. So: what
+    /// happens to the NOTES ("overlap", "gaps close") and what the user will
+    /// hear ("the restart is less obvious"), never a claim about the sound the
+    /// instrument cannot make. The "longer rests stay" clause is here because it
+    /// is the only place the panel can say that breaths survive — the threshold
+    /// itself has no control.
+    public var legatoDescription: String {
+        let l = effectiveLegatoOverlapBeats
+        if l == 0 { return "note lengths left as they are" }
+        if l <= 0.02 { return "notes just reach the next one; longer rests stay" }
+        if l <= 0.06 { return "notes overlap, so each restart is less obvious" }
+        return "notes run well into each other — a thicker join"
     }
 }

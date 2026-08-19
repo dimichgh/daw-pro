@@ -2941,17 +2941,35 @@ public final class CommandRouter {
             // params: clipId (required), timingBeats? (0...0.25, default 0.02 —
             // max independent onset jitter in beats, ±this), velocityRange?
             // (0...64 integer, default 8 — max independent velocity jitter, ±this),
-            // seed? (non-negative integer < 2^53 — omit to draw one). Seeded,
-            // DETERMINISTIC "human feel": each note's onset shifts by a uniform
-            // amount in [−timingBeats, +timingBeats] (clamped inside the clip) and
-            // its velocity by a uniform integer in [−velocityRange, +velocityRange]
-            // (clamped 1...127); lengths, ids, and array order are preserved. ONE
-            // undoable step ("Humanize"). MIDI clips ONLY — an audio clip surfaces
-            // notAMIDIClip verbatim; clipNotFound via the LocalizedError mapping.
-            // Response: the updated clip fields PLUS `seedUsed` (the seed actually
-            // used — replay it, or a nil `seed`, to reproduce/re-roll the take).
+            // seed? (non-negative integer < 2^53 — omit to draw one),
+            // legatoOverlapBeats? (0...0.25, default 0 = OFF) and maxGapBeats?
+            // (0...4, default 0.125). Seeded, DETERMINISTIC "human feel": each
+            // note's onset shifts by a uniform amount in [−timingBeats,
+            // +timingBeats] (clamped inside the clip) and its velocity by a
+            // uniform integer in [−velocityRange, +velocityRange] (clamped
+            // 1...127); ids and array order are ALWAYS preserved, and so are
+            // LENGTHS unless legatoOverlapBeats > 0 (m27-o ⓑ).
+            //
+            // The legato pass (RNG-free, so a seeded result is unchanged when it
+            // is off): a note followed within maxGapBeats is lengthened to end
+            // legatoOverlapBeats past the following onset — gaps close, joins
+            // overlap. A LARGER gap is a rest (a breath) and is left untouched;
+            // notes that already overlap are left untouched (the pass only ever
+            // extends); the last onset is never extended; nothing is extended
+            // past the clip end. ⚠️ It MASKS each note's fresh attack transient
+            // under the previous note's tail — the engine has no legato-hold
+            // mode, so every retrigger still happens (see the store method).
+            // maxGapBeats WITHOUT a positive legatoOverlapBeats does nothing: it
+            // is a ceiling on a pass that is not running.
+            //
+            // ONE undoable step ("Humanize"). MIDI clips ONLY — an audio clip
+            // surfaces notAMIDIClip verbatim; clipNotFound via the LocalizedError
+            // mapping. Response: the updated clip fields PLUS `seedUsed` (the
+            // seed actually used — replay it, or a nil `seed`, to reproduce or
+            // re-roll the take).
             try params.rejectUnknownKeys(
-                ["clipId", "timingBeats", "velocityRange", "seed"], verb: "clip.humanize")
+                ["clipId", "timingBeats", "velocityRange", "seed",
+                 "legatoOverlapBeats", "maxGapBeats"], verb: "clip.humanize")
             let humanizeClipID = try params.requireClipID()
             let humanizeTiming = params["timingBeats"]?.doubleValue ?? 0.02
             guard (0...0.25).contains(humanizeTiming) else {
@@ -2960,6 +2978,17 @@ public final class CommandRouter {
             let humanizeVelRaw = params["velocityRange"]?.doubleValue ?? 8
             guard (0...64).contains(humanizeVelRaw), humanizeVelRaw == humanizeVelRaw.rounded() else {
                 throw ControlError("'velocityRange' must be an integer between 0 and 64 (default 8 — max ± velocity jitter)")
+            }
+            // Bounds VERBATIM in HumanizeModel.legatoBounds / legatoMaxGapBounds
+            // (the panel must not be able to build a value this rejects), and the
+            // default gap ceiling has ONE home in DAWCore.
+            let humanizeLegato = params["legatoOverlapBeats"]?.doubleValue ?? 0
+            guard (0...0.25).contains(humanizeLegato) else {
+                throw ControlError("'legatoOverlapBeats' must be between 0 and 0.25 (default 0 = off — how far each note extends PAST the next note's start)")
+            }
+            let humanizeMaxGap = params["maxGapBeats"]?.doubleValue ?? HumanizeLegato.defaultMaxGapBeats
+            guard (0...4).contains(humanizeMaxGap) else {
+                throw ControlError("'maxGapBeats' must be between 0 and 4 (default 0.125 — a gap larger than this is a rest and is left alone)")
             }
             let humanizeSeed: UInt64?
             if let seedValue = params["seed"] {
@@ -2976,7 +3005,9 @@ public final class CommandRouter {
                 clipID: humanizeClipID,
                 timingBeats: humanizeTiming,
                 velocityRange: Int(humanizeVelRaw),
-                seed: humanizeSeed)
+                seed: humanizeSeed,
+                legatoOverlapBeats: humanizeLegato,
+                maxGapBeats: humanizeMaxGap)
             var humanizeObj = try JSONValue(encoding: humanized.clip).objectValue ?? [:]
             humanizeObj["seedUsed"] = .number(Double(humanized.seedUsed))
             return .success(request.id, .object(humanizeObj))

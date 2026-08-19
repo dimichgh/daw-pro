@@ -21,10 +21,11 @@ import DAWCore
     /// A recorder for the injected apply closure — the model's entire outward
     /// surface (it takes no providers; the amounts are its own state).
     @MainActor final class Harness {
-        var applied: [(clipID: UUID, timingBeats: Double, velocityRange: Int)] = []
+        var applied: [(clipID: UUID, timingBeats: Double, velocityRange: Int,
+                       legatoOverlapBeats: Double, maxGapBeats: Double)] = []
 
         func makeModel() -> HumanizeModel {
-            HumanizeModel(apply: { self.applied.append(($0, $1, $2)) })
+            HumanizeModel(apply: { self.applied.append(($0, $1, $2, $3, $4)) })
         }
     }
 
@@ -46,6 +47,10 @@ import DAWCore
     @Test func boundsMatchTheWireValidation() {
         #expect(HumanizeModel.timingBounds == 0...0.25)
         #expect(HumanizeModel.velocityBounds == 0...64)
+        // m27-o ⓑ: `guard (0...0.25).contains(legatoOverlapBeats)` and
+        // `guard (0...4).contains(maxGapBeats)` in the same wire handler.
+        #expect(HumanizeModel.legatoBounds == 0...0.25)
+        #expect(HumanizeModel.maxGapBounds == 0...4)
     }
 
     /// Defaults match the wire's defaults, so opening the panel and pressing
@@ -56,6 +61,15 @@ import DAWCore
         #expect(model.velocityRange == 8)
         #expect(HumanizeModel.defaultTimingBeats == 0.02)
         #expect(HumanizeModel.defaultVelocityRange == 8)
+        // Legato is OFF by default, matching the wire — it is the one amount
+        // that rewrites note LENGTHS, so a default-Apply must not restructure a
+        // part the user only wanted nudged.
+        #expect(model.legatoOverlapBeats == 0)
+        #expect(HumanizeModel.defaultLegatoOverlapBeats == 0)
+        // The breath-rest ceiling has ONE home, in DAWCore, and the panel model
+        // reads it rather than restating the number.
+        #expect(model.maxGapBeats == HumanizeLegato.defaultMaxGapBeats)
+        #expect(HumanizeLegato.defaultMaxGapBeats == 0.125)
     }
 
     // MARK: - Target lifecycle
@@ -77,9 +91,11 @@ import DAWCore
         let model = Harness().makeModel()
         model.timingBeats = 0.08
         model.velocityRange = 22
+        model.legatoOverlapBeats = 0.03
         model.prepare(clipID: UUID(), clipName: "Other", isMIDI: true)
         #expect(model.timingBeats == 0.08)
         #expect(model.velocityRange == 22)
+        #expect(model.legatoOverlapBeats == 0.03)
     }
 
     // MARK: - Clamping
@@ -100,6 +116,22 @@ import DAWCore
         #expect(model.effectiveVelocityRange == expected)
     }
 
+    @Test(arguments: [
+        (-1.0, 0.0), (0.0, 0.0), (0.03, 0.03), (0.25, 0.25), (2.0, 0.25),
+    ])
+    func legatoClampsIntoTheWireRange(raw: Double, expected: Double) {
+        let model = Harness().makeModel()
+        model.legatoOverlapBeats = raw
+        #expect(model.effectiveLegatoOverlapBeats == expected)
+    }
+
+    @Test(arguments: [(-1.0, 0.0), (0.0, 0.0), (0.125, 0.125), (4.0, 4.0), (99.0, 4.0)])
+    func maxGapClampsIntoTheWireRange(raw: Double, expected: Double) {
+        let model = Harness().makeModel()
+        model.maxGapBeats = raw
+        #expect(model.effectiveMaxGapBeats == expected)
+    }
+
     /// A clamped value is what APPLIES, not merely what displays — otherwise the
     /// panel would show a legal amount and send an illegal one.
     @Test func applySendsTheClampedAmounts() {
@@ -107,11 +139,27 @@ import DAWCore
         let model = preparedModel(harness)
         model.timingBeats = 9.0
         model.velocityRange = 900
+        model.legatoOverlapBeats = 4.0
+        model.maxGapBeats = 40
         model.apply()
         #expect(harness.applied.count == 1)
         #expect(harness.applied.first?.timingBeats == 0.25)
         #expect(harness.applied.first?.velocityRange == 64)
+        #expect(harness.applied.first?.legatoOverlapBeats == 0.25)
+        #expect(harness.applied.first?.maxGapBeats == 4)
         #expect(harness.applied.first?.clipID == Self.clipID)
+    }
+
+    /// The breath-rest ceiling is not a slider, so nothing in the UI can send
+    /// it — which makes it exactly the thing that would silently stop being
+    /// forwarded. Apply must carry the model's value, not the store's default.
+    @Test func applyForwardsTheBreathRestCeiling() {
+        let harness = Harness()
+        let model = preparedModel(harness)
+        model.legatoOverlapBeats = 0.03
+        model.maxGapBeats = 0.75
+        model.apply()
+        #expect(harness.applied.first?.maxGapBeats == 0.75)
     }
 
     // MARK: - No-op
@@ -124,6 +172,7 @@ import DAWCore
         let model = preparedModel(harness)
         model.timingBeats = 0
         model.velocityRange = 0
+        model.legatoOverlapBeats = 0   // explicit: the third amount joined the test
         #expect(model.isNoOp)
         #expect(!model.canApply)
         model.apply()
@@ -133,6 +182,7 @@ import DAWCore
     @Test func oneNonZeroAmountIsNotANoOp() {
         let harness = Harness()
         let model = preparedModel(harness)
+        model.legatoOverlapBeats = 0
         model.timingBeats = 0
         model.velocityRange = 3
         #expect(!model.isNoOp)
@@ -142,6 +192,35 @@ import DAWCore
         model.velocityRange = 0
         #expect(!model.isNoOp)
         #expect(model.canApply)
+
+        // ANTI-VACUITY for the two above: legato ALONE is a real edit. If
+        // `isNoOp` had ignored it, a user who raised only this slider would face
+        // a dark Apply and a caption telling them everything is zero.
+        model.timingBeats = 0
+        model.velocityRange = 0
+        model.legatoOverlapBeats = 0.03
+        #expect(!model.isNoOp)
+        #expect(model.canApply)
+        model.apply()
+        #expect(harness.applied.count == 1)
+        #expect(harness.applied.first?.legatoOverlapBeats == 0.03)
+    }
+
+    /// The breath-rest ceiling is NOT a conjunct of `isNoOp`, on purpose: it
+    /// bounds the legato pass, so on its own it does nothing at all. An Apply
+    /// enabled by it would spend an undo step and change nothing — the exact lie
+    /// `isNoOp` exists to prevent.
+    @Test func maxGapAloneIsStillANoOp() {
+        let harness = Harness()
+        let model = preparedModel(harness)
+        model.timingBeats = 0
+        model.velocityRange = 0
+        model.legatoOverlapBeats = 0
+        model.maxGapBeats = 2
+        #expect(model.isNoOp)
+        #expect(!model.canApply)
+        model.apply()
+        #expect(harness.applied.isEmpty)
     }
 
     // MARK: - Refusals
@@ -193,8 +272,25 @@ import DAWCore
         let model = Harness().makeModel()
         model.timingBeats = 3
         model.velocityRange = 300
+        model.legatoOverlapBeats = 3
         #expect(model.timingReadout == "±0.250 beats")
         #expect(model.velocityReadout == "±64")
+        #expect(model.legatoReadout == "+0.250 beats")
+    }
+
+    /// The legato readout is ONE-SIDED — no `±`. The two above are ± because
+    /// their jitter is two-sided; this is a distance in one direction (how far
+    /// past the next note's start), and a ± would describe an operation that
+    /// does not exist. Zero reads "off" because zero is a MODE (the pass does
+    /// not run, lengths are untouched), not a very small amount.
+    @Test func legatoReadoutIsOneSidedAndSaysOffAtZero() {
+        let model = Harness().makeModel()
+        model.legatoOverlapBeats = 0
+        #expect(model.legatoReadout == "off")
+        model.legatoOverlapBeats = 0.03
+        #expect(model.legatoReadout == "+0.030 beats")
+        #expect(!model.legatoReadout.contains("±"),
+                "the legato amount is one-sided; a ± would claim a spread that does not exist")
     }
 
     // MARK: - Beginner-readable descriptions
@@ -227,6 +323,50 @@ import DAWCore
         #expect(model.velocityDescription == expected)
     }
 
+    @Test(arguments: [
+        (0.0, "note lengths left as they are"),
+        (0.01, "notes just reach the next one; longer rests stay"),
+        (0.02, "notes just reach the next one; longer rests stay"),
+        (0.04, "notes overlap, so each restart is less obvious"),
+        (0.06, "notes overlap, so each restart is less obvious"),
+        (0.2, "notes run well into each other — a thicker join"),
+    ])
+    func legatoDescriptionTracksTheAmount(amount: Double, expected: String) {
+        let model = Harness().makeModel()
+        model.legatoOverlapBeats = amount
+        #expect(model.legatoDescription == expected)
+    }
+
+    /// **THE OVERSTATEMENT GUARD, and it is the point of the whole dimension.**
+    /// This engine has NO legato-hold mode: every note-on starts a fresh voice
+    /// with a fresh attack, on the built-in sampler and on a hosted AUSampler
+    /// alike, so the overlap can only MASK a retrigger under the previous note's
+    /// tail — it can never remove it. A caption promising a smooth, continuous,
+    /// seamless or "true legato" line would be a doc that describes a different
+    /// program, and the user would rightly hear the retrigger and conclude the
+    /// feature is broken. Every band's words must stay about the NOTES.
+    @Test func legatoDescriptionsNeverPromiseWhatTheEngineCannotDo() {
+        let model = Harness().makeModel()
+        let banned = ["smooth", "seamless", "continuous", "gliss", "true legato",
+                      "one breath", "unbroken", "no gaps at all"]
+        for amount in [0.0, 0.005, 0.01, 0.02, 0.03, 0.06, 0.1, 0.25] {
+            model.legatoOverlapBeats = amount
+            let words = model.legatoDescription.lowercased()
+            for phrase in banned {
+                #expect(!words.contains(phrase),
+                        """
+                        the legato caption promises something the engine cannot do — \
+                        overlap MASKS each retrigger under the previous note's tail, \
+                        it never removes one.
+                        """)
+            }
+            #expect(!words.isEmpty)
+        }
+        // POSITIVE CONTROL: the checker really can catch a banned phrase — a
+        // green from a matcher that matches nothing would be worthless.
+        #expect(banned.contains { "these notes sound smooth".contains($0) })
+    }
+
     /// Every description is non-empty and distinct per band — a duplicated string
     /// would make two different feels read identically to a beginner.
     @Test func descriptionsAreDistinctPerBand() {
@@ -244,5 +384,12 @@ import DAWCore
             velocity.insert(model.velocityDescription)
         }
         #expect(velocity.count == 4)
+
+        var legato: Set<String> = []
+        for amount in [0.0, 0.01, 0.04, 0.2] {
+            model.legatoOverlapBeats = amount
+            legato.insert(model.legatoDescription)
+        }
+        #expect(legato.count == 4)
     }
 }

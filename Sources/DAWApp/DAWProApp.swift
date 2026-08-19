@@ -4079,7 +4079,8 @@ final class AppModel {
                 return store.compEditRefusal(clipID: clipID)
             })
 
-        // The Humanize model (m25-c): the panel's two amounts, applied through
+        // The Humanize model (m25-c): the panel's amounts — timing, velocity and
+        // (m27-o ⓑ) legato overlap with its breath-rest ceiling — applied through
         // the store method the wire uses (`humanizeClipNotes` = ONE
         // `performEdit("Humanize")` undo step). The seed is deliberately NOT
         // threaded from the UI — the panel always draws a fresh one, because it
@@ -4100,11 +4101,13 @@ final class AppModel {
         // with two faces and a one-sided fix would be the two-conventions problem
         // mirroring `applyQuantize` was chosen to avoid.
         self.humanizeModel = HumanizeModel(
-            apply: { [weak store] clipID, timingBeats, velocityRange in
+            apply: { [weak store] clipID, timingBeats, velocityRange, legatoOverlapBeats, maxGapBeats in
                 _ = try? store?.humanizeClipNotes(clipID: clipID,
                                                   timingBeats: timingBeats,
                                                   velocityRange: velocityRange,
-                                                  seed: nil)
+                                                  seed: nil,
+                                                  legatoOverlapBeats: legatoOverlapBeats,
+                                                  maxGapBeats: maxGapBeats)
             },
             compRefusal: { [weak store] clipID in
                 guard let store else { return nil }

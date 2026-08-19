@@ -58,7 +58,8 @@ struct CompMemberApplyRefusalTests {
         }
 
         func makeHumanize() -> HumanizeModel {
-            HumanizeModel(apply: { self.humanized.append(($0, $1, $2)) },
+            HumanizeModel(apply: { clipID, timing, velocity, _, _ in
+                                    self.humanized.append((clipID, timing, velocity)) },
                           compRefusal: { self.refusal(for: $0) })
         }
 
@@ -234,7 +235,7 @@ struct CompMemberApplyRefusalTests {
 
     @Test("a model built without a refusal provider refuses nothing")
     func defaultProviderIsSilent() {
-        let humanize = HumanizeModel(apply: { _, _, _ in })
+        let humanize = HumanizeModel(apply: { _, _, _, _, _ in })
         humanize.prepare(clipID: Self.compClip, clipName: "Take 1", isMIDI: true)
         #expect(humanize.refusalMessage == nil)
         #expect(humanize.canApply)

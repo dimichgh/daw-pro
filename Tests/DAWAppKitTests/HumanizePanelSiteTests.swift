@@ -229,6 +229,36 @@ struct HumanizePanelSiteTests {
                 "the Humanize entry is outside the MIDI-only branch — on an audio clip it would be offered and then throw notAMIDIClip.")
     }
 
+    // MARK: - The legato row (m27-o ⓑ)
+
+    /// A slider DEFINED but never MOUNTED compiles, ships and is unreachable —
+    /// the same defect `pianoRollChipIsMounted` exists to catch, and the reason
+    /// this asserts the row is inside the CARD rather than merely present in the
+    /// file (where its own `private var` declaration would satisfy a naive
+    /// `contains`).
+    @Test("the panel mounts a LEGATO row bound to the model's amount")
+    func legatoRowIsMounted() {
+        let panel = Self.code("DAWApp/Humanize/HumanizePanel.swift")
+        guard let row = Self.bracedBody(after: "private var legatoRow: some View {", in: panel) else {
+            Issue.record("legatoRow is not defined in HumanizePanel")
+            return
+        }
+        #expect(row.contains("LEGATO"), "the row has no readable label")
+        #expect(row.contains("model.legatoOverlapBeats = "),
+                "the slider does not write the model's amount, so it can only ever read 0")
+        #expect(row.contains("HumanizeModel.legatoBounds"),
+                "the slider does not use the wire-matching bounds, so it could build a value clip.humanize rejects")
+
+        guard let card = Self.bracedBody(after: "private var card: some View {", in: panel) else {
+            Issue.record("could not extract the panel card — the marker moved; FIX THE EXTRACTOR")
+            return
+        }
+        #expect(card.contains("velocityRow"),
+                "POSITIVE CONTROL FAILED: the extracted card does not contain the row that was already there.")
+        #expect(card.contains("legatoRow"),
+                "legatoRow is defined but never mounted — it ships invisible, and the clip's gate stays untouchable by hand.")
+    }
+
     // MARK: - The wire decision, asserted rather than remembered
 
     /// m25-c is UI-ONLY. `clip.humanize` ALREADY exists on the wire and in MCP —

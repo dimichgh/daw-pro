@@ -97,11 +97,25 @@ there.
   `clip_remove_controller_lane` add mod wheel, sustain pedal, pitch bend, or
   expression moves alongside a clip's notes — raw MIDI values (0-127, or
   0-16383 for pitch bend with 8192 = center).
+  ⚠️ **CC11 (expression) and CC7 default to 127 — full scale.** An absent lane
+  means "wide open", so a lane that peaks at 110 is a **broad cut of the whole
+  part**, not a shape. Shape within **100-127** and never rest below ~90 on a
+  passage meant to stay audible. This is not theoretical: a lane peaking at
+  106-110 silently pulled a finished, verified mix down by 1.25 LU and cost a
+  full diagnose-and-re-bounce cycle to find.
+  ⚠️ **A controller lane can be inert when you write it and live later.** The
+  built-in `polySynth` and the SFZ sampler honor only pitch bend and CC64;
+  a GM `soundBank` track is a hosted Apple AUSampler and honors **every** CC.
+  So CC11 written while a track is on the poly synth does nothing — until
+  someone assigns a sound bank, at which point it becomes a cut. If you author
+  CC while the final instrument is not yet chosen, say so in your handoff.
 - **Timing feel.** `clip_quantize` snaps MIDI note onsets to a grid (with
   `strength`, `swing`, or a saved `groove`); `clip_quantize_audio` does the
   audio equivalent by slicing at transients; `clip_humanize` nudges timing
   and velocity off the grid for a played feel (seeded/reproducible via
-  `seed`/`seedUsed`). ⚠️ **`clip_humanize` is NOT idempotent** — the jitter
+  `seed`/`seedUsed`), and its `legatoOverlapBeats` / `maxGapBeats` params
+  close small gaps and overlap notes for a slurred line (see **Articulation**
+  below). ⚠️ **`clip_humanize` is NOT idempotent** — the jitter
   lands on each note's CURRENT position, so a second pass compounds the
   first, and nothing on the clip records that it was ever humanized (so an
   agent picking up someone else's clip cannot tell). One pass with the right
@@ -110,6 +124,47 @@ there.
   clip. `groove_extract`/`groove_list`/`groove_remove` capture and manage
   reusable groove templates (plus built-in MPC swing presets) to quantize
   other clips toward.
+- **Articulation — read this before writing any wind, brass or bowed part.**
+  A part where every note abuts the next exactly or leaves a gap is the MIDI
+  equivalent of **tonguing every single note**, and on a sampled patch it fires
+  a fresh attack transient on each one. That is what "sounds keyboard-entered"
+  actually is, and it is the single largest quality defect we have measured in
+  a finished song — 225 sax notes, not one of them overlapping. A real player
+  slurs most of a phrase and tongues selectively.
+  - **Overlap notes within a phrase.** Either author the overlap directly in
+    `clip_set_notes` lengths, or write the notes plainly and then call
+    `clip_humanize` with `legatoOverlapBeats`. **~20-40 ms** is the useful
+    range — at 72 BPM that is **0.024-0.048 beats**, but it is a duration in
+    TIME, so recompute per tempo: `beats = ms / 1000 × BPM / 60`.
+  - **Keep the breaths.** `maxGapBeats` (default 0.125) is the cutoff: gaps at
+    or below it close, larger gaps are treated as breath rests and left alone.
+    A wind phrase needs a breath every **4-8 bars**. ⚠️ The default is in BEATS
+    while a breath is in MILLISECONDS — below roughly 45 BPM, 0.125 beats
+    exceeds 150 ms and starts eating short rests. Lower it on slow material.
+  - **Do not slur everything.** Roughly **30-40%** of notes stay tongued,
+    always including the first and last note of a phrase, and after a wide leap
+    or on an accent. A fully-slurred line reads as synthetic in the other
+    direction.
+  - **Shape the loudness.** A flat, unshaped line is the second thing that
+    gives it away. Add CC11 within 100-127 (see the 127 warning above), and CC1
+    vibrato that stays at 0 for the first ~300-600 ms of a long note before
+    ramping in — vibrato from the instant of attack is a synth tell.
+  - ⛔ **Know the ceiling, and do not oversell it in a handoff.** No instrument
+    in this app has a true legato mode: every note-on starts a new voice with a
+    fresh attack. Overlap **masks** that retrigger under the previous note's
+    tail; it does not remove it. Overlapping does not make a sampled patch play
+    legato — it makes it stop sounding re-tongued.
+  - ⚠️ **Same-pitch repeats are the one case not to overlap** — `clip_humanize`
+    already abuts rather than overlaps there, because on the sound-bank path a
+    plain MIDI note-off carries no note id and the departing note's off would
+    cut the repeat short. If you write lengths by hand, do the same.
+  - **Provenance, so you can weigh these numbers:** the overlap figure is
+    DERIVED from this engine's voice allocation and the tongued-proportion and
+    breath-duration figures are ENGINEERING ESTIMATES — none are measured
+    practitioner statistics, and no render test has confirmed them by ear yet.
+    Treat them as a good starting point to adjust against the result, not as
+    settled fact. Full detail and sourcing:
+    `docs/research/spike-wind-instrument-realism.md` §6.
 - **Analyze imported audio.** Before writing anything against an imported
   song, call `clip_analyze_audio` first — it reads the clip's key, tempo,
   and spectral balance so new material is written IN the detected key/tempo

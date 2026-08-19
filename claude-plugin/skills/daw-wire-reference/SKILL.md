@@ -202,6 +202,30 @@ humanized. Two passes = double the drift, invisibly. `seed` reproduces a
 result only from the SAME starting state. To re-roll a feel, `edit_undo`
 the previous humanize first.
 
+⚠️ **Its `legatoOverlapBeats` / `maxGapBeats` params are the exception —
+they ARE idempotent.** The legato pass only ever EXTENDS a note, to a
+target derived from the following note's onset, so running it twice lands
+in the same place. It also consumes no randomness: omit both params and a
+seeded timing/velocity result is bit-identical to before they existed.
+Only note LENGTHS change — ids, order, start beats, pitches and velocities
+are preserved, and a note is never extended past the clip end.
+
+### Overlap masks a retrigger; it does not create legato
+
+No instrument in this app has a legato mode. Every note-on starts a new
+voice with a fresh attack — the built-in sampler and the hosted AUSampler
+both. `legatoOverlapBeats` hides that attack under the previous note's
+decaying tail, which is why a slurred line stops sounding re-tongued. It
+is masking, not voice continuation, and a handoff that claims otherwise is
+wrong. True legato needs a scripted-legato Audio Unit or new engine work.
+
+⚠️ **Same-pitch repeats abut instead of overlapping, deliberately.** On the
+sound-bank path a note-off is plain MIDI with no note id, so overlapping a
+repeat of the same pitch would let the departing note's off cut the note
+that just started. The engine model allows same-pitch overlap (offs pair
+by note id) but that id is lost when flattened for a hosted AU, so the
+rule that is safe everywhere wins.
+
 ### Nobody in this plugin can hear anything
 
 No agent here has ears. Every timbral judgement you make is inference from

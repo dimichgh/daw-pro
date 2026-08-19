@@ -3562,14 +3562,32 @@ registerTool(
 registerTool(
   "clip_humanize",
   {
-    title: "Add human feel to a MIDI clip (seeded timing + velocity jitter)",
+    title: "Add human feel to a MIDI clip (seeded timing + velocity jitter, optional legato overlap)",
     description:
       "The inverse-spirited sibling of clip_quantize: instead of snapping a MIDI clip's " +
       "notes to the grid, nudge them slightly OFF it so they feel played rather than " +
       "programmed. Each note gets an INDEPENDENT random timing offset (up to ±`timingBeats` " +
       "beats) and an independent random velocity offset (up to ±`velocityRange`), applied " +
       "as ONE undoable step. Onsets are clamped to stay inside the clip and velocities to " +
-      "1..127; note LENGTHS, ids, and order are preserved. The jitter is DETERMINISTIC and " +
+      "1..127; note ids and array order are ALWAYS preserved, and so are note LENGTHS " +
+      "UNLESS you pass `legatoOverlapBeats` > 0 — that is the one argument here that " +
+      "rewrites lengths, and it is off by default. " +
+      "LEGATO/GATE PASS (`legatoOverlapBeats` + `maxGapBeats`): every note followed within " +
+      "`maxGapBeats` is lengthened to end `legatoOverlapBeats` PAST the following note's " +
+      "start, so gaps close and joins overlap. A LARGER gap is a rest (for a wind part, a " +
+      "breath) and is left exactly as authored; notes that already overlap are left alone " +
+      "(the pass only ever extends, so running it twice with the same arguments changes " +
+      "nothing the second time); the last note is never extended; nothing is extended past " +
+      "the clip end; a note whose successor repeats its own PITCH abuts that successor " +
+      "exactly instead of overlapping it, because MIDI note-off carries only a pitch and an " +
+      "overlap there would cut the note that just started. " +
+      "⚠️ WHAT OVERLAP ACTUALLY BUYS: this engine has NO legato-hold mode — every note-on " +
+      "starts a brand-new voice with a fresh attack, on the built-in sampler and on a " +
+      "hosted AUSampler alike. The overlap MASKS each new attack under the previous note's " +
+      "decaying tail; it does NOT eliminate the retrigger and cannot produce true legato. " +
+      "Use ~0.02-0.05 beats for a melodic wind/brass line. `maxGapBeats` on its own does " +
+      "NOTHING: it is a ceiling on a pass that only runs when `legatoOverlapBeats` > 0. " +
+      "The jitter is DETERMINISTIC and " +
       "SEEDED: pass a `seed` to get an exact, repeatable result, or omit it to draw a fresh " +
       "one. Either way the response includes `seedUsed` (the seed actually applied) alongside " +
       "the updated clip fields — feed that same value back as `seed` to reproduce this exact " +
@@ -3616,10 +3634,46 @@ registerTool(
             "(and same params) to reproduce an exact result; omit it to draw a random seed. The " +
             "seed actually used is always returned as `seedUsed` so you can reproduce or re-roll."
         ),
+      legatoOverlapBeats: z
+        .number()
+        .min(0)
+        .max(0.25)
+        .optional()
+        .describe(
+          "How far each note is stretched PAST the start of the note that follows it, in BEATS, " +
+            "0..0.25 (default 0 = OFF, note lengths untouched). This is the only argument that " +
+            "changes note LENGTHS. ~0.024-0.048 beats is 20-40 ms at 72 BPM, a good range for a " +
+            "melodic wind/brass line. It masks each note's fresh attack under the previous note's " +
+            "tail — it does NOT eliminate the retrigger (no legato-hold mode exists in this " +
+            "engine), so bigger is not smoother: past ~0.06 beats it starts to read as two " +
+            "players. Deterministic and RNG-free, so a seeded result is unchanged by it."
+        ),
+      maxGapBeats: z
+        .number()
+        .min(0)
+        .max(4)
+        .optional()
+        .describe(
+          "The largest gap the legato pass will close, in BEATS, 0..4 (default 0.125 — a " +
+            "thirty-second note). A gap WIDER than this is treated as a rest — a breath in a " +
+            "wind part — and is preserved exactly, which is what keeps the pass musical rather " +
+            "than destructive. Raise it to close written rests too (1 = a quarter-note rest); " +
+            "lower it at very slow tempos, where 0.125 beat is more milliseconds. Does NOTHING " +
+            "on its own: it only bounds the pass that `legatoOverlapBeats` > 0 turns on."
+        ),
     },
   },
-  async ({ clipId, timingBeats, velocityRange, seed }) =>
-    toToolResult(() => bridge.send("clip.humanize", { clipId, timingBeats, velocityRange, seed }))
+  async ({ clipId, timingBeats, velocityRange, seed, legatoOverlapBeats, maxGapBeats }) =>
+    toToolResult(() =>
+      bridge.send("clip.humanize", {
+        clipId,
+        timingBeats,
+        velocityRange,
+        seed,
+        legatoOverlapBeats,
+        maxGapBeats,
+      })
+    )
 );
 
 server.registerTool(
