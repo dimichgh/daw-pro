@@ -183,6 +183,15 @@ extension ProjectStore {
     /// budget. An unknown pattern id is an `invalidClipEdit` naming every valid
     /// one — never a silent fallback to a default shape.
     ///
+    /// ⚠️ **There is no `requireNotCompMember` call in THIS file, and that is
+    /// not an omission — grepping here for one and concluding this sentence
+    /// lies is a mistake already made once.** Both refusal paths are leg D's own
+    /// code: `breathSelection` guards the read and `applyBreathContourVarying`
+    /// guards the write, and this method reaches a comp member through neither.
+    /// The guard living in exactly one place is the point (`requireNotCompMember`
+    /// is documented as the ONE home for that question); a copy here would be
+    /// free to drift from the refusal it exists to mirror.
+    ///
     /// ⛔ **Vibrato is SUPPRESSED, not silently mangled, on a track hosting an
     /// Audio Unit** (including every `.soundBank` track — where the GM sax
     /// lives). MEASURED 2026-08-19: bend is sample-and-held at the offline
@@ -418,10 +427,15 @@ extension ProjectStore {
             phraseCount = max(1, touched.count)
             for note in selected {
                 guard let noteBlend = blendByNote[note.id],
-                      let phraseCurve = noteBlend.curve(scope: .phrase) else {
+                      noteBlend.phraseWeight > 0 else {
                     // This note's dot had no phrase content even though another
                     // note's did — full effort, the same answer the whole call
                     // used to give when no dot anywhere had any.
+                    //
+                    // ⚠️ `phraseWeight > 0` is EXACTLY the old `curve(scope:) != nil`
+                    // gate, not an approximation of it: `Blend.members` is built
+                    // `where weight > 0` (`EffortRing.blend(atAngle:radius:)`), so
+                    // the scope's group is non-empty iff its weight is non-zero.
                     effortByNote[note.id] = 1
                     continue
                 }
@@ -431,7 +445,25 @@ extension ProjectStore {
                 // fallback is stated rather than force-unwrapped: mid-phrase is
                 // the least-wrong constant.
                 let u = phraseOf[note.id]?.position(ofBeat: note.startBeat) ?? 0.5
-                let raw = phraseCurve.evaluate(u: u)
+                // ⭐ THE LAW, NOT THE VEHICLE (m28-p2-followup). `Blend.level` is
+                // the blend law "pointwise and exact"; `Blend.curve` is the
+                // PROJECTION of that law onto the `EffortPattern` family, which
+                // exists because leg D's generator is parameterised and cannot be
+                // handed a law. Here we need ONE scalar at ONE `u`, so the
+                // projection is pure loss — and `u` is a note's position inside
+                // its phrase, an arbitrary value that is almost never a knot,
+                // which is precisely where the projection is inexact.
+                //
+                // ⚠️ This previously read `curve(scope:.phrase).evaluate(u:)` and
+                // was wrong by up to 0.0048 of effort on a genuine two-pattern
+                // ring (MEASURED, hairpinDiminuendo+terraced). It also broke
+                // `EffortRing`'s stated invariant that every value the store reads
+                // off a curve is a knot property and therefore exact — the ring of
+                // ONE that P1/P2 shipped is a self-blend, whose union curve is the
+                // pattern bit for bit, so no single-pattern test could see it.
+                // `Blend.refinementSteps` stays at 8: it guards the vehicle for
+                // leg D, and nothing now samples the vehicle between knots.
+                let raw = noteBlend.level(scope: .phrase, u: u)
                 // `amount` pulls effort toward FULL pressure, so amount 0 is
                 // "no shaping" rather than "no air" — the same direction the
                 // note-scoped branch's depth scaling goes. `phraseWeight` is
@@ -476,9 +508,14 @@ extension ProjectStore {
 
         // --- Capability gating, through the ONE routing table ----------------
         var base = options
-        let suppressVibrato = MIDIControllerRouting
-            .bendModulationNyquistHz(instrument: instrument) != nil
-            && base.vibratoDepthCents > 0
+        // ⭐ m28-bug: gated on the RATE's image ratio, not on the mere fact of
+        // hosting an AU. With the offline block at 512 frames the sampler runs
+        // at 93.75 Hz and a 5.5 Hz vibrato's image is 6 % of it — far under the
+        // 25 % cap — so this no longer fires for musical rates, and the vibrato
+        // is written. It still fires above the ceiling, where it is true.
+        let suppressVibrato = base.vibratoDepthCents > 0
+            && MIDIControllerRouting.modulationAliasesUnacceptably(
+                instrument: instrument, rateHz: base.vibratoRateHz)
         if suppressVibrato,
            let warning = MIDIControllerRouting.bendVibratoWarning(
                for: instrument, requestedRateHz: base.vibratoRateHz) {
@@ -487,18 +524,27 @@ extension ProjectStore {
         }
 
         // ⛔ P5: THE MEASURED TREMOR CEILING. On a hosted AU our own offline
-        // renderer feeds MIDI in 4096-frame blocks, so a tremor comes back with
-        // a sample-and-hold image at |11.719 − rate| Hz. MEASURED for CC 11,
-        // not inherited from the bend result — see
-        // `MIDIControllerRouting.controllerModulationSamplingHz`. Suppressed
-        // rather than retuned: the rate that would keep the image 12 dB down is
-        // 2.34 Hz, below the band a tremor IS.
+        // renderer feeds MIDI a block at a time, so a tremor comes back with a
+        // sample-and-hold image at |f_s − rate| Hz. MEASURED for CC 11, not
+        // inherited from the bend result — see
+        // `MIDIControllerRouting.controllerModulationSamplingHz`.
+        //
+        // ⭐ **m28-bug LIFTED THIS FOR THE PHYSIOLOGICAL BAND.** P5 suppressed
+        // unconditionally because at a 4096-frame block the ceiling was 2.34 Hz
+        // — below the whole 4–8 Hz band a tremor IS, so there was no rate worth
+        // writing. At 512 frames the ceiling is **18.75 Hz** and the band is
+        // entirely under it: a 4.565 Hz tremor's image is 5 % of it, and the
+        // rendered measurement agrees (87.7 % of authored depth at both 5.5 and
+        // 8 Hz, image ratios 0.022 and 0.036 — `measure-gm-sax-cc.md` §6.6).
+        // The gate stays, because it is still true above 18.75 Hz and
+        // `tremorRateHz` is authorable to 20.
         //
         // Written as the same shape as the vibrato gate above, one line apart,
         // because they are the same law arriving on two lanes.
         var effectiveHumanisation = humanisation
         let suppressTremor = humanisation.tremorDepth > 0
-            && MIDIControllerRouting.controllerModulationSamplingHz(instrument: instrument) != nil
+            && MIDIControllerRouting.modulationAliasesUnacceptably(
+                instrument: instrument, rateHz: humanisation.tremorRateHz)
         if suppressTremor,
            let warning = MIDIControllerRouting.tremorSuppressionWarning(
                for: instrument, requestedRateHz: humanisation.tremorRateHz) {

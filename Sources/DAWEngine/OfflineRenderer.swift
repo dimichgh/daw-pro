@@ -102,7 +102,7 @@ public final class OfflineRenderer {
     var performance = EnginePerformanceContext()
 
     public init(sampleRate: Double = 48_000, channelCount: Int = 2,
-                maximumFrameCount: Int = 4_096) {
+                maximumFrameCount: Int = RenderBlockSize.offlineFrames) {
         self.sampleRate = sampleRate
         self.channelCount = channelCount
         self.maximumFrameCount = maximumFrameCount

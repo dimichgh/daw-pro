@@ -147,21 +147,54 @@ public enum MIDIControllerRouting {
     ///
     /// ⛔ **MEASURED** (`docs/research/measure-gm-sax-cc.md` §2, 2026-08-19):
     /// on the HOSTED-AU path, bend is sample-and-held at the offline render
-    /// block rate (`OfflineRenderer` renders 4096 frames per block = an
-    /// **11.719 Hz sampler, Nyquist 5.86 Hz**), so an authored 5.5 Hz vibrato
-    /// bounces as 35.4 ¢ at 5.50 Hz **plus a 30.0 ¢ alias at 6.22 Hz** — two
-    /// vibratos beating. 8 Hz becomes a 3.72 Hz wobble; 11.72 Hz becomes a
-    /// static −17.9 ¢ detune. The built-in `.sampler` shows none of it.
+    /// block rate. At the 4096-frame block this was measured against, that was an
+    /// **11.719 Hz sampler, Nyquist 5.86 Hz**, so an authored 5.5 Hz vibrato
+    /// bounced as 35.4 ¢ at 5.50 Hz **plus a 30.0 ¢ alias at 6.22 Hz** — two
+    /// vibratos beating. 8 Hz became a 3.72 Hz wobble; 11.72 Hz a static
+    /// −17.9 ¢ detune. The built-in `.sampler` showed none of it.
+    ///
+    /// ⭐ **m28-bug moved the block to 512**, so this now returns **46.875 Hz**
+    /// and no musical vibrato rate is refused. The limit is not gone — it is
+    /// eight times higher, and `modulationAliasesUnacceptably` is what decides.
     ///
     /// ⚠️ **Whether LIVE playback is affected is NOT MEASURED** — live renders
     /// at the hardware buffer size, not 4096 — so this is stated as a bounce
     /// limit, which is what was actually observed.
+    /// ⭐ **m28-bug: DERIVED from the render block, no longer the literal 5.86.**
+    /// The 5.86 figure was half of 48000/4096; with the block at 512 the same
+    /// arithmetic gives **46.875 Hz**, which is above the entire musical
+    /// modulation band. Hard-coding it would have left this function reporting a
+    /// limit the engine no longer has.
     public static func bendModulationNyquistHz(instrument: InstrumentDescriptor?) -> Double? {
         guard let instrument else { return nil }
         switch instrument.kind {
-        case .soundBank, .audioUnit: return 5.86
+        case .soundBank, .audioUnit:
+            return EffortField.hostedAUOfflineModulationSamplingHz / 2
         case .sampler, .polySynth, .testTone: return nil
         }
+    }
+
+    /// Whether a modulation authored at `rateHz` on `instrument` would come back
+    /// from an offline bounce with its sample-and-hold image louder than
+    /// `EffortField.maxAcceptableImageRatio` — i.e. whether it must be
+    /// suppressed rather than written.
+    ///
+    /// ⛔⛔ **m28-bug: THIS PREDICATE IS THE FIX'S OTHER HALF, AND OMITTING IT
+    /// WOULD HAVE BEEN WORSE THAN LEAVING THE BLOCK AT 4096.** Both capability
+    /// gates used to be *unconditional on rate*: hosting an AU was itself the
+    /// disqualification. With the block at 512 the warning text would then have
+    /// computed and printed "an extra copy at 85.75 Hz at 0.09x its depth …
+    /// would need a rate at or below 18.75 Hz" — and suppressed a 4.565 Hz
+    /// tremor anyway. A sentence that contradicts its own action is exactly the
+    /// silent-plausible-wrong-answer failure this whole line of work exists to
+    /// end. The ceiling was always the real criterion; it was simply never
+    /// reachable, so nobody had to write it down.
+    public static func modulationAliasesUnacceptably(instrument: InstrumentDescriptor?,
+                                                     rateHz: Double) -> Bool {
+        guard let samplingHz = controllerModulationSamplingHz(instrument: instrument),
+              rateHz > 0 else { return false }
+        return EffortField.modulationImageRatio(rateHz: rateHz, samplingHz: samplingHz)
+            > EffortField.maxAcceptableImageRatio
     }
 
     /// One sentence for a caller that wanted vibrato on `instrument` and cannot
@@ -177,13 +210,20 @@ public enum MIDIControllerRouting {
     public static func bendVibratoWarning(for instrument: InstrumentDescriptor?,
                                           requestedRateHz: Double) -> String? {
         guard let nyquist = bendModulationNyquistHz(instrument: instrument),
-              requestedRateHz > 0 else { return nil }
+              requestedRateHz > 0,
+              // m28-bug: the ceiling is the criterion, not the mere fact of
+              // hosting an AU. At the shipping 512-frame block this is false for
+              // every musically sensible vibrato rate, so no warning is produced
+              // and the vibrato is written.
+              modulationAliasesUnacceptably(instrument: instrument, rateHz: requestedRateHz)
+        else { return nil }
         let rate = String(format: "%.4g", requestedRateHz)
         return "vibrato was NOT written to the pitch-bend lane on this track: it hosts an Audio "
             + "Unit, and bend there is sampled at the offline render block rate "
             + "(\(String(format: "%.2f", nyquist)) Hz Nyquist), so a \(rate) Hz vibrato bounces "
-            + "as two vibratos beating — the measured case is 5.5 Hz coming back as 35.4 cents "
-            + "at 5.50 Hz plus a 30.0 cent alias at 6.22 Hz. The expression swell and the "
+            + "as two vibratos beating — the measured case at a 4096-frame block was 5.5 Hz "
+            + "coming back as 35.4 cents at 5.50 Hz plus a 30.0 cent alias at 6.22 Hz. The "
+            + "expression swell and the "
             + "micro-sharpening were written normally (both are far below that limit). For "
             + "vibrato on this track use the instrument's OWN: on the stock GM sound bank, a "
             + "CC1 (mod wheel) lane gives about 2.4 + 0.30 x CC1 cents at a fixed 5.4 Hz, "
@@ -216,7 +256,9 @@ public enum MIDIControllerRouting {
     /// | no lane at all (floor) | — | 400× below |
     ///
     /// **There is no escape: CC 11 is re-sampled exactly as bend is.** The
-    /// figure is `OfflineRenderer`'s 4096-frame block at 48 kHz.
+    /// figure is `OfflineRenderer`'s block at 48 kHz — 4096 frames when the
+    /// table above was measured, 512 now (`RenderBlockSize`, m28-bug), which is
+    /// why the ratios in that table are historical rather than current.
     ///
     /// ⚠️ **Returns the SAMPLING rate, not the Nyquist rate**, unlike its bend
     /// sibling — the image ratio `f / (f_s − f)` needs `f_s`, and a helper that
@@ -234,10 +276,18 @@ public enum MIDIControllerRouting {
     /// `AudioEngine`, prepared against this machine's default output and left
     /// rendering for 400 ms, reported **quantumFrames = 512 at 48 kHz ⇒ 93.75 Hz
     /// block rate, Nyquist 46.875 Hz**, with `renderedFrames` an exact multiple
-    /// of 512 (38912 = 76 × 512), i.e. every quantum the same size. **Live is
-    /// 8× the offline bounce's 11.719 Hz**, so nothing in the table above
-    /// applies to what a user hears while the transport rolls — the ceiling is
-    /// a BOUNCE property and the two must never be quoted for each other.
+    /// of 512 (38912 = 76 × 512), i.e. every quantum the same size.
+    ///
+    /// ⭐⭐ **m28-bug CLOSED THE GAP THAT MEASUREMENT REVEALED.** When P6 took
+    /// this number the bounce ran at 11.719 Hz and live at 93.75 Hz — **live was
+    /// 8× finer than the bounce**, which is precisely the defect: the same
+    /// project, monitored and then bounced, delivered vibrato at two different
+    /// RATES, and the one the user approved was not the one written to disk.
+    /// The offline block is now 512 (`RenderBlockSize`), so both paths sample at
+    /// 93.75 Hz on this rig and the table above describes both. ⚠️ That equality
+    /// is a fact about THIS machine's HAL buffer, not a guarantee — the ceiling
+    /// remains a BOUNCE property, computed from OUR block, which is the only one
+    /// of the two we control.
     ///
     /// ⚠️ ONE machine, one device, one moment: the HAL buffer size is a device
     /// setting a user can change, so treat 512 as *what this rig reported*, not
@@ -259,20 +309,26 @@ public enum MIDIControllerRouting {
     ///
     /// ⛔ **P5 SUPPRESSES rather than retunes, and the number is the argument.**
     /// Holding the sample-and-hold image 12 dB below the tremor on this path
-    /// caps the rate at 2.34 Hz — *below* §10.1's whole 4–8 Hz physiological
-    /// band. Clamping into that would deliver a slow wobble wearing the name
-    /// "tremor", which is the silent-default failure this round exists to end.
+    /// capped the rate at 2.34 Hz at the old 4096-frame block — *below* §10.1's
+    /// whole 4–8 Hz physiological band. Clamping into that would deliver a slow
+    /// wobble wearing the name "tremor", the silent-default failure this round
+    /// exists to end. ⭐ At the 512-frame block the cap is **18.75 Hz**, so the
+    /// band is written and only genuinely too-fast rates are refused.
     ///
     /// ⭐ **Names `OfflineRenderer`'s block as the cause, not the plugin**, and
-    /// that is deliberate: `measure-gm-sax-cc.md` §2.4 calls the 4096-frame
-    /// default a bounce-fidelity bug rather than a physical limit, and predicts
-    /// live playback at 512 frames samples at 93.75 Hz and is clean. A warning
-    /// that said "hosted AUs cannot do tremor" would point at a dead end
-    /// instead of at a fixable engine default.
+    /// that is deliberate: `measure-gm-sax-cc.md` §2.4 called the 4096-frame
+    /// default a bounce-fidelity bug rather than a physical limit. A warning
+    /// that said "hosted AUs cannot do tremor" would have pointed at a dead end
+    /// instead of at a fixable engine default — and the default was then duly
+    /// fixed (m28-bug), which is the argument for naming causes you can act on.
     public static func tremorSuppressionWarning(for instrument: InstrumentDescriptor?,
                                                 requestedRateHz: Double) -> String? {
         guard let samplingHz = controllerModulationSamplingHz(instrument: instrument),
-              requestedRateHz > 0 else { return nil }
+              requestedRateHz > 0,
+              // m28-bug: see `modulationAliasesUnacceptably`. Hosting an AU is
+              // no longer the disqualification — exceeding the image ceiling is.
+              modulationAliasesUnacceptably(instrument: instrument, rateHz: requestedRateHz)
+        else { return nil }
         let ratio = EffortField.modulationImageRatio(rateHz: requestedRateHz,
                                                      samplingHz: samplingHz)
         let ceiling = EffortField.modulationRateCeilingHz(
@@ -281,17 +337,18 @@ public enum MIDIControllerRouting {
             String(format: "%.\(places)f", value)
         }
         return "micro-tremor was NOT written on this track: it hosts an Audio Unit, and in an "
-            + "OFFLINE BOUNCE our own renderer feeds it MIDI in 4096-frame blocks — an "
+            + "OFFLINE BOUNCE our own renderer feeds it MIDI in "
+            + "\(RenderBlockSize.offlineFrames)-frame blocks — an "
             + "\(f(samplingHz, 3)) Hz sampler. A \(f(requestedRateHz, 3)) Hz tremor comes back "
             + "with an extra copy at \(f(abs(samplingHz - requestedRateHz), 3)) Hz at "
-            + "\(f(ratio, 2))x its depth (measured: 8 Hz returns 2.14x more energy at 3.72 Hz "
-            + "than at 8 Hz). Keeping that copy 12 dB down would need a rate at or below "
-            + "\(f(ceiling, 2)) Hz, which is below the 4-8 Hz band a tremor IS, so it is "
-            + "suppressed rather than quietly retuned out of its own band. Everything else "
-            + "in the shape — the swell, the drift, the phrase arc — is far below this limit "
-            + "and was written normally. The tremor DOES land on a built-in Sampler track, "
-            + "and the block size is ours: live playback pulls at the hardware buffer, where "
-            + "this does not apply"
+            + "\(f(ratio, 2))x its depth (measured at a 4096-frame block: 8 Hz returned 2.14x "
+            + "more energy at 3.72 Hz than at 8 Hz). Keeping that copy 12 dB down would need a "
+            + "rate at or below "
+            + "\(f(ceiling, 2)) Hz. It is suppressed rather than quietly retuned to a rate you "
+            + "did not ask for. Everything else in the shape — the swell, the drift, the "
+            + "phrase arc — is far below this limit and was written normally, and the tremor "
+            + "DOES land on a built-in Sampler track. Lowering the tremor rate to "
+            + "\(f(ceiling, 2)) Hz or below writes it here too"
     }
 
     /// Human name for a lane type, matching the copy users see elsewhere

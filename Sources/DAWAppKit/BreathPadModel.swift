@@ -872,6 +872,90 @@ public final class BreathPadModel {
     @discardableResult
     public func endDrag() -> Bool { endGesture() }
 
+    // MARK: - Hardware-knob adapter (m28-knob)
+
+    /// How many pump passes with NO controller movement end an external
+    /// gesture. The feed runs at ~30 Hz (`MIDIInputManager`'s drain), so 15
+    /// passes is ≈ **0.5 s** of a still knob.
+    ///
+    /// A COUNT and not a wall-clock duration, deliberately: the pump is the only
+    /// clock this path has, counting it is exact, and a test drives the rule by
+    /// calling the pump rather than by sleeping. A timeout asserted with a sleep
+    /// is a flake with a schedule.
+    nonisolated public static let externalIdlePasses = 15
+
+    /// Pump passes since the knob last moved. Only meaningful while an
+    /// `.external` gesture is open.
+    public private(set) var externalIdleCount = 0
+
+    /// ⛔⛔ **THE KNOB DOES NOT COMMIT, AND THAT IS THE DESIGN — NOT A GAP.**
+    ///
+    /// An external gesture ends with `endGestureWithoutCommitting()`: the
+    /// preview releases to neutral (rule 3), the dot stays exactly where the
+    /// knob left it, and **no undo step is spent**. The APPLY button (or
+    /// `commit()`, which is public for precisely this reason) writes the shape.
+    ///
+    /// The alternative — committing when the knob goes quiet — is the m25-k
+    /// shape wearing a new hat. `applyEffortShape` spends an undo step and
+    /// rebuilds the clip's controller lanes, restarting playback with a
+    /// mid-decay re-attack. A mouse drag pays that ONCE because a hand releases
+    /// once; a knob ride is PAUSE-HEAVY, so "commit on idle" pays it once per
+    /// pause — a number the player never chose, cannot see, and would find in
+    /// their undo history as a wall of identical entries. *A correct policy at
+    /// the wrong cadence looks exactly like a correct policy.*
+    ///
+    /// `theKnobRideSpendsNoUndoSteps` holds this: a synthetic ride with three
+    /// pauses must leave `applyCount` at 0.
+    public func pumpExternalControl(_ pump: MIDIControlPump) {
+        // The feed died under us (last binding removed mid-turn, engine gone).
+        // Release now — the idle tick we are counting towards is not coming.
+        if pump.feedEnded {
+            if gesture == .external { endExternalGesture() }
+            return
+        }
+        // ⚠️ THE POINTER WINS. A hand on the pad and a hand on the knob is two
+        // sources for one dot; the one that opened the gesture keeps it, and the
+        // other is ignored until it closes. Silently interleaving them would
+        // make the dot jump between two positions at 30 Hz.
+        if gesture == .pointer { return }
+
+        // Coalesce: two values for one target in one 33 ms pass are a knob
+        // mid-turn, not two moves. One `setDot` per pass means one preview push
+        // per pass, which is the rate `PadPreviewController` is built for.
+        var angle: Double?
+        var radius: Double?
+        for update in pump.updates {
+            switch update.target {
+            case .breathPadAngle: angle = update.value
+            case .breathPadRadius: radius = update.value
+            }
+        }
+
+        guard angle != nil || radius != nil else {
+            guard gesture == .external else { return }
+            externalIdleCount += 1
+            if externalIdleCount >= Self.externalIdlePasses { endExternalGesture() }
+            return
+        }
+
+        externalIdleCount = 0
+        if gesture == nil { beginGesture(source: .external) }
+        // A knob sweep of 0…1 is a full turn of the ring. **Both ends land on
+        // ring index 0** — that is what a circle does, and it is why the ends of
+        // the sweep are not wasted travel.
+        setDot(angle: angle.map { $0 * 2 * .pi } ?? dot.angle,
+               radius: radius ?? dot.radius)
+    }
+
+    /// Releases an external gesture without committing. Safe to call when none
+    /// is open. Public so a panel dismissal or an app resignation can park the
+    /// knob's gesture the same way it parks the pointer's.
+    public func endExternalGesture() {
+        externalIdleCount = 0
+        guard gesture == .external else { return }
+        endGestureWithoutCommitting()
+    }
+
     // MARK: - Preview
 
     /// The effort the dot represents, 0…1 — what the drag streams.

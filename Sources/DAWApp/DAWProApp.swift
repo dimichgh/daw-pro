@@ -4356,6 +4356,7 @@ final class AppModel {
         onboardingAdapter = OnboardingSignalAdapter(store: store, model: onboarding)
         onboardingAdapter.start()
         wireReferencePanel()
+        wireMIDIControlPump()
         installDebugCommands()
         // Space-bar transport toggle (m17-d): the app-wide key monitor. Last —
         // it reads store state only through the toggle funnel, no init order
@@ -4379,6 +4380,27 @@ final class AppModel {
     /// command calls — so a reference imported from the panel and one imported
     /// by an agent are byte-identical, and the panel adds ZERO wire surface (the
     /// m10-c/m22-b pure-view precedent).
+    /// Hands the m28-knob controller feed to the breath pad (the pure-view
+    /// precedent: the app adds ZERO wire surface here — `midi.getControlMap` /
+    /// `setControlMap` / `learnControl` are the whole protocol, and this is the
+    /// delivery of what they configure).
+    ///
+    /// ⭐ **Deliberately three lines.** Every rule lives on one side or the
+    /// other: DAWCore's `MIDIControlMap` decides WHICH target moved and by how
+    /// much, `BreathPadModel.pumpExternalControl` decides what a move does to
+    /// the dot and when the gesture releases. `DAWApp` has no test target, so
+    /// anything with a rule in it must not live here — this is a wire, not a
+    /// policy.
+    ///
+    /// ⛔ The pass is forwarded **even when it is empty.** That empty pass is
+    /// the idle tick the pad releases on; a knob has no "release", and dropping
+    /// the empty ones would leave a preview parked on the instrument forever.
+    private func wireMIDIControlPump() {
+        store.midiControl.pumpHandler = { [weak self] pump in
+            self?.breathPad.pumpExternalControl(pump)
+        }
+    }
+
     private func wireReferencePanel() {
         referencePanel.slotProvider = { [weak self] in self?.referenceRowSlot }
         referencePanel.statusProvider = { [weak self] in

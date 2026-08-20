@@ -412,4 +412,141 @@ import Testing
         #expect(BreathPadLayout.summaryReservation == 48,
                 "the reservation moved without this bound moving with it")
     }
+
+    // MARK: - m28-knob: the ONE link in the knob chain with no other instrument
+
+    /// ⛔⛔ **THE VACUITY HOLE THIS CLOSES.** Delete `wireMIDIControlPump()` from
+    /// `AppModel.init` and *every other m28-knob test still passes*:
+    /// `MIDIControlMapTests` still resolves bindings, `MIDIInputManagerTests`
+    /// still delivers CC batches, `MIDIControlTests` still round-trips all three
+    /// verbs, and the folded pad tests in `HumanizeModelTests` still walk the
+    /// dot — because they call `pumpExternalControl` directly. The knob would
+    /// simply do nothing, silently, with a green suite. That is the same shape
+    /// guarded at four other layers of this feature (the protocol's silent
+    /// default, the empty idle tick, the MCP schema/description pairing, the
+    /// `/127` contract), and this is the one place it had no guard, because
+    /// `DAWApp` is an `executableTarget` with no test target.
+    ///
+    /// ⚠️ **A SHAPE PIN, NOT A BEHAVIOURAL MEASUREMENT** — the
+    /// `BreathPadEntryPointSiteTests` / `HumanizePanelSiteTests` caveat applies
+    /// verbatim: this reads DAWApp's SOURCE. Comments are stripped so prose
+    /// *about* the wire cannot satisfy an assertion about code, and the
+    /// extractor is both positive-controlled (it can see statements known to be
+    /// in `init`) and RUNAWAY-controlled (it must NOT see a statement that lives
+    /// past `init`'s closing brace). The init body is ~650 lines; an unbalanced
+    /// brace matcher that swallowed the rest of the file would otherwise report
+    /// the cleanest possible green.
+    @Test("the knob feed is actually WIRED to the pad in AppModel.init (m28-knob)")
+    func theControlPumpIsWiredToThePadAtLaunch() {
+        let app = Self.appCode()
+        guard let initBody = Self.bracedBody(after: "init() {", in: app) else {
+            Issue.record("could not extract AppModel.init — the marker moved; FIX THE EXTRACTOR, do not assume the wire is fine")
+            return
+        }
+        // POSITIVE CONTROL: the extractor really did land inside `init`.
+        #expect(initBody.contains("wireReferencePanel()"),
+                "POSITIVE CONTROL FAILED: the extracted init body is missing a call that was already there, so its verdict on the knob wire means nothing.")
+        #expect(initBody.contains("installSpaceKeyMonitor()"),
+                "POSITIVE CONTROL FAILED: the extracted body stops short of init's tail.")
+        // RUNAWAY CONTROL: `referencePanel.slotProvider` is the first line of
+        // `wireReferencePanel`, which is defined AFTER init. Seeing it here
+        // means the brace matcher ran past init's closing brace and every
+        // `contains` above is meaningless.
+        #expect(!initBody.contains("referencePanel.slotProvider"),
+                "RUNAWAY CONTROL FAILED: the extractor ran past init's closing brace into the wiring functions.")
+
+        #expect(initBody.contains("wireMIDIControlPump()"), """
+            AppModel.init does not call wireMIDIControlPump(). A mapped hardware knob will \
+            move the CONTROL MAP and reach NOTHING — the pad's dot never hears it. Every \
+            other m28-knob test stays green through this defect.
+            """)
+
+        guard let wire = Self.bracedBody(after: "private func wireMIDIControlPump() {", in: app) else {
+            Issue.record("wireMIDIControlPump is called but not defined — or it was renamed without this pin moving")
+            return
+        }
+        #expect(wire.contains("store.midiControl.pumpHandler"),
+                "the wire does not subscribe to the store's control pump — the feed has no receiver.")
+        #expect(wire.contains("breathPad.pumpExternalControl"),
+                "the wire subscribes but never forwards to the pad — a handler that drops every pass is indistinguishable from no handler.")
+        #expect(wire.contains("[weak self]"),
+                "the pump handler captures AppModel strongly; the store would then own its owner.")
+
+        // Exactly one definition + exactly one call. A second call site would
+        // REPLACE the handler (`pumpHandler` is a single slot, not a list), so
+        // "wired twice" and "wired once" look identical at runtime until the
+        // second one is wrong.
+        let mentions = Self.occurrences(of: "wireMIDIControlPump", in: app)
+        #expect(mentions == 2,
+                "expected exactly 2 mentions of wireMIDIControlPump (1 definition + 1 call); found \(mentions).")
+    }
+
+    // MARK: - Source scraping (the HumanizePanelSiteTests idiom, verbatim)
+
+    private static func sourcesDir() -> URL {
+        var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let fm = FileManager.default
+        for _ in 0..<12 {
+            let candidate = dir.appendingPathComponent("Sources", isDirectory: true)
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue {
+                return candidate
+            }
+            dir = dir.deletingLastPathComponent()
+        }
+        // A pin test that silently finds no files reports the cleanest possible
+        // green, which is the most dangerous kind. Say so loudly instead.
+        Issue.record("Could not locate Sources from \(#filePath)")
+        return URL(fileURLWithPath: "/nonexistent")
+    }
+
+    /// DAWApp's source with every comment stripped, so prose *about* the wire
+    /// cannot satisfy an assertion about the wire.
+    private static func appCode() -> String {
+        let url = sourcesDir().appendingPathComponent("DAWApp/DAWProApp.swift")
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else {
+            Issue.record("Could not read DAWApp/DAWProApp.swift under \(sourcesDir().path)")
+            return ""
+        }
+        return content.split(separator: "\n", omittingEmptySubsequences: false).map { line in
+            let raw = String(line)
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("//") || trimmed.hasPrefix("*") || trimmed.hasPrefix("/*") {
+                return ""
+            }
+            return raw.range(of: "//").map { String(raw[..<$0.lowerBound]) } ?? raw
+        }.joined(separator: "\n")
+    }
+
+    /// The text between the braces that OPEN at the end of `marker`. Returns nil
+    /// when the marker is absent, which every caller treats as a FAILURE:
+    /// "renamed" and "correct" must never look the same here.
+    private static func bracedBody(after marker: String, in content: String) -> String? {
+        guard let markerRange = content.range(of: marker) else { return nil }
+        var depth = 1          // the marker's own trailing `{`
+        var out = ""
+        var i = markerRange.upperBound
+        while i < content.endIndex {
+            let ch = content[i]
+            if ch == "{" { depth += 1 }
+            if ch == "}" {
+                depth -= 1
+                if depth == 0 { return out }
+            }
+            out.append(ch)
+            i = content.index(after: i)
+        }
+        return nil
+    }
+
+    private static func occurrences(of needle: String, in haystack: String) -> Int {
+        guard !needle.isEmpty else { return 0 }
+        var count = 0
+        var idx = haystack.startIndex
+        while let r = haystack.range(of: needle, range: idx..<haystack.endIndex) {
+            count += 1
+            idx = r.upperBound
+        }
+        return count
+    }
 }

@@ -860,17 +860,24 @@ test("P5 is DISCOVERABLE: the schema says the defaults are null and names the me
     "the schema must say that the humanisation defaults render byte-identically"
   );
 
-  // ⛔ The measured ceiling, and the fact that the tremor is SUPPRESSED rather
-  // than written-and-aliased. An agent that asks for a tremor on the GM sax and
-  // is told nothing would conclude the feature is broken.
-  assert.ok(/11\.719/.test(whole), "must carry the measured hosted-AU sampling rate");
+  // ⛔ The measured ceiling. m28-bug MOVED it rather than removing it: the
+  // offline block went 4096 → 512, so the sampler went 11.719 → 93.75 Hz and the
+  // rate ceiling 2.34 → 18.75 Hz. The schema must carry the CURRENT numbers — an
+  // agent told the tremor is refused on the GM sax would decline to use a
+  // feature that now works, which is the same silent-wrong-answer failure as
+  // promising one that does not.
+  assert.ok(/93\.75/.test(whole), "must carry the CURRENT hosted-AU sampling rate");
   assert.ok(
-    /4096/.test(whole),
-    "must name OUR 4096-frame offline block as the cause, not the plugin"
+    /512/.test(whole),
+    "must name OUR current offline block as the cause, not the plugin"
+  );
+  assert.ok(
+    /18\.75/.test(whole),
+    "must carry the current rate ceiling, above which the tremor IS still suppressed"
   );
   assert.ok(
     /2\.14x|2\.14 ?x/i.test(whole),
-    "must carry the measured 8 Hz image ratio rather than only asserting a limit exists"
+    "must keep the measured 8 Hz image ratio that motivated the change"
   );
 
   // ⛔ BANNED: nothing may promise a tremor on a sound-bank track. This is the
@@ -878,8 +885,9 @@ test("P5 is DISCOVERABLE: the schema says the defaults are null and names the me
   const tremorMentions = whole.match(/tremor/gi) ?? [];
   assert.ok(tremorMentions.length > 5, "positive control: the tool does discuss tremor");
   assert.ok(
-    /NOT WRITTEN|not written|SUPPRESSED|suppressed/.test(whole),
-    "must state that the tremor is not written on a hosted-AU track"
+    /SUPPRESSED|suppressed/.test(whole),
+    "must state that the tremor is still suppressed ABOVE the ceiling (m28-bug moved the "
+      + "ceiling to 18.75 Hz; it did not remove it)"
   );
 
   // POSITIVE CONTROL for the scans above: a phrase nothing has any reason to

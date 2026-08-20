@@ -149,6 +149,143 @@ struct CompEditRefusalTests {
         }
     }
 
+    // MARK: - m28 follow-up (a): the two breath verbs refuse a comp member ALIKE
+
+    /// A track holding two overlapping takes of the caller's shape, grouped, plus
+    /// the resulting comp member's id. Deliberately minimal: the only property
+    /// under test is MEMBERSHIP, so the fixture varies nothing else.
+    private func groupedMember(kind: TrackKind, takes: [Clip], groupName: String)
+        throws -> (store: ProjectStore, member: UUID) {
+        let track = Track(name: "T", kind: kind, clips: takes)
+        let store = ProjectStore(tracks: [track])
+        _ = try store.groupTakes(trackId: track.id, clipIds: [takes[0].id, takes[1].id],
+                                 name: groupName)
+        let member = try #require(store.tracks[0].clips.first { $0.takeGroupID != nil })
+        return (store, member.id)
+    }
+
+    /// `clip.applyEffortShape` ALWAYS refused a comp member — it routes its write
+    /// through `applyBreathContourVarying`, which holds the shared guard. What it
+    /// did not do was refuse with leg D's ERROR, because it resolves its selection
+    /// first, through `breathSelection`, which had no guard of its own.
+    ///
+    /// So on a comp member that ALSO trips a selection check, the selection's error
+    /// won the race and the two verbs told the caller different things about the
+    /// same clip: `clip.applyBreathContour` said "this clip is in a take group",
+    /// `clip.applyEffortShape` said "this is not a MIDI clip". Only one of those
+    /// names a problem the caller can act on, and the remedy (`take.flatten`) is
+    /// only in the first.
+    ///
+    /// ⚠️ The refusal SET is unchanged by the fix — every row below was refused
+    /// before and is refused now. What changed is WHICH error identifies it, on
+    /// the three rows where a selection check could fire first.
+    @Test("clip.applyBreathContour and clip.applyEffortShape refuse a comp member with the SAME error")
+    func breathVerbsAgreeOnCompMembers() throws {
+        let pattern = try #require(EffortPattern.library.first)
+        let ghost = UUID()
+
+        // Each row is a comp member that ALSO trips one of `breathSelection`'s
+        // checks — i.e. exactly the races where the two verbs used to disagree.
+        // The last row is the control: nothing else trips, so the two agreed even
+        // before the fix, and it must keep agreeing.
+        let audio = try groupedMember(
+            kind: .audio,
+            takes: [Clip(name: "Vox 1", startBeat: 0, lengthBeats: 4,
+                         audioFileURL: URL(fileURLWithPath: "/a.wav")),
+                    Clip(name: "Vox 2", startBeat: 0, lengthBeats: 4,
+                         audioFileURL: URL(fileURLWithPath: "/b.wav"))],
+            groupName: "Vox Comp")
+        let empty = try groupedMember(
+            kind: .instrument,
+            takes: [Clip(name: "Empty 1", startBeat: 0, lengthBeats: 4, notes: []),
+                    Clip(name: "Empty 2", startBeat: 0, lengthBeats: 4, notes: [])],
+            groupName: "Empty Comp")
+        let noted = try groupedMember(
+            kind: .instrument,
+            takes: [Clip(name: "Take 1", startBeat: 0, lengthBeats: 4,
+                         notes: [MIDINote(pitch: 60, startBeat: 0, lengthBeats: 2)]),
+                    Clip(name: "Take 2", startBeat: 0, lengthBeats: 4,
+                         notes: [MIDINote(pitch: 62, startBeat: 0, lengthBeats: 2)])],
+            groupName: "Keys Comp")
+
+        let rows: [(label: String, store: ProjectStore, clipID: UUID, noteIDs: [UUID]?)] = [
+            ("audio comp member", audio.store, audio.member, nil),
+            ("comp member with no notes", empty.store, empty.member, nil),
+            ("comp member, unknown note id", noted.store, noted.member, [ghost]),
+            ("comp member, nothing else wrong", noted.store, noted.member, nil),
+        ]
+
+        for row in rows {
+            let legD = projectError {
+                _ = try row.store.applyBreathContour(clipID: row.clipID, noteIDs: row.noteIDs)
+            }
+            let effort = projectError {
+                _ = try row.store.applyEffortShape(clipID: row.clipID, noteIDs: row.noteIDs,
+                                                   pattern: pattern)
+            }
+            guard case .clipInTakeGroup? = legD else {
+                Issue.record("applyBreathContour should have thrown clipInTakeGroup for \(row.label), got \(String(describing: legD))")
+                continue
+            }
+            guard case .clipInTakeGroup? = effort else {
+                Issue.record("applyEffortShape should have thrown clipInTakeGroup for \(row.label), got \(String(describing: effort))")
+                continue
+            }
+            // Not merely the same CASE: the same words, so a panel that prints
+            // `errorDescription` verbatim cannot tell the two verbs apart.
+            #expect(legD?.errorDescription == effort?.errorDescription,
+                    "the two verbs worded the same refusal differently for \(row.label)")
+        }
+    }
+
+    /// The control that stops the test above being about the SHAPE of the clip
+    /// rather than its MEMBERSHIP. Same three shapes, ungrouped: now each verb
+    /// must throw its own selection error and NEITHER may say `clipInTakeGroup`.
+    /// Without this, a guard that refused every clip it was handed would pass
+    /// every row above.
+    @Test("ungrouped clips of the same three shapes refuse for their OWN reason, never clipInTakeGroup")
+    func ungroupedClipsRefuseForTheirOwnReason() throws {
+        let pattern = try #require(EffortPattern.library.first)
+        let audioClip = Clip(name: "Lead", startBeat: 0, lengthBeats: 4,
+                             audioFileURL: URL(fileURLWithPath: "/c.wav"))
+        let emptyClip = Clip(name: "Blank", startBeat: 8, lengthBeats: 4, notes: [])
+        let notedClip = Clip(name: "Riff", startBeat: 16, lengthBeats: 4,
+                             notes: [MIDINote(pitch: 64, startBeat: 0, lengthBeats: 2)])
+        let store = ProjectStore(tracks: [
+            Track(name: "Vox", kind: .audio, clips: [audioClip]),
+            Track(name: "Keys", kind: .instrument, clips: [emptyClip, notedClip]),
+        ])
+        let ghost = UUID()
+
+        let rows: [(label: String, clipID: UUID, noteIDs: [UUID]?)] = [
+            ("ungrouped audio clip", audioClip.id, nil),
+            ("ungrouped clip with no notes", emptyClip.id, nil),
+            ("ungrouped clip, unknown note id", notedClip.id, [ghost]),
+        ]
+        for row in rows {
+            for (verb, err) in [
+                ("applyBreathContour", projectError {
+                    _ = try store.applyBreathContour(clipID: row.clipID, noteIDs: row.noteIDs) }),
+                ("applyEffortShape", projectError {
+                    _ = try store.applyEffortShape(clipID: row.clipID, noteIDs: row.noteIDs,
+                                                   pattern: pattern) }),
+            ] {
+                #expect(err != nil, "\(verb) accepted \(row.label)")
+                if case .clipInTakeGroup? = err {
+                    Issue.record("\(verb) blamed the take group for \(row.label), which is in none")
+                }
+            }
+        }
+        // And the guard does not refuse a clip it should edit: the ordinary MIDI
+        // clip, selected properly, succeeds on BOTH verbs.
+        #expect(throws: Never.self) {
+            _ = try store.applyBreathContour(clipID: notedClip.id)
+        }
+        #expect(throws: Never.self) {
+            _ = try store.applyEffortShape(clipID: notedClip.id, pattern: pattern)
+        }
+    }
+
     // MARK: - The remedy the message names actually works
 
     @Test("flattening the group clears the refusal, and the notes become editable")

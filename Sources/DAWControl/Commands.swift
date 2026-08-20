@@ -365,6 +365,13 @@ public final class CommandRouter {
         "output.listDevices",
         "output.setDevice",
         "midi.listInputs",
+        // m28-knob: the CC→target mapping trio, registered HERE next to
+        // midi.listInputs (their only sibling on this surface) and BEFORE
+        // transport.record — the ControlTests routing loop walks this array in
+        // order and is mid-take from transport.record onwards. NOT at the tail.
+        "midi.getControlMap",
+        "midi.setControlMap",
+        "midi.learnControl",
         "transport.record",
         "track.setArm",
         "project.save",
@@ -4565,6 +4572,113 @@ public final class CommandRouter {
                 "inputs": try JSONValue(encoding: store.listMIDIInputs()),
             ]))
 
+        case "midi.getControlMap":
+            // m28-knob. No params. Reads the CC→target mapping table, the
+            // catalogue of things a control CAN drive, and the last controller
+            // change seen.
+            //
+            // ⚠️ PASSIVE ON PURPOSE — unlike midi.listInputs this does NOT bring
+            // the CoreMIDI client up, because reading a table must not open the
+            // user's MIDI devices. `midi.learnControl` is the verb that does.
+            try params.rejectUnknownKeys([], verb: "midi.getControlMap")
+            return .success(request.id, midiControlMapPayload())
+
+        case "midi.setControlMap":
+            // m28-knob. Replaces the WHOLE table: {"bindings": [...]}, and
+            // `[]` clears it. A full SET rather than add/remove actions — an
+            // agent reads the map and writes it back, idempotently, and there is
+            // one shape on the wire instead of an action discriminator.
+            try params.rejectUnknownKeys(["bindings"], verb: "midi.setControlMap",
+                                         hint: "'bindings' is the WHOLE table — [] clears it")
+            guard let rawBindings = params["bindings"]?.arrayValue else {
+                throw ControlError(
+                    "'bindings' must be an array of {target, controller, channel?, sourceId?, "
+                    + "inverted?} — it replaces the whole table, and [] clears it")
+            }
+            var newBindings: [MIDIControlBinding] = []
+            for (index, raw) in rawBindings.enumerated() {
+                guard let entry = raw.objectValue else {
+                    throw ControlError("bindings[\(index)] must be an object")
+                }
+                guard let targetRaw = entry["target"]?.stringValue,
+                      let target = MIDIControlTarget(rawValue: targetRaw) else {
+                    throw ControlError(
+                        "bindings[\(index)].target must be one of "
+                        + MIDIControlTarget.allCases.map(\.rawValue).joined(separator: ", "))
+                }
+                guard let controller = try Self.optionalInteger(
+                        entry["controller"], "bindings[\(index)].controller"),
+                      (0...127).contains(controller) else {
+                    throw ControlError("bindings[\(index)].controller must be 0…127")
+                }
+                var channel: Int?
+                if let raw = entry["channel"], raw != .null {
+                    guard let value = try Self.optionalInteger(
+                            raw, "bindings[\(index)].channel"),
+                          (0...15).contains(value) else {
+                        throw ControlError(
+                            "bindings[\(index)].channel must be 0…15, or omitted for omni")
+                    }
+                    channel = value
+                }
+                var sourceID: Int32?
+                if let raw = entry["sourceId"], raw != .null {
+                    guard let value = try Self.optionalInteger(
+                            raw, "bindings[\(index)].sourceId"),
+                          let narrowed = Int32(exactly: value) else {
+                        throw ControlError(
+                            "bindings[\(index)].sourceId must be a MIDI source uniqueID (see "
+                            + "midi.listInputs), or omitted to accept any device")
+                    }
+                    sourceID = narrowed
+                }
+                newBindings.append(
+                    MIDIControlBinding(target: target, controller: controller,
+                                       channel: channel, sourceID: sourceID,
+                                       inverted: entry["inverted"]?.boolValue ?? false))
+            }
+            store.setMIDIControlBindings(newBindings)
+            return .success(request.id, midiControlMapPayload())
+
+        case "midi.learnControl":
+            // m28-knob. Arms MIDI learn — {"target": "..."} — so the NEXT
+            // controller change binds to that target. {"cancel": true} disarms.
+            //
+            // ⭐ ARMING BRINGS THE MIDI CLIENT UP, and that is the whole reason
+            // this is its own verb rather than a field on setControlMap: the
+            // client is created lazily (first armed instrument track, or the
+            // first midi.listInputs), so a learn armed against a client that
+            // never existed hears nothing at all — and "turn the knob, nothing
+            // happens" is indistinguishable from a broken mapping. The response
+            // carries the inputs the engine can see so the caller can say "no
+            // MIDI inputs are connected" instead of waiting forever.
+            try params.rejectUnknownKeys(["target", "cancel"], verb: "midi.learnControl",
+                                         hint: "either 'target' to arm, or 'cancel': true")
+            if params["cancel"]?.boolValue == true {
+                store.cancelMIDIControlLearn()
+                return .success(request.id, midiControlMapPayload())
+            }
+            guard let learnRaw = params["target"]?.stringValue,
+                  let learnTarget = MIDIControlTarget(rawValue: learnRaw) else {
+                throw ControlError(
+                    "'target' must be one of "
+                    + MIDIControlTarget.allCases.map(\.rawValue).joined(separator: ", ")
+                    + " — or pass 'cancel': true to disarm")
+            }
+            let learnInputs = store.armMIDIControlLearn(target: learnTarget)
+            var learnPayload = midiControlMapPayload().objectValue ?? [:]
+            learnPayload["inputs"] = try JSONValue(encoding: learnInputs)
+            if learnInputs.filter(\.isOnline).isEmpty {
+                learnPayload["hint"] = .string(
+                    "Learn is armed, but the engine sees no ONLINE MIDI input — nothing can be "
+                    + "learned until a controller is connected. Check midi.listInputs.")
+            } else {
+                learnPayload["hint"] = .string(
+                    "Learn is armed. Turn the knob you want on \(learnTarget.displayName); the "
+                    + "first controller change binds to it.")
+            }
+            return .success(request.id, .object(learnPayload))
+
         case "note.audition":
             // Sounds notes NOW on an instrument track, outside the timeline
             // (m23-d). Not an edit: nothing is written to any clip. Works with
@@ -5765,7 +5879,7 @@ public final class CommandRouter {
                 EffortField.Humanisation.minTremorRateHz,
                 EffortField.Humanisation.maxTremorRateHz,
                 effortHumanisation.tremorRateHz,
-                "tremor rate in Hz, 0.2-20 (default 4.565 = the vibrato rate x 0.83, so the two are not one oscillator summing into a single deeper vibrato). Deliberately at the BOTTOM of the 4-8 Hz physiological band: on a hosted AU an offline bounce re-samples this lane at 11.719 Hz, and the alias image is rate/(11.719-rate) as deep as the tremor. The band is the vibrato band, and REJECTING outside it is deliberate: below 0.2 Hz a tremor is a drift (which is driftDepth's job) and clamping instead would silently hand back a different gesture under the name you asked for")
+                "tremor rate in Hz, 0.2-20 (default 4.565 = the vibrato rate x 0.83, so the two are not one oscillator summing into a single deeper vibrato). At the BOTTOM of the 4-8 Hz physiological band: on a hosted AU an offline bounce re-samples this lane at 93.75 Hz and the alias image is rate/(93.75-rate) as deep as the tremor, so every rate up to 18.75 Hz is written and anything above it is suppressed rather than retuned. The band is the vibrato band, and REJECTING outside it is deliberate: below 0.2 Hz a tremor is a drift (which is driftDepth's job) and clamping instead would silently hand back a different gesture under the name you asked for")
             effortHumanisation.tremorEffortExponent = try boundedOption(
                 params, "tremorEffortExponent", 0, 8, effortHumanisation.tremorEffortExponent,
                 "how the tremor deepens with effort: depth is scaled by effort^this (default 1, linear). 0 makes the tremor the same depth however hard the player is blowing")
@@ -6982,6 +7096,72 @@ public final class CommandRouter {
     /// explicitly pinned the device that is currently the default.
     private func outputDeviceList() throws -> JSONValue {
         .object(["devices": try JSONValue(encoding: store.listOutputDevices())])
+    }
+
+    /// Shared result shape for all three m28-knob mapping verbs, so an agent
+    /// re-orients in one round trip whichever one it called:
+    ///
+    /// ```
+    /// {"bindings": [{"target","controller","channel"?,"sourceId"?,"inverted"}],
+    ///  "targets":  [{"id","name","summary","controller"?,"sourceId"?}],
+    ///  "learningTarget": "…"?,      // present only while learn is armed
+    ///  "lastControlChange": {"sourceId","channel","controller","value"}?,
+    ///  "subscribed": bool}
+    /// ```
+    ///
+    /// `targets` is the CATALOGUE — every thing a control can drive, each with
+    /// the binding that currently drives it. An agent that only reads
+    /// `bindings` cannot discover what it is allowed to bind TO; publishing the
+    /// catalogue in the same payload is what makes the table self-describing.
+    ///
+    /// ⭐ `lastControlChange` is the diagnostic that separates "your knob is not
+    /// mapped" from "your knob is not sending" — the two failures look identical
+    /// from the outside, and only one of them is our bug. It is non-destructive:
+    /// reading it never steals an event from the delivery pump.
+    private func midiControlMapPayload() -> JSONValue {
+        let map = store.midiControlMap
+        func encode(_ binding: MIDIControlBinding) -> JSONValue {
+            var out: [String: JSONValue] = [
+                "target": .string(binding.target.rawValue),
+                "controller": .number(Double(binding.controller)),
+                "inverted": .bool(binding.inverted),
+            ]
+            if let channel = binding.channel { out["channel"] = .number(Double(channel)) }
+            if let sourceID = binding.sourceID {
+                out["sourceId"] = .number(Double(sourceID))
+            }
+            return .object(out)
+        }
+        var payload: [String: JSONValue] = [
+            "bindings": .array(map.bindings.map(encode)),
+            "targets": .array(MIDIControlTarget.allCases.map { target in
+                var entry: [String: JSONValue] = [
+                    "id": .string(target.rawValue),
+                    "name": .string(target.displayName),
+                    "summary": .string(target.summary),
+                ]
+                if let binding = map.binding(for: target) {
+                    entry["controller"] = .number(Double(binding.controller))
+                    if let sourceID = binding.sourceID {
+                        entry["sourceId"] = .number(Double(sourceID))
+                    }
+                }
+                return .object(entry)
+            }),
+            "subscribed": .bool(store.midiControl.isSubscribed),
+        ]
+        if let learning = map.learningTarget {
+            payload["learningTarget"] = .string(learning.rawValue)
+        }
+        if let event = map.lastEvent {
+            payload["lastControlChange"] = .object([
+                "sourceId": .number(Double(event.sourceID)),
+                "channel": .number(Double(event.channel)),
+                "controller": .number(Double(event.controller)),
+                "value": .number(Double(event.value)),
+            ])
+        }
+        return .object(payload)
     }
 
     /// Shared result shape for all four routing commands so an agent re-orients

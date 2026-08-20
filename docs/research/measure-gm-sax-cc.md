@@ -745,3 +745,242 @@ Three consequences to file:
 - Velocity's effect on timbre — the obvious remaining lever for brightness on
   this patch — was not measured, and is the natural next experiment now that
   CC 11 is ruled out.
+
+---
+
+## 6. m28-bug — §2.4's falsifying test, RUN (2026-08-20)
+
+§2.4 ended on a prediction it could not test, because the render block size is
+not reachable from the wire. It is reachable from Swift, so the test ran there:
+`Tests/DAWEngineTests/BlockRateBounceProbeTests.swift` renders the same trials
+at a chosen `OfflineRenderer(maximumFrameCount:)`, and
+`scripts/gates/_measure-blockfix-scan.mjs` re-analyses them with **the same
+analysis library** (`_measure-dsp.mjs`) the published figures came from.
+
+**Verdict: the prediction is CONFIRMED. The block size is the whole mechanism.**
+
+### 6.1 The positive control first — the 4096 arm reproduces §2.3a exactly
+
+A hand-built probe reporting "no alias at 512" is the weakest evidence in this
+repo; a probe that plumbed nothing scores the same. So the 4096 arm had to
+reproduce the published numbers before the 512 arm was allowed to mean anything.
+It does, to the last published digit:
+
+| commanded | published depth | **re-measured** | published image | **re-measured** |
+|---|---|---|---|---|
+| 2.0 Hz | 47.5 c | **47.55 c** | 9.72 Hz, 9.7 c | **9.72 Hz, 9.67 c** |
+| 5.5 Hz | 35.4 c | **35.41 c** | 6.22 Hz, 30.0 c | **6.22 Hz, 30.02 c** |
+| 8.0 Hz | 19.2 c | **19.22 c** | 3.72 Hz, 41.7 c | **3.72 Hz, 41.70 c** |
+| 11.0 Hz | 3.2 c | **3.18 c** | 0.72 Hz, 49.8 c | **0.72 Hz, 49.81 c** |
+| 11.72 Hz | 0.013 c, f0 290.687 Hz | **0.01 c, f0 290.686 Hz** | — | — |
+
+Different language, different harness, different process — same numbers. The
+instrument is sound.
+
+### 6.2 The decisive point: the null does not shrink, it MOVES
+
+| block | controller rate | Nyquist | depth at 11.72 Hz | mean f0 |
+|---|---|---|---|---|
+| 4096 | 11.719 Hz | 5.86 Hz | **0.01 c (0.0 %)** | **290.686 Hz** (−17.9 c detune) |
+| 1024 | 46.875 Hz | 23.44 Hz | 43.92 c (87.8 %) | 293.716 Hz |
+| **512** | **93.750 Hz** | **46.88 Hz** | **47.55 c (95.1 %)** | **293.719 Hz** |
+
+The 11.72 Hz vibrato that a 4096-frame bounce delivers as a **static −17.9 cent
+detune** is delivered at **95.1 % of its authored depth, at the authored rate**,
+by a 512-frame bounce. A null becoming full depth is not something a smoother
+can produce — only re-sampling can, which is the mechanism §2.4 named.
+
+Depth across the whole band, 512 frames: **100.6 / 96.5 / 98.1 / 95.7 / 95.1 %**
+at 2 / 5.5 / 8 / 11 / 11.72 Hz — matching the built-in `.sampler` control's
+~49 c of 50, on the path that previously delivered 0.
+
+### 6.3 ⭐ The image did not vanish. It went where it was predicted to go.
+
+An absence is weak evidence. This is not an absence: at 512 frames the alias
+appears in the local-maxima list at **85.74 Hz** (8 Hz arm), **82.74 Hz** (11 Hz)
+and **82.02 Hz** (11.72 Hz) — exactly `|93.75 − f|` each time, the same law that
+held at 4096. The sampler did not stop aliasing; **its images left the vibrato
+band**.
+
+Two independent instruments agree on their size. The zero-order-hold model says
+the image sits at `A·|sinc(π(f_s − f)/f_s)|`; the analyser's own demodulator
+correction says something separately. They land on the same figure:
+
+| commanded | image at | ZOH theory | demod-corrected measurement |
+|---|---|---|---|
+| 2.0 Hz | 91.75 Hz | 1.09 c | **1.04 c** |
+| 5.5 Hz | 88.25 Hz | 3.10 c | **3.14 c** |
+| 8.0 Hz | 85.75 Hz | 4.65 c | **4.64 c** |
+| 11.0 Hz | 82.75 Hz | 6.57 c | **6.47 c** |
+| 11.72 Hz | 82.03 Hz | 7.04 c | **6.76 c** |
+
+⚠️ **Stated plainly rather than laundered: the worst-case image is ~7 cents, not
+zero.** It is a 7-cent pitch wobble at 82 Hz — a low-level sideband pair, not a
+vibrato — against the **49.8 cents at 0.72 Hz** the same lane produced at 4096.
+The defect is not "removed"; it is moved out of the band where it was audible as
+the wrong musical gesture, and attenuated ~7×.
+
+### 6.4 Why 512 and not 1024 — the data chose
+
+1024 clears the *musical* band but does **not** clear the detector:
+
+| block | images counted (>3 c AND >10 % of fundamental) |
+|---|---|
+| 4096 | **4** — at 9.72, 6.22, 3.72, 0.72 Hz (30–50 c) |
+| 1024 | **4** — at 41.4, 38.9, 35.9, 35.2 Hz (5.1–12.5 c) |
+| **512** | **0** |
+
+1024 also leaves 4–12 % of authored depth on the floor, so a bounce and a live
+monitor would still differ. 512 is the live buffer, so they agree by
+construction. ⚠️ That last argument is a *design* argument, not a measured one:
+the hardware buffer is device-dependent and user-changeable. **The measured
+argument for 512 is simply that its sampler's Nyquist (46.9 Hz) sits above the
+entire musical modulation band, and 1024's detector count is not zero.**
+
+### 6.5 Method notes
+
+- Probe: `Tests/DAWEngineTests/BlockRateBounceProbeTests.swift`, env-gated
+  (`DAWPRO_BLOCK_PROBE=1`), timing copied value-for-value from
+  `_measure-gm-sax-cc.mjs` (120 BPM, note on at 1.0 s, off at 7.0 s, 8 s render,
+  analysis window 2.0–5.5 s, tenor sax 66 at D4, ±50 c authored every 8 ms).
+- Scan: `scripts/gates/_measure-blockfix-scan.mjs`, extended to 120 Hz so the
+  moved image is *found* rather than merely *missing* from a 20 Hz scan. ⚠️ A
+  0.5–20 Hz scan cannot see an 85 Hz image; its silence there would have been
+  evidence of nothing.
+
+### 6.6 The CC 11 arm (P5) — the same defect, and it is worse in the ratio
+
+T5 (`SoundBankHostingTests`) established that CC 11 shares bend's block
+quantisation. Re-run across block sizes, carrier = amplitude envelope
+(1000 Hz trace; ⚠️ T5's own `hop = 256` gives a 187.5 Hz envelope whose Nyquist
+is *exactly* the 512-frame block rate, so that hop cannot measure this arm):
+
+| commanded | 4096: depth / image ratio | 1024 | **512: depth / image ratio** |
+|---|---|---|---|
+| 2.0 Hz | 86.1 % / **0.203** | 90.1 % / 0.036 | **90.4 % / 0.007** |
+| 5.5 Hz | 60.8 % / **0.865** | 85.5 % / 0.112 | **87.7 % / 0.022** |
+| 8.0 Hz | 34.7 % / **2.173** | 84.0 % / 0.173 | **87.7 % / 0.036** |
+| 11.0 Hz | 5.1 % / **15.559** | 79.5 % / 0.265 | **84.8 % / 0.054** |
+| 11.72 Hz | 0.08 % / — | 78.1 % / 0.291 | **85.3 % / 0.059** |
+
+At 4096 an authored 8 Hz tremolo is delivered with its **3.72 Hz alias twice as
+loud as the tremolo itself**, and an 11 Hz tremolo is delivered as a 0.72 Hz
+swell **15.6× louder** than anything at 11 Hz. At 512 every image is ≤ 6 % of
+the commanded component and depth is restored to 85–90 % across the band.
+
+**Consequence for P5:** the physiological tremor band (4–8 Hz, §10.1) is
+delivered essentially intact at 512 — 87.7 % of depth at both 5.5 and 8 Hz with
+image ratios of 0.022 and 0.036. The suppression P5 applies on hosted-AU tracks
+was a workaround for the block rate, and the measurement that motivated it no
+longer holds once the default is 512. ⚠️ The lift is conditioned on **the
+default** changing, not on any one call site: anywhere a hosted-AU tremor can
+still be rendered at 4096, the aliasing returns.
+
+## 7. The fix (m28-bug, 2026-08-20)
+
+### 7.1 What changed
+
+| | before | after |
+|---|---|---|
+| `OfflineRenderer` default block | literal `4_096` | `RenderBlockSize.offlineFrames` = **512** |
+| `EffortField.hostedAUOfflineModulationSamplingHz` | literal `48_000.0 / 4_096.0` | **derived** from the same constant ⇒ 93.75 Hz |
+| `bendModulationNyquistHz` | literal `5.86` | derived ⇒ **46.875 Hz** |
+| tremor / vibrato suppression | **unconditional** on hosted AUs | gated on `modulationAliasesUnacceptably` (image ratio > 0.25) |
+
+New file `Sources/DAWCore/RenderBlockSize.swift` is the single home. ⚠️ **The
+constant had to move with the block, and that was not optional.** Leaving it at
+4096 would have left every capability warning describing an engine that no longer
+exists. Worse, moving the constant *without* gating the suppression would have
+printed "an extra copy at 85.75 Hz at 0.09x its depth … would need a rate at or
+below 18.75 Hz" and then suppressed a 4.565 Hz tremor anyway — **a sentence
+contradicting its own action**, which is the exact failure class this line of
+work exists to end.
+
+⚠️ **`AUHostRegistry`'s `maximumFramesToRender` (8192) was NOT touched.** That is
+a CAPACITY — the largest block a hosted AU is told it may be asked for. This is
+the call size. Different numbers.
+
+### 7.2 Cost, measured
+
+8 hosted GM sound-bank tracks, dense parts, bend lanes on every one (the
+block-sensitive case), 120 s of audio, 3 runs each, `render()` only —
+`prepareAudioUnits` is excluded because a GM bank load costs seconds and would
+swamp the effect entirely:
+
+| block | mean | spread | vs realtime |
+|---|---|---|---|
+| 4096 | 0.449 s | 0.446–0.452 | 267× |
+| 1024 | 0.514 s | 0.512–0.516 | 234× |
+| **512** | **0.587 s** | 0.586–0.588 | **204×** |
+
+**+0.138 s on a two-minute eight-track bounce — a 1.31× render.** Paid.
+
+### 7.3 P5's tremor suppression: LIFTED for the physiological band
+
+The question P5 left open. At 4096 the rate ceiling (image 12 dB down) was
+**2.34 Hz**, below §10.1's whole 4–8 Hz band — so P5 suppressed rather than
+retune a tremor out of the band it is named for. At 512 the ceiling is
+**18.75 Hz** and the band sits entirely under it, with rendered confirmation:
+87.7 % of authored depth at both 5.5 and 8 Hz, image ratios 0.022 and 0.036
+(§6.6).
+
+⛔ **The gate is not deleted, and should not be.** `tremorRateHz` is authorable
+to 20 Hz, which is still above 18.75 — so the suppression path and its warning
+remain live and remain tested, now on the rate rather than on the instrument.
+
+The same lift applies to **bend vibrato**, whose gate was the tremor gate's twin
+one line away: leg D's 5.5 Hz vibrato has an image ratio of 0.062 at 93.75 Hz, so
+it is now written on the GM sax instead of refused. That is the user-visible
+headline — *the sax gets its vibrato in a bounce.*
+
+### 7.4 Every test whose expectation moved, and why
+
+Four moved. None was loosened to pass; each measured something that is now
+genuinely different, and each kept a positive control.
+
+| test | what moved | why |
+|---|---|---|
+| `AutomationFXParamTests` — gainLinear staircase | 22 steps → **186**; `quantum` now derives from `RenderBlockSize` | Effect-param automation is evaluated at each quantum start, so it is now **8× finer**. The staircase is unchanged in kind: intra-quantum spread still exactly **0.0**, max error 7.4e-09. This is the automation-resolution half of the fix, and it moves rendered bytes on every automated bounce. |
+| `SoundBankHostingTests` T5 | pinned to an explicit 4096 block, plus a new shipping-block arm | Its four ZOH ratios are FACTS ABOUT 4096. Re-pointing them at whatever ships would have left a measurement asserting nothing while still looking like one. The new arm measures the shipping block: image/commanded **0.032** where 4096 gave **2.14**. |
+| `ControllerLaneTests` — bend vibrato on a sound-bank track | "suppressed, reported 0" → **"written and reported"** | The fix's user-visible point. Leg D's 5.5 Hz vibrato now lands on the GM sax; the assertion flipped from `deviation < 300` to `> 300` (vibrato-sized, not sharpening-sized). |
+| `ControllerLaneTests` — tremor suppression | 5.5 Hz suppressed → 5.5 Hz **written**; suppression re-tested at **19.5 Hz** | The rule changed from "hosted AU ⇒ no tremor" to "above the ceiling ⇒ no tremor". Both sides are now pinned, so the machinery cannot rot in either direction. |
+
+Plus `BreathPadDeterminismTests`, whose two ceiling tests were re-pinned to the
+**literal** `48_000.0 / 4_096.0` for the same reason T5 was: they check a formula
+against a measurement, and the measurement was taken at that block.
+
+⚠️ **`AUPrepareRenegotiationStressTests` also failed in the full run and is NOT
+this change** — it is a known load flake (it passes in isolation, verified) and
+the brief lists it as such.
+
+### 7.5 What is still true, and what this does not fix
+
+- ⛔ **The sample-and-hold is not gone.** AUSampler still reads MIDI once per
+  render call; the images still exist, at `|93.75 − f|`, at ~1–7 ¢. This raises
+  the ceiling by 8×, it does not remove it. Authoring a 30 Hz pitch modulation on
+  a hosted AU will still alias, and the gate still says so.
+- ⚠️ **Live playback is still not measured by any gate here.** P6 measured
+  `quantumFrames = 512` once, on one machine, on one device. The HAL buffer is a
+  user setting; the two paths agreeing is a property of this rig, not a
+  guarantee. The ceiling remains computed from OUR block, which is the half we
+  control.
+- ⚠️ **The suppression gate is an AUTHORING-time decision, and it now reads the
+  OFFLINE block only.** `modulationAliasesUnacceptably` decides once, when the
+  lane is written; both paths then consume the same lane. Before this change,
+  unconditional suppression protected the live path by accident. It no longer
+  does, so on a rig with a HAL buffer **larger than 512** the monitor samples the
+  lane more coarsely than the bounce — the reverse of the bug we just fixed, and
+  the one direction where "the export is correct" is the consolation.
+  **The arithmetic says do not act on this.** At 1024 frames live the ceiling is
+  9.375 Hz: a 5.5 Hz vibrato is ratio 0.13 and a 4.565 Hz tremor 0.108, both
+  clear. Even at 2048 the image from a 5.5 Hz modulation lands near 17.9 Hz —
+  outside the vibrato band entirely, so the artefact is a faint sideband rather
+  than the wrong gesture, nothing like the 0.72 Hz beat that 4096 produced. On
+  any rig with a buffer **≤ 512** — including every default — our block is the
+  coarser-or-equal one and the gate is conservative for both paths. Revisit only
+  if a device-buffer reading becomes reachable from `DAWCore` without dragging
+  AVFoundation across the boundary.
+- **Nothing here says anything about third-party AUv2/AUv3 plugins.** Every
+  measurement is Apple's AUSampler with the stock `gs_instruments.dls`. A plugin
+  that interpolates its own controller input would never have shown this defect;
+  one that decimates harder could still alias at 512.

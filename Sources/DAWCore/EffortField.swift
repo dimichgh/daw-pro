@@ -73,14 +73,18 @@ import Foundation
 ///    (`EffortField.Excursion.outrunsNotes`). A dot cannot shape *within* a
 ///    note — that is what the note-scoped patterns are for.
 /// 2. **On the hosted-AU path (every `.soundBank` track, so the user's GM sax)
-///    nothing above ~5.86 Hz survives a bounce.** MEASURED 2026-08-19
+///    nothing above ~5.86 Hz survived a bounce.** MEASURED 2026-08-19
 ///    (`docs/research/measure-gm-sax-cc.md`): 4096-frame blocks ⇒ an 11.719 Hz
-///    effective sampler ⇒ 5.86 Hz Nyquist. P1 already suppresses bend vibrato
-///    there for exactly this reason and keeps doing so. **This constrains P5,
-///    not P3**: P3's dot moves at the note rate (fractions of a Hz), so it is
-///    two orders of magnitude clear of that ceiling — but §10.1's 4–8 Hz
-///    micro-tremor is *not*. Stated here rather than discovered later by
-///    generating something that silently aliases.
+///    effective sampler ⇒ 5.86 Hz Nyquist. ⭐ **m28-bug FIXED THE CAUSE**: the
+///    offline block is now 512 frames (`RenderBlockSize`), so the sampler runs
+///    at 93.75 Hz with a 46.875 Hz Nyquist and the whole musical modulation
+///    band survives. The rest of this note is kept because it is the evidence
+///    the ceiling was argued from, not because it still describes the engine:
+///    P1's bend-vibrato suppression there is now **rate-conditional** and does
+///    not fire for musical rates. **This constrained P5, not P3**: P3's dot
+///    moves at the note rate (fractions of a Hz), so it was always two orders
+///    of magnitude clear of that ceiling — §10.1's 4–8 Hz micro-tremor was
+///    *not*, and is the thing m28-bug unblocked.
 ///    ⭐ **P5 MEASURED THE CC HALF, which this comment used to record as merely
 ///    derived, and the answer is worse than "the top of the band".** The 11.719
 ///    Hz figure came from a *bend* measurement; the obvious escape was to
@@ -993,7 +997,8 @@ extension EffortField {
 
     /// The **offline** rate, in Hz, at which a hosted Audio Unit re-samples the
     /// MIDI controller and pitch-bend lanes we write: `OfflineRenderer`'s
-    /// default block of 4096 frames at 48 kHz = **11.71875 Hz**.
+    /// default block, historically 4096 frames at 48 kHz = **11.71875 Hz**,
+    /// now 512 frames = **93.75 Hz** (`RenderBlockSize`, m28-bug).
     ///
     /// ⛔ **MEASURED for CC 11 by breath-pad P5**
     /// (`SoundBankHostingTests` T5, 2026-08-19), not merely inherited from the
@@ -1010,10 +1015,19 @@ extension EffortField {
     /// ⚠️ **This is a BOUNCE limit, and the cause is ours.** Live playback
     /// pulls at the hardware buffer size — at a typical 512 frames the sampling
     /// rate is 93.75 Hz and none of this applies. `measure-gm-sax-cc.md` §2.4
-    /// calls the 4096-frame default a bounce-fidelity bug rather than a tuning
-    /// problem, and P5 agrees: the right long-term fix is a smaller offline
-    /// block, not a smaller tremor.
-    public static let hostedAUOfflineModulationSamplingHz = 48_000.0 / 4_096.0
+    /// called the 4096-frame default a bounce-fidelity bug rather than a tuning
+    /// problem, and P5 agreed: the right long-term fix is a smaller offline
+    /// block, not a smaller tremor. ⭐ **That fix landed (m28-bug)** — §6 of the
+    /// same doc ran the falsifying test and the block is now 512.
+    /// ⭐ **m28-bug: DERIVED, never re-typed.** This was the literal
+    /// `48_000.0 / 4_096.0`, which made it a second, un-gated copy of
+    /// `OfflineRenderer`'s block size — so lowering that block would have left
+    /// this constant, and every user-facing warning computed from it, quietly
+    /// describing an engine that no longer existed. It now reads the one home
+    /// (`RenderBlockSize.offlineFrames`) the renderer's default also reads, and
+    /// `RenderBlockSizeTests` pins the two together.
+    public static let hostedAUOfflineModulationSamplingHz =
+        RenderBlockSize.modulationSamplingHz()
 
     /// How loud the sample-and-hold's first image is, relative to the
     /// modulation that was asked for, when a modulation at `rateHz` is

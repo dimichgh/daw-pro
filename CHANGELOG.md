@@ -1,5 +1,64 @@
 # Changelog
 
+## 2026-08-20 — Turn a real knob, move the breath pad
+
+The breath pad has a dot you drag around a circle to say how a player is blowing. You can now drive
+that dot from a knob on a MIDI controller instead of the mouse.
+
+Pick what the knob should move — *travel around the ring* or *depth* — arm it, and turn the knob you
+want. The first controller move wins, which is how MIDI learn works everywhere; if nothing happens,
+the app tells you which controller it last heard, so "your knob is not mapped" and "your knob is not
+plugged in" stop looking the same. One knob on *travel* is the whole gesture: it walks the dot from
+one effort shape into the next at whatever depth it is sitting at. A second knob on *depth* covers
+the rest of the pad.
+
+Two things worth knowing. The mapping is not saved into your song — it describes the hardware on
+this desk, so opening someone else's project will not re-point your knobs, and it does not survive a
+relaunch yet. And a mapped controller is **not** swallowed: it still reaches an armed track and still
+records into the take, so if you are playing through a hosted plugin, pick a controller number that
+plugin does not use.
+
+Something that already worked and had never been written down anywhere: a hardware knob sending CC 11
+already rides an armed track's expression today, with no mapping and no setup — plug it in, arm the
+track, turn it. That works with the transport stopped. On the built-in instruments only CC 1, 2, 11
+and 64 do anything; hosted plugins get everything.
+
+**This round is controller-and-agent only — there is no button in the pad panel yet to arm learn.**
+Mapping a knob currently goes through the control surface or an AI agent, not the on-screen panel.
+
+## 2026-08-20 — Your bounce now sounds like what you heard
+
+If you put a vibrato or a tremolo on a track using one of the built-in sound banks — the GM sax, the
+GM strings — the export used to disagree with the monitor. It played back correctly and bounced
+wrong, which is the worst way for a bug to behave, because everything sounds fine right up until you
+send the file to someone.
+
+The cause was ours, not the instrument's. A bounce fed those instruments their controller moves in
+blocks eight times coarser than live playback does, and a wobble sampled that coarsely comes back as
+a *different* wobble. A 5.5 Hz vibrato exported as two vibratos beating against each other. An 8 Hz
+one exported at 3.7 Hz. At 11.7 Hz it stopped being a vibrato at all and became a static, slightly
+flat note.
+
+Bounces now use the same block size as live playback, so the two agree by construction. Measured on
+rendered audio: vibrato depth arrives at 95–100% of what you wrote, at the rate you wrote it. The
+false copies are not deleted — they move eight times higher and shrink to a few cents, well out of
+the range you hear as a wobble. The cost is 0.14 seconds on a two-minute eight-track bounce — still
+two hundred times faster than real time.
+
+This was measured on Apple's built-in sampler with the stock sound bank, which is what those tracks
+use. It says nothing about third-party plugins: one that smooths its own controller input never had
+this problem in the first place.
+
+One feature comes back because of this. The breath pad's micro-tremor — the small 4–8 Hz waver inside
+a sustained note that makes a wind part sound played rather than typed — had to be refused on those
+instruments, because at the old block rate it produced an artefact louder than itself. It now lands
+there like everywhere else. The refusal still exists for genuinely fast modulation (above 18.75 Hz),
+and it still tells you when it applies rather than quietly retuning what you asked for.
+
+Automation on those tracks is eight times finer in an export as a side effect, so a bounce of a
+project with controller automation will produce different bytes than it did yesterday. That is the
+fix working, not a regression.
+
 ## 2026-08-20 — The breath pad has a face: a circle, a dot, and a gauge that says why it went quiet
 
 Eight ways a wind player shapes a note now sit around a circle, and a dot moves between them. Where

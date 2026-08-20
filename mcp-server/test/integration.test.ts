@@ -377,7 +377,13 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // with a bogus-name negative control that returned nothing).
   // ⚠️ A naive `grep -o 'server\.registerTool('` returns 36, not 34 — two of
   // those occurrences are inside the wrapper's own doc comment and body.
-  assert.equal(result.tools.length, 188);
+  //
+  // 188 -> 191 at m28-knob (midi_get_control_map read-only/direct,
+  // midi_set_control_map + midi_learn_control mutating/wrapper). RE-MEASURED,
+  // not derived, by the same two regexes: **35 direct + 156 wrapper = 191**,
+  // 0 duplicates, 0 names in both sets, and a bogus-name negative control that
+  // returned nothing.
+  assert.equal(result.tools.length, 191);
 });
 
 // ---------------------------------------------------------------------------

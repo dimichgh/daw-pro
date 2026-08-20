@@ -669,7 +669,14 @@ struct BreathPadDeterminismTests {
     /// reddens here without needing an AU render.
     @Test("P5: modulationImageRatio reproduces all four MEASURED hosted-AU image ratios")
     func imageRatioMatchesTheMeasurement() {
-        let samplingHz = EffortField.hostedAUOfflineModulationSamplingHz
+        // ⚠️ m28-bug: PINNED AGAINST THE BLOCK THE MEASUREMENT WAS TAKEN AT, not
+        // against the shipping constant. T5's four ratios are facts about a
+        // 4096-frame render; the shipping block is now 512
+        // (`RenderBlockSize`), so reading `hostedAUOfflineModulationSamplingHz`
+        // here would silently re-point a MEASUREMENT at a rate it was never
+        // measured on and this test would then be checking nothing. The formula
+        // is what is under test, and it is rate-agnostic.
+        let samplingHz = 48_000.0 / 4_096.0
         #expect(abs(samplingHz - 11.71875) < 1e-9)
         // rate → the image/commanded ratio measured in T5.
         for (rate, measured) in [(2.0, 0.2217), (4.0, 0.5198), (5.5, 0.9107), (8.0, 2.1385)] {
@@ -688,14 +695,26 @@ struct BreathPadDeterminismTests {
     }
 
     /// The inverse, and the number that decided P5 suppresses rather than
-    /// retunes: 2.34 Hz is below §10.1's whole 4–8 Hz band.
+    /// retunes at a 4096-frame block: 2.34 Hz is below §10.1's whole 4–8 Hz band.
+    ///
+    /// ⭐ **m28-bug: THIS TEST NOW DOCUMENTS WHY THE SUPPRESSION LIFTED.** The
+    /// arithmetic is unchanged and still pinned at the block it was argued at;
+    /// what changed is which block ships. At 512 the same inverse gives
+    /// **18.75 Hz**, above the band — asserted in `RenderBlockSizeTests`, and
+    /// asserted here too so the two halves of the argument sit together.
     @Test("P5: the rate ceiling inverts the image ratio, and lands below the physiological band")
     func rateCeilingIsBelowThePhysiologicalBand() {
-        let samplingHz = EffortField.hostedAUOfflineModulationSamplingHz
+        let samplingHz = 48_000.0 / 4_096.0
         let ceiling = EffortField.modulationRateCeilingHz(
             samplingHz: samplingHz, maxImageRatio: EffortField.maxAcceptableImageRatio)
         #expect(abs(ceiling - 2.34375) < 1e-6)
         #expect(ceiling < 4, "the ceiling is inside the 4-8 Hz band — P5's suppression argument fails")
+        // The shipping block, and the reason the gate no longer fires for a
+        // physiological tremor.
+        let shipping = EffortField.modulationRateCeilingHz(
+            samplingHz: EffortField.hostedAUOfflineModulationSamplingHz,
+            maxImageRatio: EffortField.maxAcceptableImageRatio)
+        #expect(shipping > 8, "the shipping ceiling no longer clears the 4-8 Hz band")
         // Round trip: the ceiling really does produce the ratio it was built from.
         let back = EffortField.modulationImageRatio(rateHz: ceiling, samplingHz: samplingHz)
         #expect(abs(back - EffortField.maxAcceptableImageRatio) < 1e-9)

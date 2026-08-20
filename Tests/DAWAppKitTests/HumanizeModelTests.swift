@@ -692,6 +692,173 @@ import DAWCore
         #expect(harness.applyCount == 1)
     }
 
+    // MARK: - The hardware knob (m28-knob)
+
+    /// One pump pass carrying one move on one target — the shape the app's
+    /// pump hands the model.
+    private func knobPass(_ target: MIDIControlTarget, _ value: Double) -> MIDIControlPump {
+        MIDIControlPump(updates: [MIDIControlUpdate(target: target, value: value,
+                                                    controller: 74, sourceID: 42)])
+    }
+
+    /// An idle pass — no controller moved. The COMMON case, and the only
+    /// "release" a knob has.
+    private var knobIdlePass: MIDIControlPump { MIDIControlPump() }
+
+    /// ⭐ **THE SINGLE-KNOB CASE, WHICH IS THE GOOD CASE:** one control on
+    /// `breathPadAngle` walks the dot all the way around the ring at whatever
+    /// depth it already sits — the vector-synth gesture the user described.
+    /// The sweep's two ends both land on ring index 0, because that is what a
+    /// circle does.
+    @Test func oneKnobWalksTheDotAroundTheRingAtTheDepthItAlreadyHas() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        model.setDot(angle: 0, radius: 0.6)
+
+        model.pumpExternalControl(knobPass(.breathPadAngle, 0.25))
+        #expect(abs(EffortRing.degrees(fromRadians: model.dot.angle) - 90) < 0.5)
+        #expect(abs(model.dot.radius - 0.6) < 1e-9, "the knob must not touch depth")
+
+        model.pumpExternalControl(knobPass(.breathPadAngle, 0.5))
+        #expect(abs(EffortRing.degrees(fromRadians: model.dot.angle) - 180) < 0.5)
+        #expect(model.nearestPatternIndex == 4, "half a turn of an eight-pattern ring")
+
+        // Both ends of the sweep are the top of the circle.
+        model.pumpExternalControl(knobPass(.breathPadAngle, 1.0))
+        #expect(model.nearestPatternIndex == 0)
+        model.pumpExternalControl(knobPass(.breathPadAngle, 0.0))
+        #expect(model.nearestPatternIndex == 0)
+
+        // And it STREAMED the whole way — a knob with no audible result is the
+        // failure this feature exists to avoid.
+        #expect(harness.previews.map(\.phase).first == .begin)
+        #expect(harness.previews.filter { $0.phase == .move }.count == 4)
+    }
+
+    /// A second knob on `breathPadRadius` adds depth, and two moves arriving in
+    /// ONE 33 ms pass are ONE dot move — not two, and not two preview pushes.
+    @Test func twoKnobsInOnePassMoveTheDotOnceOnBothAxes() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        model.setDot(angle: 0, radius: 0.1)
+
+        model.pumpExternalControl(MIDIControlPump(updates: [
+            MIDIControlUpdate(target: .breathPadAngle, value: 0.25,
+                              controller: 74, sourceID: 42),
+            MIDIControlUpdate(target: .breathPadRadius, value: 0.8,
+                              controller: 71, sourceID: 42),
+        ]))
+        #expect(abs(EffortRing.degrees(fromRadians: model.dot.angle) - 90) < 0.5)
+        #expect(abs(model.dot.radius - 0.8) < 1e-9)
+        #expect(harness.previews.map(\.phase) == [.begin, .move],
+                "one pass, one move — two setDot calls would push two previews")
+    }
+
+    /// ⛔⛔ **THE RULE THIS WHOLE ADAPTER TURNS ON: A KNOB RIDE SPENDS NO UNDO
+    /// STEPS.** An external gesture releases with `endGestureWithoutCommitting`,
+    /// so the preview returns to neutral and the dot stays where the knob left
+    /// it — and APPLY is what writes the shape.
+    ///
+    /// The alternative — committing when the knob goes quiet — is the m25-k
+    /// shape wearing a new hat. `applyEffortShape` spends an undo step and
+    /// rebuilds the clip's controller lanes with a mid-decay re-attack; a mouse
+    /// drag pays that once because a hand releases once, but **a knob ride is
+    /// pause-heavy**, so idle-commit pays it once per pause — a number the
+    /// player never chose and cannot see.
+    ///
+    /// PLANTED: swapping `endExternalGesture`'s release for `endGesture()`
+    /// reddens this on the first pause.
+    @Test func theKnobRideSpendsNoUndoStepsAndOnlyApplyCommits() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+
+        // Three sweeps, each followed by a long enough pause to release.
+        for value in [0.2, 0.5, 0.85] {
+            model.pumpExternalControl(knobPass(.breathPadAngle, value))
+            #expect(model.gesture == .external)
+            for _ in 0..<BreathPadModel.externalIdlePasses {
+                model.pumpExternalControl(knobIdlePass)
+            }
+            #expect(model.gesture == nil, "a still knob releases")
+        }
+        #expect(harness.applyCount == 0, "THREE pauses, ZERO undo steps")
+        #expect(harness.expressionPointCount == 0)
+
+        // Every sweep released its preview to neutral rather than parking a
+        // value on the strip.
+        #expect(harness.previews.filter { $0.phase == .end }.count == 3)
+        #expect(harness.previews.filter { $0.phase == .begin }.count == 3)
+
+        // APPLY is the one route to an edit, and it is one call.
+        #expect(model.commit())
+        #expect(harness.applyCount == 1)
+        #expect(harness.expressionPointCount > 0)
+    }
+
+    /// The release is on the IDLE COUNT, not on the first quiet pass — a knob
+    /// rides through gaps between packets and must not be dropped mid-turn.
+    @Test func aStillKnobReleasesOnlyAfterTheFullIdleWindow() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+
+        model.pumpExternalControl(knobPass(.breathPadAngle, 0.3))
+        for pass in 1..<BreathPadModel.externalIdlePasses {
+            model.pumpExternalControl(knobIdlePass)
+            #expect(model.gesture == .external, "released early at pass \(pass)")
+        }
+        model.pumpExternalControl(knobIdlePass)
+        #expect(model.gesture == nil)
+
+        // A move part-way through the window resets the count.
+        model.pumpExternalControl(knobPass(.breathPadAngle, 0.4))
+        for _ in 0..<(BreathPadModel.externalIdlePasses - 1) {
+            model.pumpExternalControl(knobIdlePass)
+        }
+        model.pumpExternalControl(knobPass(.breathPadAngle, 0.5))
+        for _ in 0..<(BreathPadModel.externalIdlePasses - 1) {
+            model.pumpExternalControl(knobIdlePass)
+        }
+        #expect(model.gesture == .external, "the second move restarted the window")
+        _ = harness.applyCount
+    }
+
+    /// ⭐ **THE FEED CAN DIE MID-TURN** (the last binding removed, the engine
+    /// gone). The idle tick being waited for is then never coming, and a gesture
+    /// that never ends leaves a live controller preview parked on the
+    /// instrument — exactly what `PadPreviewController`'s rule 3 prevents.
+    @Test func aFeedThatStopsMidTurnReleasesTheGestureImmediately() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+
+        model.pumpExternalControl(knobPass(.breathPadRadius, 0.9))
+        #expect(model.gesture == .external)
+        model.pumpExternalControl(MIDIControlPump(feedEnded: true))
+        #expect(model.gesture == nil)
+        #expect(harness.previews.last?.phase == .end, "the preview was released, not parked")
+        #expect(harness.applyCount == 0, "a feed dying is not a request for an edit")
+    }
+
+    /// ⚠️ **THE POINTER WINS.** A hand on the pad and a hand on the knob is two
+    /// sources for one dot; interleaving them would make it jump between two
+    /// positions at 30 Hz. The source that opened the gesture keeps it.
+    @Test func aPointerGestureIgnoresTheKnobUntilItIsReleased() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        let geo = BreathPadGeometry()
+
+        model.beginDrag(at: geo.point(angle: 0, radius: 1), geometry: geo)
+        let parked = model.dot
+        model.pumpExternalControl(knobPass(.breathPadAngle, 0.5))
+        #expect(model.dot == parked, "the knob must not move a dot the pointer is holding")
+        #expect(model.gesture == .pointer)
+
+        #expect(model.endDrag() == false, "the pointer never moved, so no edit")
+        // Released — the knob takes over cleanly.
+        model.pumpExternalControl(knobPass(.breathPadAngle, 0.5))
+        #expect(model.gesture == .external)
+        #expect(abs(EffortRing.degrees(fromRadians: model.dot.angle) - 180) < 0.5)
+    }
+
     /// A press on an empty part of the dial JUMPS the dot under the finger, and
     /// a press ON the dot grabs it where it is.
     @Test func aPressJumpsTheDotUnlessItLandsOnTheDot() throws {

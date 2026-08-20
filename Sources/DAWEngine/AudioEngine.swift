@@ -279,6 +279,9 @@ public final class AudioEngine: AudioEngineControlling {
     /// True after a failed CoreMIDI client creation (sandboxed CI) — don't
     /// retry on every snapshot.
     private var midiInputUnavailable = false
+    /// The remembered m28-knob controller sink, re-applied to every MIDI client
+    /// this engine creates. See `setControlChangeObserver`.
+    private var controlChangeObserver: (@MainActor ([MIDIControlChangeEvent]) -> Void)?
 
     /// Host-tick → seconds factor for the MIDI capture session's beat math
     /// (same conversion the renderers precompute).
@@ -1455,6 +1458,9 @@ public final class AudioEngine: AudioEngineControlling {
             midiInputUnavailable = true
             return nil
         }
+        // Re-apply the remembered controller sink (m28-knob): the observer may
+        // have been installed before this client existed, or across a dispose.
+        manager.controlChangeObserver = controlChangeObserver
         midiInput = manager
         return manager
     }
@@ -1468,6 +1474,34 @@ public final class AudioEngine: AudioEngineControlling {
     public func midiEventCount() -> Int {
         midiInput?.eventCount ?? 0
     }
+
+    /// `AudioEngineControlling.setControlChangeObserver` (m28-knob).
+    ///
+    /// Held HERE as well as on the manager, because the manager is created
+    /// LAZILY (first armed instrument track, or the first `availableMIDIInputs`
+    /// call) and may be disposed and recreated underneath us. Installing an
+    /// observer before the client exists must not silently lose it — that is the
+    /// exact "returns success, does nothing" shape this feature is most exposed
+    /// to, so the observer is remembered and re-applied by `ensureMIDIInput`.
+    ///
+    /// Installing a non-nil observer brings the MIDI client UP, for the same
+    /// reason: an armed learn against a client that was never created sees no
+    /// events, and "turn the knob, nothing happens" is indistinguishable from a
+    /// broken mapping.
+    public func setControlChangeObserver(
+        _ observer: (@MainActor ([MIDIControlChangeEvent]) -> Void)?) {
+        controlChangeObserver = observer
+        if observer == nil {
+            midiInput?.controlChangeObserver = nil
+        } else {
+            ensureMIDIInput()?.controlChangeObserver = observer
+        }
+    }
+
+    /// Whether a controller observer is installed on THIS engine — the
+    /// discriminator `AudioEngineControlObserverTests` uses to prove the real
+    /// engine overrides the protocol's silent default. Testing only.
+    var hasControlChangeObserverForTesting: Bool { controlChangeObserver != nil }
 
     // MARK: - Note audition (m23-d)
 

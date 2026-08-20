@@ -328,6 +328,13 @@ public final class ProjectStore {
             engine?.engineNoticeHandler = { [weak self] event in
                 self?.recordEngineNotice(event)
             }
+            // The m28-knob controller feed (see ProjectStore+MIDIControl). NOT
+            // an unconditional install: subscribing CREATES the CoreMIDI client
+            // and connects to every online source, so it happens only when a
+            // mapping or an armed learn actually needs it. This call re-attaches
+            // an already-wanted subscription across an engine swap — the
+            // `isSubscribed` latch would otherwise leave the new engine silent.
+            midiControl.reattach(engine: engine)
         }
     }
 
@@ -1603,6 +1610,11 @@ public final class ProjectStore {
     /// THE audition policy home — the piano roll's drag, the keyboard gutter's
     /// key press and the `note.audition` wire verb all run through it.
     @ObservationIgnored public let audition = AuditionController()
+
+    /// THE CC→target mapping home (m28-knob) — one table, one engine
+    /// subscription, the `audition` idiom. Engine-free; handed the engine per
+    /// call. See `ProjectStore+MIDIControl.swift`.
+    @ObservationIgnored public let midiControl = MIDIControlController()
 
     /// Sounds exactly `pitches` on `trackID` right now, outside the timeline
     /// (m23-d). SET semantics: `[]` stops. Held until the caller says otherwise

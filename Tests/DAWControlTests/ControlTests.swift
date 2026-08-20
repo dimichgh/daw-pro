@@ -1519,6 +1519,16 @@ struct CommandRouterTests {
             // m22-g P2: OFF is the idempotent never-refusing side of the A/B
             // monitor (design §5.6) — a legitimate headless route.
             "reference.setMonitor": ["on": .bool(false)],
+            // m28-knob. DRIVEN with params rather than EXCLUDED, because both
+            // of these have a genuinely inert form and route coverage is worth
+            // more than an exclusion entry: an empty `bindings` array clears an
+            // already-empty table, and `cancel` disarms a learn that was never
+            // armed. ⚠️ `cancel` and NOT `target` on purpose — arming would
+            // bring the CoreMIDI client up and connect to the user's real MIDI
+            // sources, which a unit test must never do. (Arming IS covered, in
+            // MIDIControlTests, against a fake engine.)
+            "midi.setControlMap": ["bindings": .array([])],
+            "midi.learnControl": ["cancel": .bool(true)],
             "transport.seek": ["beats": .number(0)],
             "marker.add": ["beat": .number(0)],
             "marker.remove": ["markerId": .string(removableMarkerID)],

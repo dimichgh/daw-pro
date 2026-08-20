@@ -342,10 +342,22 @@ extension ProjectStore {
     /// Exists so `applyEffortShape` can compute a per-note effort curve BEFORE
     /// the write, over the same notes and in the same order, instead of
     /// re-deriving the selection and hoping the two agree.
+    ///
+    /// ⚠️ **The comp guard below is in the SAME POSITION as
+    /// `applyBreathContourVarying`'s — before the kind, emptiness and note-id
+    /// checks — and that ordering is the whole point, not tidiness.** A comp
+    /// member was always REFUSED on this path (the write goes through
+    /// `applyBreathContourVarying`, which holds the guard), but on a member that
+    /// also tripped one of the checks below, the check fired first and
+    /// `clip.applyEffortShape` blamed the wrong thing: "this is not a MIDI clip"
+    /// about a clip whose real problem is its take group, with no mention of the
+    /// `take.flatten` remedy. Two verbs telling different stories about one
+    /// obstacle is the m25-a-2 defect; `CompEditRefusalTests` pins all four rows.
     func breathSelection(clipID: UUID, noteIDs: [UUID]?) throws -> [MIDINote] {
         guard let (t, c) = locateClipForBreath(clipID) else {
             throw ProjectError.clipNotFound(clipID)
         }
+        try requireNotCompMember(trackIndex: t, clipIndex: c)
         let clip = tracks[t].clips[c]
         guard let notes = clip.notes else {
             throw ProjectError.notAMIDIClip(clipID, verb: "clip.applyEffortShape")

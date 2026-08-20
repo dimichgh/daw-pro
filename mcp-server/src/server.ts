@@ -1760,6 +1760,145 @@ server.registerTool(
   async () => toToolResult(() => bridge.send("midi.listInputs"))
 );
 
+// --- MIDI learn: map a hardware knob to something (m28-knob) ----------------
+//
+// Registered next to midi_list_inputs — its only sibling on this surface.
+// midi_get_control_map is READ-ONLY (server.registerTool, no before-capture);
+// the other two mutate.
+
+server.registerTool(
+  "midi_get_control_map",
+  {
+    title: "Read the hardware-knob mapping table",
+    description:
+      "Read which hardware MIDI controls (knobs, faders) are mapped to which " +
+      "DAW parameters, and what CAN be mapped. No params. Returns `bindings` " +
+      "(the mappings that exist), `targets` (the CATALOGUE — every parameter a " +
+      "control may be bound to, each with a plain-English `summary`, plus the " +
+      "`controller` number currently driving it if any), `learningTarget` " +
+      "(present only while midi_learn_control is armed), `lastControlChange` " +
+      "(the last controller message seen from ANY device, mapped or not) and " +
+      "`subscribed` (whether the DAW is currently listening to the controller " +
+      "feed). \n\n" +
+      "USE `lastControlChange` TO DIAGNOSE A DEAD KNOB: it separates \"your " +
+      "knob is not mapped\" from \"your knob is not sending anything\", which " +
+      "look identical from the outside. \n\n" +
+      "This call is PASSIVE — unlike midi_list_inputs it does not open the " +
+      "user's MIDI devices. \n\n" +
+      "⚠️ The mapping table is MACHINE SETUP, not part of the song: it is not " +
+      "saved into the project and does not survive an app relaunch yet.",
+  },
+  async () => toToolResult(() => bridge.send("midi.getControlMap"))
+);
+
+registerTool(
+  "midi_set_control_map",
+  {
+    title: "Map hardware knobs to parameters (whole table)",
+    description:
+      "Set the WHOLE hardware-control mapping table at once. `bindings` " +
+      "replaces everything that was there, and `bindings: []` clears the map. " +
+      "Read the current table with midi_get_control_map first, then write it " +
+      "back with your change — this call is idempotent. \n\n" +
+      "Each binding is {target, controller, channel?, sourceId?, inverted?}: " +
+      "`target` is one of the ids from midi_get_control_map's `targets` " +
+      "(currently `breathPadAngle` and `breathPadRadius`); `controller` is the " +
+      "MIDI CC number 0-127 that the knob sends; `channel` 0-15 is optional " +
+      "and OMITTING IT IS USUALLY RIGHT (omni — a controller's global channel " +
+      "can change and a channel-pinned mapping then dies silently); " +
+      "`sourceId` is a device's `uniqueID` from midi_list_inputs, and omitting " +
+      "it accepts any device; `inverted` flips a knob that runs backwards. \n\n" +
+      "ONE KNOB IS ENOUGH: bind a single knob to `breathPadAngle` and it walks " +
+      "the breath pad's dot all the way around the ring of playing styles at " +
+      "whatever depth it already has — that is the whole gesture. Add a second " +
+      "on `breathPadRadius` for depth. \n\n" +
+      "PREFER midi_learn_control when a human is present: turning the knob is " +
+      "faster and more reliable than looking its CC number up. \n\n" +
+      "⚠️ ABSOLUTE controls only (knobs and faders that send a POSITION). An " +
+      "endless/relative encoder sends deltas and will read as a jump to one " +
+      "end. \n\n" +
+      "⚠️ A mapped CC is NOT swallowed: it still reaches armed instrument " +
+      "tracks and is still recorded into a take. On a track hosting an Audio " +
+      "Unit it may also move a plugin parameter — pick a CC the plugin does " +
+      "not use.",
+    inputSchema: {
+      bindings: z
+        .array(
+          z.object({
+            target: z
+              .string()
+              .describe("a target id from midi_get_control_map's `targets`"),
+            controller: z
+              .number()
+              .int()
+              .min(0)
+              .max(127)
+              .describe("the MIDI CC number the knob sends"),
+            channel: z
+              .number()
+              .int()
+              .min(0)
+              .max(15)
+              .optional()
+              .describe("MIDI channel filter; omit for omni (usually right)"),
+            sourceId: z
+              .number()
+              .int()
+              .optional()
+              .describe("a device `uniqueID` from midi_list_inputs; omit for any device"),
+            inverted: z
+              .boolean()
+              .optional()
+              .describe("flip the sweep for a knob wired backwards"),
+          })
+        )
+        .describe("the WHOLE table — [] clears every mapping"),
+    },
+  },
+  async ({ bindings }: { bindings: unknown[] }) =>
+    toToolResult(() => bridge.send("midi.setControlMap", { bindings }))
+);
+
+registerTool(
+  "midi_learn_control",
+  {
+    title: "MIDI learn — turn a knob to map it",
+    description:
+      "Arm MIDI learn for `target`, then ask the user to TURN THE KNOB they " +
+      "want: the first controller message that arrives binds to that target " +
+      "and moves it immediately, so the user sees it work at once. Pass " +
+      "`cancel: true` instead to disarm without changing any mapping. \n\n" +
+      "This is the verb that WAKES THE MIDI SYSTEM UP. The DAW connects to " +
+      "MIDI inputs lazily, so a learn armed any other way can sit listening to " +
+      "a system that was never started. The response carries `inputs` (what " +
+      "the DAW can see right now) and a `hint` sentence — if the hint says no " +
+      "online input is connected, tell the user that rather than waiting. \n\n" +
+      "`target` is an id from midi_get_control_map's `targets` (currently " +
+      "`breathPadAngle`, which walks the breath pad's dot around its ring of " +
+      "playing styles, and `breathPadRadius`, which is depth). \n\n" +
+      "The learned binding pins the DEVICE but leaves the MIDI CHANNEL open on " +
+      "purpose, so changing the controller's global channel later does not " +
+      "silently break the mapping. \n\n" +
+      "⚠️ The FIRST controller message wins, whatever it is — a fader the user " +
+      "brushes will take the binding. Re-arm and try again; " +
+      "midi_get_control_map's `lastControlChange` shows what was heard.",
+    inputSchema: {
+      target: z
+        .string()
+        .optional()
+        .describe("the target id to arm; omit only when passing cancel"),
+      cancel: z.boolean().optional().describe("true to disarm, changing no mappings"),
+    },
+  },
+  async ({ target, cancel }: { target?: string; cancel?: boolean }) =>
+    toToolResult(() => {
+      const params: Record<string, unknown> = {};
+      if (target !== undefined) params.target = target;
+      if (cancel !== undefined) params.cancel = cancel;
+      return bridge.send("midi.learnControl", params);
+    })
+);
+
 registerTool(
   "note_audition",
   {
@@ -4873,15 +5012,17 @@ registerTool(
       "hear it. Suggested starting values: driftDepth 0.05, tremorDepth 0.03 (about 0.29 dB). " +
       "The drift is DOWNWARD ONLY: effort 1 means 'as authored', so it is a ceiling and there " +
       "is nothing above it to drift into.\n" +
-      "⛔ THE TREMOR IS NOT WRITTEN ON A HOSTED-AU TRACK (every soundBank instrument, so the " +
-      "GM sax) AND THE RESPONSE TELLS YOU SO. MEASURED 2026-08-19: in an offline bounce our " +
-      "renderer feeds a hosted AU MIDI in 4096-frame blocks — an 11.719 Hz sampler — so a " +
-      "tremor returns with a sample-and-hold copy at |11.719 - rate| Hz whose depth relative " +
-      "to the tremor is exactly rate/(11.719 - rate). At 8 Hz that copy is 2.14x LOUDER than " +
-      "the tremor itself; even at 4 Hz, the BOTTOM of the physiological band, it is 52%. " +
-      "Keeping it 12 dB down would need a rate at or below 2.34 Hz, below the band a tremor " +
-      "IS — so it is suppressed rather than quietly retuned. It lands normally on a built-in " +
-      "Sampler track, and the DRIFT (three orders of magnitude slower) lands everywhere.\n" +
+      "⭐ THE TREMOR NOW LANDS ON HOSTED-AU TRACKS TOO (m28-bug, 2026-08-20). It used to be " +
+      "refused on every soundBank instrument including the GM sax, and that refusal was " +
+      "correct at the time: an offline bounce fed hosted AUs MIDI in 4096-frame blocks — an " +
+      "11.719 Hz sampler — so a tremor returned with a sample-and-hold copy at " +
+      "|11.719 - rate| Hz of depth rate/(11.719 - rate), which at 8 Hz was 2.14x LOUDER than " +
+      "the tremor itself and still 52% at 4 Hz. The offline block is now 512 frames, a " +
+      "93.75 Hz sampler, so that copy sits at |93.75 - rate| Hz — 3% of the tremor at 8 Hz, " +
+      "measured from rendered audio — and the whole 4-8 Hz band is delivered at about 88% of " +
+      "authored depth. ⛔ THE LIMIT STILL EXISTS, IT MOVED: rates above 18.75 Hz are still " +
+      "SUPPRESSED rather than quietly retuned, and the response says so when it happens. " +
+      "The DRIFT (three orders of magnitude slower) was never affected and lands everywhere.\n" +
       "\n" +
       "READ THE RESPONSE. `minEffort` and `maxEffort` equal means the shape ran and varied " +
       "nothing (usually a phrase-scoped pattern on notes that all sit at one point of one " +
@@ -5225,8 +5366,9 @@ registerTool(
         .describe(
           "Tremor rate in Hz, 0.2-20. Default 4.565 = the vibrato rate x 0.83, so tremor and " +
             "vibrato are not one oscillator at one rate summing into a single deeper vibrato. " +
-            "Deliberately at the BOTTOM of the 4-8 Hz physiological band, because on a hosted " +
-            "AU an offline bounce re-samples this lane at 11.719 Hz. The band is the vibrato " +
+            "At the BOTTOM of the 4-8 Hz physiological band. On a hosted AU an offline bounce " +
+            "re-samples this lane at 93.75 Hz, so anything up to 18.75 Hz is written; above " +
+            "that it is suppressed and the response says so. The band is the vibrato " +
             "band: below 0.2 Hz a tremor is a drift, which is what driftDepth is for, and a " +
             "rate outside it is REJECTED rather than clamped so you are never handed a " +
             "different gesture under the name you asked for."

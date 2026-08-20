@@ -90,6 +90,22 @@ import Foundation
 /// `normalisedOnsetLevel`, `normalisedReleaseLevel`, `earlyDipPosition`) is a
 /// knot property and therefore exact.
 ///
+/// ⛔ **THAT LAST SENTENCE IS AN INVARIANT, NOT AN OBSERVATION — AND IT HAS BEEN
+/// BROKEN ONCE.** Between P4 and P7 the phrase branch of `applyEffortShape` read
+/// `curve(scope:.phrase).evaluate(u:)` at each note's position inside its phrase.
+/// That is not a knot property: `u` is arbitrary, and the reported effort was
+/// wrong by up to 0.0048 on a genuine two-pattern ring (m28-p2-followup). It
+/// went unseen for three phases because the ring of ONE that P1/P2 shipped is a
+/// self-blend, whose union curve IS the pattern bit for bit — so no
+/// single-pattern test can detect it, and none did.
+///
+/// **If you need a scalar at one `u`, call `level(scope:u:)` — it is the law and
+/// it is exact. Reach for `curve(scope:)` only when a caller genuinely needs an
+/// `EffortPattern`**, i.e. when something parameterised has to be fed. Adding an
+/// `evaluate(u:)` on a blended curve silently reintroduces this bug;
+/// `ControllerLaneStoreTests.phraseEffortReadsTheLawNotTheProjection` is what
+/// catches it.
+///
 /// ## ⭐ Radius keeps P1's boundary STRUCTURALLY, not by discipline
 ///
 /// Radius is applied to the **levels**, before any geometry is derived:
@@ -315,6 +331,17 @@ public struct EffortRing: Sendable, Equatable {
         /// a span falls roughly with its square, so eight pieces buys about two
         /// orders of magnitude for at most a few dozen knots on a curve that is
         /// evaluated a handful of times per note.
+        ///
+        /// ⭐ **m28-p2-followup RESOLVED: this stays at 8.** P2 filed "raise it if
+        /// anything reads the blended curve between knots at high resolution".
+        /// Something had started to — the phrase branch of `applyEffortShape` —
+        /// and the fix was to stop reading the *vehicle* there and read the *law*
+        /// (`level(scope:u:)`), which is exact, rather than to buy a smaller error
+        /// on a reading that should not have been happening. Raising the steps
+        /// would have shrunk 0.0189 toward zero while leaving a store value
+        /// derived from an interpolation of an interpolation. Every remaining
+        /// reader of `curve(scope:)` takes a KNOT property, where the refinement
+        /// is what keeps the union honest but the sampling error never applies.
         static let refinementSteps = 8
 
         /// The non-zero contributors, in ring order — one or two, never more.

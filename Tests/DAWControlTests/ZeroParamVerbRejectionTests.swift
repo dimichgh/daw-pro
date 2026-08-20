@@ -131,6 +131,10 @@ struct ZeroParamVerbRejectionTests {
         "input.listDevices",
         "output.listDevices",   // m20-j
         "midi.listInputs",
+        // m28-knob. DRIVEN, not excluded: reading the mapping table is PASSIVE
+        // by design — unlike its sibling above it never brings the CoreMIDI
+        // client up, so it opens no device and cannot flake on one.
+        "midi.getControlMap",
         "project.recoveryStatus",
         "project.recoveryBundles",
         "edit.history",
@@ -235,7 +239,7 @@ struct ZeroParamVerbRejectionTests {
         let sourceVerbs = try Self.zeroParamVerbsInSource()
         #expect(!sourceVerbs.isEmpty, "the source scan itself must find something, or this test is vacuously green")
         #expect(Set(Self.zeroParamVerbs) == sourceVerbs)
-        #expect(Self.zeroParamVerbs.count == 41)   // 39 at m23-af (transport.panic) -> 40 at m20-j (output.listDevices) -> 41 at m23-br-1 (engine.auPrepareStats)
+        #expect(Self.zeroParamVerbs.count == 42)   // 39 at m23-af (transport.panic) -> 40 at m20-j (output.listDevices) -> 41 at m23-br-1 (engine.auPrepareStats) -> 42 at m28-knob (midi.getControlMap)
     }
 
     /// NOTE: this compares against the SOURCE SCRAPE, not `Self.zeroParamVerbs`
@@ -255,7 +259,7 @@ struct ZeroParamVerbRejectionTests {
                 "a typo'd verb name in the exclusion set would silently shrink drivenVerbs without anyone noticing")
         #expect(Set(Self.drivenVerbs).isDisjoint(with: Self.notDrivenForFlakeReasons))
         #expect(Set(Self.drivenVerbs).union(Self.notDrivenForFlakeReasons) == sourceVerbs)
-        #expect(Self.drivenVerbs.count == 39)   // 37 at m23-af (transport.panic) -> 38 at m20-j (output.listDevices) -> 39 at m23-br-1 (engine.auPrepareStats)
+        #expect(Self.drivenVerbs.count == 40)   // 37 at m23-af (transport.panic) -> 38 at m20-j (output.listDevices) -> 39 at m23-br-1 (engine.auPrepareStats) -> 40 at m28-knob (midi.getControlMap — DRIVEN: reading the map is passive and opens no device)
     }
 
     /// m23-n2h durable-win sweep: every one of the 162 `allCommands` reaches
@@ -294,7 +298,7 @@ struct ZeroParamVerbRejectionTests {
         let orphaned = sourceCallSites.subtracting(Set(CommandRouter.allCommands))
         #expect(orphaned.isEmpty,
                 "these verbs have a rejectUnknownKeys call site but are not in allCommands — either renamed/removed (a bug), or an off-surface debug.* verb that was hardened (good; allowlist it above): \(orphaned.sorted())")
-        #expect(CommandRouter.allCommands.count == 183)   // 161 -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail)
+        #expect(CommandRouter.allCommands.count == 186)   // 161 -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail)
     }
 
     private func makeRouter() -> CommandRouter {

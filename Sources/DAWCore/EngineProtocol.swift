@@ -840,6 +840,34 @@ public protocol AudioEngineControlling: AnyObject {
     /// activity; the UI reads it as a cheap blinking-LED source.
     func midiEventCount() -> Int
 
+    /// Installs (or clears, with nil) the MAIN-ACTOR sink for hardware
+    /// CONTROLLER changes — the feed `MIDIControlMap` is mapped against
+    /// (m28-knob). One observer; installing a second replaces the first.
+    ///
+    /// ## The seam, and why it is not a new one
+    ///
+    /// This REUSES the receive-thread → main-actor seam that already exists and
+    /// is the only one: the CoreMIDI receive thread pushes every parsed event to
+    /// `MIDIInputRTContext.captureRing` (SPSC, lock-free, drop-newest), and
+    /// `MIDIInputManager.drainCaptureRing()` pops it on the main actor from a
+    /// ~30 Hz task that is alive for as long as the MIDI client is. Nothing new
+    /// touches the receive thread, and the render path is untouched entirely.
+    ///
+    /// ⭐ **The observer is called ONCE PER DRAIN PASS, and the batch MAY BE
+    /// EMPTY.** The empty call is load-bearing, not noise: it is the idle tick a
+    /// mapped-knob gesture uses to notice that the hand STOPPED, which is the
+    /// only "release" a knob has. A subscriber that ignores empty batches leaves
+    /// a live preview parked on the strip forever.
+    ///
+    /// ⚠️ **Optional capability with a SILENT default** (the
+    /// `previewController` precedent, and the same hazard): an engine that
+    /// forgot to override this discards every event, mapped controls would do
+    /// nothing at all, and every model-layer test would still pass because the
+    /// map and the pad are written to work against an engine that has no MIDI.
+    /// `MIDIInputManagerTests`' control-change delivery test and
+    /// `AudioEngineControlObserverTests` close that hole against the REAL types.
+    func setControlChangeObserver(_ observer: (@MainActor ([MIDIControlChangeEvent]) -> Void)?)
+
     /// Sounds EXACTLY `pitches` on `trackID`'s instrument RIGHT NOW, outside the
     /// sequencer schedule and independent of transport state (m23-d note
     /// audition). SET semantics and idempotent: pitches already sounding are
@@ -1259,6 +1287,14 @@ extension AudioEngineControlling {
 
     public func availableMIDIInputs() -> [MIDIInputDevice] { [] }
     public func midiEventCount() -> Int { 0 }
+
+    /// Hardware controller observation is optional capability (m28-knob): an
+    /// engine with no CoreMIDI client has nothing to observe, so the default
+    /// discards the installation and every existing conformer compiles
+    /// unchanged. See the requirement's ⚠️ for why that default is dangerous
+    /// and which two tests hold the real engine to it.
+    public func setControlChangeObserver(
+        _ observer: (@MainActor ([MIDIControlChangeEvent]) -> Void)?) {}
 
     /// Master-mix analysis is optional capability: engines without it
     /// (fakes, headless) sit on the floor snapshot.

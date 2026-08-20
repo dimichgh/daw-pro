@@ -892,6 +892,124 @@ struct ControllerLaneStoreTests {
         #expect(peaks2 == peaks2.sorted().reversed())
     }
 
+    /// ⭐⭐ m28-p2-followup — **the phrase axis reads the blend LAW, not the
+    /// projection vehicle.**
+    ///
+    /// P2 pinned a curve-vs-law deviation of 0.0189 and filed a conditional: raise
+    /// `EffortRing.Blend.refinementSteps` *if anything ever reads the blended curve
+    /// between knots*. P3 checked and reported nothing did. By P7 something did —
+    /// the phrase branch sampled `Blend.curve(scope:.phrase).evaluate(u:)` at each
+    /// note's position inside its phrase, an arbitrary `u` that is almost never a
+    /// knot.
+    ///
+    /// That silently broke the invariant `EffortRing`'s own header states: *"every
+    /// value the store actually reads off the curve … is a knot property and
+    /// therefore exact"*. The fix restores it by reading `Blend.level(scope:u:)`,
+    /// which the same header calls *"the law above, pointwise and exact"* — so the
+    /// error is ZERO rather than merely smaller, and `refinementSteps` stays where
+    /// it is, guarding the vehicle for the one caller that genuinely needs a curve
+    /// (leg D's parameterised generator).
+    ///
+    /// ⚠️ **The single-pattern form CANNOT see this, which is why it survived two
+    /// phases.** A ring of one is a self-blend, and the union curve of a self-blend
+    /// is that pattern bit for bit — deviation exactly 0. It takes a genuine
+    /// two-pattern ring to separate the vehicle from the law, so every row here
+    /// uses one.
+    @Test("phrase-scoped effort equals the blend LAW exactly, on a genuine two-pattern ring")
+    func phraseEffortReadsTheLawNotTheProjection() throws {
+        let phrasePatterns = EffortPattern.library.filter { $0.scope == .phrase }
+        try #require(phrasePatterns.count >= 2, "this test needs two phrase-scoped patterns")
+
+        // Set by any pair whose reported effort the OLD (vehicle) reading would
+        // have got wrong. This is the positive control: it asserts the rows below
+        // can actually tell the two implementations apart, rather than passing
+        // because every extreme happened to land on a knot.
+        var vehicleWouldHaveDiffered = false
+
+        for i in phrasePatterns.indices {
+            for j in phrasePatterns.indices where j > i {
+                let ring = EffortRing(patterns: [phrasePatterns[i], phrasePatterns[j]])
+                let angle = ring.spacing / 2                 // the exact 50/50 midpoint
+                let blend = ring.blend(atAngle: angle, radius: 1)
+                let pair = "\(phrasePatterns[i].id)+\(phrasePatterns[j].id)"
+
+                // Both members are phrase-scoped, so phraseWeight is 1; with the
+                // default amount 1, no air budget and `.none` humanisation, the
+                // store's per-note effort collapses to `raw` itself and reaches
+                // min/maxEffort unmodified. That is what makes the comparison below
+                // read the phrase branch and nothing else.
+                #expect(abs(blend.phraseWeight - 1) < 1e-12, "\(pair) is not a pure phrase blend")
+
+                let (store, clip) = try breathStore(noteCount: 7)
+                let result = try store.applyEffortShape(
+                    clipID: clip.id, ring: ring, angleRadians: angle, radius: 1)
+
+                // Derive `u` the way the store does — same detector, same defaults —
+                // instead of hard-coding positions and hoping the two agree.
+                let notes = try #require(store.tracks[0].clips[0].notes)
+                let phrases = PhraseDetection.phrases(
+                    in: notes, maxGapBeats: HumanizeLegato.defaultMaxGapBeats)
+                #expect(phrases.count == 1, "seven abutting notes are ONE phrase")
+                let phrase = try #require(phrases.first)
+                let us = notes.map { phrase.position(ofBeat: $0.startBeat) }
+
+                let law = us.map { blend.level(scope: .phrase, u: $0) }
+                let vehicleCurve = try #require(blend.curve(scope: .phrase))
+                let vehicle = us.map { vehicleCurve.evaluate(u: $0) }
+
+                let lawMin = try #require(law.min()), lawMax = try #require(law.max())
+                let vehMin = try #require(vehicle.min()), vehMax = try #require(vehicle.max())
+                let worst = try #require(zip(law, vehicle).map { abs($0 - $1) }.max())
+                print("[measured] \(pair): law \(String(format: "%.6f", lawMin))…"
+                      + "\(String(format: "%.6f", lawMax)); vehicle "
+                      + "\(String(format: "%.6f", vehMin))…\(String(format: "%.6f", vehMax)); "
+                      + "worst pointwise |law−vehicle| \(String(format: "%.6f", worst))")
+
+                // THE ASSERTION: the reported effort is the law, to the last ulp —
+                // not "within 0.0189 of it".
+                #expect(abs(result.minEffort - lawMin) < 1e-12,
+                        "\(pair): minEffort \(result.minEffort) is not the law's \(lawMin)")
+                #expect(abs(result.maxEffort - lawMax) < 1e-12,
+                        "\(pair): maxEffort \(result.maxEffort) is not the law's \(lawMax)")
+
+                // LANE LEVEL — the law-based efforts must actually REACH the
+                // written lane, in the same order. Without this the fix could be
+                // right in the number it reports and inert in the sound, which is
+                // this tree's characteristic failure.
+                //
+                // ⚠️ Exact CC values are deliberately NOT asserted: that would be
+                // a second copy of `BreathContour.scaled` living in a test, free
+                // to drift from the generator it exists to check. Rank agreement
+                // is the strongest claim available without reimplementing it —
+                // and an effort that rose while its peak fell really would be a
+                // wiring break.
+                let lane = try expressionLane(store)
+                let peaks = (0..<notes.count).map { k -> Int in
+                    let lo = Double(k) * 4, hi = lo + 4
+                    return lane.filter { $0.beat >= lo - 1e-9 && $0.beat <= hi + 1e-9 }
+                        .map(\.value).max() ?? -1
+                }
+                #expect(!peaks.contains(-1), "\(pair): some note produced no lane point")
+                let peaksByAscendingLaw = zip(law, peaks).sorted { $0.0 < $1.0 }.map(\.1)
+                #expect(peaksByAscendingLaw == peaksByAscendingLaw.sorted(),
+                        "\(pair): peak CC \(peaks) does not follow the law's efforts \(law)")
+                // The MEASURED size of this fix at the lane: how many CC steps the
+                // old vehicle reading actually moved. Printed rather than asserted
+                // — it is a consequence of the fix, not a requirement of it.
+                print("[measured] \(pair): per-note peak CC \(peaks); "
+                      + "law−vehicle effort delta at the extremes "
+                      + "\(String(format: "%.6f", max(abs(vehMin - lawMin), abs(vehMax - lawMax))))")
+
+                if abs(vehMin - lawMin) > 1e-12 || abs(vehMax - lawMax) > 1e-12 {
+                    vehicleWouldHaveDiffered = true
+                }
+            }
+        }
+
+        #expect(vehicleWouldHaveDiffered,
+                "every phrase pair's extremes landed on knots, so these rows cannot distinguish the law from the projection vehicle — the test is vacuous")
+    }
+
     /// A BREATH splits the phrase, so the hairpin restarts — the point of
     /// factoring the classifier out of humanize in the first place.
     @Test("a rest splits the phrase and the hairpin starts over")
@@ -919,10 +1037,22 @@ struct ControllerLaneStoreTests {
         #expect(peaks[2] < peaks[1], "the crescendo RESTARTS after the breath")
     }
 
-    /// ⛔ THE MEASURED SOUND-BANK GATE. On a hosted AU, bend vibrato aliases in
-    /// bounces, so it must not be authored — and the result must SAY so rather
-    /// than reporting notes "with vibrato" that have none.
-    @Test("on a sound-bank track vibrato is suppressed, reported as 0, and CC1 is named")
+    /// ⛔ THE MEASURED SOUND-BANK GATE — **AND m28-bug FLIPPED ITS SIGN.**
+    ///
+    /// This asserted that bend vibrato was suppressed on a hosted AU, because at
+    /// a 4096-frame offline block it aliased (11.719 Hz sampler, 5.86 Hz
+    /// Nyquist) and an authored 5.5 Hz vibrato bounced as two vibratos beating.
+    /// m28-bug ran §2.4's falsifying test and lowered the block to 512
+    /// (`RenderBlockSize`): the sampler is now 93.75 Hz, and the SAME render
+    /// that used to deliver 35.4 ¢ plus a 30.0 ¢ alias delivers **48.3 ¢ at the
+    /// authored rate with a 3.1 ¢ image at 88 Hz** (`measure-gm-sax-cc.md` §6).
+    ///
+    /// So leg D's vibrato now WORKS on the GM sax, which is the whole point of
+    /// the fix, and this test pins the new behaviour: vibrato is written, and
+    /// `notesWithVibrato` reports it honestly. The suppression path itself is
+    /// still gated and still tested — above the 18.75 Hz ceiling, in
+    /// `tremorIsSuppressedOnHostedAUs`.
+    @Test("on a sound-bank track vibrato is now WRITTEN and reported (m28-bug)")
     func effortShapeSuppressesBendVibratoOnHostedAU() throws {
         let (store, clip) = try soundBankStore()
         let result = try store.applyEffortShape(
@@ -933,16 +1063,18 @@ struct ControllerLaneStoreTests {
               + "bend points \(bend?.points.count ?? 0), max |Δ| from centre "
               + "\(deviations.max() ?? 0) units; warnings:\n  - "
               + result.warnings.joined(separator: "\n  - "))
-        #expect(result.notesWithVibrato == 0, "vibrato was suppressed — reporting it would be a lie")
-        // The micro-sharpening still rides the bend lane: it is a seconds-scale
-        // curve, far under the measured 5.86 Hz Nyquist, so it is safe.
-        #expect((deviations.max() ?? 0) > 0, "micro-sharpening should survive the suppression")
-        // 4 cents at ±2 semitones = 164 units; a real vibrato at ±12 cents would
-        // reach ~490. This bound is what distinguishes the two.
-        #expect((deviations.max() ?? 0) < 300, "that deviation is vibrato-sized, not sharpening-sized")
-        #expect(result.warnings.contains { $0.contains("CC1") },
-                "the warning must name the route that DOES work")
-        #expect(result.warnings.contains { $0.contains("5.4 Hz") })
+        #expect(result.notesWithVibrato > 0,
+                "leg D's vibrato is under the ceiling now and must be written")
+        // A real vibrato at ±12 cents reaches ~490 units at ±2 semitones; mere
+        // micro-sharpening (4 cents) reaches only ~164. This bound is what
+        // distinguishes the two, and it now has to be on the OTHER side of it.
+        #expect((deviations.max() ?? 0) > 300,
+                "that deviation is sharpening-sized, not vibrato-sized — vibrato did not land")
+        // ⛔ AND THE WARNING MUST BE GONE. A warning still sending the user to
+        // CC 1 "because bend aliases here" would be advice about an engine that
+        // no longer exists — worse than silence.
+        #expect(!result.warnings.contains { $0.contains("vibrato was NOT written") },
+                "still warning that vibrato was suppressed, but it was written")
         // And no warning may promise brightness on this path.
         #expect(!result.warnings.contains { $0.lowercased().contains("expressionfilterdepth") },
                 "a sound-bank track has no such switch — sending a user to look for it is worse than silence")
@@ -2095,15 +2227,41 @@ struct ControllerLaneStoreTests {
         #expect(!liveResult.warnings.contains { $0.contains("NOTHING will be heard") })
     }
 
-    /// ⛔⛔ **THE MEASURED CEILING, ENFORCED AT THE STORE.** On a hosted-AU track
-    /// the tremor is SUPPRESSED — the lane must be byte-identical to one written
-    /// with no tremor at all — and the caller must be told, with the cause named
-    /// as OUR 4096-frame offline block rather than as the plugin.
-    @Test("P5: the tremor is suppressed on a hosted-AU track, byte-for-byte, and says why")
+    /// ⛔⛔ **THE MEASURED CEILING, ENFORCED AT THE STORE — AND m28-bug MOVED IT.**
+    ///
+    /// This test used to assert that a **5.5 Hz** tremor was suppressed on a
+    /// hosted-AU track. That was correct while the offline block was 4096
+    /// frames: the sampler ran at 11.719 Hz, the image ceiling was 2.34 Hz, and
+    /// the whole 4–8 Hz physiological band aliased. m28-bug lowered the block to
+    /// 512 (`RenderBlockSize`) after confirming §2.4's falsifying test, so the
+    /// sampler runs at 93.75 Hz, the ceiling is **18.75 Hz**, and a 5.5 Hz
+    /// tremor is delivered at 87.7 % of its authored depth with an image 2.2 %
+    /// of it (`measure-gm-sax-cc.md` §6.6, rendered).
+    ///
+    /// So the rule under test is no longer "hosted AU ⇒ no tremor" but **"above
+    /// the image ceiling ⇒ no tremor"**, and both sides are pinned here. The
+    /// suppression machinery is deliberately NOT deleted: `tremorRateHz` is
+    /// authorable to 20 Hz, which is still above the ceiling.
+    @Test("P5/m28-bug: the tremor is suppressed above the image ceiling, and written below it")
     func tremorIsSuppressedOnHostedAUs() throws {
         let messa = try #require(EffortPattern.named("messaDiVoce"))
-        let tremor = EffortField.Humanisation(tremorDepth: 0.08, tremorRateHz: 5.5)
 
+        // --- BELOW the ceiling: the tremor is WRITTEN on a hosted AU ---------
+        // The half that changed. Before m28-bug this lane was byte-identical to
+        // the no-tremor control; now it must differ, and nothing must be warned.
+        let physiological = EffortField.Humanisation(tremorDepth: 0.08, tremorRateHz: 5.5)
+        let (below, belowClip) = try soundBankStore(noteCount: 3)
+        let belowResult = try below.applyEffortShape(clipID: belowClip.id, pattern: messa,
+                                                     humanisation: physiological)
+        let (belowControl, belowControlClip) = try soundBankStore(noteCount: 3)
+        _ = try belowControl.applyEffortShape(clipID: belowControlClip.id, pattern: messa)
+        #expect(try expressionLane(below) != expressionLane(belowControl),
+                "a 5.5 Hz tremor is under the 18.75 Hz ceiling and must now reach the lane")
+        #expect(!belowResult.warnings.contains { $0.contains("micro-tremor was NOT written") },
+                "warned about a tremor it actually wrote")
+
+        // --- ABOVE the ceiling: suppressed, byte-for-byte, and says why ------
+        let tremor = EffortField.Humanisation(tremorDepth: 0.08, tremorRateHz: 19.5)
         let (bank, bankClip) = try soundBankStore(noteCount: 3)
         let bankResult = try bank.applyEffortShape(clipID: bankClip.id, pattern: messa,
                                                    humanisation: tremor)
@@ -2117,10 +2275,15 @@ struct ControllerLaneStoreTests {
         // The sentence has to carry the CAUSE and the MEASUREMENT, not just a
         // refusal — a warning that only says "no" is how a user concludes the
         // feature is broken.
-        #expect(sentence.contains("4096"), "must name OUR block size as the cause: \(sentence)")
-        #expect(sentence.contains("11.719"), "must carry the measured sampling rate")
+        #expect(sentence.contains("512"), "must name OUR block size as the cause: \(sentence)")
+        #expect(sentence.contains("93.750"), "must carry the CURRENT sampling rate")
         #expect(sentence.contains("2.14"), "must carry the measured 8 Hz image ratio")
         #expect(sentence.contains("built-in Sampler"), "must name the path that DOES work")
+        // ⚠️ The block size in the sentence must be the one the engine USES. A
+        // warning still saying "4096" would describe an engine that no longer
+        // exists — the silent-wrong-answer failure this round exists to end.
+        #expect(!sentence.contains("4096-frame blocks"),
+                "the warning still names the retired 4096-frame block as current")
 
         // ⭐ AND THE OTHER HALF: on a built-in sampler the same call writes the
         // tremor and says nothing. Without this, "suppressed" could be "never

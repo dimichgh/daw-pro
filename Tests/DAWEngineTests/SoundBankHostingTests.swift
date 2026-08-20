@@ -38,8 +38,15 @@ struct SoundBankHostingTests {
     /// Full offline render of one track: prepare (bank load included) + 2 s
     /// pass at 48 kHz, returning the left channel. Hosted tracks must reach
     /// `.ready`; built-ins never touch the registry.
-    private func renderLeft(track: Track, durationSeconds: Double = 2.0) async throws -> [Float] {
-        let renderer = OfflineRenderer()
+    ///
+    /// `blockFrames` (m28-bug) exists so a test can pin a measurement to the
+    /// block it was TAKEN at. Most callers want the shipping default; T5 must
+    /// name 4096 explicitly, because what it documents is a property of that
+    /// block and re-pointing it at whatever ships would leave it asserting
+    /// nothing while still looking like a measurement.
+    private func renderLeft(track: Track, durationSeconds: Double = 2.0,
+                            blockFrames: Int = RenderBlockSize.offlineFrames) async throws -> [Float] {
+        let renderer = OfflineRenderer(maximumFrameCount: blockFrames)
         await renderer.prepareAudioUnits(tracks: [track])
         if (track.instrument ?? .default).kind == .soundBank {
             #expect(renderer.auRegistry.status[track.id] == .ready)
@@ -492,7 +499,7 @@ struct SoundBankHostingTests {
              controllerLanes: lane.map { [$0] } ?? [])
     }
 
-    @Test("T5 (P5): CC 11 is block-sampled on the hosted-AU path exactly as bend is")
+    @Test("T5 (P5/m28-bug): CC 11 is block-sampled at 4096, and clean at the shipping block")
     func expressionSharesTheBlockRateOnHostedAUs() async throws {
         let sampleRate = 48_000.0
         let hop = 256
@@ -517,14 +524,14 @@ struct SoundBankHostingTests {
             try await renderLeft(track: soundBankTrack(
                 program: 65, clips: [clip(withLane: expressionSine(rateHz: 8, startBeat: 1,
                                                                    lengthBeats: 5))]),
-                                 durationSeconds: 4.0),
+                                 durationSeconds: 4.0, blockFrames: 4_096),
             rate: 8)
         // Same path, a rate BELOW Nyquist: the commanded rate must dominate.
         let hostedAt2 = bins(
             try await renderLeft(track: soundBankTrack(
                 program: 65, clips: [clip(withLane: expressionSine(rateHz: 2, startBeat: 1,
                                                                    lengthBeats: 5))]),
-                                 durationSeconds: 4.0),
+                                 durationSeconds: 4.0, blockFrames: 4_096),
             rate: 2)
         // The BOTTOM of §10.1's 4–8 Hz physiological band, measured rather
         // than derived: P5 has to say whether ANY of that band survives here.
@@ -532,21 +539,21 @@ struct SoundBankHostingTests {
             try await renderLeft(track: soundBankTrack(
                 program: 65, clips: [clip(withLane: expressionSine(rateHz: 4, startBeat: 1,
                                                                    lengthBeats: 5))]),
-                                 durationSeconds: 4.0),
+                                 durationSeconds: 4.0, blockFrames: 4_096),
             rate: 4)
         // §10.1's own default rate, recorded because P5 has to choose it.
         let hostedAt55 = bins(
             try await renderLeft(track: soundBankTrack(
                 program: 65, clips: [clip(withLane: expressionSine(rateHz: 5.5, startBeat: 1,
                                                                    lengthBeats: 5))]),
-                                 durationSeconds: 4.0),
+                                 durationSeconds: 4.0, blockFrames: 4_096),
             rate: 5.5)
         // NO lane at all — the analysis control. Whatever this reads is the
         // floor every figure above has to beat.
         let hostedFlat = bins(
             try await renderLeft(track: soundBankTrack(program: 65,
                                                        clips: [clip(withLane: nil)]),
-                                 durationSeconds: 4.0),
+                                 durationSeconds: 4.0, blockFrames: 4_096),
             rate: 8)
 
         // --- The engine control: same lane, same clip, built-in sampler ------
@@ -557,7 +564,7 @@ struct SoundBankHostingTests {
             instrument: InstrumentDescriptor(
                 kind: .sampler,
                 sampler: SamplerParams(zones: [zone], attack: 0.001, release: 0.05)))
-        let builtInAt8 = bins(try await renderLeft(track: builtIn, durationSeconds: 4.0), rate: 8)
+        let builtInAt8 = bins(try await renderLeft(track: builtIn, durationSeconds: 4.0, blockFrames: 4_096), rate: 8)
 
         func line(_ label: String, _ b: (rate: Double, image: Double)) -> String {
             "[measured] P5/T5 \(label): at-rate \(b.rate), at-image \(b.image), "
@@ -596,6 +603,42 @@ struct SoundBankHostingTests {
         // …and below Nyquist the commanded rate wins, so the effect is a
         // sampling limit and not a fixed resonance.
         #expect(hostedAt2.rate > hostedAt2.image)
+
+        // ── m28-bug: THE SAME RENDER AT THE SHIPPING BLOCK ────────────────────
+        //
+        // Everything above is a fact about a 4096-frame block, and it stays
+        // pinned because it is the evidence the ceiling was argued from. But
+        // that block is no longer what ships, and a test that measured only the
+        // retired configuration would let the fix rot silently.
+        //
+        // Same lane, same note, same analysis — only the block differs. The
+        // image bin has to move to |93.75 − 8| = 85.75 Hz, which is above this
+        // envelope trace's own Nyquist, so the 3.719 Hz bin simply empties.
+        func shippingBins(_ audio: [Float], rate: Double) -> (rate: Double, image: Double) {
+            let envelope = rmsEnvelope(audio, in: window, hop: hop)
+            return (envelopeMagnitude(envelope, frequency: rate, sampleRate: envelopeRate),
+                    envelopeMagnitude(envelope, frequency: abs(48_000.0 / 4_096.0 - rate),
+                                      sampleRate: envelopeRate))
+        }
+        let shippingAt8 = shippingBins(
+            try await renderLeft(track: soundBankTrack(
+                program: 65, clips: [clip(withLane: expressionSine(rateHz: 8, startBeat: 1,
+                                                                   lengthBeats: 5))]),
+                                 durationSeconds: 4.0),
+            rate: 8)
+        print(line("SHIPPING BLOCK (\(RenderBlockSize.offlineFrames)), CC11 @ 8.0 Hz  ",
+                   shippingAt8))
+        // ⭐ THE INEQUALITY THAT DEFINED THE BUG, INVERTED. At 4096 the alias
+        // was 2.14× the commanded modulation; at 512 it must be a small
+        // fraction of it. Measured on this rig: 0.032.
+        let shippingRatio = shippingAt8.image / max(shippingAt8.rate, 1e-12)
+        #expect(shippingAt8.image < 0.25 * shippingAt8.rate,
+                "image/commanded = \(shippingRatio) at the shipping block — the sample-and-hold is back in band")
+        // CONJUNCTIVE, because "no image" is also what a render with no
+        // modulation at all scores: the commanded 8 Hz must be STRONGER than
+        // the 4096 arm delivered, not merely present.
+        #expect(shippingAt8.rate > hostedAt8.rate,
+                "shipping delivers \(shippingAt8.rate) at 8 Hz vs \(hostedAt8.rate) at 4096 — no depth gain")
     }
 
     // MARK: - T6 (breath-pad P5): how deep must a CC 11 tremor be to be heard?

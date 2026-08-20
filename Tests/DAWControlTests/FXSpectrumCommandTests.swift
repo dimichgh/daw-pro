@@ -238,7 +238,7 @@ struct FXSpectrumCommandTests {
         #expect(refusal.error?.contains("release") == true,
                 "the refusal must teach how to free a slot")
         #expect(engine.taps.count == 8, "the refused arm must not have recorded a 9th tap")
-        #expect(CommandRouter.allCommands.count == 183, "a cap-full refusal must not have touched allCommands")
+        #expect(CommandRouter.allCommands.count == 186, "a cap-full refusal must not have touched allCommands")
     }
 
     // MARK: - L4a/L4b: lease expiry — reporting vs cap-slot, deliberately split
@@ -461,7 +461,7 @@ struct FXSpectrumCommandTests {
         #expect(CommandRouter.allCommands.dropLast().last == "clip.detectPitch")
         // m26-k appended edit.pasteClips at the END (same law).
         #expect(CommandRouter.allCommands.last == "edit.pasteClips")
-        #expect(CommandRouter.allCommands.count == 183)   // 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail)
+        #expect(CommandRouter.allCommands.count == 186)   // 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail)
     }
 
     // MARK: - L12: headless / no-capability both refuse honestly, never with a cap number
