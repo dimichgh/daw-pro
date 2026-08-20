@@ -217,6 +217,9 @@ struct TimelineLanesView: View {
     /// Opens the Humanize panel for a clip (m25-c) — MIDI note humanize (arrange
     /// context menu, Pro; sp-c). UI-only, routes to `openHumanizePanel`.
     var onOpenHumanize: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the Breath Pad for a clip (m28-p7) — the arrange clip context menu
+    /// (Pro, MIDI only; sp-c). UI-only, routes to `openBreathPad`.
+    var onOpenBreathPad: (_ clip: Clip) -> Void = { _ in }
     /// Opens the Quantize panel focused on the extract affordance (both kinds).
     var onExtractGroove: (_ clip: Clip) -> Void = { _ in }
     /// Opens the "Convert to Voice…" sheet for an AUDIO clip (m10-p-5, Pro clip
@@ -1215,6 +1218,7 @@ struct TimelineLanesView: View {
                     },
                     onOpenQuantize: { onOpenQuantize(clip) },
                     onOpenHumanize: { onOpenHumanize(clip) },
+                    onOpenBreathPad: { onOpenBreathPad(clip) },
                     onExtractGroove: { onExtractGroove(clip) },
                     onConvertToVoice: { onConvertToVoice(clip) },
                     crossfadeNextClipID: isPro ? crossfadeNeighbor(for: clip, in: track) : nil,
@@ -2740,6 +2744,9 @@ private struct ClipBlock: View {
     var onOpenQuantize: () -> Void = {}
     /// Opens the Humanize panel for this clip (m25-c; MIDI only — note humanize).
     var onOpenHumanize: () -> Void = {}
+    /// Opens the Breath Pad for this clip (m28-p7; MIDI only — the pad shapes
+    /// notes).
+    var onOpenBreathPad: () -> Void = {}
     /// Opens the Quantize panel focused on the extract affordance (both kinds —
     /// `groove.extract` supports MIDI onsets and audio transients).
     var onExtractGroove: () -> Void = {}
@@ -3815,6 +3822,13 @@ private struct ClipBlock: View {
                 // refusal two treatments. It is handled once, in the panels: Apply
                 // is disabled and says why (kind hides, state explains).
                 Button("Humanize…") { onOpenHumanize() }
+                // Breath pad (m28-p7) — MIDI-only for the same reason as its two
+                // neighbours (`applyEffortShape` has no notes to shape on an
+                // audio clip), and hidden rather than offered-then-errored. It
+                // sits after Humanize because it is the strongest of the three:
+                // Quantize moves time, Humanize loosens it, the pad rewrites how
+                // the part is BLOWN.
+                Button("Breath Pad…") { onOpenBreathPad() }
             }
             Button("Extract Groove…") { onExtractGroove() }
             // Convert to voice (m10-p-5): AUDIO clips only — a MIDI clip has no

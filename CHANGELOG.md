@@ -1,5 +1,114 @@
 # Changelog
 
+## 2026-08-20 — The breath pad has a face: a circle, a dot, and a gauge that says why it went quiet
+
+Eight ways a wind player shapes a note now sit around a circle, and a dot moves between them. Where
+the dot points chooses which two blend; how far out it sits chooses how strongly. You hear it while
+you drag, and the shape is written into the part when you let go — once, on release, never on every
+frame of the drag.
+
+The middle of the circle is worth one sentence, because it is the opposite of what a knob usually
+means: the centre is **"exactly as written"**, which is the LOUDEST reading, not the quietest.
+Dragging outwards shapes the part more strongly. Nothing in the panel calls that axis a volume, and
+the readout is labelled DEPTH for the same reason.
+
+Under the circle is the air gauge, and it exists because a feature that can quietly turn your phrase
+down owes you an explanation. It draws one band per phrase whose height is the breath the simulated
+player has left, a mark where he got a breath (and a different mark where the gap was too short to be
+one), and a plain sentence: *"Air enforcement pulled 2 of 8 notes down, by up to 11.0 dB."* The
+switch that turns enforcement on sits on the face of the card, not behind a disclosure, and it starts
+OFF — a model that overrides what you wrote is something you turn on once, deliberately.
+
+With the switch off you still get the reading, and the sentence changes tense rather than disappearing:
+*"AIR IS OFF. Enforcing it WOULD pull 2 of 8 notes down."* Applying without enforcement is therefore
+how you find out what enforcement would do, before you let it do it.
+
+Reachable from the piano-roll BREATH chip and from an instrument clip's context menu. It adds no new
+commands and no new AI tools — the engine behind it already had both; this is the half a human can
+click.
+
+One fix in here was found by making the window small. On a laptop-sized window the card ran past the
+bottom of the screen and took the **Write the shape** button with it — the panel drew perfectly and
+could not be used. The card now shrinks its circle first, then its warnings list, and finally scrolls
+its middle while the title bar and the button stay put, so the two things you always need — close it,
+or commit it — are never the things that fall off the edge.
+
+## 2026-08-19 — The pad you can hear while you drag it, and the value it refuses to leave behind
+
+The breath pad could already write a shape. Now you can hear one while your finger is still moving.
+Drag the dot and the instrument responds immediately — the same path a piano-roll key press already
+uses, so nothing new runs on the audio thread and nothing new can stall it.
+
+The part worth explaining is what happens when you let go. The pad does **not** leave the last value
+you dragged to sitting on the instrument. A MIDI controller is sticky: nothing takes it back. Park a
+low expression value and every later playback of that song would be quieter than a bounce of the
+same project — the preview would have quietly become part of the record. So releasing the pad
+restores the controller to exactly the value the sequencer itself uses when no automation says
+otherwise.
+
+One caveat, stated plainly because we measured it rather than assumed it. That restore is the
+sequencer's *default* value, which is not the same thing as your track's own automation. If the track
+already has an expression lane and you preview in the middle of playback, letting go sets the
+controller to full and it stays there until the lane's next point — so that stretch plays back louder
+than a bounce would. It corrects itself at the next point, and it cannot happen at all on a track you
+have not yet written a shape to, which is the case the pad exists for. (The direction depends on the
+controller: expression's default is full, so the error is toward louder there, but a preview aimed at
+a different controller errs toward whatever that one's default is — modulation's, for instance, is
+off.) Restoring the lane's own value needs machinery that lives inside the schedule builder today, and
+we would rather ship the limitation written down than a second copy of that machinery that disagrees
+with the first. It is on the roadmap as its own item.
+
+For the same reason the pad only streams **while a gesture is in progress**. That rule is enforced
+on the wire, not just in the window: an agent that sends a move without first sending a begin is
+refused with a sentence telling it why. And a gesture that is never ended releases itself.
+
+One measurement came out of this that corrects a number we had been assuming: live playback hands
+the engine 512-frame blocks — 93.75 times a second, eight times finer than an offline bounce. The
+controller-resolution ceiling we had documented is a property of bouncing, not of listening.
+
+A saxophone held a long note and it sat there, flat, the way a real one never does. The report that
+came back named the mechanism precisely: seven CC11 expression lanes had been written into the
+song, they were stored, they were drawn in the editor, and not one of them reached the audio. The
+built-in sampler honoured CC64 and nothing else. The lanes were decoration.
+
+They sound now. CC11 drives amplitude continuously, a per-voice lowpass turns a controller into
+brightness on the built-in sampler, SFZ crossfade parses in both its velocity and controller forms,
+and `clip.applyBreathContour` writes a shaped breath curve over a sustained note. A warning path
+now says, at the moment you author a lane, whether the track's current instrument will actually
+honour it — because the failure this round exists to fix was never an error message. It was silence
+that looked like success.
+
+Then we asked the sampler three questions nobody had asked it, and two answers changed the plan.
+
+**CC 11 does not open a filter on a sound-bank track.** It is exactly a gain, following the MIDI
+square law, with any non-gain difference bounded at −104 dB. That is not "we looked and found
+nothing" — the same measurement fires on the built-in sampler's real filter and refuses there by
+95 dB. So on a hosted AUSampler the breath control shapes loudness and pitch, and no text may
+promise it shapes timbre. **The pitch-bend range is ±2.0155 semitones**, which vindicates an
+assumption that had been sitting unverified in the contour generator. And **the stock sax has its
+own vibrato on CC 1**, linear in depth, fixed at 5.400 Hz, generated inside the plugin.
+
+That last one matters more than it looks, because of what else turned up: **pitch-bend lanes are
+sample-and-held at the render block rate in a bounce.** Offline render uses 4096-frame blocks — an
+11.719 Hz sampler against a 5.86 Hz Nyquist — so a 5.5 Hz vibrato exports as two vibratos beating
+against each other, and an 11.72 Hz one exports as a static detune. Both of our own layers are
+already sample-accurate, which means we cannot fix it by scheduling better; the block size is the
+only lever. It is filed with the experiment that settles it. Until then, sax vibrato belongs on
+CC 1, where it never touches our bend lane at all.
+
+On top of that sits the first phase of the breath pad: eight named effort shapes — messa di voce,
+the two hairpins, terraced, sforzando-piano, sub-tone entry — applied per note or per phrase through
+`clip.applyEffortShape`. The phrase-and-breath detector that humanize had been carrying inline is
+now one definition used by both. The gates assert on rendered samples rather than stored lane
+points: a hairpin crescendo measured at +3.72 dB strictly rising, with a diminuendo control that
+falls.
+
+**One contract change to a shipped verb, deliberate and worth stating plainly.**
+`clip.applyBreathContour`'s `notesWithVibrato` count now requires `vibratoDepthCents > 0` as well as
+sufficient note length. It previously reported vibrato on notes that had none, and its companion
+warning fired about notes being "too short" when vibrato had simply been switched off. Callers
+reading that field were being told something untrue.
+
 ## 2026-08-18 — Nine genres, and a bass that is allowed to bloom
 
 A blues session had to ask for rock. It got rock's 140 BPM, rock's two guitars and, worst of the

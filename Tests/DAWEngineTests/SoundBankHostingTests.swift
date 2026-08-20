@@ -392,6 +392,292 @@ struct SoundBankHostingTests {
         #expect(defaultRatio < 0.02)                // … while the default preset is a bare sine
     }
 
+    // MARK: - T5 (breath-pad P5): does CC 11 share bend's block quantisation?
+
+    /// `measure-gm-sax-cc.md` §2.3a measured the block sample-and-hold **for
+    /// pitch bend only**, and §2.4 states the mechanism as "AUSampler computes
+    /// pitch per sample and merely reads its MIDI *inputs* per block". Whether
+    /// that covers CC 11 was DERIVED, never measured — and breath-pad P5 was
+    /// about to lean on it (deliver tremor amplitude-side, on the theory that
+    /// the CC lane is finer than the bend lane). This measures it.
+    ///
+    /// Method: one sustained sax note carrying a CC 11 lane that is a SINE at
+    /// `rateHz`, authored at 200 points/second so our own lane is nowhere near
+    /// the limit. Render offline, take a short-time RMS envelope, mean-subtract
+    /// it, and Goertzel the envelope at the commanded rate and at the
+    /// sample-and-hold image `|11.719 − rateHz|`. The built-in `.sampler` is
+    /// the negative control on the same lane, same clip, same analysis.
+    private func expressionSine(rateHz: Double, bpm: Double = 120,
+                                startBeat: Double, lengthBeats: Double,
+                                pointsPerSecond: Double = 200,
+                                centre: Int = 84, amplitude: Double = 43)
+        -> MIDIControllerLane {
+        let secondsPerBeat = 60.0 / bpm
+        let durationSeconds = lengthBeats * secondsPerBeat
+        let count = Int((durationSeconds * pointsPerSecond).rounded())
+        let points = (0...count).map { i -> MIDIControllerPoint in
+            let t = Double(i) / pointsPerSecond
+            let value = Double(centre) + amplitude * sin(2 * .pi * rateHz * t)
+            return MIDIControllerPoint(beat: startBeat + t / secondsPerBeat,
+                                       value: Int(value.rounded()))
+        }
+        return MIDIControllerLane(type: .cc(controller: 11), points: points)
+    }
+
+    /// Short-time RMS envelope of `samples` over `range`, one value per `hop`
+    /// frames. The envelope's own sample rate is `sampleRate / hop`.
+    private func rmsEnvelope(_ samples: [Float], in range: Range<Int>,
+                             hop: Int = 256) -> [Float] {
+        var out: [Float] = []
+        var i = range.lowerBound
+        while i + hop <= range.upperBound {
+            var sum = 0.0
+            for j in i..<(i + hop) { sum += Double(samples[j]) * Double(samples[j]) }
+            out.append(Float((sum / Double(hop)).squareRoot()))
+            i += hop
+        }
+        return out
+    }
+
+    /// Goertzel magnitude of a mean-subtracted envelope — the DC term of an
+    /// amplitude envelope is enormous and would leak into every bin.
+    private func envelopeMagnitude(_ envelope: [Float], frequency: Double,
+                                   sampleRate: Double) -> Double {
+        guard !envelope.isEmpty else { return 0 }
+        let mean = envelope.reduce(0.0) { $0 + Double($1) } / Double(envelope.count)
+        let centred = envelope.map { Float(Double($0) - mean) }
+        return goertzelMagnitude(centred, frequency: frequency,
+                                 sampleRate: sampleRate, in: 0..<centred.count)
+    }
+
+    /// A 4 s, 440 Hz mono sine written once per run — the built-in `.sampler`
+    /// needs a zone to sound at all, and the negative control has to sound.
+    private static var cachedSineFixture: URL?
+    private func sineFixture() throws -> URL {
+        if let cached = Self.cachedSineFixture { return cached }
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("daw-pro-p5-fixtures-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("sine440_4s_mono.wav")
+        let fileRate = 48_000.0
+        let frames = Int(fileRate * 4)
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: fileRate,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings,
+                                   commonFormat: .pcmFormatFloat32, interleaved: false)
+        let format = try #require(AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                                sampleRate: fileRate, channels: 1,
+                                                interleaved: false))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format,
+                                                   frameCapacity: AVAudioFrameCount(frames)))
+        let data = try #require(buffer.floatChannelData)
+        for frame in 0..<frames {
+            data[0][frame] = Float(0.5 * sin(2.0 * .pi * 440.0 * Double(frame) / fileRate))
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        try file.write(from: buffer)
+        Self.cachedSineFixture = url
+        return url
+    }
+
+    private func clip(withLane lane: MIDIControllerLane?) -> Clip {
+        Clip(name: "midi", startBeat: 0, lengthBeats: 8,
+             notes: [MIDINote(pitch: 69, velocity: 100, startBeat: 1, lengthBeats: 5)],
+             controllerLanes: lane.map { [$0] } ?? [])
+    }
+
+    @Test("T5 (P5): CC 11 is block-sampled on the hosted-AU path exactly as bend is")
+    func expressionSharesTheBlockRateOnHostedAUs() async throws {
+        let sampleRate = 48_000.0
+        let hop = 256
+        let envelopeRate = sampleRate / Double(hop)          // 187.5 Hz
+        let blockRate = 48_000.0 / 4_096.0                   // 11.71875 Hz
+        // Analysis window: 0.4 s after onset (past the attack) to 2.4 s.
+        let window = 24_000 + Int(0.4 * sampleRate)..<24_000 + Int(2.4 * sampleRate)
+
+        func bins(_ audio: [Float], rate: Double) -> (rate: Double, image: Double) {
+            let envelope = rmsEnvelope(audio, in: window, hop: hop)
+            return (envelopeMagnitude(envelope, frequency: rate, sampleRate: envelopeRate),
+                    envelopeMagnitude(envelope, frequency: abs(blockRate - rate),
+                                      sampleRate: envelopeRate))
+        }
+
+        // --- The discriminator: 8 Hz on the hosted AU ------------------------
+        // 8 Hz is above the 5.86 Hz Nyquist, so a sample-and-hold puts its
+        // image at 3.719 Hz — BELOW the commanded rate. A lowpass, a smoother
+        // or a slew limiter CANNOT manufacture energy down there; only
+        // re-sampling can.
+        let hostedAt8 = bins(
+            try await renderLeft(track: soundBankTrack(
+                program: 65, clips: [clip(withLane: expressionSine(rateHz: 8, startBeat: 1,
+                                                                   lengthBeats: 5))]),
+                                 durationSeconds: 4.0),
+            rate: 8)
+        // Same path, a rate BELOW Nyquist: the commanded rate must dominate.
+        let hostedAt2 = bins(
+            try await renderLeft(track: soundBankTrack(
+                program: 65, clips: [clip(withLane: expressionSine(rateHz: 2, startBeat: 1,
+                                                                   lengthBeats: 5))]),
+                                 durationSeconds: 4.0),
+            rate: 2)
+        // The BOTTOM of §10.1's 4–8 Hz physiological band, measured rather
+        // than derived: P5 has to say whether ANY of that band survives here.
+        let hostedAt4 = bins(
+            try await renderLeft(track: soundBankTrack(
+                program: 65, clips: [clip(withLane: expressionSine(rateHz: 4, startBeat: 1,
+                                                                   lengthBeats: 5))]),
+                                 durationSeconds: 4.0),
+            rate: 4)
+        // §10.1's own default rate, recorded because P5 has to choose it.
+        let hostedAt55 = bins(
+            try await renderLeft(track: soundBankTrack(
+                program: 65, clips: [clip(withLane: expressionSine(rateHz: 5.5, startBeat: 1,
+                                                                   lengthBeats: 5))]),
+                                 durationSeconds: 4.0),
+            rate: 5.5)
+        // NO lane at all — the analysis control. Whatever this reads is the
+        // floor every figure above has to beat.
+        let hostedFlat = bins(
+            try await renderLeft(track: soundBankTrack(program: 65,
+                                                       clips: [clip(withLane: nil)]),
+                                 durationSeconds: 4.0),
+            rate: 8)
+
+        // --- The engine control: same lane, same clip, built-in sampler ------
+        let zone = SamplerZone(audioFileURL: try sineFixture(), rootPitch: 69)
+        let builtIn = Track(
+            name: "Sampler", kind: .instrument,
+            clips: [clip(withLane: expressionSine(rateHz: 8, startBeat: 1, lengthBeats: 5))],
+            instrument: InstrumentDescriptor(
+                kind: .sampler,
+                sampler: SamplerParams(zones: [zone], attack: 0.001, release: 0.05)))
+        let builtInAt8 = bins(try await renderLeft(track: builtIn, durationSeconds: 4.0), rate: 8)
+
+        func line(_ label: String, _ b: (rate: Double, image: Double)) -> String {
+            "[measured] P5/T5 \(label): at-rate \(b.rate), at-image \(b.image), "
+                + "image/rate = \(b.image / max(b.rate, 1e-12))"
+        }
+        print(line("hosted AUSampler, CC11 @ 8.0 Hz (image 3.71875)", hostedAt8))
+        print(line("hosted AUSampler, CC11 @ 2.0 Hz (image 9.71875)", hostedAt2))
+        print(line("hosted AUSampler, CC11 @ 4.0 Hz (image 7.71875)", hostedAt4))
+        print(line("hosted AUSampler, CC11 @ 5.5 Hz (image 6.21875)", hostedAt55))
+        // ⭐ THE CLOSED FORM, and it is what makes the ceiling statable for
+        // ANY rate instead of only the four measured here. A zero-order hold
+        // at f_s weights the fundamental by sinc(f/f_s) and the first image by
+        // sinc((f_s−f)/f_s); those two sines are supplementary, so the ratio
+        // reduces to exactly `f / (f_s − f)`. Printed beside each measurement
+        // so a reader can see the model predict, not just describe.
+        for (label, rate, measured) in [("2.0", 2.0, hostedAt2), ("4.0", 4.0, hostedAt4),
+                                        ("5.5", 5.5, hostedAt55), ("8.0", 8.0, hostedAt8)] {
+            let predicted = rate / (blockRate - rate)
+            print("[measured] P5/T5 ZOH model @ \(label) Hz: predicted image/rate \(predicted), "
+                  + "measured \(measured.image / max(measured.rate, 1e-12))")
+            #expect(abs(measured.image / measured.rate - predicted) < 0.1 * predicted + 0.02)
+        }
+        print(line("hosted AUSampler, NO CC11 lane  (floor)         ", hostedFlat))
+        print(line("built-in sampler, CC11 @ 8.0 Hz (image 3.71875)", builtInAt8))
+
+        // The control sounds and tracks the commanded rate cleanly: without
+        // this the hosted image below could be an artefact of the analysis.
+        #expect(builtInAt8.rate > 0)
+        #expect(builtInAt8.image < builtInAt8.rate * 0.5)
+        // The floor: a note with no lane has essentially nothing at either bin.
+        #expect(hostedFlat.image < hostedAt8.image * 0.25)
+        // ⛔ THE FINDING: on the hosted AU an 8 Hz expression modulation comes
+        // back with MORE energy at 3.719 Hz than at 8 Hz. CC 11 is re-sampled
+        // at the block rate, exactly as bend is.
+        #expect(hostedAt8.image > hostedAt8.rate)
+        // …and below Nyquist the commanded rate wins, so the effect is a
+        // sampling limit and not a fixed resonance.
+        #expect(hostedAt2.rate > hostedAt2.image)
+    }
+
+    // MARK: - T6 (breath-pad P5): how deep must a CC 11 tremor be to be heard?
+
+    /// §10.1 specifies `tremorDepth` as "0.03 of effort travel". At leg D's
+    /// defaults `travel = peakValue × depth = 127 × 0.25 = 31.75 CC`, so that
+    /// reading is **±0.95 CC — one integer step**. The competing reading (0.03
+    /// of `peakValue`) is ±3.8 CC. Same knob name, 4× different feature. This
+    /// measures what each one is worth in dB on the path that can actually
+    /// carry a tremor (the built-in `.sampler`), because if ±1 CC moves nothing
+    /// then P5 would be shipping a generator hook, five wire keys and a
+    /// suppression warning for a feature that is inaudible everywhere.
+    @Test("T6 (P5): CC 11 tremor depth in CC steps → measured dB on the built-in sampler")
+    func expressionTremorDepthInDecibels() async throws {
+        let sampleRate = 48_000.0
+        let hop = 256
+        let envelopeRate = sampleRate / Double(hop)
+        let window = 24_000 + Int(0.4 * sampleRate)..<24_000 + Int(2.4 * sampleRate)
+        let zone = SamplerZone(audioFileURL: try sineFixture(), rootPitch: 69)
+
+        /// Peak-to-trough dB of a `rateHz` modulation, measured two ways so a
+        /// disagreement is visible: (a) from the Goertzel component amplitude
+        /// (2 × magnitude) against the envelope mean, and (b) from the raw
+        /// envelope's own min and max.
+        func depthDb(_ audio: [Float], rateHz: Double) -> (goertzel: Double, raw: Double) {
+            let envelope = rmsEnvelope(audio, in: window, hop: hop)
+            let mean = envelope.reduce(0.0) { $0 + Double($1) } / Double(envelope.count)
+            guard mean > 0 else { return (0, 0) }
+            let amplitude = 2 * envelopeMagnitude(envelope, frequency: rateHz,
+                                                  sampleRate: envelopeRate)
+            let m = min(0.999, amplitude / mean)
+            let lo = Double(envelope.min() ?? 0), hi = Double(envelope.max() ?? 0)
+            return (20 * log10((1 + m) / (1 - m)),
+                    lo > 0 ? 20 * log10(hi / lo) : .infinity)
+        }
+
+        for filterDepth in [0.0, 0.6] as [Double] {
+            var params = SamplerParams(zones: [zone], attack: 0.001, release: 0.05)
+            params.expressionFilterDepth = filterDepth
+            for amplitude in [1.0, 2.0, 4.0, 8.0] as [Double] {
+                let lane = expressionSine(rateHz: 4, startBeat: 1, lengthBeats: 5,
+                                          centre: 111, amplitude: amplitude)
+                let track = Track(name: "Sampler", kind: .instrument,
+                                  clips: [clip(withLane: lane)],
+                                  instrument: InstrumentDescriptor(kind: .sampler,
+                                                                   sampler: params))
+                let measured = depthDb(try await renderLeft(track: track, durationSeconds: 4.0),
+                                       rateHz: 4)
+                print("[measured] P5/T6 built-in sampler, expressionFilterDepth "
+                      + "\(filterDepth), CC11 111 ± \(Int(amplitude)): "
+                      + "peak-to-trough \(measured.goertzel) dB (Goertzel), "
+                      + "\(measured.raw) dB (raw envelope min/max)")
+            }
+        }
+
+        // A ±1 CC step must still MOVE something, or the null test below it
+        // would be measuring nothing. Recorded as a floor, not a target.
+        let oneStep = Track(
+            name: "Sampler", kind: .instrument,
+            clips: [clip(withLane: expressionSine(rateHz: 4, startBeat: 1, lengthBeats: 5,
+                                                  centre: 111, amplitude: 1))],
+            instrument: InstrumentDescriptor(
+                kind: .sampler,
+                sampler: SamplerParams(zones: [zone], attack: 0.001, release: 0.05)))
+        let flat = Track(
+            name: "Sampler", kind: .instrument,
+            clips: [clip(withLane: expressionSine(rateHz: 4, startBeat: 1, lengthBeats: 5,
+                                                  centre: 111, amplitude: 0))],
+            instrument: InstrumentDescriptor(
+                kind: .sampler,
+                sampler: SamplerParams(zones: [zone], attack: 0.001, release: 0.05)))
+        let oneStepAudio = try await renderLeft(track: oneStep, durationSeconds: 4.0)
+        let flatAudio = try await renderLeft(track: flat, durationSeconds: 4.0)
+        let oneStepBin = envelopeMagnitude(rmsEnvelope(oneStepAudio, in: window, hop: hop),
+                                           frequency: 4, sampleRate: envelopeRate)
+        let flatBin = envelopeMagnitude(rmsEnvelope(flatAudio, in: window, hop: hop),
+                                        frequency: 4, sampleRate: envelopeRate)
+        print("[measured] P5/T6 4 Hz envelope bin: ±1 CC \(oneStepBin), flat lane \(flatBin), "
+              + "ratio \(oneStepBin / max(flatBin, 1e-15))")
+        #expect(oneStepBin > flatBin * 4)
+    }
+
     // MARK: - T-extra (R3): record, don't assert
 
     @Test("T-extra: out-of-bank address (bankMSB 5) behavior is measured and recorded")

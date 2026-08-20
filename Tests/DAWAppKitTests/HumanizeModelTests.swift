@@ -392,4 +392,346 @@ import DAWCore
         }
         #expect(legato.count == 4)
     }
+
+    // MARK: - BREATH PAD (m28-p7) — folded in, structurally
+
+    /// ⚠️ **THIS SUITE ALSO OWNS `BreathPadModel`'s TESTS**, and that is a
+    /// STRUCTURAL fold rather than a topical merge, exactly as
+    /// `PolySynthEditorModelTests` owns the sampler's:
+    /// `MainActorOccupancySiteTests`' Leg C caps the tree's `@MainActor`
+    /// `@Suite` count at **330** and the tree is AT 330, so a `@MainActor`
+    /// `DAWAppKit` model cannot have a suite of its own. The bound is a review
+    /// cadence on main-actor occupancy and raising it to fit a new panel would
+    /// be raising the thing it measures.
+    ///
+    /// Everything about the pad that could live in a value type already does,
+    /// in the free `BreathPadGeometryTests` — the dial geometry, the trail, the
+    /// height budget, the movement gate and the whole air-gauge derivation. What
+    /// is left here is what genuinely needs the `@MainActor` class: the GESTURE
+    /// LIFECYCLE and the two store closures.
+    ///
+    /// A failure report from this suite may therefore be about the BREATH PAD,
+    /// not humanize — read the test name, not the suite header.
+
+    /// A pad wired to a REAL `ProjectStore` (the `PolySynthEditorModelTests`
+    /// apply-path-identity idiom: the panel's commit is the same call the
+    /// `clip.applyEffortShape` wire verb makes) and a RECORDING preview closure
+    /// — the preview must not need an engine, and counting its calls is how the
+    /// "never streams without a gesture" rule is observed at all.
+    @MainActor final class PadHarness {
+        let store = ProjectStore()
+        let trackID: UUID
+        let clipID: UUID
+        /// Every preview call, in order.
+        var previews: [(trackID: UUID, effort: Double, phase: PadPreviewPhase)] = []
+        /// How many times the APPLY closure was entered. The number the
+        /// commit-once rule is asserted on.
+        var applyCount = 0
+        /// Set to make the preview closure throw — the refusal path.
+        var previewThrows: ProjectError?
+
+        init(noteCount: Int = 8, noteLengthBeats: Double = 4) throws {
+            let track = store.addTrack(kind: .instrument)
+            trackID = track.id
+            let notes = (0..<noteCount).map {
+                MIDINote(pitch: 69, startBeat: Double($0) * noteLengthBeats,
+                         lengthBeats: noteLengthBeats)
+            }
+            clipID = try store.addMIDIClip(
+                toTrack: track.id,
+                lengthBeats: noteLengthBeats * Double(noteCount) + 1,
+                notes: notes).id
+        }
+
+        func makeModel() -> BreathPadModel {
+            BreathPadModel(
+                apply: { [self] clipID, ring, angle, radius, air in
+                    applyCount += 1
+                    return try store.applyEffortShape(clipID: clipID, ring: ring,
+                                                      angleRadians: angle,
+                                                      radius: radius, air: air)
+                },
+                preview: { [self] trackID, effort, phase in
+                    if let previewThrows { throw previewThrows }
+                    previews.append((trackID, effort, phase))
+                })
+        }
+
+        func preparedModel() -> BreathPadModel {
+            let model = makeModel()
+            model.prepare(clipID: clipID, trackID: trackID, clipName: "Sax", isMIDI: true)
+            return model
+        }
+
+        /// How many expression-lane points the clip carries — the artefact a
+        /// commit leaves behind, read off the STORE rather than off the model.
+        var expressionPointCount: Int {
+            store.tracks.flatMap(\.clips).first { $0.id == clipID }?
+                .controllerLanes.first { $0.type == .cc(controller: 11) }?.points.count ?? 0
+        }
+    }
+
+    /// ⛔⛔ RULE 1, THE ONE THE WHOLE DESIGN TURNS ON: the pad streams **if and
+    /// only if** a gesture is in progress (design §5.2). With no gesture, what
+    /// is heard is the committed lane and nothing else — which is what makes
+    /// playback, replay and a bounce agree sample for sample.
+    @Test func theBreathPadStreamsOnlyWhileAGestureIsOpen() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+
+        // Moving the dot with no gesture open pushes NOTHING.
+        model.setDot(angle: 1.0, radius: 0.8)
+        #expect(harness.previews.isEmpty)
+
+        model.beginGesture()
+        #expect(harness.previews.map(\.phase) == [.begin])
+        model.setDot(angle: 1.2, radius: 0.7)
+        model.setDot(angle: 1.4, radius: 0.6)
+        #expect(harness.previews.map(\.phase) == [.begin, .move, .move])
+        _ = model.endGesture()
+        #expect(harness.previews.map(\.phase) == [.begin, .move, .move, .end])
+
+        // And after the release it is silent again.
+        model.setDot(angle: 2.0, radius: 0.5)
+        #expect(harness.previews.count == 4)
+        #expect(harness.previews.allSatisfy { $0.trackID == harness.trackID })
+    }
+
+    /// ⛔⛔ RULE 2: the commit is ONE call, on RELEASE — never per drag frame.
+    /// `applyEffortShape` spends an undo step and rebuilds the clip's controller
+    /// lanes, which restarts playback with a mid-decay note re-attack; paying
+    /// that per frame is the m25-k shape, and undo coalescing cannot see it.
+    @Test func theBreathPadCommitsExactlyOncePerGestureAndOnlyOnRelease() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+
+        model.beginGesture()
+        for i in 1...30 { model.setDot(angle: Double(i) * 0.05, radius: 0.9) }
+        // THIRTY drag frames and not one commit yet.
+        #expect(harness.applyCount == 0)
+        #expect(harness.expressionPointCount == 0)
+
+        #expect(model.endGesture())
+        #expect(harness.applyCount == 1)
+        #expect(harness.expressionPointCount > 0)
+        #expect(model.lastApplication?.notesTouched == 8)
+
+        // A second gesture is a second commit — one each, never a running total.
+        model.beginGesture()
+        model.setDot(angle: 3.0, radius: 0.4)
+        #expect(model.endGesture())
+        #expect(harness.applyCount == 2)
+    }
+
+    /// `DragGesture(minimumDistance: 0)` makes a plain CLICK a complete gesture
+    /// with zero translation (`DeferredKnob`'s part 3). Ungated, every stray
+    /// press on the pad would spend an undo step and pay an engine rebuild.
+    @Test func aClickOnThePadCommitsNothingButStillBalancesItsStream() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+
+        model.beginGesture()
+        #expect(!model.gestureMoved)
+        #expect(!model.endGesture())
+        #expect(harness.applyCount == 0)
+        #expect(harness.expressionPointCount == 0)
+        // The stream still opened and CLOSED — an unbalanced begin would park a
+        // controller value on the strip until the 30 s ceiling fired.
+        #expect(harness.previews.map(\.phase) == [.begin, .end])
+    }
+
+    /// Dismissing the card with the pointer down is its own path: end the
+    /// stream, commit nothing. A gesture abandoned by a dismissal did not ask
+    /// for an edit.
+    @Test func dismissingMidGestureEndsTheStreamAndCommitsNothing() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+
+        model.beginGesture()
+        model.setDot(angle: 2.5, radius: 0.9)          // a REAL move
+        #expect(model.gestureMoved)
+        model.endGestureWithoutCommitting()
+        #expect(harness.applyCount == 0)
+        #expect(harness.previews.map(\.phase) == [.begin, .move, .end])
+        #expect(model.gesture == nil)
+        // Idempotent: a second dismissal pushes nothing more.
+        model.endGestureWithoutCommitting()
+        #expect(harness.previews.count == 3)
+    }
+
+    /// ⭐ The air switch reaches the store, and the gauge reports WHAT ACTUALLY
+    /// HAPPENED rather than what the switch said. Driven through a real
+    /// `applyEffortShape`, so the report is `AirBudget.sweep`'s own.
+    @Test func theAirSwitchReachesTheStoreAndTheGaugeReportsWhatItDid() throws {
+        // Eight 4-beat notes back to back = 32 beats ≈ 16 s of continuous
+        // blowing against a 6 s capacity: the player certainly runs out.
+        let harness = try PadHarness(noteCount: 8, noteLengthBeats: 4)
+        let model = harness.preparedModel()
+        #expect(!model.airEnforced, "design §9.5: enforcement is opted into, once, visibly")
+
+        model.setDot(angle: EffortRing.standard.angle(ofIndex: 3), radius: 1)
+        #expect(model.commit())
+        let off = model.gauge
+        #expect(off.hasReport)
+        #expect(!off.applied, "with the switch off nothing reached the lane")
+        #expect(off.constrainedNoteCount > 0, "the fixture must actually run out of air")
+        #expect(off.headline.contains("WOULD"))
+
+        model.airEnforced = true
+        #expect(model.commit())
+        let on = model.gauge
+        #expect(on.applied)
+        #expect(on.constrainedNoteCount > 0)
+        #expect(!on.headline.contains("WOULD"))
+        #expect(on.maxAttenuationDb > 0)
+    }
+
+    /// A refused preview is SURFACED. `previewEffort` refuses on a non-instrument
+    /// track and while recording, and a pad that silently does nothing is
+    /// indistinguishable from a broken one.
+    @Test func aPreviewRefusalIsSurfacedRatherThanSwallowed() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        harness.previewThrows = .transportBusy(
+            "cannot preview the pad while recording — stop the take first")
+
+        model.beginGesture()
+        #expect(model.previewRefusal != nil)
+        #expect(model.previewRefusal?.contains("recording") == true)
+
+        // It clears once the stream succeeds again.
+        harness.previewThrows = nil
+        model.setDot(angle: 1, radius: 0.5)
+        #expect(model.previewRefusal == nil)
+    }
+
+    /// An apply that the STORE refuses leaves the panel with the store's own
+    /// sentence and nothing written — never a closed panel that changed nothing.
+    @Test func anApplyRefusalIsSurfacedAndNothingIsCommitted() throws {
+        let harness = try PadHarness()
+        let model = harness.makeModel()
+        model.prepare(clipID: UUID(), trackID: harness.trackID,
+                      clipName: "Ghost", isMIDI: true)
+        model.setDot(angle: 1, radius: 1)
+        #expect(!model.commit())
+        #expect(model.applyRefusal != nil)
+        #expect(model.lastApplication == nil)
+        #expect(!model.gauge.hasReport)
+    }
+
+    /// A dot in the MIDDLE is a true no-op: the blend collapses to
+    /// `EffortRing.defaultNeutral`, which is "exactly as authored". Firing it
+    /// would spend an undo step to write the part the clip already has.
+    @Test func aDotInTheMiddleIsRefusedAsATrueNoOp() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        model.setDot(angle: 1, radius: 0)
+        #expect(!model.canApply)
+        #expect(!model.commit())
+        #expect(harness.applyCount == 0)
+        #expect(model.applyRefusal?.contains("exactly as written") == true)
+    }
+
+    /// ⭐ **THE MEASURED SPAN, pinned so nobody has to wonder whether the live
+    /// preview is a real control.** The pad streams `EffortField`'s own field
+    /// law with no note and no phrase (its documented 0.5 fallback), and across
+    /// the eight library gestures at full radius that reads **0.499 … 1.000**,
+    /// i.e. **CC 63 … 127**. On the hosted-AU path CC 11 is a square-law gain,
+    /// so CC 63 against 127 is ≈ −12 dB — audible, not a dead knob. It also
+    /// never reaches 0: the pad cannot preview a silence.
+    @Test func theEffortSpanAcrossTheRingIsWideEnoughToHear() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        var efforts: [Double] = []
+        for index in 0..<EffortRing.standard.count {
+            model.setDot(angle: EffortRing.standard.angle(ofIndex: index), radius: 1)
+            efforts.append(model.effort)
+        }
+        let low = try #require(efforts.min())
+        let high = try #require(efforts.max())
+        #expect(abs(low - 0.499) < 0.01, "measured 0.499 (late bloom), got \(low)")
+        #expect(abs(high - 1.0) < 0.001, "measured 1.000 (messa di voce), got \(high)")
+        #expect(PadPreviewController.controllerValue(forEffort: low) == 63)
+        #expect(PadPreviewController.controllerValue(forEffort: high) == 127)
+
+        // Radius 0 is "as authored" — the LOUDEST reading, not the quietest.
+        // The panel's DEPTH label exists because of this.
+        model.setDot(angle: EffortRing.standard.angle(ofIndex: 4), radius: 0)
+        #expect(abs(model.effort - 1.0) < 1e-9)
+        #expect(model.effort > efforts[4])
+    }
+
+    /// Pressing a NAME parks the dot exactly on that gesture — §8.2's whole
+    /// argument for nearest-two weighting is that this must be possible — and it
+    /// goes through the SAME single gesture as any other press, so it commits
+    /// exactly once.
+    ///
+    /// ⛔ The first cut made each label a tappable `Text` inside the pad's
+    /// `DragGesture(minimumDistance: 0)`. Both fire: the drag opens and jumps
+    /// the dot, the tap parks it again, and one click spends TWO undo steps.
+    /// The names are `allowsHitTesting(false)` now and the press is resolved by
+    /// `BreathPadGeometry.patternHit` inside the one gesture.
+    @Test func pressingAPatternNameParksTheDotExactlyOnItAndCommitsOnce() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        let geo = BreathPadGeometry()
+        model.setDot(angle: 0.3, radius: 0.9)
+
+        model.beginDrag(at: geo.labelPoint(index: 5, count: 8), geometry: geo)
+        #expect(abs(model.dot.angle - EffortRing.standard.angle(ofIndex: 5)) < 1e-9)
+        #expect(model.nearestPatternIndex == 5)
+        #expect(model.blendReadout.contains("TERRACED"))
+        #expect(harness.applyCount == 0, "still nothing committed mid-gesture")
+        #expect(model.endDrag())
+        #expect(harness.applyCount == 1)
+
+        // Pressing the SAME name again moves nothing, so it is not a second
+        // undo step.
+        model.beginDrag(at: geo.labelPoint(index: 5, count: 8), geometry: geo)
+        #expect(!model.endDrag())
+        #expect(harness.applyCount == 1)
+    }
+
+    /// A press on an empty part of the dial JUMPS the dot under the finger, and
+    /// a press ON the dot grabs it where it is.
+    @Test func aPressJumpsTheDotUnlessItLandsOnTheDot() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        let geo = BreathPadGeometry()
+        model.setDot(angle: 0, radius: 1)
+
+        // Empty space at a quarter turn, half way out.
+        let target = geo.point(angle: .pi / 2, radius: 0.5)
+        model.beginDrag(at: target, geometry: geo)
+        #expect(abs(EffortRing.degrees(fromRadians: model.dot.angle) - 90) < 0.5)
+        #expect(abs(model.dot.radius - 0.5) < 0.01)
+        model.endGestureWithoutCommitting()
+
+        // A press ON the dot leaves it exactly where it was.
+        let before = model.dot
+        model.beginDrag(at: geo.point(of: model.dot), geometry: geo)
+        #expect(model.dot == before)
+        #expect(!model.gestureMoved)
+        model.endGestureWithoutCommitting()
+        #expect(harness.applyCount == 0)
+    }
+
+    /// The dot is sticky across `prepare` (a gesture the player liked is the one
+    /// they want on the next phrase); the REPORT is not (it describes the clip
+    /// being left, and a stale one would read as a fresh answer).
+    @Test func theDotIsStickyAcrossPrepareButTheReportIsNot() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        model.setDot(angle: 2.2, radius: 0.65)
+        #expect(model.commit())
+        #expect(model.gauge.hasReport)
+
+        model.prepare(clipID: harness.clipID, trackID: harness.trackID,
+                      clipName: "Sax 2", isMIDI: true)
+        #expect(abs(model.dot.angle - 2.2) < 1e-9)
+        #expect(abs(model.dot.radius - 0.65) < 1e-9)
+        #expect(!model.gauge.hasReport)
+        #expect(model.lastApplication == nil)
+        #expect(model.warnings.isEmpty)
+    }
 }

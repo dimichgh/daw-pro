@@ -288,9 +288,19 @@ extension ProjectStore {
             for index in groups[groupIndex].indices {
                 let note = notes[index]
                 let gap = nextOnset - (note.startBeat + note.lengthBeats)
-                // gap < 0  → already overlapping, never shortened.
-                // gap > maxGapBeats → a rest (a breath): preserved untouched.
-                guard gap >= 0, gap <= maxGapBeats else { continue }
+                // The gap test now lives in `PhraseDetection.classify` — the ONE
+                // definition of "is this gap a breath?", shared with the breath
+                // pad's phrase splitter so the two cannot drift apart. The
+                // behaviour is unchanged and the classifier's doc comment
+                // records why its branch order is what it is (including the NaN
+                // path the old `guard gap >= 0, gap <= maxGapBeats` had):
+                // `.overlap` (gap < 0) is already joined and is never shortened,
+                // `.breath` (gap > maxGapBeats) is a rest and is preserved
+                // untouched, and only `.articulation` is closed.
+                guard PhraseDetection.classify(gapBeats: gap,
+                                               maxGapBeats: maxGapBeats) == .articulation else {
+                    continue
+                }
 
                 let overlap = nextPitches.contains(note.pitch) ? 0 : overlapBeats
                 let targetEnd = min(nextOnset + overlap, clipEnd)

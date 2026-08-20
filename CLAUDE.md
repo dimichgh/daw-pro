@@ -5,7 +5,7 @@ A professional, AI-native digital audio workstation for macOS. Goal: the feature
 ## Stack
 
 - **App**: Swift 6, SwiftUI, macOS 14+. Custom Canvas/Metal rendering for meters, waveforms, glowing indicators.
-- **Audio**: `DAWEngine` wraps AVAudioEngine/CoreAudio behind the `AudioEngineProtocol`. AudioUnit (AUv2/v3) hosting for instruments & effects. Real-time-safe code: no allocation, locks, or ObjC dispatch on the render thread.
+- **Audio**: `DAWEngine` wraps AVAudioEngine/CoreAudio behind `AudioEngineControlling` (`Sources/DAWCore/EngineProtocol.swift`). AudioUnit (AUv2/v3) hosting for instruments & effects. Real-time-safe code: no allocation, locks, or ObjC dispatch on the render thread.
 - **Control plane**: `DAWControl` runs a WebSocket JSON command server (default `ws://127.0.0.1:17600`). Every user-facing operation must be invokable through it — this is what makes the app AI-controllable and E2E-testable.
 - **MCP**: `mcp-server/` (TypeScript, `@modelcontextprotocol/sdk`, stdio) exposes the DAW to AI agents; it bridges to the app over the control WebSocket and calls Anthropic/OpenAI/Suno APIs directly for generation tasks.
 - **AI services**: Anthropic + OpenAI (lyrics, naming, music-theory reasoning), **ACE-Step-1.5 local sidecar** (full-song/sung-vocal generation, FastAPI on 127.0.0.1:8001; Suno is a dormant cloud fallback), GPT Image (UI asset generation). Keys via `.env` / environment — never hardcode, never commit.

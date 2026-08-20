@@ -72,7 +72,7 @@ struct CopilotCatalogTests {
         // group delete/move, and strictly better undo atomicity for a
         // capability (clip.remove/clip.move) already IN the catalog — took it
         // 69 -> 71.
-        #expect(CopilotToolCatalog.v1.count == 76)   // 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd) -> 76 at m27 leg D (clip.applyBreathContour)
+        #expect(CopilotToolCatalog.v1.count == 77)   // 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd) -> 76 at m27 leg D (clip.applyBreathContour) -> 77 at breath pad P1 (clip.applyEffortShape)
         #expect(CopilotToolCatalog.tool(command: "clip.applyBreathContour") != nil,
                 "clip.applyBreathContour missing from the catalog — the copilot is exactly\n                 the caller that should reach for a breath contour, and m21-b2 requires a\n                 new user-facing capability to be visible to it")
         #expect(CopilotToolCatalog.tool(command: "transport.setStopAtContentEnd") != nil,
@@ -176,5 +176,105 @@ struct CopilotCatalogTests {
         #expect(byToolName.command == "clip.setNotes")
         #expect(CopilotToolCatalog.tool(command: "track.remove") == nil)
         #expect(CopilotToolCatalog.tool(toolName: "ai_copilotSend") == nil)
+    }
+
+    // MARK: - Catalog PARAM-KEY parity with the wire (breath pad P5)
+
+    /// ⛔⛔ **THE CATALOG IS HAND-WRITTEN AND ITS PARAM KEYS WERE UNGATED.**
+    /// Every other test in this suite pins command NAMES, schema SHAPE, and
+    /// entry COUNT — none of them looks at a single property key. A key
+    /// mistyped here (`tremorRateHZ` for `tremorRateHz`) therefore advertised a
+    /// parameter to the in-app Copilot that `Commands.swift` would REJECT, and
+    /// nothing anywhere went red. MEASURED, not supposed: that exact typo was
+    /// planted while building P5 and the whole `Copilot`-filtered run — 238
+    /// tests, 20 suites — stayed green.
+    ///
+    /// This is the hazard the P5 brief named ("a key the DESCRIPTION advertises
+    /// but the SCHEMA omits") arriving through the third surface, and it is
+    /// this tree's characteristic failure mode: the Copilot would emit the
+    /// advertised key, the wire would refuse the whole call, and the only
+    /// symptom is a plausible-looking error blamed on the model.
+    ///
+    /// Direction is deliberate: **catalog ⊆ wire**. The catalog is allowed to
+    /// be a curated subset (most entries are — that is the point of a curated
+    /// tool surface), but it may never advertise a key the wire will not take.
+    @Test("every param key the Copilot catalog advertises is a key Commands.swift actually accepts — the direction that matters, since a curated subset is legal and a typo is not")
+    func catalogParamKeysAreAcceptedByTheWire() throws {
+        let allowedByVerb = try Self.allowedKeysByVerbInSource()
+        #expect(!allowedByVerb.isEmpty,
+                "the source scan itself must find something, or this test is vacuously green")
+
+        // POSITIVE CONTROL on the scrape: the P5 verb must be one of the verbs
+        // the scrape actually resolved, and its key set must contain a key we
+        // can see with our own eyes. Without this, a regex that silently
+        // stopped matching would turn every assertion below into a no-op and
+        // the test would still pass — a tool that never looked and a tool that
+        // looked and found nothing produce the same green.
+        let effortKeys = try #require(allowedByVerb["clip.applyEffortShape"],
+                                      "the scrape lost clip.applyEffortShape entirely")
+        #expect(effortKeys.contains("tremorRateHz"))
+        #expect(effortKeys.contains("driftDepth"))
+        #expect(effortKeys.contains("clipId"))
+
+        var checked = 0
+        for tool in CopilotToolCatalog.v1 {
+            guard let allowed = allowedByVerb[tool.command] else { continue }
+            guard case .object(let fields) = tool.schema,
+                  case .object(let properties)? = fields["properties"] else { continue }
+            checked += 1
+            for key in properties.keys.sorted() {
+                #expect(allowed.contains(key),
+                        "\(tool.command): the catalog advertises '\(key)', which Commands.swift does not accept — the Copilot would emit it and the wire would refuse the whole call")
+            }
+        }
+        // Second vacuity guard: the LOOP must have had work to do. `checked`
+        // counts catalog entries whose verb the scrape resolved AND whose
+        // schema exposed properties; if a refactor breaks either half, this
+        // number collapses and says so instead of passing quietly.
+        print("[measured] catalog param-key parity: \(checked) of \(CopilotToolCatalog.v1.count) "
+              + "catalog entries compared against \(allowedByVerb.count) scraped wire key sets")
+        #expect(checked >= 50,
+                "only \(checked) catalog entries were actually compared — the gate has lost its reach")
+    }
+
+    /// The allowed-key set for every verb whose `rejectUnknownKeys` call site
+    /// writes its set as an ARRAY LITERAL. Same scrape family as
+    /// `ZeroParamVerbRejectionTests`, but it keeps the KEYS rather than
+    /// discarding them for the verb name.
+    private static func allowedKeysByVerbInSource() throws -> [String: Set<String>] {
+        var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let fm = FileManager.default
+        var source: URL?
+        for _ in 0..<12 {
+            let candidate = dir.appendingPathComponent("Sources/DAWControl/Commands.swift")
+            if fm.fileExists(atPath: candidate.path) { source = candidate; break }
+            dir = dir.deletingLastPathComponent()
+        }
+        guard let source else {
+            Issue.record("Could not locate Sources/DAWControl/Commands.swift from \(#filePath)")
+            return [:]
+        }
+        let text = try String(contentsOf: source, encoding: .utf8)
+        // `[^\]]` spans newlines under NSRegularExpression, which is what lets
+        // this reach the multi-line literals (clip.applyEffortShape's is 17
+        // lines long). Capture 1 is the literal's body, capture 2 the verb.
+        let pattern = #"rejectUnknownKeys\(\s*\[([^\]]*)\]\s*,\s*verb:\s*"([^"]+)""#
+        let regex = try NSRegularExpression(pattern: pattern)
+        let quoted = try NSRegularExpression(pattern: #""([^"]+)""#)
+        var found: [String: Set<String>] = [:]
+        regex.enumerateMatches(in: text, range: NSRange(text.startIndex..., in: text)) { match, _, _ in
+            guard let match, match.numberOfRanges > 2,
+                  let bodyRange = Range(match.range(at: 1), in: text),
+                  let verbRange = Range(match.range(at: 2), in: text) else { return }
+            let body = String(text[bodyRange])
+            var keys: Set<String> = []
+            quoted.enumerateMatches(in: body, range: NSRange(body.startIndex..., in: body)) { m, _, _ in
+                guard let m, m.numberOfRanges > 1,
+                      let r = Range(m.range(at: 1), in: body) else { return }
+                keys.insert(String(body[r]))
+            }
+            found[String(text[verbRange])] = keys
+        }
+        return found
     }
 }

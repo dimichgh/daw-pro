@@ -351,14 +351,33 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // contour over a MIDI clip's notes — the expression swell plus delayed
   // vibrato; a mutating tool, so it joined the strict-schema wrapper count)
   // took it 185 -> 186.
+  // Breath pad P1's `clip_apply_effort_shape` (apply one NAMED effort gesture —
+  // messa di voce, a phrase-wide hairpin, sforzando-piano — through leg D's own
+  // machinery; a mutating tool, so it joined the strict-schema wrapper count)
+  // took it 186 -> 187.
+  // Breath pad P6's `pad_preview_effort` (stream one effort value live while a
+  // pad gesture is open — a preview, never the record; a mutating tool, so it
+  // joined the strict-schema wrapper count) took it 187 -> 188.
   // ⚠️ The DECOMPOSITION, because the total on its own has rotted before:
   // 34 `server.registerTool(` (pure reads, deliberately exempt from `.strict()`)
-  // + 151 `registerTool(` (the strict-schema wrappers — `vc_import_voice_model`,
+  // + 154 `registerTool(` (the strict-schema wrappers — `vc_import_voice_model`,
   // `transport_set_stop_at_content_end`, `audio_profile_file`,
-  // `clip_detect_pitch`, `clip_get_notes`, m26-i's three sampler tools, and
-  // m26-k's `edit_paste_clips` and m27 leg D's `clip_apply_breath_contour`
-  // joined those) = 186.
-  assert.equal(result.tools.length, 186);
+  // `clip_detect_pitch`, `clip_get_notes`, m26-i's three sampler tools,
+  // m26-k's `edit_paste_clips`, m27 leg D's `clip_apply_breath_contour` and
+  // breath pad P1's `clip_apply_effort_shape` and P6's `pad_preview_effort`
+  // joined those) = 188.
+  //
+  // ⚠️⚠️ THE DECOMPOSITION ITSELF HAD ROTTED and this cycle re-measured it
+  // rather than adding one: at 186 tools it read "34 + 151", which does not
+  // even add up to 186. Measured 2026-08-19 by name-capturing regexes
+  // (`server\.registerTool\(\s*\n?\s*"([a-z0-9_]+)"` for the direct set,
+  // the same without the `server.` prefix and minus that set for the wrapper
+  // set): 34 direct + 154 wrapper = 188, no name in both, no duplicates
+  // (re-measured 2026-08-19 at the breath-pad P6 close by the same regexes,
+  // with a bogus-name negative control that returned nothing).
+  // ⚠️ A naive `grep -o 'server\.registerTool('` returns 36, not 34 — two of
+  // those occurrences are inside the wrapper's own doc comment and body.
+  assert.equal(result.tools.length, 188);
 });
 
 // ---------------------------------------------------------------------------

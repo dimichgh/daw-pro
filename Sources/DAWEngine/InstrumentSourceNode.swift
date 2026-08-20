@@ -345,11 +345,58 @@ final class InstrumentRenderer: @unchecked Sendable {
     /// not a comment. Lock-free and allocation-free, so it cannot stall the
     /// render thread. Returns false when the ring was full (the drop is answered
     /// by cutting the open audition voices — never by resetting the instrument).
+    ///
+    /// ## THE PAYLOAD CONTRACT (amended at the breath pad's P6 — read this before
+    /// "fixing" the 6c drain)
+    ///
+    /// TWO payload families are supported on this ring, and they are supported
+    /// for different reasons:
+    ///
+    /// 1. **Note on/off (kind 0/1).** Voice-bearing. The 6c drain owns
+    ///    `pitchToAuditionID`, `openAuditionCount` and `auditionOpenedAt` for
+    ///    these, so a held audition pairs its off and the 3 s liveness watchdog
+    ///    can cut a voice whose main actor stopped heartbeating.
+    /// 2. **Controller / bend / pressure (kind 2/3/4) — BLESSED, not tolerated.**
+    ///    They pair with NO voice. The 6c drain mints them a fresh `noteID` that
+    ///    no voice holds and MUST NEVER touch the pitch map, the open-voice count
+    ///    or the watchdog clock (the m16-b3 §4.3 C11 rule). This is the breath
+    ///    pad's live drag preview (`pushAuditionController`) and it is a
+    ///    SUPPORTED producer, not a bug. Before P6 the drain's `else` comment
+    ///    called a kind-2 event here "a producer bug"; the behaviour was already
+    ///    right, the contract was not. `AuditionRenderTests`' five `P6 …` cases
+    ///    pin it — if you make a kind-2 push stop reaching the instrument, or
+    ///    let it touch the pitch map, those go red on purpose.
+    ///
+    /// A controller push is deliberately NOT a liveness heartbeat: bumping
+    /// `auditionHeartbeat` from here would keep a genuinely stuck piano-roll
+    /// audition note alive past its watchdog. Callers that want the heartbeat
+    /// call `beatAuditionHeartbeat()` themselves.
     @MainActor
     @discardableResult
     func pushAudition(kind: UInt8, pitch: UInt8, velocity: UInt8) -> Bool {
         auditionRing.push(LiveMIDIEvent(hostTime: 0, source: 0, kind: kind,
                                         pitch: pitch, velocity: velocity, channel: 0))
+    }
+
+    /// MAIN-ACTOR ONLY — a named entry point for the blessed controller payload
+    /// above, so no call site has to spell a raw kind constant (breath pad P6).
+    ///
+    /// `controller` rides the event's `pitch` byte and `value` its `velocity`
+    /// byte: that is `ScheduledMIDIEvent`'s own CC encoding, which is why the 6c
+    /// drain can forward the event verbatim. Both are masked to 7 bits here
+    /// rather than trusted — the render side reads `pitch & 0x7F` as a table
+    /// index, and an out-of-range value must not reach it even from a
+    /// main-actor caller.
+    ///
+    /// Emits exactly ONE ring event, so `emitBound`'s `2 * audTake` term
+    /// (`:592`) stays conservative and no render-side bound arithmetic moves —
+    /// deliberately, per design-breath-pad §1.5: that arithmetic has a measured
+    /// history of being got wrong ("11 events written into an 8-slot buffer").
+    @MainActor
+    @discardableResult
+    func pushAuditionController(controller: UInt8, value: UInt8) -> Bool {
+        pushAudition(kind: ScheduledMIDIEvent.controlChange,
+                     pitch: controller & 0x7F, velocity: value & 0x7F)
     }
 
     /// MAIN-ACTOR ONLY (m23-d) — bumps the audition liveness heartbeat. Load →
@@ -729,11 +776,31 @@ final class InstrumentRenderer: @unchecked Sendable {
                         pitch: event.pitch, velocity: 0)
                     liveCount += 1
                 } else {
-                    // Orphan off (its on was cut by the watchdog / a reset), or
-                    // a kind audition never produces (2/3/4 — a producer bug).
-                    // Mint an ID no voice holds and NEVER touch the pitch map
-                    // (the m16-b3 §4.3 C11 rule): well-behaved instruments no-op
-                    // it.
+                    // Two producers land here and BOTH are legitimate:
+                    //
+                    //   * an orphan off (its on was cut by the watchdog / a
+                    //     reset), and
+                    //   * a CONTROLLER / BEND / PRESSURE payload (kind 2/3/4) —
+                    //     the breath pad's live drag preview via
+                    //     `pushAuditionController`. ⚠️ THIS COMMENT USED TO CALL
+                    //     THAT "a producer bug". It is not, as of the breath
+                    //     pad's P6: see the payload contract on `pushAudition`
+                    //     (:341). The behaviour below was ALREADY correct for
+                    //     it — this branch is now a SUPPORTED path and the
+                    //     preview depends on it, so do not narrow it back to
+                    //     note-offs. `AuditionRenderTests`' five `P6 …` cases
+                    //     redden if a kind-2 push stops reaching the instrument.
+                    //
+                    // Both get an ID no voice holds, and NEITHER touches the
+                    // pitch map, `openAuditionCount` or `auditionOpenedAt` (the
+                    // m16-b3 §4.3 C11 rule) — a controller pairs with no voice,
+                    // so filing one in the pitch map would fabricate a note-off
+                    // on the CC number and, worse, let a pad drag keep a stuck
+                    // audition note alive past the 3 s watchdog.
+                    // Well-behaved instruments no-op an orphan off; a
+                    // controller they route reaches `instrument.apply` intact,
+                    // with `kind`, `pitch` (= controller number) and `velocity`
+                    // (= value) unchanged.
                     let id = nextLiveNoteID
                     nextLiveNoteID &+= 1
                     liveScratch[liveCount] = ScheduledMIDIEvent(

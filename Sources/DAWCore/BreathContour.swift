@@ -49,9 +49,9 @@ public enum BreathContour {
 
     // MARK: - Shape constants
 
-    /// Contour level at the note's ONSET, as a fraction of the swell's travel
-    /// (0 = the contour's lowest point, 1 = its peak). The tone speaks at a
-    /// moderate pressure, not at the note's loudest instant.
+    /// DEFAULT contour level at the note's ONSET, as a fraction of the swell's
+    /// travel (0 = the contour's lowest point, 1 = its peak). The tone speaks at
+    /// a moderate pressure, not at the note's loudest instant.
     ///
     /// **(estimate)** — `docs/research/spike-wind-instrument-realism.md` §6
     /// gives a usable CC11 BAND ("100-127, never resting below ~90 for a
@@ -59,7 +59,11 @@ public enum BreathContour {
     /// willing to put a number on where inside that band a note starts. 0.35
     /// places the onset a third of the way up the travel, so the swell is the
     /// dominant gesture and the attack is not itself the peak.
-    static let onsetLevel = 0.35
+    ///
+    /// ⚠️ Was a fixed constant through m27 leg D; breath-pad P1 promoted it to
+    /// `Options.onsetLevel` with this value as the default, so the shipped
+    /// default contour is byte-identical. See that property for why.
+    public static let defaultOnsetLevel = 0.35
 
     /// Contour level at the settling dip — the LOWEST point of the whole
     /// contour, by construction, which is what makes `Options.depth` mean "the
@@ -71,12 +75,26 @@ public enum BreathContour {
     /// make `depth` unreadable.
     static let dipLevel = 0.0
 
-    /// Contour level at the note's END. Above the settling dip and below the
-    /// onset: the taper eases off, it does not fade to nothing — the note's own
-    /// amplitude release does that.
+    /// DEFAULT contour level at the note's END. Above the settling dip and
+    /// below the onset: the taper eases off, it does not fade to nothing — the
+    /// note's own amplitude release does that.
     ///
-    /// **(estimate)**, same gap in the sources as `onsetLevel`.
-    static let releaseLevel = 0.25
+    /// **(estimate)**, same gap in the sources as `defaultOnsetLevel`.
+    ///
+    /// ⚠️ Promoted to `Options.releaseLevel` by breath-pad P1, same as the
+    /// onset level and for the same reason.
+    public static let defaultReleaseLevel = 0.25
+
+    /// The most a caller-set `Options.onsetLevel` may be. **Load-bearing, not
+    /// tidiness:** micro-sharpening is referenced to the onset level
+    /// (`sharpenCents(_:)` divides by `1 - onsetLevel`), so an onset level of
+    /// exactly 1 would divide by the 1e-9 epsilon and silently flatten the
+    /// pitch-bend lane to a constant. 0.95 keeps the divisor at 0.05 — a real
+    /// number — and is high enough for an `sfp` accent to read. The cost is
+    /// stated rather than hidden: on a high-onset pattern the sharpening tracks
+    /// only the excursion ABOVE the accent, so the accent itself is not
+    /// sharpened.
+    public static let maxOnsetLevel = 0.95
 
     /// The settling dip may never occupy more than this fraction of the note.
     /// THE SHORT-NOTE RULE for the expression half: an absolute-time feature
@@ -135,6 +153,42 @@ public enum BreathContour {
         /// 0.05...0.95; `attackSettleSeconds` is further clamped to half of it
         /// so the dip always precedes the peak.
         public var peakPosition: Double
+
+        /// Contour level at the note's ONSET, as a fraction of the swell's
+        /// travel (0 = the contour's lowest point, the settling dip; 1 = its
+        /// peak). **Default `defaultOnsetLevel` (0.35)** — the value this was a
+        /// hard-coded constant at through m27 leg D, so an omitted argument
+        /// reproduces leg D exactly.
+        ///
+        /// ⭐ **Why it became a parameter (breath-pad P1).** Leg D's shape
+        /// family is onset → dip → peak → release, and with the onset and
+        /// release pinned, `peakPosition` and `depth` are the ONLY things that
+        /// distinguish one authored gesture from another. That is not enough
+        /// curves to carry a pattern library: a *sforzando-piano* is defined by
+        /// starting AT its accent, and a *sub-tone entry* by starting far below
+        /// where it ends up — both are onset-level statements, and without this
+        /// knob both collapse into "an ordinary swell with the peak moved",
+        /// which is eight names for three curves. Clamped to
+        /// `0...maxOnsetLevel`.
+        ///
+        /// ⚠️ **The onset level is only AUDIBLE when the settling dip has room
+        /// to exist**, i.e. when `settleTime > 0` — and `settleTime` is
+        /// `min(attackSettleSeconds, duration × maxSettleFraction,
+        /// peakTime × 0.5)`. With `attackSettleSeconds` at 0, or on a note too
+        /// short for it, or with `peakPosition` at its 0.05 floor, the contour
+        /// steps straight from the onset toward the peak and a high onset level
+        /// reads as nothing more than a quick start. A pattern that depends on
+        /// this must ask for an `attackSettleSeconds` the note can afford;
+        /// `ProjectStore.applyEffortShape` warns when one could not.
+        public var onsetLevel: Double
+
+        /// Contour level at the note's END, on the same 0...1 scale.
+        /// **Default `defaultReleaseLevel` (0.25)** — again leg D's constant, so
+        /// omitting it is byte-identical. Above 0 because the taper eases off
+        /// rather than fading out; the note's own amplitude release does the
+        /// fading. A *terraced* pattern sets it equal to the onset level to get
+        /// a level that is stepped into and held. Clamped to 0...1.
+        public var releaseLevel: Double
 
         /// How long after the attack the settling dip bottoms out, in SECONDS.
         /// **Default 0.05** — the pressure settling, on the order of one
@@ -259,6 +313,42 @@ public enum BreathContour {
         /// roughly 130 s (widening) or 745 s (truncation).
         public var maxPointsPerLane: Int
 
+        // MARK: - Micro-tremor (breath-pad P5, §10.1)
+
+        /// Peak-to-trough depth of the intra-note micro-tremor, as a fraction
+        /// of the contour level it rides on. **Default 0 — off, and off means
+        /// byte-identical**: every expression point, every emitted count and
+        /// every rendered sample matches the pre-P5 tree exactly.
+        ///
+        /// The tremor is applied as a **downward-only** ripple, and that is not
+        /// taste: `peakValue` defaults to 127, the top of the lane, so a
+        /// symmetric ripple would clamp there and the tremor's upper half would
+        /// vanish on the loudest instant of every note while its lower half
+        /// survived — a half-wave rectifier wearing the name "tremor", and
+        /// invisible to any test that only asked "did the samples change?".
+        ///
+        /// See `EffortField.Humanisation.tremorDepth` for the measured dB per
+        /// step and for why this is a fraction of the LEVEL rather than of
+        /// §10.1's "effort travel" (that reading measures 0.16 dB — inaudible).
+        public var tremorDepth: Double
+
+        /// Tremor rate in Hz. Only read when `tremorDepth > 0`.
+        ///
+        /// ⚠️ **The generator refines the expression grid to honour this**, to
+        /// at least `minPointsPerVibratoCycle` points per tremor cycle — at the
+        /// default `expressionSpacingSeconds` of 0.02 s the grid is 50 Hz, so
+        /// without the refinement anything above **6.25 Hz** would be emitted
+        /// as a staircase by our own sampling, a second ceiling with a
+        /// completely different cause from the hosted-AU one. Ours is fixable
+        /// and is fixed here.
+        public var tremorRateHz: Double
+
+        /// The tremor's phase at this note's ONSET, in radians — supplied by
+        /// the caller so one continuous oscillator can span a whole clip
+        /// instead of restarting at every note. See
+        /// `EffortField.tremorPhase(atSeconds:seed:humanisation:)`.
+        public var tremorPhase: Double
+
         public init(depth: Double = 0.25,
                     peakValue: Int = 127,
                     peakPosition: Double = 0.65,
@@ -273,7 +363,26 @@ public enum BreathContour {
                     sharpenCents: Double = 4,
                     bendSpacingSeconds: Double = 0.008,
                     bendRangeSemitones: Double = 2,
-                    maxPointsPerLane: Int = 16384) {
+                    maxPointsPerLane: Int = 16384,
+                    // ⚠️ The two shape levels are LAST, out of the order they
+                    // are declared in, so that every call site written against
+                    // leg D's signature still compiles unchanged: Swift argument
+                    // order is positional-by-label, and inserting a parameter in
+                    // the middle would break every caller that passes a prefix
+                    // of the old list (`SamplerTests` passes four such prefixes).
+                    onsetLevel: Double = BreathContour.defaultOnsetLevel,
+                    releaseLevel: Double = BreathContour.defaultReleaseLevel,
+                    // ⚠️ P5's three are LAST for the same reason the two shape
+                    // levels above are: inserting a parameter mid-list breaks
+                    // every caller that passes a prefix of the old list.
+                    tremorDepth: Double = 0,
+                    tremorRateHz: Double = 4.565,
+                    tremorPhase: Double = 0) {
+            self.tremorDepth = tremorDepth
+            self.tremorRateHz = tremorRateHz
+            self.tremorPhase = tremorPhase
+            self.onsetLevel = onsetLevel
+            self.releaseLevel = releaseLevel
             self.depth = depth
             self.peakValue = peakValue
             self.peakPosition = peakPosition
@@ -296,6 +405,10 @@ public enum BreathContour {
         /// self-healing discipline). Applied once at the top of `generate`.
         func sanitized() -> Options {
             var o = self
+            // `maxOnsetLevel` (0.95), not 1: `sharpenCents(_:)` divides by
+            // `1 - onsetLevel`, and 1 would flatten the bend lane silently.
+            o.onsetLevel = clampD(onsetLevel, 0, BreathContour.maxOnsetLevel)
+            o.releaseLevel = clampD(releaseLevel, 0, 1)
             o.depth = clampD(depth, 0, 1)
             o.peakValue = min(127, max(0, peakValue))
             o.peakPosition = clampD(peakPosition, 0.05, 0.95)
@@ -322,8 +435,115 @@ public enum BreathContour {
             // knots and endpoints and the bend grid 2, so a smaller budget
             // would leave the generator dividing the note by zero or less.
             o.maxPointsPerLane = min(16384, max(8, maxPointsPerLane))
+            // P5. 0 is the null and stays exactly 0; the ceiling of 1 is "the
+            // ripple reaches silence at its trough". The rate shares the
+            // vibrato band's clamp because both are the same physical thing —
+            // an oscillation a wind player's body makes.
+            o.tremorDepth = clampD(tremorDepth, 0, 1)
+            // ⛔ MUST be the same band as `EffortField.Humanisation.sanitized()`,
+            // which is why it is that band's constants and not two literals that
+            // happen to match today. The store derives the tremor PHASE from the
+            // Humanisation-clamped rate and this generator oscillates at the
+            // Options-clamped one; a gap between the bands puts a growing phase
+            // discontinuity at every note onset with no warning on any surface.
+            // Gated by `bothTremorRateClampsAgree`.
+            o.tremorRateHz = clampD(tremorRateHz,
+                                    EffortField.Humanisation.minTremorRateHz,
+                                    EffortField.Humanisation.maxTremorRateHz)
+            o.tremorPhase = tremorPhase.isFinite ? tremorPhase : 0
             return o
         }
+    }
+
+    // MARK: - The effort hook (breath-pad P1)
+
+    /// How a per-note **effort** scalar (0 = barely blowing, 1 = full pressure)
+    /// bends the contour options for that one note.
+    ///
+    /// ## Why this is a separate type and not more `Options` fields
+    ///
+    /// Effort is a property of *where the note sits in the performance* — which
+    /// phrase, how far through it — while `Options` is a property of *the
+    /// gesture being authored*. The pad computes one effort per note and asks
+    /// this type to turn it into that note's `Options`; `applyBreathContour`
+    /// never sees it. Keeping them apart is what lets P1 add a whole feature
+    /// without touching leg D's contract.
+    ///
+    /// ⚠️ **`identity` really is the identity**, and that is tested: for ANY
+    /// effort value, `scaled(o, effort: e, response: .identity) == o` exactly.
+    /// That is the null test that makes "additive, changes nothing" a measured
+    /// claim rather than a design intention.
+    ///
+    /// ⛔ **`peakPosition` is deliberately NOT effort-scaled, and the P1 plan
+    /// asked for it.** The pattern owns `peakPosition` — that is the whole
+    /// content of "late bloom" versus "messa di voce" — so letting effort move
+    /// it too would give two mechanisms one visible outcome, and a user seeing
+    /// the peak drift could not tell which one did it. That is exactly the
+    /// ambiguity the design's own §7.2 invokes to reject an "air runs out"
+    /// pattern (the air budget already produces that symptom). One symptom, one
+    /// cause.
+    public struct EffortResponse: Sendable, Equatable {
+        /// The fraction of `peakValue` that effort commands. At `effort == 1`
+        /// the peak is untouched; at `effort == 0` it falls to
+        /// `(1 - loudnessDepth) × peakValue`.
+        ///
+        /// This is the primary destination and the one the physiology is
+        /// unambiguous about (design §6.1): breath pressure is loudness. On a
+        /// `.soundBank` track it is the ONLY destination — CC 11 there was
+        /// MEASURED (2026-08-19, `docs/research/measure-gm-sax-cc.md`) to be
+        /// exactly a gain following the MIDI square law, with any non-gain
+        /// difference bounded at −104 dB.
+        ///
+        /// ⚠️ CC is not dB. Because CC 11 is a square law, a `loudnessDepth` of
+        /// 0.5 is −12.0 dB at effort 0, not −6.
+        public var loudnessDepth: Double
+
+        /// How much effort scales the intra-note swell (`Options.depth`). At
+        /// `effort == 1` the depth is untouched; at `effort == 0` it becomes
+        /// `(1 - swellDepth) × depth`.
+        ///
+        /// **(estimate.)** The reasoning, stated so it can be argued with: a
+        /// player at low effort is not merely quieter, they are *flatter* —
+        /// there is less pressure available to shape with, so the note leans in
+        /// less. Scaling the swell down with effort keeps a soft note from
+        /// carrying the same theatrical crescendo as a loud one. No source
+        /// found puts a number on it.
+        public var swellDepth: Double
+
+        /// Changes nothing, for any effort. The default, and the null test.
+        public static let identity = EffortResponse(loudnessDepth: 0, swellDepth: 0)
+
+        public init(loudnessDepth: Double, swellDepth: Double) {
+            self.loudnessDepth = loudnessDepth
+            self.swellDepth = swellDepth
+        }
+    }
+
+    /// Applies one note's `effort` to `options`, returning the options that
+    /// note should be generated with.
+    ///
+    /// `effort` is clamped to 0...1. `peakValue` is rounded (it is an integer
+    /// CC) and floored at 0. The result is still passed through `sanitized()`
+    /// by `generate`, so nothing here can produce an out-of-domain contour.
+    ///
+    /// Pure, and exactly the identity when `response == .identity`.
+    public static func scaled(_ options: Options,
+                              effort: Double,
+                              response: EffortResponse = .identity) -> Options {
+        var out = options
+        let e = clampD(effort, 0, 1)
+        // `1 - e` is the SHORTFALL: at full effort every term below vanishes and
+        // the options come back untouched, which is what makes `.identity`
+        // identity and what makes effort 1 mean "as authored".
+        let shortfall = 1 - e
+        if response.loudnessDepth != 0 {
+            let scale = 1 - response.loudnessDepth * shortfall
+            out.peakValue = max(0, Int((Double(options.peakValue) * scale).rounded()))
+        }
+        if response.swellDepth != 0 {
+            out.depth = options.depth * (1 - response.swellDepth * shortfall)
+        }
+        return out
     }
 
     // MARK: - Result
@@ -444,6 +664,13 @@ public enum BreathContour {
         settleTime = max(0, settleTime)
         peakTime = min(max(peakTime, settleTime), duration)
 
+        // The two shape levels are per-call since breath-pad P1 (they were
+        // constants through leg D); `dipLevel` stays a constant because it is
+        // the contour's minimum BY CONSTRUCTION, which is what makes
+        // `Options.depth` mean "the peak-to-trough travel".
+        let onsetLevel = options.onsetLevel
+        let releaseLevel = options.releaseLevel
+
         func shape(_ t: Double) -> Double {
             if t <= 0 { return onsetLevel }
             if t >= duration { return releaseLevel }
@@ -462,8 +689,22 @@ public enum BreathContour {
 
         // --- Expression lane -------------------------------------------------
         let travel = Double(options.peakValue) * options.depth
+        // P5's micro-tremor: a DOWNWARD-ONLY ripple on the level, in
+        // `[1 − tremorDepth, 1]`. At `tremorDepth == 0` this is exactly 1.0 —
+        // not "1.0 to within rounding": the guard returns the literal, so the
+        // whole expression below is bit-identical to the pre-P5 arithmetic and
+        // §13.5's null test is a property of the code rather than of the
+        // floating-point luck of multiplying by a computed one.
+        // ⭐ ONE implementation, in `EffortField` — see `tremorRipple`'s own doc
+        // comment for the planted regression that proved a local copy here was
+        // worse than useless: the pure tests stayed green while this arithmetic
+        // was wrong.
         func expressionValue(_ t: Double) -> Int {
-            let raw = Double(options.peakValue) - travel * (1 - shape(t))
+            let level = Double(options.peakValue) - travel * (1 - shape(t))
+            let raw = level * EffortField.tremorRipple(atSeconds: t,
+                                                       phaseAtOnset: options.tremorPhase,
+                                                       depth: options.tremorDepth,
+                                                       rateHz: options.tremorRateHz)
             return Int(min(127, max(0, raw.rounded())))
         }
 
@@ -471,6 +712,21 @@ public enum BreathContour {
         // peak land on exact extrema instead of wherever the grid happens to
         // fall. Widen the grid if the note is long enough to blow the budget.
         var expressionSpacing = options.expressionSpacingSeconds
+        // Kept before any P5 refinement — the bend lane's sparse region reads
+        // this one, so the tremor cannot move the pitch lane. See `sparseCount`.
+        let bendSparseSpacing = expressionSpacing
+        // ⚠️ P5: OUR OWN SECOND CEILING, and it is the one we can fix. The
+        // default grid is 50 Hz, and this file's own `minPointsPerVibratoCycle`
+        // says a lane at 2–3 points per cycle is a square wave, not an
+        // oscillation — so at the default spacing anything above 6.25 Hz would
+        // be emitted as a staircase by US, with nothing naming the cause and
+        // the hosted-AU ceiling standing ready to take the blame. Refine the
+        // grid instead. Only when the tremor is actually on: with it off the
+        // spacing, the emitted points and the rendered bytes are unchanged.
+        if options.tremorDepth > 0 {
+            expressionSpacing = min(expressionSpacing,
+                                    1 / (options.tremorRateHz * minPointsPerVibratoCycle))
+        }
         let expressionNeeded = Int((duration / expressionSpacing).rounded(.up)) + 4
         if expressionNeeded > options.maxPointsPerLane {
             // `max(1, …)` because the 4 reserved slots (three knots plus the
@@ -516,7 +772,13 @@ public enum BreathContour {
         // represent the oscillation (fewer than `minPointsPerVibratoCycle`
         // points per cycle) hold it at the coarsest representable value and
         // CUT the vibrato short instead of aliasing it into a buzz.
-        let sparseCount = Int((vibratoOnset / expressionSpacing).rounded(.up)) + 1
+        // ⚠️ P5: the REQUESTED expression spacing, not the tremor-refined one.
+        // The tremor is an EXPRESSION-lane feature; letting its refinement leak
+        // in here would make the bend lane's budget — and so its spacing, and
+        // so where the vibrato gets truncated — depend on a knob that has
+        // nothing to do with pitch. The bend lane must come out identical
+        // whether the tremor is on or off, and a test asserts that it does.
+        let sparseCount = Int((vibratoOnset / bendSparseSpacing).rounded(.up)) + 1
         // −2 leaves room for the exact vibrato-onset point and the exact
         // centre point at the note's end.
         let denseBudget = max(1, options.maxPointsPerLane - sparseCount - 2)

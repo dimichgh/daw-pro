@@ -290,11 +290,28 @@ public final class CommandRouter {
         // an insertion 117 elements from the end leaves every end-relative
         // assertion in the tree (46 `dropLast` sites across 8 files, plus
         // three `suffix(19)`/`suffix(21)` windows) true by construction, so
-        // only the 16 explicit count pins move. Verified before moving it:
+        // only the explicit count pins move. ⚠️ THAT PIN COUNT HAS BEEN WRONG
+        // IN THIS COMMENT AND IN ARCHITECTURE.md: both said "16" (and
+        // ARCHITECTURE.md said "across 15 files"). MEASURED 2026-08-19 at the
+        // breath-pad P1 close: **19 lines across 18 files**, because three
+        // spell it `all.count == N` rather than `allCommands.count == N`.
+        // GREP THE LITERAL VALUE, NOT THE IDIOM — a brief built on "16" sent
+        // an agent looking for three sites. (A bare `.count ==` sweep returns
+        // 21/20: two are unrelated local arrays in AuditionRenderTests and
+        // LiveThruRenderTests. 19 is the number that moves.)
+        // Verified before moving it:
         // there is not one absolute `allCommands[i]` index anywhere in
         // Tests/ or Sources/ (0 hits, positive-controlled against the 46
         // dropLast hits with the same command shape).
         "clip.applyBreathContour",
+        // Breath pad P1: pick one NAMED effort shape (messa di voce, a hairpin,
+        // sforzando-piano...) and apply it through the verb above. Placed HERE,
+        // immediately after the sibling whose machinery it reuses, for exactly
+        // the reason recorded on that line — an insertion this far from the end
+        // leaves every end-relative assertion in the tree true by construction,
+        // so only the explicit count pins move. NOTE: no quoted string in this
+        // comment, deliberately (the m25-d rule).
+        "clip.applyEffortShape",
         "clip.setFades",
         "clip.crossfade",
         "clip.setStretch",
@@ -395,6 +412,22 @@ public final class CommandRouter {
         // m23-d: note audition — sound notes NOW on an instrument track,
         // outside the timeline. Additive at the END (the additive-at-end law).
         "note.audition",
+        // Breath pad P6: the live drag preview — stream ONE controller value to
+        // an instrument track while a pad gesture is in progress. Placed HERE,
+        // immediately after the verb whose machinery and whose contract it
+        // shares (both "sound something NOW, outside the timeline, not an
+        // edit", both ride the same per-renderer audition ring, and neither is
+        // ever the record), for the reason recorded on the
+        // clip.applyBreathContour line ~120 entries below: an insertion this
+        // far from the END leaves every end-relative assertion in the tree
+        // (46 dropLast sites across 8 files, plus the suffix windows) true by
+        // construction, so only the explicit count pins move. A TAIL APPEND
+        // BROKE 80 ASSERTIONS ACROSS 22 TESTS AT m27 LEG D and every FILTERED
+        // run stayed green. ⚠️ Those pins are 19 LINES ACROSS 18 FILES — grep
+        // the LITERAL count, not the idiom, since three spell it
+        // `all.count == N`. NOTE: no quoted string in this comment,
+        // deliberately (the m25-d rule).
+        "pad.previewEffort",
         // m23-h: the ONE track-ordering verb (arrange headers drag onto it;
         // the mixer follows in m23-z). Additive at the END (the same law).
         "track.reorder",
@@ -4596,6 +4629,85 @@ public final class CommandRouter {
             }
             return .success(request.id, .object(auditionPayload))
 
+        case "pad.previewEffort":
+            // Breath pad P6 — the LIVE DRAG PREVIEW. Streams one effort value
+            // (0…1) to the track's instrument as a controller, right now,
+            // outside the timeline. Sibling of note.audition above: same
+            // per-renderer ring, same "sounds but is not the record" contract.
+            //
+            // ⛔ GESTURE-SCOPED ON THE WIRE, NOT ONLY IN THE UI. A move with no
+            // begin is REFUSED. That refusal is what makes the design's rule
+            // ("the pad NEVER streams while the transport merely rolls") a
+            // property of the protocol rather than of one view's code: with no
+            // gesture ever opened, what sounds is the committed lane and nothing
+            // else, so playback, replay and a bounce agree sample-for-sample.
+            //
+            // ⛔ end DOES NOT PARK THE LAST VALUE — it restores the controller's
+            // neutral default (127 for CC 11). A CC is sticky and nothing takes
+            // it back, so parking one would make the next playback quieter than
+            // a fresh bounce of the same project. See PadPreviewController.
+            // ⚠️ Neutral is not the same as the track's COMMITTED lane, and on a
+            // track that has one it measurably is not — the scope, the direction
+            // of the error and the shared-merge fix are in that type's "THE
+            // LIMIT OF RULE 3" (roadmap m28-p6b).
+            //
+            // No undo entry, no clip mutation: the record is the controller lane
+            // that the effort-shape verb writes.
+            try params.rejectUnknownKeys(
+                ["trackId", "value", "gesture", "expressionCC"], verb: "pad.previewEffort",
+                hint: "'gesture' is one of begin/move/end — the pad streams ONLY between a "
+                    + "begin and its end")
+            let padTrackID = try params.requireTrackID()
+            guard let padGestureRaw = params["gesture"]?.stringValue else {
+                throw ControlError(
+                    "'gesture' must be one of "
+                    + PadPreviewPhase.allCases.map(\.rawValue).joined(separator: ", "))
+            }
+            guard let padPhase = PadPreviewPhase(rawValue: padGestureRaw) else {
+                throw ControlError(
+                    "'gesture' must be one of "
+                    + PadPreviewPhase.allCases.map(\.rawValue).joined(separator: ", ")
+                    + " — got '\(padGestureRaw)'")
+            }
+            // `end` carries no effort by construction (it restores neutral), so
+            // omitting `value` there is legal and 0 is a placeholder that is
+            // never read.
+            let padValue: Double
+            if padPhase == .end {
+                padValue = params["value"]?.doubleValue ?? 0
+            } else {
+                guard let asked = params["value"]?.doubleValue else {
+                    throw ControlError("'value' must be a number 0…1 (the pad's effort scale)")
+                }
+                padValue = asked
+            }
+            // Mirrors the option of the same name on the effort-shape verb, so a
+            // caller that commits to a non-default lane can preview THAT lane
+            // instead of previewing one nothing on the track reads.
+            let padCC = try Self.optionalInteger(params["expressionCC"], "'expressionCC'")
+                ?? PadPreviewController.defaultExpressionCC
+            let padResult = try store.previewEffort(
+                trackID: padTrackID, value: padValue, phase: padPhase, expressionCC: padCC)
+            var padPayload: [String: JSONValue] = [
+                "trackId": .string(padResult.trackID.uuidString),
+                "gesture": .string(padResult.phase.rawValue),
+                "controller": .number(Double(padResult.controller)),
+                "controllerValue": .number(Double(padResult.controllerValue)),
+                "streaming": .bool(padResult.streaming),
+                "delivered": .bool(padResult.delivered),
+                "audible": .bool(padResult.isAudible),
+            ]
+            if let padEffort = padResult.effort {
+                padPayload["value"] = .number(padEffort)
+            }
+            if let reason = Self.auditionReason(padResult.outcome) {
+                // A real answer, not an error — the same contract note.audition
+                // carries: the controller WAS delivered in every inaudible*
+                // case, the strip is just silent for a reason worth acting on.
+                padPayload["reason"] = .string(reason)
+            }
+            return .success(request.id, .object(padPayload))
+
         case "project.snapshot":
             try params.rejectUnknownKeys([], verb: "project.snapshot")
             return .success(request.id, try snapshotJSON())
@@ -5243,6 +5355,556 @@ public final class CommandRouter {
                 breathObj["warnings"] = .array(breathResult.warnings.map { .string($0) })
             }
             return .success(request.id, .object(breathObj))
+
+        case "clip.applyEffortShape":
+            // Breath pad P1. params: clipId (required), pattern (required — one
+            // of the eight library ids, case-insensitive), noteIds? (omit to
+            // shape EVERY note), amount? (0-1, how strongly the shape is
+            // applied), maxGapBeats? (the gap above which a rest counts as a
+            // BREATH and splits the phrase), loudnessDepth?/swellDepth? (how
+            // far a phrase-scoped shape may pull a note down), plus the leg D
+            // contour options that the PATTERN does not own.
+            //
+            // ⚠️ depth / peakPosition / onsetLevel / releaseLevel are NOT
+            // accepted here and that is deliberate, not an oversight: those four
+            // ARE the pattern. Accepting them would give one visible outcome two
+            // controls, and would collide with the leg D meaning of the name
+            // depth. Use clip.applyBreathContour for hand-authored shapes.
+            //
+            // ⛔ On a track hosting an Audio Unit (every sound-bank track,
+            // including the GM sax) bend VIBRATO is suppressed and said so in
+            // warnings: it was MEASURED on 2026-08-19 to alias in bounces. The
+            // warning names the route that works. Nothing here promises
+            // brightness on that path either — CC11 there is exactly a gain.
+            //
+            // ONE undoable step, named for itself. MIDI clips only. Response:
+            // the updated clip fields PLUS patternId, patternName, scope,
+            // notesTouched, phraseCount, notesWithVibrato, expressionPointCount,
+            // pitchBendPointCount, perNotePointBudget, minEffort, maxEffort and
+            // warnings. Read minEffort/maxEffort: equal values mean the shape
+            // ran and varied nothing.
+            //
+            // ⭐ P2 ADDS THE RING — additively. `ringAngle` (DEGREES, 0-360)
+            // says where the dot sits on a circle of patterns; `ringRadius`
+            // (0-1) how far out; `ring` optionally replaces the eight-pattern
+            // default with your own order. `ringAngle` is what SELECTS the ring
+            // form — passing `ringRadius` or `ring` without it is refused rather
+            // than defaulted, because a dot position nobody stated is a gesture
+            // nobody asked for. Response then also carries `ring:{angleDegrees,
+            // radius, patternIds, weights, noteWeight, phraseWeight}`, and
+            // `patternId` names the NEAREST pattern, not the only one.
+            //
+            // ⚠️ `ringRadius` and `amount` are not independent: both scale the
+            // same thing and only their product survives.
+            //
+            // ⭐ P3 ADDS THE DOT'S PATH — still additively, still no new verb.
+            // `path` is `fixed` (the default, P2's behaviour), `orbit` (a steady
+            // revolution round the ring) or `drift` (a seeded wander that flows
+            // from one gesture into the next). `ringAngle`/`ringRadius` stop
+            // being where the dot IS and become where the hand PUT it: the path
+            // is an offset from that origin. The dot is read ONCE PER NOTE, at
+            // the note's start, in CLIP-RELATIVE beats — so a looped clip takes
+            // the same path on every cycle, and a path that moves faster than
+            // the notes arrive earns a warning instead of aliasing quietly.
+            // Response then also carries `path:{pathId, seed, angleSweepDegrees,
+            // startAngleDegrees, endAngleDegrees, minRadius, maxRadius,
+            // patternIds, moved, outrunsNotes}`. Read `moved` and `patternIds`:
+            // a wander that never left one gesture ran and did nothing.
+            //
+            // ⭐ P4 ADDS THE AIR BUDGET — additively, still no new verb. A wind
+            // player has a finite lungful; `airEnforced` makes a phrase that
+            // runs past it SAG rather than hold. ⛔ It DEFAULTS TO FALSE (a user
+            // ruling, 2026-08-19): a model that overrides what the composer
+            // wrote is opted into, once, visibly. `airCapacitySeconds`,
+            // `airConsumptionExponent`, `airRefillSecondsPerSecond`,
+            // `airMinBreathSeconds` and `airReserveFraction` tune it — every one
+            // is an exposed ESTIMATE, which is why they are exposed.
+            //
+            // ⭐ THE RESPONSE ALWAYS CARRIES `air`, enforced or not, because
+            // that is the surface that answers "why did this get quiet?".
+            // `air.applied` says whether the lane was actually changed;
+            // `air.constrainedNoteCount` how many notes lost something; and when
+            // anything was constrained, `air.phrases[].constrainedNotes` names
+            // each one with `effortRequested` beside `effortAllowed` and the dB
+            // between them. A phrase can also get quiet because the composer
+            // chose a diminuendo — only the budget produces
+            // `effortAllowed < effortRequested`, which is why "air runs out" is
+            // deliberately not one of the selectable patterns.
+            //
+            // ⚠️ §9.1's `referenceEffort` is NOT accepted, and its absence is
+            // algebra: `(e/ref)^k / cap` is `e^k / (ref^k · cap)`, so `ref` and
+            // `airCapacitySeconds` are one axis and only their combination is
+            // observable. Capacity is quoted at the AS-AUTHORED level.
+            //
+            // ⭐ P5 ADDS PHYSIOLOGICAL HUMANISATION — additively, still no new
+            // verb. `driftDepth` is a slow 1/f sag in the baseline (DOWNWARD
+            // ONLY: effort 1 means "as authored", so it is a ceiling, and a
+            // symmetric drift would be half-rectified against it); `tremorDepth`
+            // is a 4–8 Hz micro-tremor inside each note.
+            //
+            // ⛔⛔ **BOTH DEFAULT TO 0, AND THAT IS THE POINT.** Design §13.5
+            // requires the rendered bytes at the default to be identical to the
+            // pre-P5 tree, which is what makes each knob individually declinable
+            // after the fact. §10.1/§10.2's suggested 0.03/0.05 are quoted in the
+            // descriptions as starting values, not shipped as defaults.
+            //
+            // ⛔ **THE TREMOR IS SUPPRESSED ON HOSTED-AU TRACKS (every
+            // `.soundBank`, so the GM sax) AND THE RESPONSE SAYS SO.** MEASURED
+            // 2026-08-19: our own offline renderer feeds a hosted AU MIDI in
+            // 4096-frame blocks — an 11.719 Hz sampler — so a tremor comes back
+            // with a sample-and-hold image at |11.719 − rate| Hz whose relative
+            // depth is exactly `rate / (11.719 − rate)`. At 8 Hz that image is
+            // 2.14× LOUDER than the tremor (measured, CC 11, stock GM alto sax);
+            // even at 4 Hz, the BOTTOM of the physiological band, it is 52 %.
+            // The whole band is compromised there, so the tremor is suppressed
+            // rather than retuned into a band it is not named for. It lands
+            // normally on a built-in Sampler track, and the drift — three orders
+            // of magnitude slower — lands everywhere.
+            try params.rejectUnknownKeys(
+                ["clipId", "pattern", "ring", "ringAngle", "ringRadius",
+                 "path", "pathSeed", "revolutionBeats", "pathDirection",
+                 "scaleBeats", "octaves", "momentum", "angleSwing", "radiusSwing",
+                 "noteIds", "amount", "maxGapBeats",
+                 "airEnforced", "airCapacitySeconds", "airConsumptionExponent",
+                 "airRefillSecondsPerSecond", "airMinBreathSeconds", "airReserveFraction",
+                 "driftDepth", "driftScaleBeats", "driftOctaves",
+                 "tremorDepth", "tremorRateHz", "tremorEffortExponent",
+                 "loudnessDepth", "swellDepth", "peakValue", "expressionCC",
+                 "attackSettleSeconds", "expressionSpacingSeconds",
+                 "vibratoOnsetSeconds", "vibratoRateHz", "vibratoDepthCents",
+                 "vibratoBloomSeconds", "vibratoReleaseSeconds", "sharpenCents",
+                 "bendSpacingSeconds", "bendRangeSemitones"],
+                verb: "clip.applyEffortShape")
+            let effortClipID = try params.requireClipID()
+
+            // --- Which FORM: one named pattern, or a dot on the ring? --------
+            //
+            // Every combination that is not exactly one of the two is refused
+            // with a sentence naming the fix. Quietly preferring one over the
+            // other would return success and write a gesture the caller did not
+            // choose — the silent-default failure this round exists to end.
+            let effortRingAngleValue = params["ringAngle"]
+            let effortRingRadiusValue = params["ringRadius"]
+            let effortRingListValue = params["ring"]
+            let effortPatternValue = params["pattern"]
+            if effortPatternValue != nil,
+               effortRingAngleValue != nil || effortRingRadiusValue != nil
+                || effortRingListValue != nil {
+                throw ControlError(
+                    "pass EITHER 'pattern' (one named gesture) OR the ring controls "
+                    + "('ringAngle', with optional 'ringRadius'/'ring') — not both. They are two "
+                    + "ways to choose the same thing, and honouring one would silently ignore the "
+                    + "other. To sit exactly ON a pattern, use ringAngle: each of the 8 default "
+                    + "patterns is 45° apart starting at 0 for '"
+                    + (EffortPattern.libraryIDs.first ?? "flat") + "'")
+            }
+            if effortRingAngleValue == nil,
+               effortRingRadiusValue != nil || effortRingListValue != nil {
+                throw ControlError(
+                    "'ringRadius'/'ring' only mean something together with 'ringAngle' — say "
+                    + "WHERE the dot is. Add ringAngle (degrees, 0-360), or use 'pattern' to name "
+                    + "one gesture instead")
+            }
+            if effortPatternValue == nil, effortRingAngleValue == nil {
+                throw ControlError(
+                    "say which gesture: either 'pattern' (one of "
+                    + EffortPattern.libraryIDs.joined(separator: ", ")
+                    + ") or 'ringAngle' (degrees, 0-360 — a dot on the ring, blending the two "
+                    + "patterns it sits between)")
+            }
+
+            // --- P3: the dot's PATH ------------------------------------------
+            //
+            // Every parameter here belongs to exactly one path, and passing one
+            // that belongs to another is REFUSED rather than ignored. That is
+            // the whole point of the round: `revolutionBeats` accepted and
+            // silently dropped on a drift would be a call that succeeded, wrote
+            // a lane, and did something else.
+            let effortPathKeys = ["path", "pathSeed", "revolutionBeats", "pathDirection",
+                                  "scaleBeats", "octaves", "momentum", "angleSwing",
+                                  "radiusSwing"]
+            let effortPathAsked = effortPathKeys.filter { params[$0] != nil }
+            if !effortPathAsked.isEmpty, effortRingAngleValue == nil {
+                throw ControlError(
+                    "\(effortPathAsked.sorted().joined(separator: ", ")) describe how the DOT "
+                    + "MOVES, so they need a dot: add 'ringAngle' (degrees, 0-360 — where the "
+                    + "hand puts it, and the path is an offset from there). The 'pattern' form "
+                    + "names one fixed gesture and has no dot to move")
+            }
+            var effortPath = DotPath.fixed
+            var effortSeed: UInt64 = 0
+            if let pathValue = params["path"] {
+                guard let name = pathValue.stringValue else {
+                    throw ControlError("'path' must be a string — one of: fixed, orbit, drift")
+                }
+                // Which keys this path can carry. Refusing the others by name is
+                // what makes a typo'd or mis-shaped call teach instead of lie.
+                let orbitKeys = ["revolutionBeats", "pathDirection"]
+                let driftKeys = ["pathSeed", "scaleBeats", "octaves", "momentum",
+                                 "angleSwing", "radiusSwing"]
+                func refuseKeys(_ keys: [String], _ why: String) throws {
+                    let offenders = keys.filter { params[$0] != nil }
+                    guard offenders.isEmpty else {
+                        throw ControlError(
+                            "\(offenders.sorted().joined(separator: ", ")) \(why) — remove "
+                            + "\(offenders.count == 1 ? "it" : "them"), or change 'path'")
+                    }
+                }
+                switch name.lowercased() {
+                case "fixed":
+                    try refuseKeys(orbitKeys + driftKeys,
+                                   "only mean something on a MOVING path, and path is 'fixed'")
+                    effortPath = .fixed
+                case "orbit":
+                    try refuseKeys(driftKeys, "belong to path 'drift', not 'orbit'")
+                    let revolutionBeats = try boundedOption(
+                        params, "revolutionBeats", 0.25, 4096, 16,
+                        "how many BEATS one full trip round the ring takes; the dot is read once per note, so a revolution shorter than a few notes is heard as an alias rather than as motion")
+                    var direction = DotPath.Direction.clockwise
+                    if let value = params["pathDirection"] {
+                        guard let raw = value.stringValue,
+                              let parsed = DotPath.Direction(rawValue: raw) else {
+                            throw ControlError(
+                                "'pathDirection' must be 'clockwise' (toward the next pattern in "
+                                + "ring order) or 'counterclockwise'")
+                        }
+                        direction = parsed
+                    }
+                    effortPath = .orbit(revolutionBeats: revolutionBeats, direction: direction)
+                case "drift":
+                    try refuseKeys(orbitKeys, "belong to path 'orbit', not 'drift'")
+                    let scaleBeats = try boundedOption(
+                        params, "scaleBeats", 0.25, 1024, DotPath.defaultScaleBeats,
+                        "how many BEATS one unit of the wander spans; bigger is slower and lazier")
+                    let octaves = try boundedIntOption(
+                        params, "octaves", 1, EffortField.maxOctaves, EffortField.defaultOctaves,
+                        "how many layers of detail the wander has; 1 is a single slow sway, 4 adds three progressively faster and quieter layers on top")
+                    let momentum = try boundedOption(
+                        params, "momentum", 0, 1, DotPath.defaultMomentum,
+                        "how LAZY the wander is: 1 is one long unhurried sway, 0 is twitchy, 0.5 is the 1/f middle. It is the spectral tilt, not a stored velocity — there is no state anywhere in this")
+                    let angleSwing = try boundedOption(
+                        params, "angleSwing", 0, 360, 45,
+                        "the furthest the dot ever wanders from ringAngle, in DEGREES either side. This is an exact bound, not a typical value. One pattern spacing is 45 degrees on the default 8-pattern ring, so 45 reaches each neighbour and no further")
+                    let radiusSwing = try boundedOption(
+                        params, "radiusSwing", 0, 1, DotPath.defaultRadiusSwing,
+                        "how far the dot also wanders IN AND OUT, 0-1. Default 0: the wander changes WHICH gesture, not how strongly it is applied, so one control has one visible outcome")
+                    // ⚠️ BOUNDED TO 32 BITS, and not for tidiness. A JSON number
+                    // is an IEEE double, so a seed above 2^53 does not survive
+                    // the trip through JavaScript and back — it would arrive as
+                    // a DIFFERENT seed, and "same seed, same performance" would
+                    // quietly stop being true for large values only.
+                    let seed = try boundedIntOption(
+                        params, "pathSeed", 0, 4_294_967_295, 0,
+                        "which wander you get, 0-4294967295. The same seed always gives the same performance, at the same clip beats, in playback and in a bounce alike; change it for a different one. Capped at 32 bits because a JSON number is a double and a larger seed would not survive the round trip intact")
+                    effortSeed = UInt64(max(0, seed))
+                    effortPath = .drift(scaleBeats: scaleBeats, octaves: octaves,
+                                        momentum: momentum,
+                                        angleSwingRadians: EffortRing.radians(
+                                            fromDegrees: angleSwing),
+                                        radiusSwing: radiusSwing)
+                default:
+                    throw ControlError(
+                        "unknown path '\(name)' — valid paths are: fixed (the dot stays where you "
+                        + "put it), orbit (a steady revolution round the ring), drift (a seeded "
+                        + "wander that flows from one gesture into the next)")
+                }
+            } else if !effortPathAsked.isEmpty {
+                throw ControlError(
+                    "\(effortPathAsked.sorted().joined(separator: ", ")) only mean something "
+                    + "together with 'path' — say HOW the dot moves: 'orbit' (a steady revolution) "
+                    + "or 'drift' (a seeded wander)")
+            }
+
+            var effortPattern: EffortPattern?
+            var effortRing: EffortRing?
+            var effortRingAngle = 0.0
+            var effortRingRadius = 1.0
+            if effortRingAngleValue != nil {
+                // ⚠️ BOUNDED here although DAWCore WRAPS. `EffortRing.wrap`
+                // takes any real angle because P3's orbit integrates one without
+                // limit — but on the wire, 4500 is far likelier to be a typo
+                // than a request for twelve and a half turns, so it earns a
+                // sentence rather than a silent modulo.
+                let degrees = try boundedOption(
+                    params, "ringAngle", 0, 360, 0,
+                    "where the dot sits, in DEGREES clockwise from the first pattern; the 8 default patterns are 45° apart, so 0=flat, 45=messaDiVoce, 90=lateBloom, 135=hairpinCrescendo, 180=hairpinDiminuendo, 225=terraced, 270=sforzandoPiano, 315=subToneEntry")
+                effortRingAngle = EffortRing.radians(fromDegrees: degrees)
+                effortRingRadius = try boundedOption(
+                    params, "ringRadius", 0, 1, 1,
+                    "how far out the dot sits, 0-1; 0 is a true no-op (the shape is not applied at all) and 1 is the full gesture. NOT independent of amount — only the product of the two survives")
+                if effortRingListValue != nil {
+                    let ids = try parseStringList(effortRingListValue, field: "ring",
+                                                  requirement: " (pattern ids in ring order)")
+                    do {
+                        effortRing = try EffortRing.resolve(ids: ids)
+                    } catch let error as EffortRing.ResolveError {
+                        throw ControlError(error.message)
+                    }
+                } else {
+                    effortRing = EffortRing.standard
+                }
+            } else {
+                guard let effortPatternName = effortPatternValue?.stringValue else {
+                    throw ControlError(
+                        "'pattern' must be a string — one of: "
+                        + EffortPattern.libraryIDs.joined(separator: ", "))
+                }
+                // An unknown id is REFUSED naming every valid one — never a
+                // silent fallback to a default shape, which would return success
+                // for a typo and write a gesture nobody asked for.
+                guard let named = EffortPattern.named(effortPatternName) else {
+                    throw ControlError(
+                        "unknown pattern '\(effortPatternName)' — valid patterns are: "
+                        + EffortPattern.libraryIDs.joined(separator: ", "))
+                }
+                effortPattern = named
+            }
+            let effortNoteIDs = params["noteIds"] == nil
+                ? nil
+                : try parseClipIDs(params["noteIds"], field: "noteIds",
+                                   requirement: " (the notes to shape — omit to shape every note)")
+            let effortAmount = try boundedOption(params, "amount", 0, 1, 1,
+                                                 "how strongly the pattern is applied; 0 writes a flat lane")
+            let effortMaxGap = try boundedOption(
+                params, "maxGapBeats", 0, 16, HumanizeLegato.defaultMaxGapBeats,
+                "a gap larger than this counts as a BREATH and splits the phrase; same meaning as in clip.humanize")
+            // Presence, not value: an EXPLICIT response is what earns the
+            // "these two did nothing" warning on a note-scoped pattern, and
+            // `boundedOption` cannot tell an absent key from one that happens
+            // to carry the default.
+            let effortResponseAsked = params["loudnessDepth"] != nil || params["swellDepth"] != nil
+            var effortResponse = EffortPattern.defaultEffortResponse
+            effortResponse.loudnessDepth = try boundedOption(
+                params, "loudnessDepth", 0, 1, effortResponse.loudnessDepth,
+                "how far a phrase-scoped shape may pull a note's peak down; CC11 is a square law, so 0.55 is about 9 dB")
+            effortResponse.swellDepth = try boundedOption(
+                params, "swellDepth", 0, 1, effortResponse.swellDepth,
+                "how much a quiet note's own swell shrinks with it; 0 keeps every note's internal shape identical")
+            // The leg D passthrough — the same bounds, stated so the wire
+            // REFUSES a bad value with a sentence instead of clamping it.
+            var effortOptions = BreathContour.Options()
+            effortOptions.peakValue = try boundedIntOption(params, "peakValue", 0, 127, effortOptions.peakValue,
+                                                           "the CC value at FULL effort; 127 = the lane's neutral, so the loudest instant is as loud as no lane at all")
+            effortOptions.expressionCC = try boundedIntOption(params, "expressionCC", 0, 127, effortOptions.expressionCC,
+                                                              "which CC carries the shape; 11 is the one the built-in sampler routes to amplitude with no opt-in")
+            effortOptions.attackSettleSeconds = try boundedOption(params, "attackSettleSeconds", 0, 1, effortOptions.attackSettleSeconds,
+                                                                  "seconds from the attack to the settling dip; a pattern with its own early dip (sforzandoPiano) overrides this per note")
+            effortOptions.expressionSpacingSeconds = try boundedOption(params, "expressionSpacingSeconds", 0.001, 1, effortOptions.expressionSpacingSeconds,
+                                                                        "seconds between expression points; controller lanes are STEPWISE, so this is what makes a curve instead of a staircase")
+            effortOptions.vibratoOnsetSeconds = try boundedOption(params, "vibratoOnsetSeconds", 0, 10, effortOptions.vibratoOnsetSeconds,
+                                                                   "seconds of STRAIGHT playing before vibrato starts")
+            effortOptions.vibratoRateHz = try boundedOption(params, "vibratoRateHz", 0.2, 20, effortOptions.vibratoRateHz,
+                                                             "vibrato rate in Hz")
+            effortOptions.vibratoDepthCents = try boundedOption(params, "vibratoDepthCents", 0, 200, effortOptions.vibratoDepthCents,
+                                                                 "peak vibrato width in cents (a ± figure); 0 turns vibrato off")
+            effortOptions.vibratoBloomSeconds = try boundedOption(params, "vibratoBloomSeconds", 0, 10, effortOptions.vibratoBloomSeconds,
+                                                                   "seconds for the vibrato to widen from nothing to full depth")
+            effortOptions.vibratoReleaseSeconds = try boundedOption(params, "vibratoReleaseSeconds", 0, 10, effortOptions.vibratoReleaseSeconds,
+                                                                     "seconds before the note's end over which vibrato relaxes back to centre")
+            effortOptions.sharpenCents = try boundedOption(params, "sharpenCents", -200, 200, effortOptions.sharpenCents,
+                                                            "peak micro-sharpening in cents at full effort, resolving as the shape falls")
+            effortOptions.bendSpacingSeconds = try boundedOption(params, "bendSpacingSeconds", 0.001, 1, effortOptions.bendSpacingSeconds,
+                                                                  "seconds between pitch-bend points; the bend run IS the vibrato waveform, so this is its sample rate")
+            effortOptions.bendRangeSemitones = try boundedOption(params, "bendRangeSemitones", 0.01, 48, effortOptions.bendRangeSemitones,
+                                                                  "the instrument's pitch-bend range in semitones for a full deflection; the built-in sampler is exactly 2 and a hosted AUSampler measured 2.0155")
+            // --- P4: the air budget ------------------------------------------
+            //
+            // PRESENCE, not value, is what earns the "it would have" advisory —
+            // the same idiom `loudnessDepth`/`swellDepth` use two blocks up, and
+            // for the same reason: `boundedOption` returns the default for an
+            // absent key and cannot tell the two apart. A caller who never
+            // mentioned air still gets the full report in the response; they
+            // just are not nagged about a model they did not ask for.
+            let effortAirKeys = ["airEnforced", "airCapacitySeconds", "airConsumptionExponent",
+                                 "airRefillSecondsPerSecond", "airMinBreathSeconds",
+                                 "airReserveFraction"]
+            let effortAirAsked = effortAirKeys.contains { params[$0] != nil }
+            var effortAir = AirBudget.Settings()
+            if let enforcedValue = params["airEnforced"] {
+                guard let flag = enforcedValue.boolValue else {
+                    throw ControlError(
+                        "'airEnforced' must be true or false. It decides whether a phrase that "
+                        + "runs past the player's lungful is actually pulled down, or merely "
+                        + "REPORTED. It defaults to false on purpose: an air budget overrides what "
+                        + "you wrote, so it is opted into rather than assumed")
+                }
+                effortAir.enforced = flag
+            }
+            effortAir.capacitySeconds = try boundedOption(
+                params, "airCapacitySeconds", 0.25, 3600, effortAir.capacitySeconds,
+                "how many SECONDS the player can sustain the part AS AUTHORED before the lungful is gone; every figure in this model is an estimate, which is why it is a parameter")
+            effortAir.consumptionExponent = try boundedOption(
+                params, "airConsumptionExponent", 0, 8, effortAir.consumptionExponent,
+                "how much faster loud playing burns air: rate = effort^this. 1.5 makes a phrase at half the authored level last about 2.8x longer; 0 makes level irrelevant")
+            effortAir.refillSecondsPerSecond = try boundedOption(
+                params, "airRefillSecondsPerSecond", 0, 100, effortAir.refillSecondsPerSecond,
+                "how much of a lungful one second of rest gives back; 0.5 means a 2-second rest refills completely. If the part's rests are shorter than this can keep up with, the sag accumulates and the response says so")
+            effortAir.minBreathSeconds = try boundedOption(
+                params, "airMinBreathSeconds", 0, 60, effortAir.minBreathSeconds,
+                "a rest shorter than this many SECONDS is an articulation, not a breath, and refills nothing. Note this is in seconds while maxGapBeats is in beats, so at a fast tempo a gap can split the phrase and still be too quick to breathe in — the response reports that as breath.kind 'tooShort'")
+            effortAir.reserveFraction = try boundedOption(
+                params, "airReserveFraction", 0, 1, effortAir.reserveFraction,
+                "below this fraction of a lungful the player starts running out and effort is scaled down toward it, so the phrase SAGS instead of stopping. A note is never taken to silence")
+
+            // --- P5: humanisation -------------------------------------------
+            var effortHumanisation = EffortField.Humanisation.none
+            effortHumanisation.driftDepth = try boundedOption(
+                params, "driftDepth", 0, 1, effortHumanisation.driftDepth,
+                "how far a slow 1/f drift may pull the effort baseline BELOW what you wrote, as a fraction. 0 (the default) is off and renders byte-identically to not mentioning it; 0.05 is the design's suggested starting value. Downward only: effort 1 means 'as authored', so there is nothing above it to drift into")
+            effortHumanisation.driftScaleBeats = try boundedOption(
+                params, "driftScaleBeats", 0.01, 4096, effortHumanisation.driftScaleBeats,
+                "the drift's period in BEATS (default 8 = two bars of 4/4). Far slower than any note rate on purpose — the effort is sampled once per note, so a fast drift would be aliased by the note grid")
+            effortHumanisation.driftOctaves = Int(try boundedOption(
+                params, "driftOctaves", 1, 8, Double(effortHumanisation.driftOctaves),
+                "how many fBm octaves the drift is built from (default 4, persistence fixed at 0.5, which is the 1/f spectrum). Note: '1/f breath pressure' is a modelling choice this design made, not a measured finding"))
+            effortHumanisation.tremorDepth = try boundedOption(
+                params, "tremorDepth", 0, 1, effortHumanisation.tremorDepth,
+                "peak-to-trough depth of the involuntary micro-tremor INSIDE each note, as a fraction of the contour level it rides on. 0 (the default) is off and renders byte-identically; 0.03 is the design's suggested value and measures about 0.29 dB. MEASURED: 0.0755 dB per CC of peak-to-trough travel on the built-in sampler. SUPPRESSED on hosted-AU tracks (every soundBank) — see the response warnings")
+            effortHumanisation.tremorRateHz = try boundedOption(
+                params, "tremorRateHz",
+                EffortField.Humanisation.minTremorRateHz,
+                EffortField.Humanisation.maxTremorRateHz,
+                effortHumanisation.tremorRateHz,
+                "tremor rate in Hz, 0.2-20 (default 4.565 = the vibrato rate x 0.83, so the two are not one oscillator summing into a single deeper vibrato). Deliberately at the BOTTOM of the 4-8 Hz physiological band: on a hosted AU an offline bounce re-samples this lane at 11.719 Hz, and the alias image is rate/(11.719-rate) as deep as the tremor. The band is the vibrato band, and REJECTING outside it is deliberate: below 0.2 Hz a tremor is a drift (which is driftDepth's job) and clamping instead would silently hand back a different gesture under the name you asked for")
+            effortHumanisation.tremorEffortExponent = try boundedOption(
+                params, "tremorEffortExponent", 0, 8, effortHumanisation.tremorEffortExponent,
+                "how the tremor deepens with effort: depth is scaled by effort^this (default 1, linear). 0 makes the tremor the same depth however hard the player is blowing")
+
+            let effortResult: EffortShapeApplication
+            if let effortRing {
+                effortResult = try store.applyEffortShape(
+                    clipID: effortClipID, noteIDs: effortNoteIDs, ring: effortRing,
+                    angleRadians: effortRingAngle, radius: effortRingRadius,
+                    path: effortPath, seed: effortSeed,
+                    amount: effortAmount, maxGapBeats: effortMaxGap,
+                    response: effortResponseAsked ? effortResponse : nil,
+                    air: effortAirAsked ? effortAir : nil,
+                    humanisation: effortHumanisation, options: effortOptions)
+            } else if let effortPattern {
+                effortResult = try store.applyEffortShape(
+                    clipID: effortClipID, noteIDs: effortNoteIDs, pattern: effortPattern,
+                    amount: effortAmount, maxGapBeats: effortMaxGap,
+                    response: effortResponseAsked ? effortResponse : nil,
+                    air: effortAirAsked ? effortAir : nil,
+                    humanisation: effortHumanisation, options: effortOptions)
+            } else {
+                // Unreachable: the fork above throws on every other combination.
+                // Stated rather than force-unwrapped.
+                throw ControlError("say which gesture: 'pattern' or 'ringAngle'")
+            }
+            var effortObj = try JSONValue(encoding: effortResult.clip).objectValue ?? [:]
+            effortObj["patternId"] = .string(effortResult.patternID)
+            effortObj["patternName"] = .string(effortResult.patternName)
+            effortObj["scope"] = .string(effortResult.scope.rawValue)
+            effortObj["notesTouched"] = .number(Double(effortResult.notesTouched))
+            effortObj["phraseCount"] = .number(Double(effortResult.phraseCount))
+            effortObj["notesWithVibrato"] = .number(Double(effortResult.notesWithVibrato))
+            effortObj["expressionPointCount"] = .number(Double(effortResult.expressionPointCount))
+            effortObj["pitchBendPointCount"] = .number(Double(effortResult.pitchBendPointCount))
+            effortObj["perNotePointBudget"] = .number(Double(effortResult.perNotePointBudget))
+            effortObj["minEffort"] = .number(effortResult.minEffort)
+            effortObj["maxEffort"] = .number(effortResult.maxEffort)
+            // Present ONLY for the ring form. A caller who named one pattern
+            // never mentioned a ring and should not be answered about one; a
+            // caller who moved the dot cannot otherwise tell what it resolved
+            // to, since `patternId` alone names only the nearest gesture.
+            if let ringReport = effortResult.ring {
+                effortObj["ring"] = .object([
+                    "angleDegrees": .number(ringReport.angleDegrees),
+                    "radius": .number(ringReport.radius),
+                    "patternIds": .array(ringReport.patternIDs.map { .string($0) }),
+                    "weights": .array(ringReport.weights.map { .number($0) }),
+                    "noteWeight": .number(ringReport.noteWeight),
+                    "phraseWeight": .number(ringReport.phraseWeight),
+                ])
+            }
+            // Present ONLY when the dot actually had a path (P3). A caller who
+            // never moved it should not be answered about travel, and `moved`
+            // plus `patternIds` are the two fields that say whether a wander did
+            // anything musical or merely ran.
+            if let pathReport = effortResult.path {
+                effortObj["path"] = .object([
+                    "pathId": .string(pathReport.pathID),
+                    "seed": .number(Double(pathReport.seed)),
+                    "angleSweepDegrees": .number(pathReport.angleSweepDegrees),
+                    "startAngleDegrees": .number(pathReport.startAngleDegrees),
+                    "endAngleDegrees": .number(pathReport.endAngleDegrees),
+                    "minRadius": .number(pathReport.minRadius),
+                    "maxRadius": .number(pathReport.maxRadius),
+                    "patternIds": .array(pathReport.patternIDs.map { .string($0) }),
+                    "moved": .bool(pathReport.moved),
+                    "outrunsNotes": .bool(pathReport.outrunsNotes),
+                ])
+            }
+            // ⭐⭐⭐ P4, THE LEGIBILITY SURFACE, LAYER 1. **Always present**, on
+            // every call, enforced or not — this is the block that answers "why
+            // did this get quiet?". `applied` is the first thing to read: false
+            // means the lane was NOT touched and everything here is the
+            // prediction of what enforcement would do. The per-phrase detail
+            // ships only when something was actually constrained, so an ordinary
+            // call is not buried in an empty structure.
+            let airReport = effortResult.air
+            var airObj: [String: JSONValue] = [
+                "applied": .bool(airReport.applied),
+                "enforced": .bool(airReport.settings.enforced),
+                "notesConsidered": .number(Double(airReport.notesConsidered)),
+                "notesShaped": .number(Double(airReport.notesShaped)),
+                "constrainedNoteCount": .number(Double(airReport.constrainedNoteCount)),
+                "constrainedShapedCount": .number(Double(airReport.constrainedShapedCount)),
+                "exhaustedPhraseCount": .number(Double(airReport.exhaustedPhraseCount)),
+                "phraseCount": .number(Double(airReport.phrases.count)),
+                "lowestAir": .number(airReport.lowestAir),
+                "maxAttenuationDb": .number(airReport.maxAttenuationDb),
+                "neverRecovered": .bool(airReport.neverRecovered),
+                "settings": .object([
+                    "capacitySeconds": .number(airReport.settings.capacitySeconds),
+                    "consumptionExponent": .number(airReport.settings.consumptionExponent),
+                    "refillSecondsPerSecond": .number(airReport.settings.refillSecondsPerSecond),
+                    "minBreathSeconds": .number(airReport.settings.minBreathSeconds),
+                    "reserveFraction": .number(airReport.settings.reserveFraction),
+                ]),
+            ]
+            if airReport.constrainedAnything {
+                airObj["phrases"] = .array(airReport.phrases.map { phrase in
+                    var breath: [String: JSONValue] = ["kind": .string(phrase.breath.id)]
+                    if let beat = phrase.breath.beat { breath["beat"] = .number(beat) }
+                    if let seconds = phrase.breath.seconds {
+                        breath["seconds"] = .number(seconds)
+                    }
+                    var obj: [String: JSONValue] = [
+                        "startBeat": .number(phrase.startBeat),
+                        "endBeat": .number(phrase.endBeat),
+                        "breath": .object(breath),
+                        "airAtStart": .number(phrase.airAtStart),
+                        "airAtEnd": .number(phrase.airAtEnd),
+                        "lowestAir": .number(phrase.lowestAir),
+                        "exhausted": .bool(phrase.exhausted),
+                        "soundingSeconds": .number(phrase.soundingSeconds),
+                        "constrainedNotes": .array(phrase.constrainedNotes.map { note in
+                            .object([
+                                "noteId": .string(note.noteID.uuidString),
+                                "beat": .number(note.beat),
+                                "effortRequested": .number(note.effortRequested),
+                                "effortAllowed": .number(note.effortAllowed),
+                                "airAtNote": .number(note.airAtNote),
+                                "peakCCRequested": .number(Double(note.peakCCRequested)),
+                                "peakCCAllowed": .number(Double(note.peakCCAllowed)),
+                                "attenuationDb": .number(note.attenuationDb),
+                                "shaped": .bool(note.shaped),
+                            ])
+                        }),
+                    ]
+                    if let after = phrase.exhaustedAfterSeconds {
+                        obj["exhaustedAfterSeconds"] = .number(after)
+                    }
+                    return .object(obj)
+                })
+            }
+            effortObj["air"] = .object(airObj)
+            if !effortResult.warnings.isEmpty {
+                effortObj["warnings"] = .array(effortResult.warnings.map { .string($0) })
+            }
+            return .success(request.id, .object(effortObj))
 
         case "plugin.openUI":
             // Opens (or focuses) the floating window of the LIVE hosted Audio
@@ -7343,6 +8005,27 @@ public final class CommandRouter {
             ids.append(id)
         }
         return ids
+    }
+
+    /// An array of plain strings, refused element by element so the error names
+    /// the index that is wrong rather than the whole array (breath pad P2's
+    /// `ring`). Deliberately NOT `parseClipIDs` — these are catalog ids, not
+    /// UUIDs, and validating them as UUIDs would reject every valid one.
+    private func parseStringList(
+        _ value: JSONValue?, field: String, requirement: String
+    ) throws -> [String] {
+        guard let array = value?.arrayValue else {
+            throw ControlError("'\(field)' must be an array of strings\(requirement)")
+        }
+        var out: [String] = []
+        out.reserveCapacity(array.count)
+        for (i, element) in array.enumerated() {
+            guard let raw = element.stringValue else {
+                throw ControlError("\(field)[\(i)] is not a string\(requirement)")
+            }
+            out.append(raw)
+        }
+        return out
     }
 
     /// Shared JSON encoder for `ClipsTrackMoveResult` (m23-aj-2) — ONE

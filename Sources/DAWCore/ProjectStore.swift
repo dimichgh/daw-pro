@@ -1019,6 +1019,16 @@ public final class ProjectStore {
         // ring cannot see it, so it would be heard and not recorded, which is
         // exactly the lie the refusal exists to prevent. Placed after every
         // throwing gate above, so a REFUSED record leaves the audition alone.
+        // Same argument for a pad gesture open when record begins (breath pad
+        // P6), plus one more: a parked CC 11 would attenuate the whole take
+        // while being invisible in the project. Releasing to neutral is the
+        // silent start. Ordered BEFORE `audition.stopAll` for the reason spelled
+        // out on `stopAllAudition()` — that call clears the engine's controller-
+        // preview ledger, which is what marks this push as a release. The hazard
+        // it guards (starting the audio hardware) cannot bite HERE, because a
+        // take is starting and the engine is necessarily running; the order is
+        // matched anyway so the two sites cannot teach opposite lessons.
+        padPreview.stop(engine: engine)
         audition.stopAll(engine: engine)
         transport.isRecording = true
         transport.isPlaying = true
@@ -1645,8 +1655,58 @@ public final class ProjectStore {
 
     /// Releases every audition voice everywhere. Called on the project boundary
     /// and by the app on resign-active; idempotent.
+    ///
+    /// ⚠️ **THE ORDER IS LOAD-BEARING, unlike `panic()`'s.** The pad gesture is
+    /// released FIRST because `AudioEngine.stopAllAudition()` clears the engine's
+    /// controller-preview ledger, and that ledger is what tells the engine this
+    /// push is a release of live state rather than a first touch. Clear it first
+    /// and the neutral that follows looks like a cold-app preview — which
+    /// `AudioEngine.previewController` answers by STARTING THE AUDIO HARDWARE, on
+    /// the app-resign-active path, to send a controller to silence.
     public func stopAllAudition() {
+        // A pad gesture left open across a project boundary would park a
+        // controller on a strip nobody is looking at any more (breath pad P6).
+        padPreview.stop(engine: engine)
         audition.stopAll(engine: engine)
+    }
+
+    // MARK: - Breath pad live preview (P6)
+
+    /// THE pad-preview policy home — the pad view's drag, P7's `BreathPadModel`
+    /// and the `pad.previewEffort` wire verb all run through it.
+    @ObservationIgnored public let padPreview = PadPreviewController()
+
+    /// Streams one effort value to `trackID`'s instrument as a live controller,
+    /// for as long as a gesture is open (breath pad P6).
+    ///
+    /// ⛔ **NOT AN EDIT, AND NOT THE RECORD.** Nothing is written to any clip and
+    /// no undo entry is made. What a bounce renders is the committed
+    /// controller lane that `clip.applyEffortShape` writes — this is the
+    /// audible half of a drag, and it ends leaving the controller at its neutral
+    /// default so it leaves nothing behind (see `PadPreviewController`).
+    ///
+    /// REFUSED while recording, for `auditionPitches`' reason exactly: anything
+    /// a user hears during a take is reasonably assumed to be IN the take, and
+    /// both honest alternatives are worse. `.end` is always allowed, so a take
+    /// starting mid-gesture can never strand a parked controller.
+    @discardableResult
+    public func previewEffort(trackID: UUID, value: Double, phase: PadPreviewPhase,
+                              expressionCC: Int = PadPreviewController.defaultExpressionCC) throws
+        -> PadPreviewResult {
+        if phase != .end {
+            guard !transport.isRecording else {
+                throw ProjectError.transportBusy(
+                    "cannot preview the pad while recording — stop the take first")
+            }
+            guard let track = tracks.first(where: { $0.id == trackID }) else {
+                throw ProjectError.trackNotFound(trackID)
+            }
+            guard track.kind == .instrument else {
+                throw ProjectError.instrumentRequiresInstrumentTrack(track.kind)
+            }
+        }
+        return try padPreview.preview(trackID: trackID, effort: value, phase: phase,
+                                      expressionCC: expressionCC, engine: engine)
     }
 
     /// PANIC (m23-af) — the user's and the agent's way out of a stuck note.

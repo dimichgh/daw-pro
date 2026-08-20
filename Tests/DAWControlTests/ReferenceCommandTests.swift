@@ -135,12 +135,19 @@ struct ReferenceCommandTests {
         // m23-ap-3 appended `clip.detectPitch` after THAT, making the tail
         // TWENTY-ONE, and m26-k appended `edit.pasteClips` after THAT, making
         // the tail TWENTY-TWO.
-        let tail = Array(CommandRouter.allCommands.dropLast(23).suffix(8))
+        // ⚠️ Breath pad P6 did NOT append: `pad.previewEffort` was INSERTED next
+        // to `note.audition`, which happens to sit just after this block — so
+        // the count moved AND this offset moved, even though nothing landed at
+        // the tail. That is the shape to watch: a pin that encodes the count as
+        // an OFFSET is invisible to a grep for the count literal, and only a
+        // full-suite run finds it. (P1's `clip.applyEffortShape` landed BEFORE
+        // this block and correctly moved neither.)
+        let tail = Array(CommandRouter.allCommands.dropLast(24).suffix(8))
         #expect(tail == ["reference.import", "reference.remove",
                          "reference.status", "reference.analyze",
                          "reference.setMonitor", "reference.setOffset",
                          "reference.setTrim", "reference.compare"])
-        #expect(CommandRouter.allCommands.count == 181)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail)
+        #expect(CommandRouter.allCommands.count == 183)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail)
         #expect(CommandRouter.allCommands.dropLast(4).last == "vc.importVoiceModel")  // m23-di-2a (ai.modelUnload was last at m23-dl)
         #expect(CommandRouter.allCommands.dropLast(3).last == "transport.setStopAtContentEnd")  // m25-d
         #expect(CommandRouter.allCommands.dropLast(2).last == "audio.profileFile")  // m25-z

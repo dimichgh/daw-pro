@@ -104,6 +104,13 @@ struct PianoRollView: View {
     /// Store-free closure (the `onOpenQuantize` precedent) so the view stays
     /// previewable.
     var onOpenHumanize: () -> Void = {}
+    /// Opens the Breath Pad for this clip (m28-p7) — the third of the header's
+    /// note-shaping chips, and the only thing a human can click to reach
+    /// `ProjectStore.applyEffortShape`. Shown in BOTH densities for the reason
+    /// HUMANIZE is: it is the only route in, so hiding it behind Pro would leave
+    /// the beginner exactly where the feature found them. Store-free closure so
+    /// the view stays previewable.
+    var onOpenBreathPad: () -> Void = {}
     /// Commits the visible controller lane (m16-b4) through
     /// `ProjectStore.setControllerLane` — the SAME store call the
     /// `clip.setControllerLane` wire verb uses — and returns the updated clip so
@@ -473,6 +480,7 @@ struct PianoRollView: View {
          onInsertTimeRange: @escaping (_ atBeat: Double, _ lengthBeats: Double) -> Clip?,
          onOpenQuantize: @escaping () -> Void,
          onOpenHumanize: @escaping () -> Void = {},
+         onOpenBreathPad: @escaping () -> Void = {},
          onCommitControllerLane: @escaping (_ type: MIDIControllerType, _ points: [MIDIControllerPoint]) -> Clip?,
          onCopyNotes: @escaping ([MIDINote]) -> Void = { _ in },
          onCutNotes: @escaping (_ copied: [MIDINote], _ remaining: [MIDINote]) -> Bool
@@ -504,6 +512,7 @@ struct PianoRollView: View {
         self.onInsertTimeRange = onInsertTimeRange
         self.onOpenQuantize = onOpenQuantize
         self.onOpenHumanize = onOpenHumanize
+        self.onOpenBreathPad = onOpenBreathPad
         self.onCommitControllerLane = onCommitControllerLane
         self.onCopyNotes = onCopyNotes
         self.onCutNotes = onCutNotes
@@ -1501,6 +1510,7 @@ struct PianoRollView: View {
             quantizeChip
                 .explainable(.quantize)
             humanizeChip
+            breathPadChip
             barOpsCluster
                 .explainable(.pianoRollBarOps)
             if editorMode == .notes {
@@ -2114,6 +2124,30 @@ struct PianoRollView: View {
         }
         .buttonStyle(.plain)
         .help("Loosen this part's timing and velocity so it sounds played, not programmed")
+    }
+
+    /// Opens the Breath Pad (m28-p7) — HUMANIZE's neighbour and the strongest of
+    /// the three: quantize moves time, humanize loosens it, the pad rewrites how
+    /// the part is blown. Neutral create-chrome at rest (Rule 3 — `textPrimary`,
+    /// no earned accent), the same chip idiom.
+    private var breathPadChip: some View {
+        Button(action: onOpenBreathPad) {
+            HStack(spacing: 4) {
+                Image(systemName: "wind")
+                    .font(.system(size: 9, weight: .semibold))
+                Text("BREATH")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .tracking(0.6)
+            }
+            .foregroundStyle(DAWTheme.textPrimary)
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Shape how hard the player blows across this part — the breath pad")
     }
 
     /// Simple / Pro segmented chip — the shared `SimpleProToggle` component bound

@@ -251,6 +251,23 @@ final class AppModel {
     /// this panel is up would destroy the arrange selection behind the scrim.
     var humanizePanelClipID: UUID?
 
+    /// The BREATH PAD's headless model (m28-p7): the ring of effort gestures,
+    /// the dot the hand moves between them, the live drag preview and the ONE
+    /// commit on release. Owned here (like `humanizeModel`) so `debug.breathPad`
+    /// drives the SAME instance `debug.captureUI` renders. Its two closures
+    /// converge on `ProjectStore.applyEffortShape` and `ProjectStore.previewEffort`
+    /// — the SAME methods `clip.applyEffortShape` and `pad.previewEffort` use, so
+    /// this adds NO wire surface (the m10-c/sp-b pure-view rule).
+    let breathPad: BreathPadModel
+
+    /// The clip the breath pad is open for (nil = closed). Set by the piano-roll
+    /// header BREATH chip, the arrange clip context menu (Pro, MIDI only) and
+    /// `debug.breathPad`; the panel renders as a centered overlay.
+    ///
+    /// ⚠️ A BLOCKING MODAL — listed in `isModalPresented`, for the reason stated
+    /// there (a DELETE behind the scrim would destroy the arrange selection).
+    var breathPadClipID: UUID?
+
     /// The Export (bounce) dialog's headless model (m23-m3): the output format
     /// (`DeliveryFormat`), the tracks to leave out, and the loudness target —
     /// plus the ONE place that state becomes `ProjectStore.renderBounce`
@@ -2152,6 +2169,7 @@ final class AppModel {
             || effectPickerTrackID != nil
             || quantizePanelClipID != nil
             || humanizePanelClipID != nil
+            || breathPadClipID != nil
             || voiceConvertClipID != nil
             || showExportSheet
             || showUndoHistory
@@ -4158,6 +4176,26 @@ final class AppModel {
                 return store.compEditRefusal(clipID: clipID)
             })
 
+        // The BREATH PAD (m28-p7). Two closures, two store methods, and the
+        // model owns every rule between them.
+        //
+        // ⚠️ `apply` DOES NOT swallow its error the way `humanizeModel`'s does:
+        // `applyEffortShape` refuses a non-MIDI clip, a comp member and a clip
+        // that vanished, and the pad's own panel is the surface that has to say
+        // so. The model catches and stores the sentence (`applyRefusal`), which
+        // is why this rethrows instead of `try?`.
+        self.breathPad = BreathPadModel(
+            apply: { [weak store] clipID, ring, angle, radius, air in
+                guard let store else { throw ProjectError.clipNotFound(clipID) }
+                return try store.applyEffortShape(clipID: clipID, ring: ring,
+                                                  angleRadians: angle, radius: radius,
+                                                  air: air)
+            },
+            preview: { [weak store] trackID, value, phase in
+                guard let store else { return }
+                _ = try store.previewEffort(trackID: trackID, value: value, phase: phase)
+            })
+
         // The Export dialog model (m23-m3). Stateless to construct — it takes
         // its track list as a VALUE snapshot at open time (`prepare(tracks:)`)
         // and drives the store only through the export call it is handed, so it
@@ -4613,6 +4651,8 @@ final class AppModel {
                 return try self.synthEditorDebug(params)
             case "debug.samplerEditor":
                 return try self.samplerEditorDebug(params)
+            case "debug.breathPad":
+                return self.breathPadDebug(params)
             case "debug.explainMode":
                 return try self.setExplainMode(params)
             case "debug.explainFrames":
@@ -9893,6 +9933,142 @@ final class AppModel {
     func applyHumanize() {
         guard humanizeModel.apply() else { return }
         closeHumanizePanel()
+    }
+
+    // MARK: - Breath pad (m28-p7)
+
+    /// Opens the breath pad on a clip: seeds the model with the clip's name,
+    /// kind and OWNING TRACK, and shows the centered card.
+    ///
+    /// ⚠️ **The track id is not optional bookkeeping.** The commit writes into a
+    /// CLIP and the live preview streams to a TRACK; a panel that carried only
+    /// the clip would apply correctly and drag in silence — which is exactly the
+    /// "looks like it worked" failure this round keeps closing.
+    ///
+    /// The DOT is not reset here (the sticky-amounts idiom): a gesture the user
+    /// liked on one phrase is the one they most likely want on the next. The
+    /// report, the warnings and the refusals ARE cleared, because they describe
+    /// the clip that is being left.
+    func openBreathPad(clipID: UUID) {
+        guard let track = store.tracks.first(where: { $0.clips.contains { $0.id == clipID } }),
+              let clip = track.clips.first(where: { $0.id == clipID }) else { return }
+        breathPad.prepare(clipID: clipID, trackID: track.id,
+                          clipName: clip.name, isMIDI: clip.isMIDI)
+        breathPadClipID = clipID
+    }
+
+    /// Closes the pad. **Ends any open gesture first, committing nothing** — a
+    /// dismissal is not an edit, and a gesture left open would park a controller
+    /// value on the strip until `PadPreviewController`'s 30 s ceiling fired.
+    func closeBreathPad() {
+        breathPad.endGestureWithoutCommitting()
+        breathPadClipID = nil
+    }
+
+    /// `debug.breathPad {clipId?, open?, angleDegrees?, radius?, pattern?,
+    /// gesture?, airEnforced?, apply?, close?}` — stages the pad for a capture the wire
+    /// alone cannot reach (the panel is UI chrome, off `allCommands`/MCP — the
+    /// `debug.quantizePanel` precedent, so the wire and MCP counts are unchanged).
+    ///
+    /// ⭐ It can SET THE DOT, not merely open the card. A capture with the dot at
+    /// its default would frame the one position that proves nothing about the
+    /// geometry — see `scripts/gates/_m28p7-breath-pad-probe.mjs`.
+    private func breathPadDebug(_ params: [String: JSONValue]) -> JSONValue {
+        if params["close"]?.boolValue == true {
+            closeBreathPad()
+            return breathPadStateResponse()
+        }
+        let clip: Clip?
+        if let raw = params["clipId"]?.stringValue, let id = UUID(uuidString: raw) {
+            clip = store.tracks.flatMap(\.clips).first { $0.id == id }
+        } else {
+            clip = store.tracks.flatMap(\.clips).first(where: { $0.isMIDI })
+        }
+        guard let clip else { return breathPadStateResponse() }
+        workspaceMode = .arrange
+        if breathPadClipID != clip.id { openBreathPad(clipID: clip.id) }
+        // A GESTURE can be staged, which is what lets a capture see the two
+        // things that exist only while the pointer is down — the dot's earned
+        // glow and its trail. `begin` is processed before the dot params and
+        // `end`/`cancel` after them, so one call can open, move and release.
+        if params["gesture"]?.stringValue == "begin" {
+            breathPad.beginGesture(source: .external)
+        }
+        // The dot: by pattern NAME (the honest way to say "park it exactly on
+        // late bloom") or by raw angle/radius.
+        if let name = params["pattern"]?.stringValue,
+           let index = EffortPattern.library.firstIndex(where: {
+               $0.id.caseInsensitiveCompare(name) == .orderedSame
+           }) {
+            breathPad.setDot(angle: EffortRing.standard.angle(ofIndex: index),
+                             radius: breathPad.dot.radius)
+        }
+        let angle = params["angleDegrees"]?.doubleValue
+        let radius = params["radius"]?.doubleValue
+        if angle != nil || radius != nil {
+            breathPad.setDot(
+                angle: angle.map { EffortRing.radians(fromDegrees: $0) } ?? breathPad.dot.angle,
+                radius: radius ?? breathPad.dot.radius)
+        }
+        if let enforced = params["airEnforced"]?.boolValue { breathPad.airEnforced = enforced }
+        switch params["gesture"]?.stringValue {
+        case "end": _ = breathPad.endGesture()
+        case "cancel": breathPad.endGestureWithoutCommitting()
+        default: break
+        }
+        // Apply via the UI path (`commit()` — the same one the release calls).
+        // Leaves the panel OPEN so a capture can frame the applied state.
+        if params["apply"]?.boolValue == true { _ = breathPad.commit() }
+        return breathPadStateResponse()
+    }
+
+    /// Read-only snapshot of the pad so a capture flow can poll — and so a probe
+    /// can assert on the numbers the panel is DRAWING rather than on the ones it
+    /// was handed.
+    private func breathPadStateResponse() -> JSONValue {
+        let gauge = breathPad.gauge
+        return .object([
+            "visible": .bool(breathPadClipID != nil),
+            "clipId": breathPadClipID.map { JSONValue.string($0.uuidString) } ?? .null,
+            "isMIDI": .bool(breathPad.targetIsMIDI),
+            "angleDegrees": .number(EffortRing.degrees(fromRadians: breathPad.dot.angle)),
+            "radius": .number(breathPad.dot.radius),
+            "effort": .number(breathPad.effort),
+            "streaming": .bool(breathPad.gesture != nil),
+            "trailPoints": .number(Double(breathPad.trail.count)),
+            "previewRefusal": breathPad.previewRefusal.map { JSONValue.string($0) } ?? .null,
+            "blend": .string(breathPad.blendReadout),
+            "nearestPattern": .string(
+                breathPad.ring.patterns[breathPad.nearestPatternIndex].id),
+            "airEnforced": .bool(breathPad.airEnforced),
+            "airApplied": .bool(gauge.applied),
+            "airHasReport": .bool(gauge.hasReport),
+            "airConstrainedNotes": .number(Double(gauge.constrainedNoteCount)),
+            "airBreathMarks": .number(Double(gauge.breaths.count)),
+            "airPhrases": .number(Double(gauge.phrases.count)),
+            "airHeadline": .string(gauge.headline),
+            "warnings": .array(breathPad.warnings.map { JSONValue.string($0) }),
+            "applyRefusal": breathPad.applyRefusal.map { JSONValue.string($0) } ?? .null,
+            "notesTouched": .number(Double(breathPad.lastApplication?.notesTouched ?? 0)),
+            // ⭐ THE LAYOUT'S OWN ACCOUNT. `available` and `cardHeight` are what
+            // the VIEW was offered and what it DREW; `dialSide` and `predicted`
+            // are what the budget SAYS it should be. A probe that only captures
+            // a PNG can measure the card and must then infer everything else,
+            // and that inference did not converge — three separate readings of
+            // the same capture implied three different `available` values.
+            // Reporting both sides makes the disagreement a subtraction.
+            "layoutAvailable": .number(Double(breathPad.measuredLayout.available)),
+            "layoutCardHeight": .number(Double(breathPad.measuredLayout.cardHeight)),
+            "layoutOverhang": .number(Double(breathPad.measuredLayout.overhang)),
+            "layoutDialSide": .number(Double(BreathPadLayout.dialSide(
+                available: breathPad.measuredLayout.available,
+                hasWarnings: !breathPad.warnings.isEmpty,
+                hasRecoveryNote: breathPad.gauge.recoveryNote != nil))),
+            "layoutPredictedCard": .number(Double(BreathPadLayout.cardHeight(
+                available: breathPad.measuredLayout.available,
+                hasWarnings: !breathPad.warnings.isEmpty,
+                hasRecoveryNote: breathPad.gauge.recoveryNote != nil))),
+        ])
     }
 
     /// Removes a saved groove template through the store (`removeGrooveTemplate`,

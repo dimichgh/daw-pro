@@ -97,6 +97,43 @@ extension ProjectStore {
         noteIDs: [UUID]? = nil,
         options: BreathContour.Options = .init()
     ) throws -> BreathContourApplication {
+        // ONE options for every note — the leg D contract, unchanged. The core
+        // below is the same code this method has always run; breath-pad P1
+        // factored it out so an effort SHAPE can vary the options per note
+        // without a second lane-writing path existing to disagree about merge
+        // semantics, the point budget, undo or the warnings.
+        try applyBreathContourVarying(clipID: clipID, noteIDs: noteIDs,
+                                      baseOptions: options, undoLabel: "Breath Contour") { _ in
+            options
+        }
+    }
+
+    /// The shared engine behind `applyBreathContour` and
+    /// `applyEffortShape` — everything the two have in common, which is
+    /// everything except how each note's options are chosen.
+    ///
+    /// - Parameters:
+    ///   - baseOptions: the options that describe the CALL rather than a note.
+    ///     `expressionCC` (one lane serves the whole call, so it cannot vary
+    ///     per note) and `maxPointsPerLane` (the requested budget, quoted in the
+    ///     coarsening warning) are read from here. Everything else is read from
+    ///     `perNoteOptions`.
+    ///   - undoLabel: the `performEdit` label, so the two verbs name themselves
+    ///     honestly in the undo history.
+    ///   - perNoteOptions: called once per selected note, in the sorted order
+    ///     described below, and again on each budget retry. Must be PURE — it
+    ///     is invoked more than once for the same note and the two calls must
+    ///     agree, or the reported counts describe a different contour than the
+    ///     one written.
+    @discardableResult
+    func applyBreathContourVarying(
+        clipID: UUID,
+        noteIDs: [UUID]?,
+        baseOptions: BreathContour.Options,
+        undoLabel: String,
+        perNoteOptions: (MIDINote) -> BreathContour.Options
+    ) throws -> BreathContourApplication {
+        let options = baseOptions
         guard let (t, c) = locateClipForBreath(clipID) else {
             throw ProjectError.clipNotFound(clipID)
         }
@@ -172,15 +209,25 @@ extension ProjectStore {
         let map = transport.tempoMap
         let clipStart = clip.startBeat
 
-        func generateAll(perNoteBudget: Int) -> [BreathContour.Generated] {
-            var scoped = options
+        // One options per note. `expressionCC` is forced back to the call's —
+        // the merge below computes exactly ONE expression lane type, and a note
+        // that generated points for a different CC would have them silently
+        // written to the wrong lane. `maxPointsPerLane` is likewise the call's,
+        // since the budget is a property of the clip's lane, not of a note.
+        func optionsFor(_ note: MIDINote, perNoteBudget: Int) -> BreathContour.Options {
+            var scoped = perNoteOptions(note)
+            scoped.expressionCC = options.expressionCC
             scoped.maxPointsPerLane = perNoteBudget
-            return selected.map {
+            return scoped
+        }
+
+        func generateAll(perNoteBudget: Int) -> [BreathContour.Generated] {
+            selected.map {
                 BreathContour.generate(noteStartBeat: $0.startBeat,
                                        noteLengthBeats: $0.lengthBeats,
                                        clipStartBeat: clipStart,
                                        tempoMap: map,
-                                       options: scoped)
+                                       options: optionsFor($0, perNoteBudget: perNoteBudget))
             }
         }
 
@@ -246,16 +293,34 @@ extension ProjectStore {
         }
         let canon = Clip.canonicalControllerLanes(rebuilt)
 
-        performEdit("Breath Contour") {
+        performEdit(undoLabel) {
             tracks[t].clips[c].controllerLanes = canon
             // A ClipKey-affecting edit — the lanes ride the schedule build.
             engine?.tracksDidChange(tracks)
         }
 
+        // ⚠️ A note counts as having vibrato only if it was long enough AND the
+        // options it was generated with asked for a non-zero width. Before
+        // breath-pad P1 this read `vibratoStartBeat != nil` alone, which is a
+        // property of the note's LENGTH only: a caller who turned vibrato off
+        // with `vibratoDepthCents: 0` was told every long note "got vibrato",
+        // and got back a bend lane carrying nothing but micro-sharpening. That
+        // is the "returns something that looks like a valid answer" shape this
+        // whole round exists to end, and P1 could not report honestly on the
+        // sound-bank path (where it MUST suppress bend vibrato) without it.
+        let vibratoRequested = selected.contains {
+            optionsFor($0, perNoteBudget: budget).vibratoDepthCents > 0
+        }
+        let notesWithVibrato = zip(selected, generated).filter { note, g in
+            g.vibratoStartBeat != nil
+                && optionsFor(note, perNoteBudget: budget).vibratoDepthCents > 0
+        }.count
+
         warnings += breathWarnings(trackIndex: t,
                                    expressionType: expressionType,
                                    wroteBend: !bendPoints.isEmpty,
-                                   notesWithVibrato: generated.filter { $0.vibratoStartBeat != nil }.count,
+                                   vibratoRequested: vibratoRequested,
+                                   notesWithVibrato: notesWithVibrato,
                                    notesTouched: selected.count,
                                    truncated: generated.contains { $0.vibratoTruncatedAtBeat != nil })
 
@@ -263,13 +328,52 @@ extension ProjectStore {
         return BreathContourApplication(
             clip: stored,
             notesTouched: selected.count,
-            notesWithVibrato: generated.filter { $0.vibratoStartBeat != nil }.count,
+            notesWithVibrato: notesWithVibrato,
             expressionPointCount: stored.controllerLanes
                 .first { $0.type == expressionType }?.points.count ?? 0,
             pitchBendPointCount: stored.controllerLanes
                 .first { $0.type == .pitchBend }?.points.count ?? 0,
             perNotePointBudget: budget,
             warnings: warnings)
+    }
+
+    /// The notes `applyBreathContourVarying` WOULD shape, resolved exactly the
+    /// way it resolves them — same all-or-nothing id check, same total order.
+    /// Exists so `applyEffortShape` can compute a per-note effort curve BEFORE
+    /// the write, over the same notes and in the same order, instead of
+    /// re-deriving the selection and hoping the two agree.
+    func breathSelection(clipID: UUID, noteIDs: [UUID]?) throws -> [MIDINote] {
+        guard let (t, c) = locateClipForBreath(clipID) else {
+            throw ProjectError.clipNotFound(clipID)
+        }
+        let clip = tracks[t].clips[c]
+        guard let notes = clip.notes else {
+            throw ProjectError.notAMIDIClip(clipID, verb: "clip.applyEffortShape")
+        }
+        guard !notes.isEmpty else {
+            throw ProjectError.invalidClipEdit(
+                "clip '\(clip.name)' has no notes to shape — author notes with clip.setNotes first")
+        }
+        let chosen: [MIDINote]
+        if let noteIDs {
+            let wanted = Set(noteIDs)
+            let found = notes.filter { wanted.contains($0.id) }
+            let missing = wanted.subtracting(found.map(\.id))
+            guard missing.isEmpty else {
+                throw ProjectError.invalidClipEdit(
+                    "clip '\(clip.name)' has no note with id "
+                    + missing.map(\.uuidString).sorted().joined(separator: ", ")
+                    + " — read the clip's note ids from clip.getNotes")
+            }
+            chosen = found
+        } else {
+            chosen = notes
+        }
+        return chosen.sorted {
+            if $0.startBeat != $1.startBeat { return $0.startBeat < $1.startBeat }
+            if $0.lengthBeats != $1.lengthBeats { return $0.lengthBeats < $1.lengthBeats }
+            return $0.id.uuidString < $1.id.uuidString
+        }
     }
 
     /// Points of `type` that fall OUTSIDE every touched span — the ones this
@@ -296,12 +400,13 @@ extension ProjectStore {
     /// never opted in is a fader move — audible, correct, and only half of what
     /// the caller asked for. Saying nothing there would be exactly the silent
     /// half-success this round exists to end.
-    private func breathWarnings(trackIndex: Int,
-                                expressionType: MIDIControllerType,
-                                wroteBend: Bool,
-                                notesWithVibrato: Int,
-                                notesTouched: Int,
-                                truncated: Bool) -> [String] {
+    func breathWarnings(trackIndex: Int,
+                        expressionType: MIDIControllerType,
+                        wroteBend: Bool,
+                        vibratoRequested: Bool,
+                        notesWithVibrato: Int,
+                        notesTouched: Int,
+                        truncated: Bool) -> [String] {
         var out: [String] = []
         let instrument = tracks[trackIndex].instrument
         if let warning = MIDIControllerRouting.inertLaneWarning(for: expressionType,
@@ -321,7 +426,15 @@ extension ProjectStore {
                 + "sampler.expressionFilterDepth above 0 (try 0.6) to make a held note read as a "
                 + "player leaning in rather than a fader move")
         }
-        if notesWithVibrato == 0 {
+        // Both sentences below explain "you asked for vibrato and some notes did
+        // not get it". When vibrato was not requested at all — a caller passing
+        // vibratoDepthCents 0, or P1 suppressing bend vibrato on a hosted-AU
+        // track — neither is true, and the caller has its own, accurate
+        // explanation to give. Saying "no note got vibrato: every one is too
+        // short" about notes that are not too short is worse than silence.
+        if !vibratoRequested {
+            // Nothing to say here; the caller turned it off deliberately.
+        } else if notesWithVibrato == 0 {
             out.append(
                 "no note got vibrato: every one of the \(notesTouched) selected is shorter than "
                 + "the straight opening plus one vibrato cycle, so only the expression contour "

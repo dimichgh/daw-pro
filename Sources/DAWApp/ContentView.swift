@@ -141,6 +141,23 @@ struct ContentView: View {
                     onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeHumanizePanel() } }
                 )
             }
+            // Breath pad (m28-p7): the same centered dark-glass modal, folded
+            // into this SAME overlay for the type-checker reason above — three
+            // panels, one chain link, all mutually exclusive in practice and all
+            // listed in `isModalPresented`.
+            //
+            // Unlike Humanize this one IS snapshotted: `debug.breathPad` opens
+            // it AND sets the dot, which is what lets a probe capture the
+            // geometry in more than one state. UI-only — the drag streams
+            // through `ProjectStore.previewEffort` and the release commits
+            // through `ProjectStore.applyEffortShape`, the SAME methods
+            // `pad.previewEffort` and `clip.applyEffortShape` use.
+            if model.breathPadClipID != nil {
+                BreathPadView(
+                    model: model.breathPad,
+                    onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeBreathPad() } }
+                )
+            }
         }
         // "Convert to Voice…" sheet (m10-p-5): a centered dark-glass modal over a
         // scrim (the Quantize idiom) — rendered INSIDE the window so
@@ -733,6 +750,9 @@ struct ContentView: View {
                 onOpenQuantize: { model.openQuantizePanel(clipID: clip.id) },
                 // Humanize (m25-c): the QUANTIZE chip's sibling in the roll header.
                 onOpenHumanize: { model.openHumanizePanel(clipID: clip.id) },
+                // Breath pad (m28-p7): the third chip in the roll header — the
+                // only thing a human can click to reach `applyEffortShape`.
+                onOpenBreathPad: { model.openBreathPad(clipID: clip.id) },
                 // Controller strip (m16-b4) commits through the same store call the
                 // clip.setControllerLane wire verb uses; returns the updated clip so
                 // the strip reseeds its edit model.
@@ -1004,6 +1024,9 @@ struct ContentView: View {
             // entry on audio rather than offering a throw (the sibling
             // "Quantize…" / "Convert to Voice…" rule).
             onOpenHumanize: { clip in model.openHumanizePanel(clipID: clip.id) },
+            // Breath pad (m28-p7, Pro clip menu, MIDI only): the same centered
+            // panel the piano-roll BREATH chip opens.
+            onOpenBreathPad: { clip in model.openBreathPad(clipID: clip.id) },
             onExtractGroove: { clip in
                 model.openQuantizePanel(clipID: clip.id, startExtract: true)
             },

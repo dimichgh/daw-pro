@@ -44849,6 +44849,35 @@ registerTool(
     () => bridge.send("note.audition", { trackId, pitches, velocity, durationMs })
   )
 );
+registerTool(
+  "pad_preview_effort",
+  {
+    title: "Breath pad: stream an effort value live (preview, not an edit)",
+    description: 'Stream ONE breath-pad effort value (0-1, \'how hard is the player blowing right now\') to an instrument track as a live MIDI controller, so it can be HEARD while a pad gesture is in progress. This is a PREVIEW, not an edit: nothing is written to any clip, nothing is recorded, there is no undo entry, and a bounce will not contain it. The RECORD is the controller lane clip_apply_effort_shape writes \u2014 use that to commit a shape. GESTURE-SCOPED, AND THE SCOPING IS THE POINT: send `gesture:"begin"` once, then `gesture:"move"` as the value changes, then `gesture:"end"` exactly once, naming THE SAME trackId. A `move` or `end` with no `begin` open \u2014 or naming a different track than the open gesture \u2014 is REFUSED. The pad NEVER streams while the transport is merely rolling \u2014 only while a gesture is open \u2014 which is what keeps live playback, replay and an offline bounce agreeing sample-for-sample. `end` DOES NOT LEAVE YOUR LAST VALUE ON THE STRIP: it restores the controller to its neutral default (127 for CC 11, expression), because a MIDI controller is sticky and nothing else would take it back \u2014 a parked low value would quietly attenuate every later playback. If you start a gesture, ALWAYS end it. CAVEAT, MEASURED, DO NOT OVERSTATE THIS TOOL: neutral is not the same as the track\'s committed lane. If the track already HAS a CC 11 lane and you preview mid-playback, ending parks 127 and the strip stays there until that lane\'s next point \u2014 so playback is louder than a bounce over that span. It self-heals at the next point and cannot happen on a track with no lane yet. Prefer previewing with the transport stopped, or on a track you have not committed a shape to. The reply carries `controller` (which CC was moved), `controllerValue` (the raw 0-127 that went out), `streaming` (is a gesture open after this call), `delivered` (false when the 30 Hz rate cap or the unchanged-value filter coalesced this call away \u2014 normal during a fast drag, not an error \u2014 and also false, on any phase including `end`, when the value reached no instrument at all), and `audible` with a `reason` when false (`trackMuted`, `instrumentNotReady`, `engineStopped`, `engineRebuilding`) exactly as note_audition does. WHAT THIS DOES AND DOES NOT MOVE: effort rides CC 11 (expression). On the built-in sampler that moves loudness always, and brightness only when the track\'s sampler `expressionFilterDepth` is above 0. On a hosted Audio Unit or sound bank \u2014 where a GM sax lives \u2014 CC 11 was MEASURED to be exactly a gain and NOT a filter, so do not promise a timbre change there. Refused while a take is recording, and on audio or bus tracks.',
+    inputSchema: {
+      trackId: external_exports.string().describe(
+        "Id of the INSTRUMENT track to preview on (from project_snapshot). Audio and bus tracks carry no instrument and are refused."
+      ),
+      gesture: external_exports.enum(["begin", "move", "end"]).describe(
+        "Where this call sits in the drag. 'begin' opens streaming, 'move' updates the value, 'end' closes it and restores the controller to neutral. A 'move' with no 'begin' open is refused."
+      ),
+      value: external_exports.number().min(0).max(1).optional().describe(
+        "Effort, 0-1: 0 is barely blowing, 1 is full pressure. Required for 'begin' and 'move'; ignored for 'end', which always restores neutral."
+      ),
+      expressionCC: external_exports.number().int().min(0).max(127).optional().describe(
+        "Which CC carries the preview. Defaults to 11 (expression) \u2014 the same default clip_apply_effort_shape writes, so the preview and the commit land on one lane. Set it only if you will also pass the matching expressionCC when you commit."
+      )
+    }
+  },
+  async ({
+    trackId,
+    gesture,
+    value,
+    expressionCC
+  }) => toToolResult(
+    () => bridge.send("pad.previewEffort", { trackId, gesture, value, expressionCC })
+  )
+);
 server.registerTool(
   "instrument_list_audio_units",
   {
@@ -45854,6 +45883,238 @@ registerTool(
       peakPosition,
       attackSettleSeconds,
       expressionCC,
+      expressionSpacingSeconds,
+      vibratoOnsetSeconds,
+      vibratoRateHz,
+      vibratoDepthCents,
+      vibratoBloomSeconds,
+      vibratoReleaseSeconds,
+      sharpenCents,
+      bendSpacingSeconds,
+      bendRangeSemitones
+    })
+  )
+);
+registerTool(
+  "clip_apply_effort_shape",
+  {
+    title: "Shape how hard the player is blowing, with one named musical gesture",
+    description: "Apply a NAMED effort gesture to a MIDI part \u2014 the composing verb on top of clip_apply_breath_contour. Instead of choosing a dozen numbers, pick the shape a musician would name, and every note gets the right contour for its place in the music:\n\u2022 `messaDiVoce` \u2014 grow to a peak in the MIDDLE of the note, then fade. The anchor gesture for a held wind or vocal note.\n\u2022 `lateBloom` \u2014 steady, then swell in the last third. The difference between singing a note and leaning into it.\n\u2022 `sforzandoPiano` \u2014 hit it hard, drop immediately to soft, then grow back (sfp).\n\u2022 `subToneEntry` \u2014 start almost breath-only and rise into full tone. The tenor-ballad gesture.\n\u2022 `flat` \u2014 no shaping. The identity; use it to hear the part with expression off.\n\u2022 `hairpinCrescendo` / `hairpinDiminuendo` \u2014 the whole PHRASE grows or falls away, note by note.\n\u2022 `terraced` \u2014 step to one level and hold it for the phrase (the baroque contrast to the hairpins).\n\n\nTWO WAYS TO CHOOSE, and you must use exactly one. `pattern` names ONE gesture. `ringAngle` puts a DOT on a circle of all eight and blends the two it sits between \u2014 which is how you get a gesture that has no name, like 'mostly a late bloom but leaning toward a phrase crescendo' (ringAngle 112). The blend is nearest-two and equal-gain: landing on a pattern's own angle gives that pattern exactly, nothing else leaks in, and two identical patterns blend to themselves rather than to something louder. `ringRadius` is how far out the dot is, 0-1, where 0 changes nothing at all. Passing both forms, or neither, or ringRadius/ring without ringAngle, is REFUSED with a sentence \u2014 none of those is silently resolved for you.\n\nTHE PHRASE-SCOPED PATTERNS (the last three) are what clip_apply_breath_contour structurally cannot do: they split the part into phrases at the BREATHS \u2014 rests bigger than `maxGapBeats`, the same rule clip_humanize's legato pass uses \u2014 and place each note at its own point of the arc. A written crescendo is a property of the phrase, not of any one note.\n\nEverything else is the sibling verb's, unchanged: the two lanes are MERGED (points outside the shaped notes survive as authored), the clip-wide point budget applies, and it is ONE undo step.\n\n\u26D4 ON A TRACK HOSTING AN AUDIO UNIT \u2014 which includes EVERY sound-bank instrument, so the GM saxophone, flute, strings and so on \u2014 two limits were MEASURED on 2026-08-19 and are enforced here rather than hoped about:\n1. Bend VIBRATO is SUPPRESSED, not written. Pitch bend there is sampled at the offline render block rate, so an authored 5.5 Hz vibrato bounces as two vibratos beating. `notesWithVibrato` comes back 0 and a warning names the route that DOES work: the instrument's own vibrato on a CC 1 (mod wheel) lane, about 2.4 + 0.30 x CC1 cents at a fixed 5.4 Hz, which you author with clip_set_controller_lane.\n2. The shape moves LOUDNESS ONLY, never brightness. CC 11 on that path is exactly a gain. Brightness shaping is a built-in Sampler capability \u2014 it is not a setting to turn on here.\n\nMAKE THE DOT MOVE \u2014 this is what turns a setting into a performance. `path: \"drift\"` with a `pathSeed` sends the dot wandering from one gesture into the next and back, so note 9 is shaped differently from note 2 the way a player's effort is never twice the same. `path: \"orbit\"` travels the ring steadily instead. The wander is REPRODUCIBLE: it is a pure function of the clip beat and the seed, with nothing accumulating anywhere, so playback, replay, a looped cycle and a bounce that starts in the middle of the song all agree exactly. Same seed, same performance \u2014 change the seed for a different one.\n\u26A0\uFE0F The dot is read ONCE PER NOTE, at the note's start. It chooses each note's gesture and cannot shape inside one.\n\nTHE AIR BUDGET \u2014 a wind player has a finite lungful. `airEnforced: true` makes a phrase that runs past it SAG toward the ground rather than hold, the way a real player does. \u26D4 IT DEFAULTS TO FALSE, deliberately: an air budget OVERRIDES what you wrote, and anything that does that is switched on once, on purpose, rather than assumed. Tune it with `airCapacitySeconds` (how long the player can sustain the part as authored \u2014 6 s), `airConsumptionExponent` (how much faster loud playing burns air), `airRefillSecondsPerSecond` (how much a rest gives back), `airMinBreathSeconds` (a rest shorter than this is an articulation, not a breath) and `airReserveFraction` (when the sag begins). Every one of those is an ESTIMATE, which is exactly why it is a parameter.\n\u2B50 THE RESPONSE ALWAYS CARRIES `air`, whether or not you enforced it, because that is what answers \"why did this get quiet?\". Read `air.applied` first: false means the lane was NOT changed and the rest is a prediction of what enforcing would do \u2014 so you can ask the question without mutating anything. `air.constrainedNoteCount` is how many notes lost something, `air.lowestAir` how close the player came to empty, and when anything was constrained `air.phrases[].constrainedNotes` names each note with `effortRequested` beside `effortAllowed`, the two peak CC values, and the dB between them. `air.neverRecovered` means the rests are too short to keep up and the sag accumulates. \u26D4 A part can also get quiet because YOU asked for it \u2014 a hairpin diminuendo. Only the budget produces effortAllowed < effortRequested, which is why \"air runs out\" is deliberately NOT one of the patterns you can pick: one symptom, one cause.\n\nPHYSIOLOGICAL HUMANISATION \u2014 the involuntary layer. `driftDepth` is a slow 1/f sag in the effort baseline (period `driftScaleBeats`, default 8 beats); `tremorDepth` is a 4-8 Hz micro-tremor INSIDE each note, at `tremorRateHz`, deepening with effort by `tremorEffortExponent`. \u26D4 BOTH DEFAULT TO 0 \u2014 off, and off renders BYTE-IDENTICALLY to never mentioning them, which is what makes each one individually declinable after you hear it. Suggested starting values: driftDepth 0.05, tremorDepth 0.03 (about 0.29 dB). The drift is DOWNWARD ONLY: effort 1 means 'as authored', so it is a ceiling and there is nothing above it to drift into.\n\u26D4 THE TREMOR IS NOT WRITTEN ON A HOSTED-AU TRACK (every soundBank instrument, so the GM sax) AND THE RESPONSE TELLS YOU SO. MEASURED 2026-08-19: in an offline bounce our renderer feeds a hosted AU MIDI in 4096-frame blocks \u2014 an 11.719 Hz sampler \u2014 so a tremor returns with a sample-and-hold copy at |11.719 - rate| Hz whose depth relative to the tremor is exactly rate/(11.719 - rate). At 8 Hz that copy is 2.14x LOUDER than the tremor itself; even at 4 Hz, the BOTTOM of the physiological band, it is 52%. Keeping it 12 dB down would need a rate at or below 2.34 Hz, below the band a tremor IS \u2014 so it is suppressed rather than quietly retuned. It lands normally on a built-in Sampler track, and the DRIFT (three orders of magnitude slower) lands everywhere.\n\nREAD THE RESPONSE. `minEffort` and `maxEffort` equal means the shape ran and varied nothing (usually a phrase-scoped pattern on notes that all sit at one point of one phrase). `phraseCount` says how many arcs were drawn. `warnings` says what will and will not be audible. On the ring form there is also `ring`, carrying the resolved `angleDegrees`, `radius`, `patternIds`, per-pattern `weights`, and the `noteWeight` / `phraseWeight` split \u2014 read the weights rather than `patternId`, which names only the NEAREST gesture and not the only one that played. On a moving dot that `ring` block describes the ORIGIN, and a `path` block describes the journey: `moved` says whether the dot travelled at all, `patternIds` lists every gesture it actually reached, and `outrunsNotes` says the motion was faster than the notes could sample it. A wander that reports one entry in `patternIds` ran and did nothing musical. MIDI clips only.",
+    inputSchema: {
+      clipId: external_exports.string().describe("Id of the MIDI clip to shape, from project_snapshot."),
+      pattern: external_exports.enum([
+        "flat",
+        "messaDiVoce",
+        "lateBloom",
+        "hairpinCrescendo",
+        "hairpinDiminuendo",
+        "terraced",
+        "sforzandoPiano",
+        "subToneEntry"
+      ]).optional().describe(
+        "ONE named gesture \u2014 the simple form. An unknown name is REFUSED naming the valid ones; it is never silently defaulted to a shape you did not ask for. Pass EITHER this OR `ringAngle`, never both, and never neither \u2014 the app refuses each of those with a sentence rather than guessing."
+      ),
+      ringAngle: external_exports.number().min(0).max(360).optional().describe(
+        "THE RING \u2014 where the dot sits, in DEGREES, on a circle of the 8 gestures. This is the blending form: instead of one gesture you get the two the dot sits between, mixed by how close it is to each. The default ring is 45\xB0 apart starting at 0: 0=flat, 45=messaDiVoce, 90=lateBloom, 135=hairpinCrescendo, 180=hairpinDiminuendo, 225=terraced, 270=sforzandoPiano, 315=subToneEntry. So 157.5 is halfway between the crescendo and the diminuendo (which cancel to a steady mid-level), and 67.5 is part messa di voce, part late bloom. Landing exactly on a number above gives that gesture EXACTLY \u2014 the blend is nearest-two, so a pattern you are not near contributes nothing at all. Only two things ever mix."
+      ),
+      ringRadius: external_exports.number().min(0).max(1).optional().describe(
+        "How far out the dot sits, 0-1. Default 1 (the full gesture). 0 is a TRUE no-op \u2014 the shape is not applied at all and nothing changes level \u2014 not 'half as loud'. \u26A0\uFE0F Not independent of `amount`: both scale the same thing, so only the PRODUCT survives (radius 0.5 with amount 1 is identical to radius 1 with amount 0.5). Requires `ringAngle`; on its own it is refused rather than defaulted."
+      ),
+      ring: external_exports.array(external_exports.string()).optional().describe(
+        "Your own ring, as pattern ids in ring order \u2014 replaces the default eight. They are spaced evenly, so N ids sit 360/N apart with the first at 0\xB0. Duplicates are allowed (a ring of copies of one pattern is a legitimate way to pin the dot). Max 32. Requires `ringAngle`; on its own it is refused rather than defaulted."
+      ),
+      path: external_exports.enum(["fixed", "orbit", "drift"]).optional().describe(
+        "HOW THE DOT MOVES while the part plays. Default 'fixed' \u2014 it stays where you put it, which is the behaviour every earlier call had.\n\u2022 'orbit' \u2014 a steady revolution round the ring, so the part travels through every gesture in turn. Set `revolutionBeats`.\n\u2022 'drift' \u2014 a seeded wander that flows from one gesture into the next and back. This is the one that sounds like a player rather than a setting. Set `pathSeed`, and optionally `scaleBeats` / `momentum` / `angleSwing`.\nWith a path, `ringAngle` and `ringRadius` stop being where the dot IS and become where you PUT it \u2014 the path is an offset from there, so nudging the origin moves the whole journey instead of cancelling it.\n\u26A0\uFE0F THE DOT IS READ ONCE PER NOTE, at the note's start. It chooses each note's gesture; it cannot shape INSIDE a note (that is what the note-scoped patterns are for). A path that moves faster than the notes arrive comes back with a warning saying so rather than aliasing quietly.\n\u26A0\uFE0F Parameters belonging to another path are REFUSED, not ignored: `revolutionBeats` on a drift is an error with a sentence. Requires `ringAngle`."
+      ),
+      pathSeed: external_exports.number().int().min(0).max(4294967295).optional().describe(
+        "WHICH wander you get, 0-4294967295. Default 0. The same seed always produces the same performance at the same clip beats \u2014 in playback, on replay, and in a bounce alike, including one that starts in the middle of the song. Change it to audition a different take of the same idea. \u26A0\uFE0F Capped at 32 bits deliberately: a JSON number is a double, so a larger seed would not survive the round trip and you would silently get a different wander back. Only means anything with path 'drift'."
+      ),
+      revolutionBeats: external_exports.number().min(0.25).max(4096).optional().describe(
+        "ORBIT ONLY. How many BEATS one full trip round the ring takes. Default 16. On the default 8-pattern ring that is one gesture every 2 beats. Long values are the useful ones: the dot is read once per note, so a revolution shorter than a few notes is heard as an alias rather than as motion, and is warned about."
+      ),
+      pathDirection: external_exports.enum(["clockwise", "counterclockwise"]).optional().describe(
+        "ORBIT ONLY. Which way round. Default 'clockwise', which is the order you listed the patterns in (or the default ring's order: flat \u2192 messaDiVoce \u2192 lateBloom \u2192 \u2026)."
+      ),
+      scaleBeats: external_exports.number().min(0.25).max(1024).optional().describe(
+        "DRIFT ONLY. How many BEATS one unit of the wander spans. Default 8 \u2014 about two bars of 4/4, which reads as phrasing rather than as wobble. Bigger is slower."
+      ),
+      octaves: external_exports.number().int().min(1).max(8).optional().describe(
+        "DRIFT ONLY. How many layers of detail the wander has. Default 4: one slow sway plus three progressively faster and quieter layers on top. 1 is a single pure sway."
+      ),
+      momentum: external_exports.number().min(0).max(1).optional().describe(
+        "DRIFT ONLY. How LAZY the wander is, 0-1. Default 0.5. 1 is one long unhurried sway; 0 is twitchy; 0.5 is the 1/f middle that human drift tends to sit near. \u26A0\uFE0F It is the spectral tilt of the noise, not a stored velocity \u2014 nothing in this feature accumulates, which is why a bounce from bar 33 matches playing through to it."
+      ),
+      angleSwing: external_exports.number().min(0).max(360).optional().describe(
+        "DRIFT ONLY. The furthest the dot ever wanders from `ringAngle`, in DEGREES either side. Default 45 \u2014 one pattern spacing on the default ring, so it reaches each neighbour and no further. This is an exact bound, not a typical value. A swing much smaller than the gap between gestures comes back with a warning that the dot moved and never left the gesture it started on."
+      ),
+      radiusSwing: external_exports.number().min(0).max(1).optional().describe(
+        "DRIFT ONLY. How far the dot also wanders IN AND OUT, 0-1. Default 0 \u2014 the wander changes WHICH gesture is playing, not how strongly it is applied, so one control has one visible outcome. Raise it to let the intensity breathe too."
+      ),
+      noteIds: external_exports.array(external_exports.string()).optional().describe(
+        "Ids of the notes to shape (from clip_get_notes). OMIT to shape every note in the clip. Phrases are still measured over the WHOLE clip, so shaping the middle three notes of a phrase places them where they really sit in it rather than renormalising them into a phrase of their own. An id not in the clip is refused outright \u2014 nothing is written."
+      ),
+      amount: external_exports.number().min(0).max(1).optional().describe(
+        "How strongly the pattern is applied, 0-1. Default 1. 0 is a VALID no-op on the shaping axis \u2014 a flat lane at peakValue \u2014 not an error, and it says so in warnings."
+      ),
+      maxGapBeats: external_exports.number().min(0).max(16).optional().describe(
+        "A gap larger than this counts as a BREATH and splits the phrase, so a hairpin starts over after it. Default 0.125 (a thirty-second note at a quarter-note beat) \u2014 the same threshold, and the same reasoning, as clip_humanize's maxGapBeats. Only the phrase-scoped patterns consult it."
+      ),
+      loudnessDepth: external_exports.number().min(0).max(1).optional().describe(
+        "How far a phrase-scoped shape may pull a quiet note's peak down, 0-1. Default 0.55, which is about 9 dB across a full hairpin. \u26A0\uFE0F Not linear in dB: CC 11 is a square law, so halving it is -12 dB, not -6."
+      ),
+      swellDepth: external_exports.number().min(0).max(1).optional().describe(
+        "How much a quiet note's own internal swell shrinks along with its level, 0-1. Default 0.5, on the reasoning that a player at low pressure has less to shape with. Set 0 to vary only the level and keep every note's internal shape identical."
+      ),
+      airEnforced: external_exports.boolean().optional().describe(
+        "THE AIR BUDGET SWITCH. \u26D4 Default FALSE, and that is a decision, not an oversight: turning it on lets the model OVERRIDE what you wrote, pulling a phrase down when the simulated player runs out of breath, so it is opted into rather than assumed. With it false you still get the full `air` report saying what it WOULD have done \u2014 which is the cheapest way to find out whether a part is over-long before changing anything. A note is never taken to silence and no note's length or existence ever changes; the phrase sags, it does not stop."
+      ),
+      airCapacitySeconds: external_exports.number().min(0.25).max(3600).optional().describe(
+        "How many SECONDS the player can sustain the part AS AUTHORED before the lungful is gone. Default 6. This is an estimate and it is the first knob to reach for when the budget is firing more than you want \u2014 raise it. (There is no separate `referenceEffort`: it would be algebraically the same axis as this number.)"
+      ),
+      airConsumptionExponent: external_exports.number().min(0).max(8).optional().describe(
+        "How much faster loud playing burns air: rate = effort^this. Default 1.5, superlinear because blowing pressure rises steeply into fortissimo. At 1.5 a phrase at half the authored level lasts about 2.8x longer. 0 makes the level irrelevant."
+      ),
+      airRefillSecondsPerSecond: external_exports.number().min(0).max(100).optional().describe(
+        "How much of a lungful one second of rest gives back. Default 0.5, so a 2-second rest refills completely. \u26A0\uFE0F If the part's rests are shorter than this can keep up with, the sag ACCUMULATES across the part instead of resetting at each breath \u2014 the response reports that as `air.neverRecovered` rather than leaving you to hear it."
+      ),
+      airMinBreathSeconds: external_exports.number().min(0).max(60).optional().describe(
+        "A rest shorter than this many SECONDS is an articulation, not a breath, and refills nothing. Default 0.15. \u26A0\uFE0F This is in SECONDS while `maxGapBeats` is in BEATS, so at a fast tempo a gap can split the phrase and still be too quick to breathe in. That is not a contradiction, it is a player whose rest was too short \u2014 the response says so with breath.kind 'tooShort', which is a different answer from 'none' (the first phrase, which has nothing before it)."
+      ),
+      airReserveFraction: external_exports.number().min(0).max(1).optional().describe(
+        "Below this fraction of a lungful the player starts running out, and effort is scaled toward it so the phrase SAGS rather than stopping. Default 0.25. A note starting exactly AT the reserve is left alone; only notes below it lose anything."
+      ),
+      driftDepth: external_exports.number().min(0).max(1).optional().describe(
+        "How far a slow 1/f drift may pull the effort baseline BELOW what you wrote, as a fraction. Default 0 \u2014 off, and off is byte-identical to not mentioning it. 0.05 is the design's suggested starting value. DOWNWARD ONLY: effort 1 means 'as authored'."
+      ),
+      driftScaleBeats: external_exports.number().min(0.01).max(4096).optional().describe(
+        "The drift's period in BEATS. Default 8 (two bars of 4/4). Deliberately far slower than any note rate: effort is sampled once per note, so a fast drift would be aliased by the note grid rather than heard."
+      ),
+      driftOctaves: external_exports.number().int().min(1).max(8).optional().describe(
+        "How many fBm octaves the drift is built from. Default 4, persistence fixed at 0.5, which is the 1/f spectrum. \u26A0\uFE0F '1/f breath pressure' is a MODELLING CHOICE this design made, not a measured finding \u2014 no measurement of 1/f structure in wind-instrument breath pressure was found."
+      ),
+      tremorDepth: external_exports.number().min(0).max(1).optional().describe(
+        "Peak-to-trough depth of the involuntary micro-tremor INSIDE each note, as a fraction of the contour level it rides on. Default 0 \u2014 off, and off is byte-identical. 0.03 is the suggested value and measures about 0.29 dB peak-to-trough; the line is 0.0755 dB per CC of travel, MEASURED on the built-in sampler at \xB11, \xB12, \xB14 and \xB18 CC. \u26D4 SUPPRESSED on hosted-AU tracks \u2014 read the warnings."
+      ),
+      tremorRateHz: external_exports.number().min(0.2).max(20).optional().describe(
+        "Tremor rate in Hz, 0.2-20. Default 4.565 = the vibrato rate x 0.83, so tremor and vibrato are not one oscillator at one rate summing into a single deeper vibrato. Deliberately at the BOTTOM of the 4-8 Hz physiological band, because on a hosted AU an offline bounce re-samples this lane at 11.719 Hz. The band is the vibrato band: below 0.2 Hz a tremor is a drift, which is what driftDepth is for, and a rate outside it is REJECTED rather than clamped so you are never handed a different gesture under the name you asked for."
+      ),
+      tremorEffortExponent: external_exports.number().min(0).max(8).optional().describe(
+        "How the tremor deepens with effort: depth is scaled by effort^this. Default 1 (linear). 0 makes the tremor the same depth however hard the player is blowing."
+      ),
+      peakValue: external_exports.number().int().min(0).max(127).optional().describe(
+        "CC value at FULL effort, 0-127. Default 127 \u2014 the lane's neutral, so the loudest instant is exactly as loud as the note with no contour at all, and applying this can never quietly drop the level of a part you already balanced."
+      ),
+      expressionCC: external_exports.number().int().min(0).max(127).optional().describe(
+        "Which CC carries the shape. Default 11 (expression) \u2014 the one the built-in sampler routes to amplitude with no opt-in."
+      ),
+      attackSettleSeconds: external_exports.number().min(0).max(1).optional().describe(
+        "Seconds from the attack to the settling dip. Default 0.05. A pattern that has its own early dip (sforzandoPiano) overrides this per note so its accent lands where the gesture says."
+      ),
+      expressionSpacingSeconds: external_exports.number().min(1e-3).max(1).optional().describe(
+        "Seconds between expression points. Default 0.02. Controller lanes are STEPWISE, so a dense run is what makes a curve instead of a staircase."
+      ),
+      vibratoOnsetSeconds: external_exports.number().min(0).max(10).optional().describe(
+        "Seconds of STRAIGHT playing before vibrato starts. Default 0.5. A note shorter than this plus one cycle gets no vibrato at all."
+      ),
+      vibratoRateHz: external_exports.number().min(0.2).max(20).optional().describe("Vibrato rate in Hz. Default 5.5."),
+      vibratoDepthCents: external_exports.number().min(0).max(200).optional().describe(
+        "Peak vibrato width in CENTS (a \xB1 figure). Default 12; 0 turns vibrato off. IGNORED on a track hosting an Audio Unit, where vibrato is suppressed for the measured aliasing reason above \u2014 the response reports 0 notes with vibrato rather than pretending."
+      ),
+      vibratoBloomSeconds: external_exports.number().min(0).max(10).optional().describe("Seconds for the vibrato to widen from nothing to full depth. Default 0.7."),
+      vibratoReleaseSeconds: external_exports.number().min(0).max(10).optional().describe(
+        "Seconds before the note's end over which vibrato relaxes back to centre. Default 0.08, which also guarantees the next note cannot start detuned by this one."
+      ),
+      sharpenCents: external_exports.number().min(-200).max(200).optional().describe(
+        "Peak micro-sharpening in CENTS at full effort, resolving as the shape falls. Default 4. It rides the pitch-bend lane on EVERY instrument kind, including hosted Audio Units, because it is a seconds-scale curve far below the block-rate limit that forbids vibrato there."
+      ),
+      bendSpacingSeconds: external_exports.number().min(1e-3).max(1).optional().describe(
+        "Seconds between emitted pitch-bend points. Default 0.008 \u2014 about 23 points per cycle at the default vibrato rate."
+      ),
+      bendRangeSemitones: external_exports.number().min(0.01).max(48).optional().describe(
+        "The instrument's pitch-bend range in semitones for a full \xB18192 deflection, so the cents figures land correctly. Default 2 \u2014 exactly the built-in sampler, and a hosted AUSampler was MEASURED at 2.0155, so the default is right to 0.78% there too."
+      )
+    }
+  },
+  async ({
+    clipId,
+    pattern,
+    ringAngle,
+    ringRadius,
+    ring,
+    path: path6,
+    pathSeed,
+    revolutionBeats,
+    pathDirection,
+    scaleBeats,
+    octaves,
+    momentum,
+    angleSwing,
+    radiusSwing,
+    noteIds,
+    amount,
+    maxGapBeats,
+    airEnforced,
+    driftDepth,
+    driftScaleBeats,
+    driftOctaves,
+    tremorDepth,
+    tremorRateHz,
+    tremorEffortExponent,
+    airCapacitySeconds,
+    airConsumptionExponent,
+    airRefillSecondsPerSecond,
+    airMinBreathSeconds,
+    airReserveFraction,
+    loudnessDepth,
+    swellDepth,
+    peakValue,
+    expressionCC,
+    attackSettleSeconds,
+    expressionSpacingSeconds,
+    vibratoOnsetSeconds,
+    vibratoRateHz,
+    vibratoDepthCents,
+    vibratoBloomSeconds,
+    vibratoReleaseSeconds,
+    sharpenCents,
+    bendSpacingSeconds,
+    bendRangeSemitones
+  }) => toToolResult(
+    () => bridge.send("clip.applyEffortShape", {
+      clipId,
+      pattern,
+      ringAngle,
+      ringRadius,
+      ring,
+      path: path6,
+      pathSeed,
+      revolutionBeats,
+      pathDirection,
+      scaleBeats,
+      octaves,
+      momentum,
+      angleSwing,
+      radiusSwing,
+      noteIds,
+      amount,
+      maxGapBeats,
+      airEnforced,
+      driftDepth,
+      driftScaleBeats,
+      driftOctaves,
+      tremorDepth,
+      tremorRateHz,
+      tremorEffortExponent,
+      airCapacitySeconds,
+      airConsumptionExponent,
+      airRefillSecondsPerSecond,
+      airMinBreathSeconds,
+      airReserveFraction,
+      loudnessDepth,
+      swellDepth,
+      peakValue,
+      expressionCC,
+      attackSettleSeconds,
       expressionSpacingSeconds,
       vibratoOnsetSeconds,
       vibratoRateHz,

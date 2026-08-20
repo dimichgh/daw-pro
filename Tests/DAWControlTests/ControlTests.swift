@@ -1729,6 +1729,28 @@ struct CommandRouterTests {
                 // errors) and DAWCore ControllerLaneStoreTests / DAWEngine
                 // SamplerTests' offline-render gate.
                 "clip.applyBreathContour",
+                // clip.applyEffortShape (breath pad P1) is the composing verb
+                // over clip.applyBreathContour and needs the same MIDI clip id
+                // — a bare call is the ordinary "missing or invalid required
+                // param 'clipId'" refusal this loop, which sends no params,
+                // cannot express.
+                // ⚠️ P2 (the ring) RETIRED THE SECOND REASON THIS COMMENT USED
+                // TO GIVE: `pattern` is NO LONGER required — it is now one of
+                // TWO accepted gesture forms (`pattern`, or `ringAngle`
+                // [+ optional `ringRadius`/`ring`]), and supplying NEITHER is
+                // refused app-side with an error naming both. `clipId` alone
+                // still keeps this verb out of the loop, so the exclusion is
+                // unchanged in effect — but the rationale is not, and a stale
+                // reason is how an exclusion silently goes vacuous.
+                // Proven by ControllerLaneCommandTests (round-trip,
+                // every-new-parameter reachability, case-insensitive pattern
+                // resolution, the unknown-pattern refusal that lists the valid
+                // ids, the pattern-owned-key rejections, and P2's ring
+                // round-trip / both-forms / orphan-decoration / neither-form
+                // fork with positive controls) and DAWCore
+                // ControllerLaneStoreTests / EffortPatternTests /
+                // EffortRingTests.
+                "clip.applyEffortShape",
                 "clip.setFades",
                 // clip.fitToContent (m21-d) needs a clip id like the other
                 // per-clip edits; proven by ClipFitToContentCommandTests
@@ -1956,6 +1978,25 @@ struct CommandRouterTests {
                 // AuditionCommandTests against a stopped transport — the
                 // reference.import rationale.
                 "note.audition",
+                // pad.previewEffort (breath pad P6) is note.audition's neighbour
+                // in allCommands and excluded for note.audition's reason PLUS
+                // one of its own. BOTH are written down because either alone
+                // invites the wrong repair:
+                //  1. `begin`/`move` are refused mid-take (same design §9 rule —
+                //     anything heard during a take is assumed to be in it), and
+                //     this loop leaves transport.record's take rolling.
+                //  2. ⛔ Do NOT "fix" this by feeding it {gesture:"end"}. `end`
+                //     is allowed mid-take on purpose, but with no gesture open
+                //     it throws by design ("'end' has nothing to release"), so
+                //     it would fail here too — and if it ever stopped throwing,
+                //     the loop would be exercising the degenerate no-op branch
+                //     while looking like route coverage. A green vacuous check
+                //     is worse than an honest exclusion.
+                // The route (all three phases, both identity guards, the rate
+                // cap, the release-to-neutral law) is proven against a stopped
+                // transport by PadPreviewCommandTests — the note.audition
+                // rationale verbatim.
+                "pad.previewEffort",
                 // clip.transcribe (m23-n2b) hits a REAL WhisperTranscriber —
                 // this bare router doesn't inject a fake (there is no
                 // WhisperTranscriber protocol to fake; the actor IS the

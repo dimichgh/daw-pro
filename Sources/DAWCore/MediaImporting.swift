@@ -200,6 +200,13 @@ public enum ProjectError: Error, LocalizedError {
     // audition rejection lands BEFORE anything is pushed to a renderer, so a
     // refused call is guaranteed to have sounded nothing.
     case invalidAudition(String)
+    // Breath pad live preview (P6, pad.previewEffort): a gesture-scoped refusal
+    // built at throw time — a `move`/`end` with no gesture open, an effort
+    // outside 0…1, a CC outside 0…127, or a target that is not an instrument
+    // track. Its own case rather than `invalidAudition` because the preview is
+    // NOT an audition: it opens no voice, and a caller reading "audition" would
+    // look for a stuck note that cannot exist. Same ready-to-show contract.
+    case invalidPadPreview(String)
     // Speech-to-text (m23-n2b, clip.transcribe): resolves its `clipId` param
     // to that clip's backing audio file — a MIDI clip (or, structurally
     // unreachable via any current mutation, an audio clip with no backing
@@ -550,6 +557,12 @@ public enum ProjectError: Error, LocalizedError {
         case .invalidAudition(let message):
             // Built at throw time (which audition field was out of range, and
             // what the legal range is); surfaced verbatim.
+            return message
+        case .invalidPadPreview(let message):
+            // Built at throw time (which gesture rule or range was broken, and
+            // what to do instead); surfaced verbatim. Every pad-preview refusal
+            // lands BEFORE anything reaches a renderer, so a refused call is
+            // guaranteed to have moved no controller.
             return message
         case .voiceConversionRequiresAudioClip(let id):
             // Exact wording is contract (control protocol + MCP surface it verbatim).

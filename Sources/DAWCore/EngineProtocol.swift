@@ -855,6 +855,36 @@ public protocol AudioEngineControlling: AnyObject {
     @discardableResult
     func setAuditionPitches(trackID: UUID, pitches: [UInt8], velocity: UInt8) -> AuditionOutcome
 
+    /// Sends ONE controller value to `trackID`'s instrument RIGHT NOW, outside
+    /// the sequencer schedule (breath pad P6 — the live drag preview). Rides the
+    /// same per-renderer audition ring `setAuditionPitches` uses, so it is
+    /// delivered at offset 0 of whatever render quantum it drains in and touches
+    /// no voice: it opens nothing, closes nothing, and is NOT a liveness
+    /// heartbeat (bumping one would keep a stuck audition note alive).
+    ///
+    /// ⛔ **A PREVIEW, NEVER THE RECORD.** The controller lane on the clip is the
+    /// record; this is a gesture. THE PAD LAW (design-breath-pad §5.1) survives
+    /// because nothing here is ever consulted by playback, replay or bounce —
+    /// they all read the same event array and agree sample-for-sample. The
+    /// caller is responsible for the other half of that law: streaming happens
+    /// IF AND ONLY IF a gesture is in progress, and the gesture's end restores
+    /// the controller to `MIDIControllerType.neutralDefault` so no preview value
+    /// is left parked on the strip (`PadPreviewController` is the ONE home for
+    /// that policy — see `Sources/DAWCore/PadPreview.swift`).
+    ///
+    /// ⚠️ **Restoring neutral is not the same as restoring the committed lane,
+    /// and on a track that HAS one it is measurably not.** The chase that emits
+    /// `neutralDefault` is a schedule-BUILD-time prefix, not a per-block
+    /// re-assert, so a release mid-playback holds neutral until the lane's next
+    /// point. Scope, direction and the shared-merge fix are written out in
+    /// `PadPreviewController`'s "THE LIMIT OF RULE 3".
+    ///
+    /// `controller` is a CC number 0…127 and `value` a data byte 0…127; both are
+    /// masked rather than trusted. Never throws; the outcome reports why nothing
+    /// will be heard when that is the case, exactly as `setAuditionPitches` does.
+    @discardableResult
+    func previewController(trackID: UUID, controller: UInt8, value: UInt8) -> AuditionOutcome
+
     /// Releases every audition voice on every track and requests an
     /// all-notes-off on each renderer that held one. Called at engine
     /// shutdown, project boundary, and app resign-active — the paths where the
@@ -1010,6 +1040,25 @@ extension AudioEngineControlling {
     /// unchanged.
     public func setAuditionPitches(trackID: UUID, pitches: [UInt8],
                                    velocity: UInt8) -> AuditionOutcome { .unsupported }
+
+    /// The live controller preview is optional capability (breath pad P6, the
+    /// `setAuditionPitches` precedent): fakes and headless engines have no
+    /// instrument renderers, so the default reports `.unsupported` and every
+    /// existing conformer compiles unchanged.
+    ///
+    /// ⚠️ THE SAME VACUITY RISK AS `availableOutputDevices` BELOW, and it is
+    /// worse here because the symptom is silence rather than an empty list: an
+    /// `AudioEngine` that forgot to override this would report `.unsupported`
+    /// forever, the pad would preview nothing, and every model-layer test would
+    /// still pass because `PadPreviewController` is written to keep working
+    /// against an engine that cannot preview.
+    /// `Tests/DAWEngineTests/AuditionEngineTests.swift`'s
+    /// `theRealEngineImplementsTheControllerPreview` closes that hole by
+    /// asserting the REAL engine returns something other than `.unsupported`
+    /// for a track that has an instrument node (the `OutputDeviceTests`
+    /// precedent, applied to a method whose default is a silent no-sound).
+    public func previewController(trackID: UUID, controller: UInt8,
+                                  value: UInt8) -> AuditionOutcome { .unsupported }
 
     /// The audition all-stop is optional capability (m23-d): an engine with no
     /// audition support holds no voices, so the default is a no-op.

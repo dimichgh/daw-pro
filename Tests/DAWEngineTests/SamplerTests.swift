@@ -1024,4 +1024,829 @@ struct SamplerTests {
         #expect(abs(bright - 0.9993) < 0.01)
         #expect(bright > dark * 1.3)
     }
+
+    // MARK: - Breath pad P1 — the effort patterns, RENDERED
+
+    /// ⭐ WHY THESE TWO EXIST. Every other P1 test asserts on stored lane
+    /// POINTS. A CC ramp of `[75, 82, 101, 119]` is not evidence of an audible
+    /// one, and P1 did not stay inside the data layer: promoting `onsetLevel`
+    /// and `releaseLevel` out of `static let` and into `Options` WIDENED the
+    /// generator's shape family, so `sforzandoPiano` now sends a contour
+    /// through the sampler that no existing render has ever produced — a
+    /// near-maximum onset followed by a forced dip. Nothing above would notice
+    /// if the settle clamp ate the accent, or if the phrase arc came out flat.
+    ///
+    /// These go through `ProjectStore.applyEffortShape` rather than
+    /// hand-building lanes: the chain under test is pattern → per-note options
+    /// → generator → lane → SAMPLES, and a test that skips the store would
+    /// re-implement the very mapping it is meant to check.
+
+    /// Four back-to-back 2-beat notes (1 s each at 120 BPM) on a sampler whose
+    /// only zone is the 440 Hz tone at its own root pitch, shaped by `pattern`.
+    /// Returns the shaped track and what the store said it did.
+    private func effortTrack(
+        _ fixtures: Fixtures,
+        pattern: EffortPattern,
+        noteCount: Int = 4,
+        noteLengthBeats: Double = 2
+    ) throws -> (track: Track, result: EffortShapeApplication) {
+        let store = ProjectStore()
+        // A non-empty zones array is validated through the media service, so
+        // the REAL importer is wired up rather than the zone being smuggled in
+        // after the fact — the descriptor the render sees is the one the store
+        // accepted.
+        store.media = AudioFileImporter()
+        let track = store.addTrack(kind: .instrument)
+        _ = try store.setInstrument(
+            id: track.id, kind: .sampler,
+            sampler: SamplerParams(zones: [SamplerZone(audioFileURL: fixtures.sine440MonoLong,
+                                                       rootPitch: 69)],
+                                   attack: 0.001, release: 0.05, gain: 0.8))
+        let notes = (0..<noteCount).map {
+            MIDINote(pitch: 69, velocity: 127,
+                     startBeat: Double($0) * noteLengthBeats, lengthBeats: noteLengthBeats)
+        }
+        let clip = try store.addMIDIClip(toTrack: track.id,
+                                         lengthBeats: noteLengthBeats * Double(noteCount) + 1,
+                                         notes: notes)
+        let result = try store.applyEffortShape(clipID: clip.id, pattern: pattern)
+        return (store.tracks[0], result)
+    }
+
+    @Test("P1: a phrase-scoped hairpin RENDERS as a real crescendo, note by note")
+    func hairpinCrescendoRendersAsACrescendo() throws {
+        let fixtures = try fixtures()
+        let pattern = try #require(EffortPattern.named("hairpinCrescendo"))
+        let (shaped, result) = try effortTrack(fixtures, pattern: pattern)
+        let audio = try renderBreath(shaped)
+
+        // Each note owns 1 s. Measure the middle 85 % so neither the attack
+        // transient nor the previous note's 50 ms release tail is in the window.
+        func noteWindow(_ k: Int) -> Range<Int> {
+            Int((Double(k) + 0.10) * sampleRate)..<Int((Double(k) + 0.95) * sampleRate)
+        }
+        let levels = (0..<4).map { rmsLevel(audio, noteWindow($0)) }
+        let expressionLane = try #require(shaped.clips[0].controllerLanes
+            .first { $0.type == .cc(controller: 11) })
+        var peaks: [Int] = []
+        for k in 0..<4 {
+            let lo = Double(k) * 2.0
+            let hi = lo + 2.0
+            var best = -1
+            for point in expressionLane.points where point.beat >= lo && point.beat < hi {
+                best = max(best, point.value)
+            }
+            peaks.append(best)
+        }
+        let spanDB = 20 * log10(levels[3] / levels[0])
+        print("[measured] P1 hairpinCrescendo: per-note RMS \(levels) → span \(spanDB) dB; "
+              + "per-note peak CC \(peaks); effort \(result.minEffort)…\(result.maxEffort)")
+
+        // ⭐ THE ASSERTION THE LANE TESTS CANNOT MAKE: the AUDIO rises, note by
+        // note, in the order the phrase does.
+        #expect(levels[0] < levels[1])
+        #expect(levels[1] < levels[2])
+        #expect(levels[2] < levels[3])
+        #expect(spanDB > 3.0)                    // a real crescendo, not a nudge
+        #expect(levels[0] > 0.01)                // and nothing rendered silence
+        // ⭐ THE LANE THE AUDIO FOLLOWED, PINNED — and pinned to a DERIVATION,
+        // not to a remembered figure. Four uniformly spaced notes sit at
+        // u = 0, ¼, ½, ¾ of the phrase; hairpinCrescendo blends 0.25 → 1 with
+        // the raised cosine, and `EffortResponse.loudnessDepth` is 0.55, so
+        //     peak(u) = round(127 × (1 − 0.55 × (1 − blend(0.25, 1, u))))
+        //             = 75, 82, 101, 119.
+        // ⚠️ An earlier note in this round recorded these as [75, 88, 101, 119].
+        // 88 needs u = ⅓, i.e. a THREE-note phrase — it is a different fixture's
+        // number, and no test anywhere pins it (grepped, with a control). It is
+        // written down here so it does not get "restored" as a correction.
+        #expect(peaks == [75, 82, 101, 119])
+        #expect(zip(peaks, peaks.dropFirst()).allSatisfy { $0 < $1 })
+        #expect(result.phraseCount == 1)         // one phrase: no gap is a breath here
+
+        // NEGATIVE CONTROL — the same four notes with the DIMINUENDO fall
+        // instead. If the crescendo above were an artefact of the fixture or the
+        // windowing rather than of the pattern, this would rise too.
+        let falling = try #require(EffortPattern.named("hairpinDiminuendo"))
+        let (down, _) = try effortTrack(fixtures, pattern: falling)
+        let downLevels = (0..<4).map { rmsLevel(try! renderBreath(down), noteWindow($0)) }
+        print("[measured] P1 hairpinDiminuendo control: per-note RMS \(downLevels)")
+        #expect(downLevels[0] > downLevels[3])
+    }
+
+    @Test("P1: sforzandoPiano RENDERS its accent — the attack is louder than the settle")
+    func sforzandoPianoRendersItsAccent() throws {
+        let fixtures = try fixtures()
+        let pattern = try #require(EffortPattern.named("sforzandoPiano"))
+        // ONE long note, so the early dip (u 0.12) has room and is not clamped:
+        // 11 beats = 5.5 s ⇒ the dip is asked for at 0.66 s, well inside both
+        // the 25 % settle ceiling (1.375 s) and half the peak time (2.475 s).
+        let (shaped, result) = try effortTrack(fixtures, pattern: pattern,
+                                               noteCount: 1, noteLengthBeats: 11)
+        let audio = try renderBreath(shaped)
+
+        // 15-70 ms: past the 1 ms envelope attack, and short enough that the
+        // fall toward the 0.66 s dip has barely started. A wider window
+        // averages the accent away with the very slope it is measuring.
+        let attack = Int(0.015 * sampleRate)..<Int(0.07 * sampleRate)
+        let settle = Int(0.60 * sampleRate)..<Int(0.75 * sampleRate)
+        let late = Int(4.70 * sampleRate)..<Int(5.00 * sampleRate)
+        let attackLevel = rmsLevel(audio, attack)
+        let settleLevel = rmsLevel(audio, settle)
+        let lateLevel = rmsLevel(audio, late)
+        let dropDB = 20 * log10(attackLevel / settleLevel)
+        print("[measured] P1 sforzandoPiano: attack RMS \(attackLevel), settle \(settleLevel), "
+              + "late \(lateLevel) → attack is \(dropDB) dB above the settle; "
+              + "warnings \(result.warnings)")
+
+        // ⛔ THE FAILURE THIS CATCHES: a settle clamp, or an onsetLevel that did
+        // not survive the promotion into `Options`, eats the accent — and every
+        // lane-point assertion in P1 still passes, because the POINTS are fine.
+        //
+        // ⚠️ The threshold is 1.2 dB against a MEASURED 2.10, not the 4.2 dB the
+        // CC values alone predict (125.4 → 98.4 under the square law). The gap
+        // is real and is the windows' doing: neither window sits on an extreme,
+        // because the dip is a single instant at 0.66 s and the attack window
+        // is already sliding toward it. What the assertion has to separate is
+        // "accent present" from "accent eaten", and those are 2.10 dB and
+        // NEGATIVE respectively — the messaDiVoce control below measures the
+        // negative case at −0.13 dB, so the two are not near each other.
+        #expect(attackLevel > settleLevel * 1.1)
+        #expect(dropDB > 1.2)
+        #expect(lateLevel > settleLevel)         // and it grows back afterwards
+        // The note is 5.5 s and NOT too short, so the clamp warning must be absent.
+        #expect(!result.warnings.contains { $0.contains("too short to hold") })
+
+        // NEGATIVE CONTROL — messaDiVoce on the SAME note swells INTO the middle,
+        // so its attack must be quieter than the same settle window. Without
+        // this, "attack > settle" could be a property of the sampler's envelope.
+        let swell = try #require(EffortPattern.named("messaDiVoce"))
+        let (mdv, _) = try effortTrack(fixtures, pattern: swell,
+                                       noteCount: 1, noteLengthBeats: 11)
+        let mdvAudio = try renderBreath(mdv)
+        let mdvAttack = rmsLevel(mdvAudio, attack)
+        let mdvSettle = rmsLevel(mdvAudio, settle)
+        print("[measured] P1 messaDiVoce control: attack RMS \(mdvAttack), settle \(mdvSettle)")
+        #expect(mdvAttack < mdvSettle)
+    }
+
+    // MARK: - Breath pad P2 — the RING, rendered
+
+    /// ⭐ WHY THIS EXISTS AND WHY IT IS NOT A LANE TEST. A blend that produces
+    /// the right lane numbers and the wrong audio is this tree's characteristic
+    /// failure, and P2's specific hazard has a shape that lane assertions alone
+    /// cannot separate: an equal-power (`sqrt`) blend of the two hairpins is
+    /// **also flat**, just 2.8 dB louder. So flatness proves nothing here — the
+    /// LEVEL is the discriminator, and it is measured against two rendered
+    /// references rather than against a dB figure derived from an assumed
+    /// CC-to-gain law.
+    private func effortRingTrack(
+        _ fixtures: Fixtures,
+        degrees: Double,
+        radius: Double = 1,
+        noteCount: Int = 4,
+        noteLengthBeats: Double = 2
+    ) throws -> (track: Track, result: EffortShapeApplication) {
+        let (store, clip) = try effortStore(fixtures, noteCount: noteCount,
+                                            noteLengthBeats: noteLengthBeats)
+        let result = try store.applyEffortShape(
+            clipID: clip.id, ring: .standard,
+            angleRadians: EffortRing.radians(fromDegrees: degrees), radius: radius)
+        return (store.tracks[0], result)
+    }
+
+    /// A flat lane pinned at one CC value — the rendered REFERENCE the blend's
+    /// level is compared against. `flat` has zero travel, so its depth is 0 and
+    /// the lane really is a constant.
+    private func flatAtCC(_ fixtures: Fixtures, _ value: Int,
+                          noteCount: Int = 4, noteLengthBeats: Double = 2) throws -> Track {
+        let (store, clip) = try effortStore(fixtures, noteCount: noteCount,
+                                            noteLengthBeats: noteLengthBeats)
+        _ = try store.applyEffortShape(
+            clipID: clip.id, pattern: try #require(EffortPattern.named("flat")),
+            options: BreathContour.Options(peakValue: value))
+        return store.tracks[0]
+    }
+
+    /// The store + clip `effortTrack` builds, factored out so the P2 helpers
+    /// above share the exact fixture P1's gates render.
+    private func effortStore(_ fixtures: Fixtures, noteCount: Int, noteLengthBeats: Double)
+    throws -> (store: ProjectStore, clip: Clip) {
+        let store = ProjectStore()
+        store.media = AudioFileImporter()
+        let track = store.addTrack(kind: .instrument)
+        _ = try store.setInstrument(
+            id: track.id, kind: .sampler,
+            sampler: SamplerParams(zones: [SamplerZone(audioFileURL: fixtures.sine440MonoLong,
+                                                       rootPitch: 69)],
+                                   attack: 0.001, release: 0.05, gain: 0.8))
+        let notes = (0..<noteCount).map {
+            MIDINote(pitch: 69, velocity: 127,
+                     startBeat: Double($0) * noteLengthBeats, lengthBeats: noteLengthBeats)
+        }
+        let clip = try store.addMIDIClip(toTrack: track.id,
+                                         lengthBeats: noteLengthBeats * Double(noteCount) + 1,
+                                         notes: notes)
+        return (store, clip)
+    }
+
+    private func peakLevel(_ audio: RenderedAudio, _ window: Range<Int>) -> Double {
+        var best = 0.0
+        for frame in window { best = max(best, abs(Double(audio.channelData[0][frame]))) }
+        return best
+    }
+
+    @Test("P2: the hairpin blend RENDERS flat, at the equal-gain level and not the sqrt one")
+    func ringBlendRendersAtTheEqualGainLevel() throws {
+        let fixtures = try fixtures()
+        // Each note owns 1 s at 120 BPM. Skip the first 100 ms (attack plus the
+        // previous note's 50 ms release tail) and stop before the note ends.
+        func noteWindow(_ k: Int) -> Range<Int> {
+            Int((Double(k) + 0.10) * sampleRate)..<Int((Double(k) + 0.95) * sampleRate)
+        }
+
+        // 135° = hairpinCrescendo, 180° = hairpinDiminuendo ⇒ 157.5° is the
+        // seam, where the eased weights are exactly 0.5/0.5 and the two curves
+        // cancel to a constant 0.625 for every u.
+        let (blended, result) = try effortRingTrack(fixtures, degrees: 157.5)
+        let audio = try renderBreath(blended)
+        let levels = (0..<4).map { rmsLevel(audio, noteWindow($0)) }
+        let peaks = (0..<4).map { peakLevel(audio, noteWindow($0)) }
+        let spread = 20 * log10((levels.max() ?? 1) / (levels.min() ?? 1))
+
+        // The two rendered references: a flat lane at the CC the EQUAL-GAIN
+        // blend produces (101), and one at the CC an equal-power blend would
+        // have produced (119). Comparing renders rather than pinning a dB
+        // figure means this gate does not depend on the sampler's CC-to-gain
+        // law being what anyone remembers it is.
+        let correct = try renderBreath(flatAtCC(fixtures, 101))
+        let wrong = try renderBreath(flatAtCC(fixtures, 119))
+        let correctPeak = (0..<4).map { peakLevel(correct, noteWindow($0)) }
+        let wrongPeak = (0..<4).map { peakLevel(wrong, noteWindow($0)) }
+        let vsCorrect = 20 * log10(peaks[1] / correctPeak[1])
+        let vsWrong = 20 * log10(peaks[1] / wrongPeak[1])
+        print("[measured] P2 ring blend RENDER: per-note RMS \(levels) → spread \(spread) dB; "
+              + "peaks \(peaks); vs the CC-101 reference \(vsCorrect) dB, "
+              + "vs the CC-119 (equal-power) reference \(vsWrong) dB; "
+              + "effort \(result.minEffort)…\(result.maxEffort)")
+
+        // MEASURED 2026-08-19: RMS 0.20649 on all four notes (spread EXACTLY
+        // 0.0 dB), peak 0.31808, −0.0007 dB from the CC-101 reference and
+        // −1.425 dB from the CC-119 one.
+        //
+        // ⚠️ That −1.425 dB is worth reading, because it is NOT the −2.85 dB a
+        // square law would give for 101/119: on the BUILT-IN sampler CC 11 is
+        // closer to linear in amplitude. The measured square law belongs to the
+        // hosted AUSampler path and does not transfer here — which is exactly
+        // why this gate compares two RENDERS instead of pinning a derived dB.
+        #expect(levels[0] > 0.01, "nothing rendered silence")
+        // ⭐ FLAT — the phrase arc really did cancel, in the AUDIO.
+        #expect(spread < 0.5, "the blended hairpins must render as one level, not an arc")
+        // ⛔ AND AT THE RIGHT LEVEL. Flatness alone would pass on an
+        // equal-power blend; this is the half that will not.
+        #expect(abs(vsCorrect) < 0.4, "the blend must render at the equal-gain reference's level")
+        #expect(abs(vsWrong) > 1.0, "…and audibly apart from what equal-power would have given")
+        // POSITIVE CONTROL for the two references: they must differ from EACH
+        // OTHER, or "matches one and not the other" would be vacuous.
+        #expect(20 * log10(wrongPeak[1] / correctPeak[1]) > 1.0)
+
+        // TWO NEGATIVE CONTROLS: the parents still rise and fall in the audio.
+        // Without them, "flat" could be a property of the fixture.
+        let (up, _) = try effortRingTrack(fixtures, degrees: 135)
+        let (down, _) = try effortRingTrack(fixtures, degrees: 180)
+        let upLevels = (0..<4).map { rmsLevel(try! renderBreath(up), noteWindow($0)) }
+        let downLevels = (0..<4).map { rmsLevel(try! renderBreath(down), noteWindow($0)) }
+        print("[measured] P2 ring controls: 135° \(upLevels), 180° \(downLevels)")
+        #expect(zip(upLevels, upLevels.dropFirst()).allSatisfy { $0 < $1 })
+        #expect(zip(downLevels, downLevels.dropFirst()).allSatisfy { $0 > $1 })
+    }
+
+    @Test("P2: the dot parked on a pattern RENDERS bit-identically to naming that pattern")
+    func ringAtAPatternAngleRendersIdentically() throws {
+        let fixtures = try fixtures()
+        // messaDiVoce sits at 45°. Bit-identical, not within an epsilon: the
+        // ring reaches the generator through the SAME code path, so anything
+        // other than sample equality means the blend perturbed the shape.
+        let named = try renderBreath(
+            effortTrack(fixtures, pattern: try #require(EffortPattern.named("messaDiVoce"))).track)
+        let (dotted, _) = try effortRingTrack(fixtures, degrees: 45)
+        let dot = try renderBreath(dotted)
+
+        #expect(named.frameCount == dot.frameCount)
+        var differing = 0
+        for frame in 0..<min(named.frameCount, dot.frameCount)
+        where named.channelData[0][frame] != dot.channelData[0][frame] { differing += 1 }
+        print("[measured] P2 dot-on-pattern render: \(differing) differing frames of "
+              + "\(named.frameCount)")
+        #expect(differing == 0, "45° IS messaDiVoce — the samples must be identical")
+
+        // NEGATIVE CONTROL: 67.5° is BETWEEN two patterns, so the same
+        // comparison must find a great many differing frames. Without it, a
+        // renderer that ignored the lane entirely would pass the line above.
+        let (between, _) = try effortRingTrack(fixtures, degrees: 67.5)
+        let mixed = try renderBreath(between)
+        var mixedDiffering = 0
+        for frame in 0..<min(named.frameCount, mixed.frameCount)
+        where named.channelData[0][frame] != mixed.channelData[0][frame] { mixedDiffering += 1 }
+        print("[measured] P2 between-patterns control: \(mixedDiffering) differing frames")
+        #expect(mixedDiffering > named.frameCount / 10)
+    }
+
+    // MARK: - Breath pad P3 — the dot PATH, rendered
+    //
+    // The field's maths is pinned in `BreathPadDeterminismTests` and its lane
+    // output in `ControllerLaneStoreTests`. What only a render can answer is
+    // whether a MOVING dot reaches the samples at all, and whether the order it
+    // put the notes in is the order you hear.
+
+    /// The same fixture P1 and P2 render, with a dot PATH added.
+    ///
+    /// The origin sits at **157.5°, the hairpin seam**, with a ±22° swing, so
+    /// the dot travels strictly between hairpinCrescendo (135°) and
+    /// hairpinDiminuendo (180°) and never reaches a note-scoped neighbour. Two
+    /// reasons, both load-bearing:
+    ///
+    /// - With `noteWeight` 0 throughout, the intra-note shape stays leg D's
+    ///   default and each note's RMS tracks its own place in the phrase — so a
+    ///   per-note level IS the thing the dot moved.
+    /// - At the seam the two hairpins CANCEL to a constant (P2's measurement),
+    ///   so the phrase arc contributes nothing and what is left in the audio is
+    ///   the dot. Parked at 180° instead, the diminuendo's own fall dominates
+    ///   and the drift only dents it — MEASURED: the levels there still fall
+    ///   monotonically apart from one tie, which would let the "it is not just a
+    ///   parked dot" assertion pass on a rounding coincidence.
+    private func effortPathTrack(
+        _ fixtures: Fixtures,
+        degrees: Double = 157.5,
+        path: DotPath,
+        seed: UInt64,
+        noteCount: Int = 10,
+        noteLengthBeats: Double = 1
+    ) throws -> (track: Track, result: EffortShapeApplication) {
+        let (store, clip) = try effortStore(fixtures, noteCount: noteCount,
+                                            noteLengthBeats: noteLengthBeats)
+        let result = try store.applyEffortShape(
+            clipID: clip.id, ring: .standard,
+            angleRadians: EffortRing.radians(fromDegrees: degrees), radius: 1,
+            path: path, seed: seed)
+        return (store.tracks[0], result)
+    }
+
+    private func phraseDrift() -> DotPath {
+        // scaleBeats 4 against notes arriving 1 per beat: the effective rate is
+        // 1.0 cycles/beat, exactly at (not above) the note rate, so the fixture
+        // is not itself an aliasing one — `outrunsNotes` stays false.
+        .drift(scaleBeats: 4, octaves: 4, momentum: 0.5,
+               angleSwingRadians: EffortRing.radians(fromDegrees: 22), radiusSwing: 0)
+    }
+
+    /// ⭐⭐ THE P3 RENDER GATE: the dot's travel must reach the SAMPLES, and the
+    /// order it put the notes in must be the order you hear.
+    ///
+    /// "The audio differs from a still dot" is not enough — that passes on a
+    /// single differing frame and would not catch an off-by-one in which note
+    /// got which blend. This asserts the per-note **rendered RMS ordering**
+    /// matches the per-note **stored peak CC ordering**, pair by pair, which is
+    /// the bridge from lane numbers to audio.
+    @Test("P3: a drifting dot RENDERS, and the notes come out in the order the lane put them")
+    func driftRendersInTheOrderTheLaneAsked() throws {
+        let fixtures = try fixtures()
+        // 10 notes of 1 beat = 0.5 s each at 120 BPM. Skip the first 100 ms
+        // (1 ms attack plus the previous note's 50 ms release tail) and stop
+        // 30 ms before the note ends.
+        func noteWindow(_ k: Int) -> Range<Int> {
+            Int((Double(k) * 0.5 + 0.10) * sampleRate)..<Int((Double(k) * 0.5 + 0.47) * sampleRate)
+        }
+        func perNotePeakCC(_ track: Track) throws -> [Int] {
+            let lane = try #require(track.clips[0].controllerLanes
+                .first { $0.type == .cc(controller: 11) })
+            return (0..<10).map { k in
+                let lo = Double(k), hi = lo + 1
+                return lane.points.filter { $0.beat >= lo && $0.beat < hi }.map(\.value).max() ?? -1
+            }
+        }
+
+        let (drifted, result) = try effortPathTrack(fixtures, path: phraseDrift(), seed: 2_024)
+        let audio = try renderBreath(drifted)
+        let levels = (0..<10).map { rmsLevel(audio, noteWindow($0)) }
+        let peaks = try perNotePeakCC(drifted)
+        let spreadDB = 20 * log10((levels.max() ?? 1) / (levels.min() ?? 1))
+        print("[measured] P3 drift RENDER: per-note RMS \(levels) → spread \(spreadDB) dB; "
+              + "per-note peak CC \(peaks); effort \(result.minEffort)…\(result.maxEffort); "
+              + "path \(String(describing: result.path))")
+
+        #expect(levels.min()! > 0.01, "nothing rendered silence")
+        #expect(spreadDB > 1.0, "the dot's travel is not audible at all")
+        #expect((peaks.max() ?? 0) - (peaks.min() ?? 0) > 8,
+                "fixture check: the lane must have a real spread for an ordering test to mean anything")
+
+        // ⭐ THE ORDERING BRIDGE. Every pair of notes whose stored CC differs
+        // must render in that same order. CC 11 on the built-in sampler is
+        // monotonic in amplitude (P2 measured it as near-linear), so an
+        // inversion here means a note was shaped with another note's blend.
+        var inversions = 0
+        for i in 0..<10 {
+            for j in (i + 1)..<10 where peaks[i] != peaks[j] {
+                if (peaks[i] < peaks[j]) != (levels[i] < levels[j]) { inversions += 1 }
+            }
+        }
+        #expect(inversions == 0, "\(inversions) note pairs rendered in the opposite order to their lane")
+        let loudest = levels.firstIndex(of: levels.max()!)
+        let quietest = levels.firstIndex(of: levels.min()!)
+        #expect(loudest == peaks.firstIndex(of: peaks.max()!))
+        #expect(quietest == peaks.firstIndex(of: peaks.min()!))
+
+        // ⭐ AND THE DISCRIMINATOR AGAINST "the path is inert": a FIXED dot at
+        // the same origin is pure hairpinDiminuendo, so its notes fall
+        // MONOTONICALLY. The drift's must NOT — if they did, the dot's travel
+        // never changed which gesture a note got, and every assertion above
+        // would be satisfied by a still dot.
+        let (still, _) = try effortPathTrack(fixtures, path: .fixed, seed: 2_024)
+        let stillLevels = (0..<10).map { rmsLevel(try! renderBreath(still), noteWindow($0)) }
+        let stillSpread = 20 * log10((stillLevels.max() ?? 1) / (stillLevels.min() ?? 1))
+        print("[measured] P3 fixed-dot control: per-note RMS \(stillLevels) → spread "
+              + "\(stillSpread) dB")
+        #expect(stillSpread < 0.5,
+                Comment(rawValue: "fixture check: a parked dot at the hairpin seam cancels to one LEVEL, so "
+                + "any arc in the drifted render is the dot's and not the phrase's"))
+        // ⚠️ NOT `!allSatisfy { $0 > $1 }` — MEASURED, that is satisfied by a
+        // TIE between two adjacent notes, so it passed once on a rounding
+        // coincidence rather than on a reordering. This demands the levels
+        // actually go back UP somewhere, which only a moving dot can do.
+        #expect(zip(levels, levels.dropFirst()).contains { $0 < $1 - 1e-6 },
+                Comment(rawValue: "the drifted render never rises anywhere — the dot's travel did not "
+                + "reorder anything and the path is inert"))
+    }
+
+    /// §13.1 item 5, end to end: the same seed renders byte-identically, and a
+    /// different seed renders **differently**. The second half is what catches a
+    /// seed that is threaded, reported, and never read.
+    @Test("P3: the same seed RENDERS byte-identically; a different seed does not")
+    func seedReachesTheSamples() throws {
+        let fixtures = try fixtures()
+        func render(seed: UInt64) throws -> RenderedAudio {
+            try renderBreath(effortPathTrack(fixtures, path: phraseDrift(), seed: seed).track)
+        }
+        let a = try render(seed: 11)
+        let again = try render(seed: 11)
+        #expect(a.frameCount == again.frameCount)
+        var same = 0
+        for frame in 0..<min(a.frameCount, again.frameCount)
+        where a.channelData[0][frame] != again.channelData[0][frame] { same += 1 }
+        #expect(same == 0, "\(same) frames of \(a.frameCount) differ between two runs of ONE seed")
+
+        let other = try render(seed: 12)
+        var differing = 0
+        for frame in 0..<min(a.frameCount, other.frameCount)
+        where a.channelData[0][frame] != other.channelData[0][frame] { differing += 1 }
+        print("[measured] P3 seed RENDER: seed 11 vs itself \(same) differing frames of "
+              + "\(a.frameCount); seed 11 vs 12 \(differing)")
+        #expect(differing > a.frameCount / 20,
+                "changing only the seed barely moved the audio — the seed is decoration")
+    }
+
+    // MARK: - Breath pad P4: the AIR BUDGET, in RENDERED SAMPLES
+    //
+    // The budget's own arithmetic has 18 tests in `AirBudgetTests` and its lane
+    // writing has eight more at the store. None of them can tell you whether the
+    // sag is AUDIBLE. A stored CC ramp is not evidence of an audible one — the
+    // whole round exists because seven CC 11 lanes were stored, displayed, and
+    // completely inert.
+
+    /// 16 notes of one beat (0.5 s each at 120 bpm) on the 440 Hz sampler, shaped
+    /// by `messaDiVoce`. Eight seconds of continuous blowing against a
+    /// six-second lungful, so the DEFAULT settings bite: the reserve is crossed
+    /// at 4.5 s and the notes from beat 10 on are short of air.
+    private func airTrack(_ fixtures: Fixtures,
+                          air: AirBudget.Settings?,
+                          noteCount: Int = 16)
+    throws -> (track: Track, result: EffortShapeApplication) {
+        let store = ProjectStore()
+        store.media = AudioFileImporter()
+        let track = store.addTrack(kind: .instrument)
+        _ = try store.setInstrument(
+            id: track.id, kind: .sampler,
+            sampler: SamplerParams(zones: [SamplerZone(audioFileURL: fixtures.sine440MonoLong,
+                                                       rootPitch: 69)],
+                                   attack: 0.001, release: 0.05, gain: 0.8))
+        let notes = (0..<noteCount).map {
+            MIDINote(pitch: 69, velocity: 127, startBeat: Double($0), lengthBeats: 1)
+        }
+        let clip = try store.addMIDIClip(toTrack: track.id,
+                                         lengthBeats: Double(noteCount) + 1, notes: notes)
+        let result = try store.applyEffortShape(
+            clipID: clip.id,
+            pattern: try #require(EffortPattern.named("messaDiVoce")),
+            air: air)
+        return (store.tracks[0], result)
+    }
+
+    private func renderAir(_ track: Track) throws -> RenderedAudio {
+        try OfflineRenderer().render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
+                                     fromBeat: 0, durationSeconds: 9.0)
+    }
+
+    /// ⭐⭐ THE RENDER GATE FOR P4. Air enforcement must make the END of a long
+    /// phrase measurably quieter IN THE SAMPLES — and must make no difference at
+    /// all when it is off, which is the half that stops "it got quieter" being
+    /// an artefact of the fixture or the windowing.
+    @Test("P4: enforced air RENDERS the tail of a long phrase quieter; unenforced is bit-identical")
+    func airEnforcementRendersAsASag() throws {
+        let fixtures = try fixtures()
+        // Each note owns 0.5 s. Skip the first 100 ms (1 ms attack plus the
+        // previous note's 50 ms release tail) and stop 30 ms before the end.
+        func noteWindow(_ k: Int) -> Range<Int> {
+            Int((Double(k) * 0.5 + 0.10) * sampleRate)..<Int((Double(k) * 0.5 + 0.47) * sampleRate)
+        }
+        func perNotePeakCC(_ track: Track) throws -> [Int] {
+            let lane = try #require(track.clips[0].controllerLanes
+                .first { $0.type == .cc(controller: 11) })
+            return (0..<16).map { k in
+                let lo = Double(k), hi = lo + 1
+                return lane.points.filter { $0.beat >= lo && $0.beat < hi }.map(\.value).max() ?? -1
+            }
+        }
+
+        let (enforced, result) = try airTrack(fixtures, air: AirBudget.Settings(enforced: true))
+        let audio = try renderAir(enforced)
+        let levels = (0..<16).map { rmsLevel(audio, noteWindow($0)) }
+        let peaks = try perNotePeakCC(enforced)
+        // The budget's own boundary, read from the REPORT rather than assumed:
+        // whatever it says it constrained is what the audio must reflect.
+        let constrainedBeats = Set(result.air.constrainedNotes.map { Int($0.beat) })
+        let supplied = (0..<16).filter { !constrainedBeats.contains($0) }
+        let short = (0..<16).filter { constrainedBeats.contains($0) }
+        let suppliedRMS = supplied.map { levels[$0] }
+        let shortRMS = short.map { levels[$0] }
+        // TWO figures, because ONE would be the wrong one whichever it was: the
+        // sag is GRADUAL, so the mildest short note sits just below the supplied
+        // ones while the last one is well down. Asserting only the mild bound
+        // would accept a budget that barely bit; asserting only the deep one
+        // would accept a budget that skipped the early short notes entirely.
+        let firstSagDB = 20 * log10((shortRMS.max() ?? 1) / (suppliedRMS.min() ?? 1))
+        let worstSagDB = 20 * log10((shortRMS.min() ?? 1) / (suppliedRMS.min() ?? 1))
+        print("[measured] P4 RENDER enforced: per-note RMS \(levels)")
+        print("[measured] P4 RENDER enforced: per-note peak CC \(peaks); constrained beats "
+              + "\(short); mildest short note \(firstSagDB) dB, worst \(worstSagDB) dB, "
+              + "against the quietest supplied one")
+
+        #expect(!short.isEmpty, "fixture check: the budget must have constrained something")
+        #expect(!supplied.isEmpty, "fixture check: and must NOT have constrained everything")
+        #expect(levels.min()! > 0.005, "nothing rendered silence — §9.6")
+        // ⭐ THE AUDIBLE SAG: EVERY short-of-air note renders below EVERY
+        // well-supplied one, and the worst is properly down. This is the pair a
+        // budget that writes a beautiful report and never reaches the lane fails.
+        #expect(firstSagDB < -1.0,
+                Comment(rawValue: "the mildest note the report calls short of air is only "
+                + "\(firstSagDB) dB below the supplied ones — the budget did not reach the AUDIO"))
+        #expect(worstSagDB < -3.0,
+                Comment(rawValue: "the worst short note is only \(worstSagDB) dB down — the sag "
+                + "is not audible"))
+        // ⚠️ AND THE LAW THAT FIGURE OBEYS, measured rather than assumed. CC 127
+        // → 71 is a ratio of 0.559: the SQUARE law the report's `attenuationDb`
+        // quotes predicts −10.1 dB, LINEAR predicts −5.1, and the render says
+        // ~−4.8. P2 measured the same thing on this sampler. So the report's dB
+        // is the CONSERVATIVE reading (it belongs to the hosted-AU path, where
+        // the GM sax lives) and the header says so — this pins that it is not
+        // quietly re-derived as the built-in figure.
+        #expect(worstSagDB > -8.0,
+                Comment(rawValue: "the built-in sampler rendered \(worstSagDB) dB where the square "
+                + "law predicts about −10.1 — if this now MATCHES the square law, CC 11's "
+                + "response changed and AirBudget's attenuationDb note is stale"))
+        // And the lane the audio followed, in the same order.
+        var inversions = 0
+        for i in 0..<16 {
+            for j in (i + 1)..<16 where peaks[i] != peaks[j] {
+                if (peaks[i] < peaks[j]) != (levels[i] < levels[j]) { inversions += 1 }
+            }
+        }
+        #expect(inversions == 0, "\(inversions) note pairs rendered opposite to their lane")
+
+        // ⭐ NEGATIVE CONTROL 1 — `enforced: false` must render BIT-IDENTICALLY
+        // to never mentioning air. The user ruling is a default, and a default
+        // that silently costs a fraction of a dB is not a default.
+        let (off, _) = try airTrack(fixtures, air: AirBudget.Settings(enforced: false))
+        let (never, _) = try airTrack(fixtures, air: nil)
+        let offAudio = try renderAir(off)
+        let neverAudio = try renderAir(never)
+        var offDiffers = 0
+        for frame in 0..<min(offAudio.frameCount, neverAudio.frameCount)
+        where offAudio.channelData[0][frame] != neverAudio.channelData[0][frame] { offDiffers += 1 }
+        // ...and it must differ from the ENFORCED render, or the line above is a
+        // tautology about a fixture that never changes.
+        var onDiffers = 0
+        for frame in 0..<min(offAudio.frameCount, audio.frameCount)
+        where offAudio.channelData[0][frame] != audio.channelData[0][frame] { onDiffers += 1 }
+        let offLevels = (0..<16).map { rmsLevel(offAudio, noteWindow($0)) }
+        let offSpread = 20 * log10((offLevels.max() ?? 1) / (offLevels.min() ?? 1))
+        print("[measured] P4 RENDER controls: enforced=false vs no-air \(offDiffers) differing "
+              + "frames of \(offAudio.frameCount); enforced=false vs enforced=true \(onDiffers); "
+              + "unenforced per-note spread \(offSpread) dB")
+        #expect(offDiffers == 0,
+                "`enforced: false` changed the audio — the default is not free")
+        #expect(onDiffers > offAudio.frameCount / 20,
+                "enforcement barely moved the audio — the budget is decoration")
+        // ⭐ AND THE DISCRIMINATOR AGAINST THE WINDOWING: unenforced, a
+        // note-scoped pattern gives every note the SAME contour, so the render
+        // is flat. Any arc in the enforced render above is the budget's.
+        #expect(abs(offSpread) < 0.5,
+                Comment(rawValue: "fixture check: the unenforced render is not flat (\(offSpread) "
+                + "dB), so the sag above could be the fixture rather than the budget"))
+    }
+
+    /// The other half of the pair, in samples: a phrase the player can afford
+    /// must render BIT-IDENTICALLY with enforcement on. A budget that fires on
+    /// everything is as useless as one that fires on nothing, and only a null
+    /// render proves it does not.
+    @Test("P4: a SHORT phrase renders bit-identically with air enforced — the budget is not a blanket")
+    func aShortPhraseIsUntouchedByEnforcement() throws {
+        let fixtures = try fixtures()
+        // 6 notes of 1 beat = 3 s of blowing against a 6-second lungful: the
+        // reserve (4.5 s) is never reached.
+        let (on, result) = try airTrack(fixtures, air: AirBudget.Settings(enforced: true),
+                                        noteCount: 6)
+        let (off, _) = try airTrack(fixtures, air: nil, noteCount: 6)
+        let onAudio = try renderAir(on)
+        let offAudio = try renderAir(off)
+        let difference = maxDifference(onAudio, offAudio)
+        print("[measured] P4 RENDER short phrase: constrained \(result.air.constrainedNoteCount), "
+              + "lowestAir \(result.air.lowestAir), max sample difference \(difference)")
+        #expect(result.air.constrainedNoteCount == 0)
+        #expect(difference == 0.0,
+                "enforcement changed a phrase the player could afford — it is attenuating blindly")
+        // Prove the lane was really written, so this is a null over REAL data
+        // rather than over two empty clips.
+        let lanes = on.clips[0].controllerLanes.map { ($0.type.wireKey, $0.points.count) }
+        #expect(lanes.contains { $0.0.contains("11") || $0.1 > 2 })
+        #expect(TestSignals.peak(onAudio.channelData[0], in: 0..<onAudio.frameCount) > 0.2)
+    }
+
+    // MARK: - Breath pad P5: PHYSIOLOGICAL HUMANISATION, in RENDERED SAMPLES
+    //
+    // ⭐ §13.5's null test is the point of this phase, and a null test alone
+    // proves nothing: a feature wired to NOTHING passes it perfectly. So every
+    // null below ships beside a render of a NON-DEFAULT value that must differ
+    // measurably, and both frame counts are printed.
+
+    /// One sustained note (4 s at 120 BPM) on the 440 Hz sampler with the given
+    /// humanisation. A long note because the tremor is an INTRA-note feature —
+    /// P3's per-note grid cannot show it and neither can a staccato fixture.
+    private func humanisedTrack(_ fixtures: Fixtures,
+                                humanisation: EffortField.Humanisation?,
+                                noteCount: Int = 1,
+                                noteLengthBeats: Double = 8) throws -> Track {
+        let store = ProjectStore()
+        store.media = AudioFileImporter()
+        let track = store.addTrack(kind: .instrument)
+        _ = try store.setInstrument(
+            id: track.id, kind: .sampler,
+            sampler: SamplerParams(zones: [SamplerZone(audioFileURL: fixtures.sine440MonoLong,
+                                                       rootPitch: 69)],
+                                   attack: 0.001, release: 0.05, gain: 0.8))
+        let notes = (0..<noteCount).map {
+            MIDINote(pitch: 69, velocity: 127, startBeat: Double($0) * noteLengthBeats,
+                     lengthBeats: noteLengthBeats)
+        }
+        let clip = try store.addMIDIClip(
+            toTrack: track.id, lengthBeats: noteLengthBeats * Double(noteCount) + 1, notes: notes)
+        let pattern = try #require(EffortPattern.named("messaDiVoce"))
+        if let humanisation {
+            _ = try store.applyEffortShape(clipID: clip.id, pattern: pattern,
+                                           humanisation: humanisation)
+        } else {
+            _ = try store.applyEffortShape(clipID: clip.id, pattern: pattern)
+        }
+        return store.tracks[0]
+    }
+
+    private func renderHumanised(_ track: Track, seconds: Double = 5.0) throws -> RenderedAudio {
+        try OfflineRenderer().render(tracks: [track], tempoMap: TempoMap(constantBPM: 120),
+                                     fromBeat: 0, durationSeconds: seconds)
+    }
+
+    /// ⭐⭐ **THE P5 RENDER GATE.** Both halves in one test, because separately
+    /// each is worthless: a null that passes because the feature is wired to
+    /// nothing is indistinguishable from one that passes because the defaults
+    /// are neutral.
+    @Test("P5: humanisation at its defaults renders BIT-IDENTICALLY; a real tremor does not")
+    func humanisationDefaultsRenderBitIdentically() throws {
+        let fixtures = try fixtures()
+
+        // --- THE NULL ------------------------------------------------------
+        let never = try renderHumanised(try humanisedTrack(fixtures, humanisation: nil))
+        // ⚠️ SPELLED OUT, not `.none`. The parameter is `Humanisation?`, so a
+        // bare `.none` binds to `Optional.none` (= nil) and this line silently
+        // became a SECOND copy of `never` above — the null test asserting
+        // nil == nil. The compiler said so ("assuming you mean
+        // Optional<…>.none"); found at the breath pad's P6 close.
+        let defaulted = try renderHumanised(
+            try humanisedTrack(fixtures, humanisation: EffortField.Humanisation.none))
+        // …and a humanisation carrying every knob EXCEPT a depth: rates and
+        // scales alone must change nothing, or the null is only true of the
+        // literal `.none` and not of the property it stands for.
+        let ratesOnly = try renderHumanised(try humanisedTrack(
+            fixtures,
+            humanisation: EffortField.Humanisation(driftScaleBeats: 2.5, driftOctaves: 7,
+                                                   tremorRateHz: 12,
+                                                   tremorEffortExponent: 3)))
+
+        func differingFrames(_ a: RenderedAudio, _ b: RenderedAudio) -> Int {
+            var count = 0
+            for frame in 0..<min(a.frameCount, b.frameCount)
+            where a.channelData[0][frame] != b.channelData[0][frame] { count += 1 }
+            return count
+        }
+        let nullDiffers = differingFrames(never, defaulted)
+        let ratesDiffers = differingFrames(never, ratesOnly)
+
+        // --- THE DISCRIMINATOR ---------------------------------------------
+        let tremored = try renderHumanised(try humanisedTrack(
+            fixtures, humanisation: EffortField.Humanisation(tremorDepth: 0.12, tremorRateHz: 5)))
+        let drifted = try renderHumanised(try humanisedTrack(
+            fixtures, humanisation: EffortField.Humanisation(driftDepth: 0.4),
+            noteCount: 6, noteLengthBeats: 2))
+        let driftControl = try renderHumanised(try humanisedTrack(
+            fixtures, humanisation: nil, noteCount: 6, noteLengthBeats: 2))
+        let tremorDiffers = differingFrames(never, tremored)
+        let driftDiffers = differingFrames(driftControl, drifted)
+
+        print("[measured] P5 RENDER null: .none vs never-mentioned \(nullDiffers) differing "
+              + "frames of \(never.frameCount); rates-without-depth \(ratesDiffers)")
+        print("[measured] P5 RENDER discriminator: tremorDepth 0.12 \(tremorDiffers) differing "
+              + "frames of \(never.frameCount); driftDepth 0.4 \(driftDiffers) of "
+              + "\(driftControl.frameCount)")
+
+        #expect(nullDiffers == 0, "passing .none changed the rendered samples")
+        #expect(ratesDiffers == 0, "a rate with no depth behind it changed the rendered samples")
+        #expect(tremorDiffers > never.frameCount / 10,
+                "the tremor moved \(tremorDiffers) frames — that is wired to nothing")
+        #expect(driftDiffers > driftControl.frameCount / 10,
+                "the drift moved \(driftDiffers) frames — that is wired to nothing")
+        // The null is over REAL audio, not over two silences.
+        #expect(TestSignals.peak(never.channelData[0], in: 0..<never.frameCount) > 0.2)
+    }
+
+    /// ⭐⭐ **THE AUDIBILITY HALF — "modulates" vs "appears to modulate".**
+    /// Differing frames only say the samples changed; they cannot tell a 5 Hz
+    /// tremor from a DC offset or from noise. This Goertzels the rendered RMS
+    /// envelope at the commanded rate and requires energy there that the
+    /// un-tremored render does not have.
+    @Test("P5: a 5 Hz tremor RENDERS as 5 Hz energy in the amplitude envelope, and 0 Hz does not")
+    func tremorRendersAtItsCommandedRate() throws {
+        let fixtures = try fixtures()
+        let hop = 256
+        let envelopeRate = sampleRate / Double(hop)
+
+        /// Short-time RMS envelope over one window, mean-subtracted (an
+        /// amplitude envelope's DC term is enormous and leaks into every bin).
+        func envelopeBin(_ audio: RenderedAudio, frequency: Double,
+                         from: Double, to: Double) -> Double {
+            var envelope: [Double] = []
+            var i = Int(from * sampleRate)
+            let end = Int(to * sampleRate)
+            while i + hop <= end {
+                var sum = 0.0
+                for j in i..<(i + hop) {
+                    let v = Double(audio.channelData[0][j])
+                    sum += v * v
+                }
+                envelope.append((sum / Double(hop)).squareRoot())
+                i += hop
+            }
+            guard !envelope.isEmpty else { return 0 }
+            let mean = envelope.reduce(0, +) / Double(envelope.count)
+            let omega = 2.0 * Double.pi * frequency / envelopeRate
+            let coefficient = 2.0 * cos(omega)
+            var s1 = 0.0, s2 = 0.0
+            for value in envelope {
+                let s0 = (value - mean) + coefficient * s1 - s2
+                s2 = s1
+                s1 = s0
+            }
+            let power = s1 * s1 + s2 * s2 - coefficient * s1 * s2
+            return max(0, power).squareRoot() / Double(envelope.count)
+        }
+
+        let rate = 5.0
+        let on = try renderHumanised(try humanisedTrack(
+            fixtures,
+            humanisation: EffortField.Humanisation(tremorDepth: 0.12, tremorRateHz: rate)))
+        let off = try renderHumanised(try humanisedTrack(fixtures, humanisation: nil))
+        // The note runs 0…4 s; analyse 0.5…3.5 s, clear of the attack and the
+        // contour's own release taper.
+        let onAtRate = envelopeBin(on, frequency: rate, from: 0.5, to: 3.5)
+        let offAtRate = envelopeBin(off, frequency: rate, from: 0.5, to: 3.5)
+        // ⚠️ A BIN THE TREMOR IS NOT AT, on the same render — without it, a
+        // broadband change (a level shift, a click) would pass the test above.
+        let onAtOther = envelopeBin(on, frequency: 9.0, from: 0.5, to: 3.5)
+
+        print("[measured] P5 RENDER audibility: 5 Hz bin — tremor on \(onAtRate), off "
+              + "\(offAtRate), ratio \(onAtRate / max(offAtRate, 1e-15)); "
+              + "9 Hz bin with the tremor on \(onAtOther)")
+        #expect(onAtRate > offAtRate * 8,
+                "the 5 Hz envelope bin barely moved — the tremor is stored, not sounding")
+        #expect(onAtRate > onAtOther * 4,
+                "the energy is not AT the commanded rate — this is a broadband change, not a tremor")
+        #expect(offAtRate >= 0, "positive control: the analysis ran on the off render too")
+    }
+
 }

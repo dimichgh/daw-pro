@@ -471,6 +471,33 @@ public final class AudioEngine: AudioEngineControlling {
     /// Per-track note-audition state (m23-d) — see `setAuditionPitches`.
     private var auditionVoices: [UUID: AuditionVoices] = [:]
 
+    /// Per-track LIVE CONTROLLER PREVIEW state (breath pad P6) — what
+    /// `previewController` last actually pushed, and to which renderer object.
+    ///
+    /// ⛔ DELIBERATELY A SEPARATE LEDGER FROM `auditionVoices`, NOT AN EXTRA
+    /// FIELD ON IT. That one is keyed by PITCH and `stopAllAudition()` /
+    /// `allNotesOff()` walk it emitting a note-off per entry; a CC number filed
+    /// there would come back out as a bogus note-off on the pitch of the same
+    /// number (CC 11 → note-off on B0). A controller pairs with no voice, so it
+    /// belongs in no voice ledger.
+    ///
+    /// The renderer reference is STRONG for the `AuditionVoices` reason (it pins
+    /// the ring's memory across a node teardown), and the identity is what makes
+    /// the change filter below CORRECT rather than merely cheap: a rebuilt node
+    /// is a different object holding a freshly reset instrument, so a remembered
+    /// value from the old one says nothing about the new one.
+    private struct ControllerPreview {
+        var renderer: InstrumentRenderer
+        var controller: UInt8
+        var value: UInt8
+    }
+
+    /// See `ControllerPreview`. Entries are dropped wherever the instrument is
+    /// reset (`stopAllAudition`, `allNotesOff`), because a reset restores the
+    /// instrument's own controller defaults and the remembered value is then a
+    /// lie that would suppress the next identical push.
+    private var controllerPreviews: [UUID: ControllerPreview] = [:]
+
     /// The tempo tempo-synced delays derive their effective time from
     /// (m22-f): adopted from EVERY transport-carrying intent via
     /// `cacheTransportFlags` — `setTempo` is the store's tempo-change push,
@@ -1535,6 +1562,108 @@ public final class AudioEngine: AudioEngineControlling {
         return auditionAudibility(trackID: trackID)
     }
 
+    /// Sends ONE controller value to `trackID`'s instrument right now (breath
+    /// pad P6 — the live drag preview). Rides the SAME per-renderer audition
+    /// ring `setAuditionPitches` uses, which is the whole reason this leg is
+    /// cheap: no new ring, no new render-thread bound arithmetic
+    /// (design-breath-pad §1.5), and the SPSC argument is unchanged because the
+    /// producer is still the main actor and only the main actor.
+    ///
+    /// WHAT THIS METHOD DOES NOT DO, ON PURPOSE:
+    ///
+    /// * **No time-based throttle here.** The ring-protection cap that matters
+    ///   is the 30 Hz one, and it lives in `PadPreviewController` (DAWCore) with
+    ///   the gesture phase, because those two facts are only safe TOGETHER: an
+    ///   engine-side timer cannot tell an intermediate drag frame from the last
+    ///   value of a gesture, so it would silently strand the strip at a stale
+    ///   controller value — the m25-k shape (a correct policy at the wrong
+    ///   cadence looks exactly like a correct policy). What lives here is a
+    ///   STATE filter, below, which cannot strand anything by construction.
+    /// * **No heartbeat.** `beatAuditionHeartbeat()` is deliberately not called:
+    ///   a controller holds no voice, and bumping the counter would keep a
+    ///   genuinely stuck piano-roll audition note alive past the render side's
+    ///   3 s watchdog.
+    /// * **No `auditionVoices` entry.** See `ControllerPreview`.
+    ///
+    /// The state filter: an identical (controller, value) already sent to the
+    /// SAME renderer object pushes nothing — a dot held still costs zero ring
+    /// traffic — but still reports the audibility outcome honestly, because the
+    /// strip really is at that value. A different renderer always pushes: a
+    /// rebuilt node holds a freshly reset instrument.
+    @discardableResult
+    public func previewController(trackID: UUID, controller: UInt8,
+                                  value: UInt8) -> AuditionOutcome {
+        let cc = controller & 0x7F
+        let data = value & 0x7F
+        let held = controllerPreviews[trackID]
+
+        // ONLY A **FIRST TOUCH** MAY START THE HARDWARE.
+        //
+        // The cold-app half is the `setAuditionPitches` idiom: the pad must be
+        // audible with the transport stopped, so a graph with no running
+        // hardware is started here. `prepare()` has already posted its own
+        // notice on failure.
+        //
+        // Holding a ledger entry for this track means the engine WAS running when
+        // that entry was made, so this push is a refresh or a RELEASE of live
+        // state — the `setAuditionPitches` case that puts its `wanted.isEmpty`
+        // release branch ABOVE its own `prepare()`.
+        //
+        // ⚠️⚠️ **THIS IS DEFENCE IN DEPTH, NOT THE MECHANISM — DO NOT READ IT AS
+        // THE THING THAT PREVENTS THE BUG, AND DO NOT DELETE IT ON THAT BASIS.**
+        // The bug it guards is real and was live: `ProjectStore.stopAllAudition()`
+        // (project boundary, app RESIGN-ACTIVE) routes a release through here, and
+        // an unconditional `prepare()` booted CoreAudio to send a controller to
+        // silence as the app went away. What actually closes it is TWO DAWCore
+        // guards, and they are the ones under test: `PadPreviewController.release-
+        // ToNeutral` pushes nothing when `lastDeliveredValue == nil` (pinned by
+        // `aReleaseWithNothingParkedPushesNothing`), and `ProjectStore.stopAll-
+        // Audition()` releases the pad BEFORE clearing this ledger (pinned by
+        // `projectBoundaryReleasesThePadFirst`, a SEQUENCE assertion). Together
+        // those make the branch below unreachable from the release path today —
+        // which is why deleting `held == nil` reddens nothing, and why the fact is
+        // written here instead of being discovered by someone who deletes it. It
+        // stays for the callers that do not exist yet (P7's `BreathPadModel`,
+        // m28-knob's MIDI-learn), which will reach this method by other routes.
+        //
+        // ⚠️ Skipping the start does NOT drop the release: `prepare()` starts the
+        // existing graph, it does not rebuild it (see `prepare()` — it returns
+        // early when running and otherwise only starts the AVAudioEngine), so
+        // `instrumentRenderer(forTrack:)` is a plain dictionary lookup that
+        // answers the SAME renderer object whether or not hardware is running.
+        // The neutral lands in that renderer's audition ring and is drained on
+        // the next quantum the engine renders — which is why the release must be
+        // PUSHED here rather than skipped: the instrument's own CC state
+        // survives a stop/start, so a value parked before a stop would otherwise
+        // come back with the hardware.
+        if !isRunning, held == nil {
+            do { try prepare() } catch { }
+        }
+
+        guard let renderer = graph.instrumentRenderer(forTrack: trackID) else {
+            // Unknown/audio/bus track, or a mid-rebuild gap. Drop the remembered
+            // value: whatever renderer comes back must be pushed to afresh.
+            controllerPreviews[trackID] = nil
+            return .noRenderer
+        }
+
+        let alreadyThere = held.map {
+            $0.renderer === renderer && $0.controller == cc && $0.value == data
+        } ?? false
+        if !alreadyThere {
+            renderer.pushAuditionController(controller: cc, value: data)
+            controllerPreviews[trackID] = ControllerPreview(
+                renderer: renderer, controller: cc, value: data)
+        }
+        return auditionAudibility(trackID: trackID)
+    }
+
+    /// Test seam: the controller value this engine believes is parked on a
+    /// track, or nil when it has pushed none.
+    var controllerPreviewForTesting: [UUID: (controller: UInt8, value: UInt8)] {
+        controllerPreviews.mapValues { (controller: $0.controller, value: $0.value) }
+    }
+
     /// Releases every audition voice on every track (m23-d). Also requests a
     /// flush on each renderer that held one: this runs on the paths where the
     /// main actor is about to stop being able to send note-offs, and there is
@@ -1549,6 +1678,18 @@ public final class AudioEngine: AudioEngineControlling {
             held.renderer.requestFlush()
         }
         auditionVoices.removeAll()
+        // Breath pad P6. ⚠️ THE OBVIOUS JUSTIFICATION FOR THIS LINE IS FALSE and
+        // is written down wrong-first so nobody re-derives it: the flush above
+        // does NOT cover these tracks. `requestFlush()` runs only for renderers
+        // that held an audition VOICE, and a track can hold a controller preview
+        // with no voice at all — so its instrument keeps whatever CC it was
+        // given. The ledger is dropped anyway because it is a CACHE for the
+        // change filter, and a stale-but-dropped cache can only cost a redundant
+        // push, never suppress a needed one. The value that actually restores
+        // the strip is the neutral `PadPreviewController.stop(engine:)` sends,
+        // which `ProjectStore.stopAllAudition()` deliberately sends BEFORE
+        // calling in here.
+        controllerPreviews.removeAll()
     }
 
     /// PANIC (m23-af) — all-notes-off on every instrument renderer, regardless of
@@ -1570,6 +1711,9 @@ public final class AudioEngine: AudioEngineControlling {
     @discardableResult
     public func allNotesOff() -> Int {
         stopAllAudition()
+        // `flushAllInstruments` resets renderers `stopAllAudition` never held,
+        // so clear the preview ledger against the WIDER set too (breath pad P6).
+        controllerPreviews.removeAll()
         return graph.flushAllInstruments()
     }
 

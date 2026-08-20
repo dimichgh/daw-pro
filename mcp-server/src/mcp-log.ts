@@ -19,10 +19,11 @@
  * wrapper alone would miss every read — exactly the calls that answer "what
  * did the agent see when it decided that?" So this module patches
  * `McpServer.prototype`'s instance method `registerTool` ITSELF, once,
- * before any tool registers. Every one of the 186 registrations (152 + 34,
- * re-measured after m27 leg D's `clip_apply_breath_contour` joined the
- * wrapper count at 151 -> 152) — whichever path it takes — funnels through
- * the same patched function.
+ * before any tool registers. Every one of the 188 registrations (154 wrapper + 34
+ * direct, RE-MEASURED at breath-pad P1 by name-capturing regex rather than by
+ * adding one — the previous figure said "152 + 34" beside a total of 186,
+ * which does not add up, and the paragraph below said 151) — whichever path it
+ * takes — funnels through the same patched function.
  *
  * `installMcpLogging` MUST run after `new McpServer(...)` but before the
  * first `registerTool(`/`server.registerTool(` call in server.ts. If it runs
@@ -42,27 +43,33 @@
  * import-time work — there is no interleaving to race.
  *
  * The "mutating-wrapper" family is EVERY registration through the local
- * wrapper — currently 151 — because the wrapper calls
+ * wrapper — currently 154 (MEASURED, breath-pad P6) — because the wrapper calls
  * `withMutatingRegistration` unconditionally; a few semantic reads that route
  * through it for `.strict()` (the `audio_profile_file`/`clip_detect_pitch`/
  * `clip_get_notes`/`instrument_describe_sampler` quartet named above) are
  * flagged mutating here too. That is harmless (a wasted before-read at
  * worst) but it means this denominator tracks the WRAPPER count, not a
- * hand-maintained "how many tools mutate" tally. Three of the 151
+ * hand-maintained "how many tools mutate" tally. Three of the 154
  * (`generate_lyrics`, `generate_song_suno`, `generate_image` — server.ts's
  * own comment names them as Table-B) have no backing wire command at all:
  * they call `src/ai.ts` directly. A before-read against the DAW would be
  * pure waste for them, so they're excluded by name from before-capture
- * (NO_WIRE_COMMAND_TOOLS below). 152 - 3 = 149 is the real
+ * (NO_WIRE_COMMAND_TOOLS below). 154 - 3 = 151 is the real
  * before-capture-eligible denominator.
  *
- * ⚠️ These two numbers rot silently: `test/mcp-log.test.ts` pins the 186 TOTAL,
+ * ⚠️ These two numbers rot silently: `test/mcp-log.test.ts` pins the 188 TOTAL,
  * so a new strict-wrapper registration reddens that assertion and gets the
  * total fixed — while this paragraph's 151/148 sail through untouched. They
  * were found stale at 142/139 (five behind) exactly that way, again at
  * 147/144 (three behind, m26-i) the same way, and again at 150/147 (one
  * behind, m26-k — the pair had already been found stale twice in one day).
- * Updated again at m27 leg D (150 -> 151 -> 152 wrapper, 186 total).
+ * Updated again at m27 leg D (150 -> 151 -> 152 wrapper, 186 total), and at
+ * breath-pad P1 (152 -> 153 wrapper, 187 total), and at breath-pad P6
+ * (153 -> 154 wrapper, 188 total — `pad_preview_effort`). ⭐ P1 did NOT trust the
+ * running figure: it re-derived both halves with a regex and found the prose
+ * had been internally inconsistent (151 in one paragraph, 152 in another,
+ * against a pinned total of 186 that only 152 satisfies). RE-MEASURE BOTH
+ * HALVES OF A PAIR; one of them is usually already wrong.
  *
  * ---------------------------------------------------------------------------
  * Before-snapshot: what it costs and why `project.overview`, not
