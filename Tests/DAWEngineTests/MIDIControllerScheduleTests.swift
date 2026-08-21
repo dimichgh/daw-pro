@@ -612,4 +612,385 @@ struct MIDIControllerScheduleTests {
             #expect(midBend?.event.pitch == 127 && midBend?.event.velocity == 127)
         }
     }
+
+    // MARK: - m29-bend-leak: pitch bend must not leak across a clip boundary
+    //
+    // FIELD REPORT (tester, 2026-08-20): "Pitch bend leaks across clips. A clip
+    // with no pitchBend lane inherits the previous clip's last value and plays
+    // transposed for its whole length. Mine read a full semitone sharp until I
+    // added one centre point."
+    //
+    // THE MECHANISM, as measured by the tests below: the chase prefix documented
+    // at `MIDISchedule.swift` §"m16-b2 controller lanes" opens every BLOCK, not
+    // every CLIP. In a linear render there is exactly one prefix, at frame 0.
+    // After it, clip A's bend points fire; clip B, declaring no bend value at its
+    // own onset, emits nothing, so the instrument holds whatever A last sent.
+    //
+    // THE FIX is scoped to `MIDIControllerType.resetsAtClipOnset` — pitch bend
+    // only. See that property for the per-type decision table and
+    // `buildEvents`' "clip-onset reset" comment for the containment argument.
+
+    /// The two-clip fixture: A bends up a semitone and never returns; B carries
+    /// one note and (by default) no bend lane at all.
+    ///
+    /// 12288 = 8192 + 4096 = +1 semitone at the ±2-semitone bend range both
+    /// built-in instruments use, chosen so the render arm below reproduces the
+    /// reporter's "a full semitone sharp" literally rather than approximately.
+    private func bendLeakClips(clipBLane: [(Double, Int)]? = nil,
+                               clipALane: [(Double, Int)]? = [(0, 12_288)]) -> [Clip] {
+        [
+            Clip(name: "A", startBeat: 0, lengthBeats: 4,
+                 notes: [MIDINote(pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 3.5)],
+                 controllerLanes: clipALane.map { [lane(.pitchBend, $0)] } ?? []),
+            Clip(name: "B", startBeat: 4, lengthBeats: 4,
+                 notes: [MIDINote(pitch: 69, velocity: 100, startBeat: 0, lengthBeats: 3.5)],
+                 controllerLanes: clipBLane.map { [lane(.pitchBend, $0)] } ?? []),
+        ]
+    }
+
+    @Test("m29-bend-leak: a clip with no bend lane opens at centre, not at the previous clip's value")
+    func bendDoesNotLeakIntoALaneLessClip() {
+        let events = MIDIEventSchedule.buildEvents(
+            clips: bendLeakClips(), fromBeat: 0, tempoMap: TempoMap(constantBPM: 120),
+            sampleRate: ccRate).events
+        let neutral = bendData(8_192)
+        // Clip B starts at beat 4 → frame 96 000. Its onset must carry a bend
+        // event, and that event must be centre.
+        let atB = events.filter {
+            $0.sampleTime == 96_000 && $0.kind == ScheduledMIDIEvent.pitchBend
+        }
+        #expect(atB.count == 1, "clip B's onset carries no bend reset — A's value leaks in")
+        #expect(atB.first.map { ($0.pitch, $0.velocity) }.map { $0 == neutral } ?? false,
+                "clip B's onset bend is not centre 8192")
+        // …and it lands BEFORE B's note-on at the same frame (rank 1 < rank 2),
+        // so the note never sounds even one frame detuned.
+        let indexOfReset = events.firstIndex { $0.sampleTime == 96_000
+            && $0.kind == ScheduledMIDIEvent.pitchBend }
+        let indexOfNoteOn = events.firstIndex { $0.sampleTime == 96_000
+            && $0.kind == ScheduledMIDIEvent.noteOn }
+        #expect(indexOfReset != nil && indexOfNoteOn != nil && indexOfReset! < indexOfNoteOn!)
+    }
+
+    @Test("m29-bend-leak: seeking INTO the lane-less clip chases centre, not the earlier clip's bend")
+    func bendChaseIntoALaneLessClipIsNeutral() {
+        // The `OfflineChaseDivergenceTests` failure class: if playback from the
+        // top gives centre inside clip B, a seek into clip B must too, or the
+        // same instant sounds at two different pitches depending on how the
+        // transport got there.
+        let events = MIDIEventSchedule.buildEvents(
+            clips: bendLeakClips(), fromBeat: 6, tempoMap: TempoMap(constantBPM: 120),
+            sampleRate: ccRate).events
+        let neutral = bendData(8_192)
+        let prefix = events.filter { $0.sampleTime == 0 && $0.kind == ScheduledMIDIEvent.pitchBend }
+        #expect(prefix.count == 1)
+        #expect(prefix.first.map { ($0.pitch, $0.velocity) }.map { $0 == neutral } ?? false,
+                "a seek into clip B chases clip A's stale bend")
+    }
+
+    /// ⭐ THE RENDERED-AUDIO ARM. The schedule assertions above describe bytes;
+    /// this one measures the pitch that comes out of a real offline render,
+    /// which is what the reporter actually heard.
+    ///
+    /// Built-in `.polySynth` with a SINE waveform so the zero-crossing estimator
+    /// has a single clean tone to work on, and `.sine` + ±2-semitone bend make
+    /// the expected numbers exact: MIDI 69 is 440.000 Hz, and 12288 is +1
+    /// semitone ⇒ 466.164 Hz.
+    ///
+    /// ⭐ **ASSERTED IN CENTS, in the reporter's own units.** Their control clip
+    /// measured "a uniform +100 cents across all 22 notes", from a lane that
+    /// ended on 12288 — so 12288 in, +100.0 cents out is a precise, checkable
+    /// prediction rather than a vague "the pitch is wrong", and the fix arm
+    /// pins the same number back to 0.
+    ///
+    /// ⭐ THE CONTROLS ARE THE LOAD-BEARING HALF, and there are two, because
+    /// "clip B reads 0 cents" is exactly the reading a broken probe also
+    /// produces — the reporter found this defect at all only because their own
+    /// detector was checked against an untouched reference clip first:
+    ///  · NO BEND ANYWHERE — the estimator must read A440 on clip B when nothing
+    ///    could have detuned it (does the probe read the right note at all?).
+    ///  · CLIP A'S OWN NOTE — must read its OWN +100 cents in the SAME render as
+    ///    the fixed clip B's 0 (can the probe still SEE a bend? A probe that
+    ///    reported "in tune" unconditionally would pass control 1 and the fix
+    ///    arm together).
+    @Test("m29-bend-leak: RENDERED pitch of a lane-less clip is A440, not a semitone sharp")
+    @MainActor
+    func bendLeakRenderedPitch() async throws {
+        let map = TempoMap(constantBPM: 120)
+        func renderLeft(_ clips: [Clip]) throws -> [Float] {
+            let track = Track(
+                name: "bend", kind: .instrument, clips: clips,
+                instrument: InstrumentDescriptor(
+                    kind: .polySynth,
+                    polySynth: PolySynthParams(waveform: .sine, attack: 0.005, decay: 0.05,
+                                               sustain: 1.0, release: 0.1,
+                                               cutoffHz: 18_000, resonance: 0.0, gain: 0.8)))
+            let audio = try OfflineRenderer().render(
+                tracks: [track], tempoMap: map, fromBeat: 0, durationSeconds: 4.2)
+            return audio.channelData[0]
+        }
+        // Steady windows well inside each note: clip A beat 0.5–3.0, clip B
+        // beat 4.5–7.0 (frames 12 000–72 000 and 108 000–168 000).
+        func pitch(_ left: [Float], beats: Range<Double>) -> Double {
+            let range = Int(beats.lowerBound * 24_000)..<min(left.count,
+                                                             Int(beats.upperBound * 24_000))
+            return TestSignals.dominantFrequency(byZeroCrossings: left, sampleRate: ccRate,
+                                                 in: range)
+        }
+
+        /// Deviation from an equal-tempered reference, in CENTS — the units the
+        /// field report is written in.
+        func cents(_ measured: Double, from reference: Double) -> Double {
+            1_200 * log2(measured / reference)
+        }
+        let a440 = 440.0                       // clip B, MIDI 69
+        let c261 = 261.6255653005986           // clip A, MIDI 60
+
+        // CONTROL 1 — no bend lane anywhere. Nothing can detune clip B.
+        let noBend = try renderLeft(bendLeakClips(clipALane: nil))
+        let controlB = cents(pitch(noBend, beats: 4.5..<7.0), from: a440)
+        print("[measured] bend-leak CONTROL (no lane anywhere): clip B = \(controlB) cents")
+        #expect(abs(controlB) < 5.0,
+                "the probe cannot read an UNBENT clip B — every figure below is void")
+
+        // THE DEFECT ARM — clip A bends +1 semitone (12288, the reporter's
+        // value), clip B declares nothing.
+        let leaked = try renderLeft(bendLeakClips())
+        let bentA = cents(pitch(leaked, beats: 0.5..<3.0), from: c261)
+        let clipB = cents(pitch(leaked, beats: 4.5..<7.0), from: a440)
+        print("[measured] bend-leak: clip A (lane 12288) = \(bentA) cents, "
+              + "clip B (no lane) = \(clipB) cents")
+        // CONTROL 2 — the probe can still SEE a bend, in this very render:
+        // clip A's own note must read the +100 cents its lane commands.
+        #expect(abs(bentA - 100.0) < 10.0, """
+            the probe cannot read the BENT clip A (\(bentA) cents) — a probe that always said \
+            "in tune" would pass the assertion below without the fix
+            """)
+        #expect(abs(clipB) < 5.0, """
+            clip B rendered \(clipB) cents off A440 — clip A's bend leaked across the boundary. \
+            The field report measured exactly +100 cents here, uniformly across 22 notes.
+            """)
+
+        // THE REPORTER'S OWN WORKAROUND must keep working: a clip that DOES
+        // declare centre at its onset is untouched by the fix. `{beat: 0,
+        // value: 8192}` is verbatim what fixed all 22 of their notes.
+        let withCentre = try renderLeft(bendLeakClips(clipBLane: [(0, 8_192)]))
+        let workaround = cents(pitch(withCentre, beats: 4.5..<7.0), from: a440)
+        print("[measured] bend-leak workaround (B declares 8192 at beat 0): "
+              + "clip B = \(workaround) cents")
+        #expect(abs(workaround) < 5.0)
+    }
+
+    /// ⭐ **THE CONTAINMENT GATE.** The clip-onset reset changes rendered bytes,
+    /// so the four claims in `buildEvents`' "clip-onset reset" comment are
+    /// CHECKED here rather than argued there. Each `#expect` below is labelled
+    /// with the claim it pins; if any of them fails the containment argument is
+    /// void, whatever the fix arm above says.
+    @Test("m29-bend-leak CONTAINMENT: the reset touches bend-using tracks only, one event, one value")
+    func bendResetContainment() {
+        let map = TempoMap(constantBPM: 120)
+        func build(_ clips: [Clip], from: Double = 0) -> [ScheduledMIDIEvent] {
+            MIDIEventSchedule.buildEvents(clips: clips, fromBeat: from, tempoMap: map,
+                                          sampleRate: ccRate).events
+        }
+
+        // CLAIM 1 — a track with NO bend lane in ANY clip is untouched. Three
+        // clips, CC 11 + CC 64 + pressure lanes, none of them a resetting type:
+        // each lane must produce exactly its own points plus the ONE block
+        // prefix, and not a single pitch-bend event may appear from nowhere.
+        let noBend = (0..<3).map { index in
+            Clip(name: "n\(index)", startBeat: Double(index) * 4, lengthBeats: 4,
+                 notes: [MIDINote(pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 2)],
+                 controllerLanes: index == 0
+                    ? [lane(.cc(controller: 11), [(0, 100), (2, 40)]),
+                       lane(.cc(controller: 64), [(1, 127)]),
+                       lane(.channelPressure, [(1, 90)])]
+                    : [])
+        }
+        let plain = build(noBend)
+        #expect(!plain.contains { $0.kind == ScheduledMIDIEvent.pitchBend },
+                "CLAIM 1: a track that never used bend gained a bend event")
+        // CC 11: 2 points, and the beat-0 point IS the anchor literal, so the
+        // prefix is suppressed — exactly 2 events, the pre-fix count.
+        #expect(plain.filter { $0.kind == ScheduledMIDIEvent.controlChange && $0.pitch == 11 }
+                    .count == 2, "CLAIM 3: CC 11 gained events")
+        // CC 64: 1 point at beat 1 + 1 neutral prefix at the anchor = 2.
+        #expect(plain.filter { $0.kind == ScheduledMIDIEvent.controlChange && $0.pitch == 64 }
+                    .count == 2, "CLAIM 3: CC 64 gained events")
+        // Channel pressure: 1 point + 1 neutral prefix = 2, and NOTHING at the
+        // onsets of clips n1 (frame 96 000) and n2 (frame 192 000) — the
+        // deliberate `resetsAtClipOnset == false` row of the table.
+        let pressure = plain.filter { $0.kind == ScheduledMIDIEvent.channelPressure }
+        #expect(pressure.count == 2, "CLAIM 3: channel pressure gained events")
+        #expect(!pressure.contains { $0.sampleTime == 96_000 || $0.sampleTime == 192_000 },
+                "CLAIM 3: channel pressure reset at a clip onset — it must NOT")
+
+        // CLAIM 2 — a SPLIT is invisible. `Clip.windowedControllerLanes` seeds
+        // each half with the value in effect at its own beat 0, so the two
+        // halves must render exactly what the unsplit clip renders. This is the
+        // strongest available form of "a clip that establishes its own value at
+        // its onset is byte-untouched", and it guards the store's split/trim
+        // seam law directly.
+        let lanes = [lane(.pitchBend, [(0, 8_192), (1, 12_288), (5, 4_096)]),
+                     lane(.cc(controller: 11), [(0, 100), (3, 40)])]
+        let notes = [MIDINote(pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 2),
+                     MIDINote(pitch: 64, velocity: 90, startBeat: 4, lengthBeats: 2)]
+        let whole = Clip(name: "w", startBeat: 0, lengthBeats: 8, notes: notes,
+                         controllerLanes: lanes)
+        var left = whole
+        left.lengthBeats = 3
+        left.controllerLanes = Clip.windowedControllerLanes(lanes, delta: 0, newLength: 3)
+        left.notes = notes.filter { $0.startBeat < 3 }
+        var right = Clip(name: "r", startBeat: 3, lengthBeats: 5,
+                         notes: notes.filter { $0.startBeat >= 3 }
+                            .map { MIDINote(pitch: $0.pitch, velocity: $0.velocity,
+                                            startBeat: $0.startBeat - 3,
+                                            lengthBeats: $0.lengthBeats) },
+                         controllerLanes: Clip.windowedControllerLanes(lanes, delta: 3,
+                                                                       newLength: 5))
+        right.name = "r"
+        // Both halves declare a bend value at their own beat 0, so NO virtual
+        // point may be added to either. Machine-checked as "every bend event
+        // sits on a frame one of the halves actually authored": left points at
+        // beats 0 and 1 (frames 0, 24 000), right points at beats 0 and 2
+        // (frames 72 000, 120 000). A reset would show up as a fifth frame.
+        let splitBends = build([left, right]).filter { $0.kind == ScheduledMIDIEvent.pitchBend }
+        #expect(splitBends.map(\.sampleTime) == [0, 24_000, 72_000, 120_000],
+                "CLAIM 2: a split half gained a synthetic reset — it declares its own onset value")
+        // ⚠️ MEASURED AND PRE-EXISTING, recorded because it is the one place the
+        // split is NOT event-identical to the unsplit clip and a future reader
+        // would otherwise suspect this fix: `windowedControllerLanes` seeds the
+        // right half with the value IN EFFECT at the split beat (12288), which
+        // the unsplit clip never re-states there. That redundant event is a
+        // no-op — it re-sends the value already on the wire — and it predates
+        // m29-bend-leak. Strip exactly it and the two streams are identical.
+        let seeded = splitBends.first { $0.sampleTime == 72_000 }
+        #expect(seeded.map { Int($0.pitch) | (Int($0.velocity) << 7) } == 12_288)
+        #expect(build([whole]).map(shape)
+                == build([left, right]).map(shape).filter { $0 != [72_000, 3, 0, 96] },
+                "CLAIM 2: splitting changed the rendered stream by more than the seeded boundary point")
+
+        // CLAIM 4 — exactly ONE event per bend-less clip, at that clip's own
+        // onset frame, carrying exactly `neutralDefault`. Three clips: the
+        // first declares bend, the next two declare nothing.
+        var row = (0..<3).map { index in
+            Clip(name: "r\(index)", startBeat: Double(index) * 4, lengthBeats: 4,
+                 notes: [MIDINote(pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 2)])
+        }
+        row[0].controllerLanes = [lane(.pitchBend, [(0, 16_383)])]
+        let bends = build(row).filter { $0.kind == ScheduledMIDIEvent.pitchBend }
+        let neutral = bendData(8_192)
+        #expect(bends.map(\.sampleTime) == [0, 96_000, 192_000],
+                "CLAIM 4: not exactly one bend event per clip onset")
+        #expect(bends.dropFirst().allSatisfy { ($0.pitch, $0.velocity) == neutral },
+                "CLAIM 4: a reset carried something other than neutralDefault 8192")
+
+        // THE REORDERING HALF of the field report ("clip reordering can retune a
+        // part"): what happens inside the second clip must not depend on what
+        // the first clip's bend lane did. Three different predecessors, one
+        // identical tail.
+        func tail(_ aLane: [(Double, Int)]?) -> [ScheduledMIDIEvent] {
+            build(bendLeakClips(clipALane: aLane)).filter { $0.sampleTime >= 96_000 }
+        }
+        // Same value, different value: clip B's whole stream is identical.
+        #expect(tail([(0, 12_288)]).map(shape) == tail([(0, 4_096)]).map(shape),
+                "clip B still depends on clip A's bend value")
+        // No bend lane on A at all: B's NOTES are identical, and the only
+        // difference anywhere is whether B opens with the neutral reset — which
+        // is the fix, and which is a no-op when nothing bent in the first place.
+        func notesOnly(_ events: [ScheduledMIDIEvent]) -> [[Int64]] {
+            events.filter { $0.kind <= 1 }.map(shape)
+        }
+        #expect(notesOnly(tail([(0, 12_288)])) == notesOnly(tail(nil)),
+                "clip B's notes still depend on WHETHER clip A had a bend lane")
+        #expect(tail([(0, 12_288)]).filter { $0.kind == ScheduledMIDIEvent.pitchBend }
+                    .map { ($0.pitch, $0.velocity) == neutral } == [true])
+        #expect(tail(nil).allSatisfy { $0.kind != ScheduledMIDIEvent.pitchBend },
+                "CLAIM 1 again, on the render fixture: no bend lane anywhere ⇒ no bend events")
+    }
+
+    /// ⛔ **THE CC 11 GATE — the measured half of `resetsAtClipOnset`'s table.**
+    ///
+    /// The table's "NO" row for expression is the row most likely to be
+    /// well-meaningly flipped later ("surely a clip should start clean?"), and
+    /// flipping it silently undoes the sax breath round. So the consequence is
+    /// measured here rather than asserted in a comment: a breath-contoured clip
+    /// A followed by a plain clip B, rendered through the built-in `.sampler`,
+    /// which is the cheapest instrument that actually ROUTES CC 11
+    /// (`MIDIControllerRouting.samplerRoutedCCs`).
+    ///
+    /// The contour tapers clip A toward its phrase end; clip B declares no
+    /// expression, so today it continues from where the phrase left off. With
+    /// CC 11 added to the reset set, B's onset would instead assert
+    /// `neutralDefault` = **127, full** — the phrase's dynamic shape replaced by
+    /// a step up, in the one direction `PadPreview` §"the limit of rule 3"
+    /// already names as this tree's characteristic silent failure (louder than
+    /// the author wrote, self-healing only at the next lane point).
+    ///
+    /// ⭐ The assertion is the STEP, not an absolute level, so it survives any
+    /// re-voicing of the contour: what must never happen is clip B jumping
+    /// ABOVE the level clip A's phrase ended at.
+    @Test("m29-bend-leak: CC 11 must NOT reset at a clip onset (the breath round, measured)")
+    @MainActor
+    func expressionDoesNotResetAtClipOnset() throws {
+        let map = TempoMap(constantBPM: 120)
+        let fixture = try TestSignals.fixtures().cos1k48
+        /// Renders the breath-contoured pair and returns the seam step in dB:
+        /// clip B's opening half-beat against clip A's closing half-beat.
+        func seamStepDb(_ options: BreathContour.Options) throws -> (Double, Int) {
+            // The REAL generator, so this measures the shipped feature and not
+            // a hand-drawn imitation of it.
+            let contour = BreathContour.generate(noteStartBeat: 0, noteLengthBeats: 3.5,
+                                                 clipStartBeat: 0, tempoMap: map,
+                                                 options: options)
+            #expect(!contour.expression.isEmpty)
+            let clips = [
+                Clip(name: "breath", startBeat: 0, lengthBeats: 4,
+                     notes: [MIDINote(pitch: 69, velocity: 100, startBeat: 0, lengthBeats: 3.5)],
+                     controllerLanes: [MIDIControllerLane(type: .cc(controller: 11),
+                                                          points: contour.expression)]),
+                Clip(name: "plain", startBeat: 4, lengthBeats: 4,
+                     notes: [MIDINote(pitch: 69, velocity: 100, startBeat: 0, lengthBeats: 3.5)]),
+            ]
+            let track = Track(
+                name: "breath", kind: .instrument, clips: clips,
+                instrument: InstrumentDescriptor(
+                    kind: .sampler,
+                    sampler: SamplerParams(
+                        zones: [SamplerZone(audioFileURL: fixture, rootPitch: 69)],
+                        attack: 0.002, release: 0.05, gain: 0.8)))
+            let audio = try OfflineRenderer().render(tracks: [track], tempoMap: map,
+                                                     fromBeat: 0, durationSeconds: 4.2)
+            let left = audio.channelData[0]
+            // The last half-beat of clip A's phrase (frames 72 000–84 000)
+            // against the first half-beat of clip B (96 000–108 000).
+            let phraseEnd = TestSignals.rms(left, in: 72_000..<84_000)
+            let nextClip = TestSignals.rms(left, in: 96_000..<108_000)
+            #expect(phraseEnd > 1e-4, "the contour rendered silence — the step is meaningless")
+            return (20 * log10(Double(max(nextClip, 1e-9)) / Double(max(phraseEnd, 1e-9))),
+                    contour.expression.last?.value ?? -1)
+        }
+
+        // ARM 1 — the DEFAULT contour, i.e. what `applyBreathContour` writes
+        // when nobody asks for anything. Reported for scale, not asserted on:
+        // its taper only reaches CC ≈ 103, so a reset could raise it by at most
+        // 20·log10(127/103) ≈ 1.8 dB. Small, and still an unrequested edit.
+        let (defaultStep, defaultEndCC) = try seamStepDb(BreathContour.Options())
+        print("[measured] CC11 seam, DEFAULT contour (ends CC \(defaultEndCC)): "
+              + "\(defaultStep) dB")
+
+        // ARM 2 — A PHRASE THAT DIES AWAY, which is the ordinary way a wind
+        // phrase ends and the case where the size of the mistake is visible.
+        // `depth: 0.9, releaseLevel: 0` taper the lane to CC ≈ 12, so asserting
+        // CC 11's neutral (127) at the next clip's onset is a ~20 dB step up.
+        let (decrescendo, endCC) = try seamStepDb(
+            BreathContour.Options(depth: 0.9, releaseLevel: 0))
+        print("[measured] CC11 seam, DECRESCENDO contour (ends CC \(endCC)): "
+              + "\(decrescendo) dB")
+        #expect(endCC < 30, "the decrescendo fixture did not actually taper — arm 2 is vacuous")
+        #expect(decrescendo < 3.0, """
+            clip B jumped \(decrescendo) dB above the level clip A's phrase ended at — CC 11 is \
+            resetting at the clip onset, which is the breath-round regression \
+            `MIDIControllerType.resetsAtClipOnset` exists to prevent
+            """)
+    }
 }

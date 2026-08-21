@@ -44,6 +44,10 @@ import DAWAppKit
 /// the design language forbids.
 struct BreathPadView: View {
     @Bindable var model: BreathPadModel
+    /// The hardware-mapping section's model (m28-knob-ui). **Holds no store and
+    /// no engine** — see `BreathPadHardwareModel`: that is what makes "opening
+    /// this panel does not touch the user's MIDI hardware" structural.
+    @Bindable var hardware: BreathPadHardwareModel
     var onClose: () -> Void
 
     /// The panel's stable id — the `HumanizePanel.panelID` idiom.
@@ -85,6 +89,9 @@ struct BreathPadView: View {
         }
         .onPreferenceChange(AvailableHeightKey.self) { [weak model] height in
             model?.measuredLayout.available = height
+        }
+        .onPreferenceChange(HardwareHeightKey.self) { [weak model] height in
+            model?.measuredLayout.hardwareHeight = height
         }
         .transition(.opacity)
     }
@@ -141,22 +148,46 @@ struct BreathPadView: View {
     private func card(available: CGFloat) -> some View {
         let hasWarnings = !model.warnings.isEmpty
         let hasRecoveryNote = model.gauge.recoveryNote != nil
+        // ⚠️ m28-knob-ui: the FOURTH input to this budget. Read from the ONE
+        // place it lives (`BreathPadHardwareModel.isExpanded`) and handed
+        // straight to the layout — a copy on the pad's model would be a second
+        // home for a fact the card's height depends on.
+        let hardwareExpanded = hardware.isExpanded
         let regions = BreathPadLayout.regions(
             available: available,
             hasWarnings: hasWarnings,
-            hasRecoveryNote: hasRecoveryNote)
+            hasRecoveryNote: hasRecoveryNote,
+            hardwareExpanded: hardwareExpanded)
         let room = available - BreathPadLayout.windowMargin * 2
         let scrolls = available > 0 && BreathPadLayout.cardHeight(
             available: available,
             hasWarnings: hasWarnings,
-            hasRecoveryNote: hasRecoveryNote) > room
+            hasRecoveryNote: hasRecoveryNote,
+            hardwareExpanded: hardwareExpanded) > room
         return VStack(alignment: .leading, spacing: 12) {
             header
             Divider().overlay(DAWTheme.hairline)
             if model.targetIsMIDI {
                 if scrolls {
-                    ScrollView(.vertical) {
-                        shapingBody(regions: regions, scrolls: true)
+                    // ⭐⭐ THE SCROLLER IS INSTRUMENTED, AND THAT IS NOT A LUXURY.
+                    // On this machine's display the expanded card cannot fit at
+                    // ANY window height, so the hardware section is always below
+                    // the fold — and "captured: the whole section" was a capture
+                    // of the section's absence. `debug.breathPad {scrollTo:
+                    // "hardware"}` drives this anchor so the bottom of a
+                    // scrolling card can be photographed on a screen too short to
+                    // show it. m28-p7's lesson was that a UI phase is not done
+                    // until someone has LOOKED at it; a card that can outgrow
+                    // every available display needs a way to be looked at.
+                    ScrollViewReader { proxy in
+                        ScrollView(.vertical) {
+                            shapingBody(regions: regions, scrolls: true)
+                        }
+                        .onChange(of: model.scrollToBottomRequest) {
+                            withAnimation(.none) {
+                                proxy.scrollTo(BreathPadView.bottomAnchor, anchor: .bottom)
+                            }
+                        }
                     }
                 } else {
                     shapingBody(regions: regions, scrolls: false)
@@ -182,14 +213,37 @@ struct BreathPadView: View {
             BreathPadDial(model: model, side: regions.dial)
                 .frame(width: regions.dial, height: regions.dial)
                 .frame(maxWidth: .infinity)
-            readouts
+            controlRow
             gestureLine
             Divider().overlay(DAWTheme.hairline)
             airSection
             warningsBlock(room: scrolls ? .infinity : regions.warnings)
+            Divider().overlay(DAWTheme.hairline)
+            // ⭐ THE SECTION REPORTS ITS OWN HEIGHT (m28-knob-ui), for the
+            // reason `MeasuredLayout.hardwareHeight` states: the card's own
+            // report cannot supply `hardwareExpandedChrome`, because on a short
+            // display the expanded card is CLAMPED by the scroll cascade and the
+            // difference between two clamped cards is not the difference between
+            // two sections. Reported through a preference — a model write during
+            // a body evaluation is the mutation-during-update bug — and
+            // REPORTED ONLY: no layout code reads it.
+            BreathPadHardwareSection(hardware: hardware)
+                .background(
+                    GeometryReader { section in
+                        Color.clear.preference(key: HardwareHeightKey.self,
+                                               value: section.size.height)
+                    }
+                )
+                // The anchor the scroll instrument targets. It is the LAST thing
+                // on the card, so scrolling to it proves the card's bottom is
+                // reachable — which is the property the m28-p7 clip violated.
+                .id(BreathPadView.bottomAnchor)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    /// The id of the card's last row, for `ScrollViewReader`.
+    fileprivate static let bottomAnchor = "breathPad.bottom"
 
     // MARK: - Header
 
@@ -231,13 +285,59 @@ struct BreathPadView: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    // MARK: - Readouts
+    // MARK: - Readouts and the precision knobs
 
-    private var readouts: some View {
-        HStack(alignment: .top, spacing: 18) {
-            readout("ANGLE", model.angleReadout)
-            readout("DEPTH", model.radiusReadout)
+    /// ANGLE and DEPTH as real knobs, EFFORT as the readout it has to stay
+    /// (m28-knob-ui).
+    ///
+    /// ## Why knobs and not a second set of numbers
+    ///
+    /// The dial is a *gesture* control: it is the fastest way to find a shape
+    /// and the worst way to land on 90.0° exactly. Two knobs beside it give the
+    /// same two dimensions one at a time, with ⌥ for quarter-speed fine
+    /// adjustment — the house knob contract — and they are the only route a
+    /// player has to nudge ONE axis without disturbing the other.
+    ///
+    /// ⭐ **They REPLACE the ANGLE/DEPTH text readouts rather than joining
+    /// them.** `KnobControl` already draws its label above and its SF Mono value
+    /// below, so keeping both would have printed each number twice and cost the
+    /// card a row it does not have — the pad's budget was already the tightest
+    /// on any card in the app.
+    ///
+    /// EFFORT stays a readout because it is DERIVED (`effort` is a function of
+    /// the blend, and the CC integer is `PadPreviewController`'s own mapping).
+    /// A knob on a value you cannot set is the do-nothing control the design
+    /// language forbids.
+    ///
+    /// ⛔ **Two-way with the dial and with the hardware, by construction.** The
+    /// knobs render `model.angleFraction` / `model.radiusFraction`, so a
+    /// hardware turn — which moves the same dot through `pumpExternalControl` —
+    /// visibly moves these caps, and so does a drag on the dial. There is one
+    /// dot and three ways to push it, not three copies of a position.
+    private var controlRow: some View {
+        HStack(alignment: .top, spacing: 14) {
+            KnobControl(
+                label: "ANGLE",
+                fraction: model.angleFraction,
+                readout: model.angleReadout,
+                accent: DAWTheme.playback,
+                onChange: { _ = model.knobMoved(angleFraction: $0) },
+                // ⛔ ONE KNOB, ONE AXIS. Both of these once called a shared
+                // `resetKnobs()`, so double-clicking DEPTH swung the ANGLE — a
+                // control moving a parameter it does not name, against the
+                // `KnobControl` contract every other knob in the app keeps.
+                onReset: { model.resetAngle() },
+                onCommit: { _ = model.knobReleased() })
+            KnobControl(
+                label: "DEPTH",
+                fraction: model.radiusFraction,
+                readout: model.radiusReadout,
+                accent: DAWTheme.playback,
+                onChange: { _ = model.knobMoved(radiusFraction: $0) },
+                onReset: { model.resetDepth() },
+                onCommit: { _ = model.knobReleased() })
             readout("EFFORT", model.effortReadout)
+                .padding(.top, 2)
             Spacer(minLength: 0)
         }
     }
@@ -729,6 +829,15 @@ private struct AvailableHeightKey: PreferenceKey {
 }
 
 private struct CardHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// The HARDWARE section's drawn height (m28-knob-ui) — the one number
+/// `hardwareExpandedChrome` is measured from.
+private struct HardwareHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())

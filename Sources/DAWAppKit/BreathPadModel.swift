@@ -201,7 +201,17 @@ public enum BreathPadLayout {
     /// believe the loaded card fitted (predicted 806 against 820 of room) while
     /// it actually drew 857 and overhung by 37 pt — the dial never yielded,
     /// because as far as the arithmetic knew there was nothing to yield.
-    public static let fixedChrome: CGFloat = 433
+    ///
+    /// ## 433 → 510.5 (m28-knob-ui), measured the same way
+    ///
+    /// The card gained two unconditional rows: the ANGLE/DEPTH precision knobs
+    /// (which REPLACED the plain angle/depth readouts, so the net cost is one
+    /// knob's height and not a whole row), and the HARDWARE section's collapsed
+    /// disclosure with its divider. **510.5 = 798.5 drawn − 288 dial**, both read
+    /// off `debug.breathPad` at an 868 pt window where the card FITS — a reading
+    /// taken while the card is clamped by the scroll cascade would be measuring
+    /// the clamp, not the card.
+    public static let fixedChrome: CGFloat = 510.5
     /// What the warnings block costs the card when there is one: its room plus
     /// the stack spacing above it.
     public static let warningsChrome: CGFloat = 12
@@ -232,11 +242,87 @@ public enum BreathPadLayout {
     /// `subToneEntry` capture.
     public static let summaryReservation: CGFloat = 48
 
+    /// ⚠️ **THE FOURTH VARIABLE-HEIGHT INPUT (m28-knob-ui), and the budget has
+    /// now been burned by three of them.** What the HARDWARE section costs the
+    /// card when it is EXPANDED — the two mapping rows, the LAST HEARD readout,
+    /// the listening line, the persistence note and the clear-all button.
+    ///
+    /// Its COLLAPSED cost is folded into `fixedChrome`, because the collapsed
+    /// row is unconditional: it is the section's diagnostic and it is always on
+    /// the card.
+    ///
+    /// ⛔ **MEASURED THE SAME WAY AS `fixedChrome`, NOT DERIVED FROM IT.** The
+    /// tempting move — take `fixedChrome`, add an estimate per row — is exactly
+    /// how the summed 372 and the pixel-scanned 380 both came out wrong for the
+    /// number above. **285 = 298.5 − 13.5**, the SECTION's own reported height
+    /// expanded minus collapsed (`debug.breathPad`'s `hardwareSectionHeight`),
+    /// with nothing else changed.
+    ///
+    /// ⚠️ **IT WAS 260 FOR ONE ROUND, AND 260 WAS A MEASUREMENT OF A SECTION
+    /// THAT HAD TWO HEIGHTS.** See `hardwareFeedReservation` below: the section
+    /// used to be 273.5 in the unbound state and something else once a mapping
+    /// existed, and 260 was the honest delta *of that one sample*. Reserving the
+    /// worst case made the section a single height — and made it taller. A
+    /// correctly-measured constant for an incorrectly-varying view is still
+    /// wrong, and it fails in the state nobody measured.
+    ///
+    /// ⚠️⚠️ **THE OBVIOUS MEASUREMENT IS THE WRONG ONE, AND IT LOOKS RIGHT.**
+    /// The first attempt took the difference between the two CARD heights, the
+    /// way `fixedChrome` was obtained. It returned **21.5** — an entirely
+    /// plausible-looking number, and wrong by a factor of twelve. On a 900 pt
+    /// display the expanded card exceeds its room, so the scroll cascade CLAMPS
+    /// it: the difference between the two drawn cards was the difference between
+    /// two clamps, not between two cards. A clamped reading is indistinguishable
+    /// from a real one, which is this tree's characteristic failure. The section
+    /// reports its own height instead — a `ScrollView`'s content keeps its
+    /// natural size, so that reading is honest at any window.
+    ///
+    /// Pinned against the panel's live report by the m28-knob-ui render probe,
+    /// which compares this constant to the measured delta rather than to a card
+    /// height it might not be able to observe unclamped.
+    ///
+    /// ⚠️ It moves the card's SCROLL THRESHOLD, and that is the honest cost of
+    /// the feature: the card scrolls once `fixedChrome + dial + this` exceeds
+    /// the room. The section is collapsed by default so the common case is
+    /// unaffected, and the cascade (dial yields → warnings shed → the card
+    /// scrolls) already handles the rest without clipping anything.
+    public static let hardwareExpandedChrome: CGFloat = 285
+
+    /// ⛔⛔ **AND THE MEASUREMENT ABOVE IS ONLY TRUE BECAUSE THE SECTION IS MADE
+    /// NOT TO VARY. This is the constant that buys that.**
+    ///
+    /// `hardwareExpandedChrome` is ONE number, read in ONE state — unbound and
+    /// unsubscribed. The section as first written was two different heights: the
+    /// feed line's longest variant ("Not listening yet. Nothing is mapped, so
+    /// DAW Pro leaves your MIDI gear alone until you press LEARN.") wraps to two
+    /// lines while the other two variants fit on one, and FORGET ALL MAPPINGS
+    /// appeared only once something was bound. So the sampled state was the one
+    /// state the panel leaves the moment the feature is used, and the delta was
+    /// not even reliably negative.
+    ///
+    /// **That is the P7 defect exactly**: the budget says it fits, the card draws
+    /// taller, and the overhang lands on WRITE THE SHAPE — with every test green,
+    /// because they all consume the same wrong constant. Worse, the scroll
+    /// cascade HIDES it on a 900 pt display, so a render probe cannot see it
+    /// either; it would surface only on a window where the expanded card just
+    /// fits, i.e. on someone else's screen.
+    ///
+    /// The fix is the one `summaryReservation` already uses: **reserve the worst
+    /// case so the constant is true in every state**, rather than sampling one
+    /// state and hoping. The feed line gets two lines' room always; the button is
+    /// always present and merely disabled when there is nothing to forget (which
+    /// the destructive-action rule wanted anyway). The m28-knob-ui probe asserts
+    /// the section reports the SAME height unbound, bound, armed and inverted —
+    /// an equality that fails the moment a variable-height control is added here.
+    public static let hardwareFeedReservation: CGFloat = 24
+
     /// What the card WANTS, before anything yields.
-    public static func naturalHeight(hasWarnings: Bool, hasRecoveryNote: Bool) -> CGFloat {
+    public static func naturalHeight(hasWarnings: Bool, hasRecoveryNote: Bool,
+                                     hardwareExpanded: Bool = false) -> CGFloat {
         fixedChrome + dialCeiling
             + (hasWarnings ? warningsCeiling + warningsChrome : 0)
             + (hasRecoveryNote ? recoveryNoteHeight : 0)
+            + (hardwareExpanded ? hardwareExpandedChrome : 0)
     }
 
     /// The two regions that can give height back, in the ORDER they give it.
@@ -264,10 +350,13 @@ public enum BreathPadLayout {
     /// outside the scroller. This function keeps returning a card that does not
     /// fit, because that IS the signal the view acts on.
     public static func regions(available: CGFloat, hasWarnings: Bool,
-                               hasRecoveryNote: Bool) -> (dial: CGFloat, warnings: CGFloat) {
+                               hasRecoveryNote: Bool,
+                               hardwareExpanded: Bool = false)
+        -> (dial: CGFloat, warnings: CGFloat) {
         let room = available - windowMargin * 2
         var shortfall = naturalHeight(hasWarnings: hasWarnings,
-                                      hasRecoveryNote: hasRecoveryNote) - room
+                                      hasRecoveryNote: hasRecoveryNote,
+                                      hardwareExpanded: hardwareExpanded) - room
         guard shortfall > 0 else { return (dialCeiling, warningsCeiling) }
 
         let dialGive = min(shortfall, dialCeiling - dialFloor)
@@ -278,36 +367,45 @@ public enum BreathPadLayout {
 
     /// The dial's drawn side — the common read.
     public static func dialSide(available: CGFloat, hasWarnings: Bool = false,
-                                hasRecoveryNote: Bool = false) -> CGFloat {
+                                hasRecoveryNote: Bool = false,
+                                hardwareExpanded: Bool = false) -> CGFloat {
         regions(available: available, hasWarnings: hasWarnings,
-                hasRecoveryNote: hasRecoveryNote).dial
+                hasRecoveryNote: hasRecoveryNote,
+                hardwareExpanded: hardwareExpanded).dial
     }
 
     /// The warnings block's bound at this window.
     public static func warningsRoom(available: CGFloat, hasWarnings: Bool,
-                                    hasRecoveryNote: Bool = false) -> CGFloat {
+                                    hasRecoveryNote: Bool = false,
+                                    hardwareExpanded: Bool = false) -> CGFloat {
         regions(available: available, hasWarnings: hasWarnings,
-                hasRecoveryNote: hasRecoveryNote).warnings
+                hasRecoveryNote: hasRecoveryNote,
+                hardwareExpanded: hardwareExpanded).warnings
     }
 
     /// The smallest card the layout can produce — **derived from the floors**,
     /// so a floor can never outrank the ceiling the way m26-i's picked minimum
     /// did.
     public static func minimumCardHeight(hasWarnings: Bool = true,
-                                         hasRecoveryNote: Bool = true) -> CGFloat {
+                                         hasRecoveryNote: Bool = true,
+                                         hardwareExpanded: Bool = false) -> CGFloat {
         fixedChrome + dialFloor
             + (hasWarnings ? warningsFloor + warningsChrome : 0)
             + (hasRecoveryNote ? recoveryNoteHeight : 0)
+            + (hardwareExpanded ? hardwareExpandedChrome : 0)
     }
 
     /// The card's height at a given window, after both regions have yielded.
     public static func cardHeight(available: CGFloat, hasWarnings: Bool = false,
-                                  hasRecoveryNote: Bool = false) -> CGFloat {
+                                  hasRecoveryNote: Bool = false,
+                                  hardwareExpanded: Bool = false) -> CGFloat {
         let r = regions(available: available, hasWarnings: hasWarnings,
-                        hasRecoveryNote: hasRecoveryNote)
+                        hasRecoveryNote: hasRecoveryNote,
+                        hardwareExpanded: hardwareExpanded)
         return fixedChrome + r.dial
             + (hasWarnings ? r.warnings + warningsChrome : 0)
             + (hasRecoveryNote ? recoveryNoteHeight : 0)
+            + (hardwareExpanded ? hardwareExpandedChrome : 0)
     }
 }
 
@@ -751,15 +849,49 @@ public final class BreathPadModel {
     /// returned, so it took" mistake in this tree.
     public var measuredLayout = MeasuredLayout()
 
+    /// ⭐ **A COUNTER, NOT A FLAG — the card's scroller watches it and jumps to
+    /// the bottom when it changes.**
+    ///
+    /// This exists because of a measured dead end: with the hardware section
+    /// expanded, the pad's card is taller than the tallest window this display
+    /// can grant (971.5 pt of card against 934 pt of room at `available` 982), so
+    /// the section is ALWAYS below the fold and no capture can show it. The probe
+    /// happily logged "captured: the WHOLE expanded section, unclipped" while
+    /// photographing the part of the card the section is not in — a green check
+    /// on an image of an absence, which is this tree's characteristic failure.
+    ///
+    /// A counter rather than a `Bool` so two consecutive requests both fire;
+    /// `onChange` on a flag already set is silent, which would make the
+    /// instrument work once per launch and then quietly stop.
+    ///
+    /// ⚠️ Drives NO layout. It moves a scroll offset and nothing else.
+    public var scrollToBottomRequest = 0
+
     /// The panel's own account of its layout. Points.
     public struct MeasuredLayout: Sendable, Equatable {
         /// The height the card's `GeometryReader` was offered.
         public var available: CGFloat = 0
         /// The height the card actually drew at.
         public var cardHeight: CGFloat = 0
-        public init(available: CGFloat = 0, cardHeight: CGFloat = 0) {
+        /// The height the HARDWARE section drew at, collapsed or expanded
+        /// (m28-knob-ui).
+        ///
+        /// ⭐ **Why a SECOND report, when the card already reports itself.**
+        /// `hardwareExpandedChrome` is a DIFFERENCE between two card heights,
+        /// and the card cannot supply it: on a short display the expanded card
+        /// hits the scroll cascade and is CLAMPED to its room, so the difference
+        /// between the two drawn cards is whatever the clamp left over — 21.5 pt
+        /// in the first measurement, against a section that is an order of
+        /// magnitude taller than that. A clamped reading looks exactly like a
+        /// real one. The section reports its OWN height, which is natural in
+        /// both states (a `ScrollView`'s content is not clamped), so the
+        /// subtraction is honest at any window size.
+        public var hardwareHeight: CGFloat = 0
+        public init(available: CGFloat = 0, cardHeight: CGFloat = 0,
+                    hardwareHeight: CGFloat = 0) {
             self.available = available
             self.cardHeight = cardHeight
+            self.hardwareHeight = hardwareHeight
         }
 
         /// How far the card exceeds the room the margin leaves it — 0 when it
@@ -871,6 +1003,94 @@ public final class BreathPadModel {
 
     @discardableResult
     public func endDrag() -> Bool { endGesture() }
+
+    // MARK: - On-screen precision knobs (m28-knob-ui)
+
+    /// The dot's angle as a knob travel fraction, 0…1 → one full turn of the
+    /// ring. **Both ends land on ring index 0**, which is what a circle does.
+    ///
+    /// ⚠️ **The knob is fed THIS, and `knobMoved` compares against THIS.** The
+    /// round trip fraction → radians → fraction is not bit-exact in floating
+    /// point, so comparing the resulting DOT would make a zero-movement tick
+    /// look like a move roughly whenever the last bit disagreed. Comparing the
+    /// fractions is exact, because it is the same expression on both sides.
+    public var angleFraction: Double { EffortRing.wrap(dot.angle) / (2 * .pi) }
+
+    /// The dot's depth as a knob travel fraction — already 0…1.
+    public var radiusFraction: Double { dot.radius }
+
+    /// A precision knob moved. Pass ONE axis; the other stays where it is.
+    ///
+    /// ## ⛔ WHY THE "DID IT ACTUALLY CHANGE" GUARD IS LOAD-BEARING
+    ///
+    /// `KnobControl`'s gesture is `DragGesture(minimumDistance: 0)`, so a plain
+    /// CLICK on the cap is a complete drag with zero translation: `onChange`
+    /// fires once with the value it already had, and `onCommit` — which fires
+    /// only if the drag MOVED — never fires at all. A version of this that
+    /// opened a gesture on every `onChange` would open one that nothing ever
+    /// closes, leaving a live controller preview parked on the instrument until
+    /// `PadPreviewController`'s 30 s ceiling fired. That is precisely the state
+    /// rule 3 exists to prevent, and a stray click is not a rare input.
+    ///
+    /// So the gesture opens only on a tick that genuinely changes the dot. That
+    /// makes **"we opened a gesture" and "`onCommit` will fire" the same
+    /// condition**, which is provable rather than hopeful: `KnobControl` latches
+    /// `dragMovedValue` on `next != start`, `start` is the fraction the knob was
+    /// handed, and before we open, that fraction IS `angleFraction` /
+    /// `radiusFraction`. One predicate, two places.
+    ///
+    /// The source is `.pointer` and not a third case, so the existing
+    /// "THE POINTER WINS" precedence in `pumpExternalControl` covers a hand on
+    /// the knob and a hand on the hardware with no new rule.
+    ///
+    /// Returns whether the dot moved — for tests, and so a caller can tell a
+    /// real tick from the stray-click case.
+    @discardableResult
+    public func knobMoved(angleFraction newAngle: Double? = nil,
+                          radiusFraction newRadius: Double? = nil) -> Bool {
+        let angleChanged = newAngle.map { $0 != angleFraction } ?? false
+        let radiusChanged = newRadius.map { $0 != radiusFraction } ?? false
+        if gesture == nil {
+            guard angleChanged || radiusChanged else { return false }
+            beginGesture(source: .pointer)
+        }
+        setDot(angle: newAngle.map { $0 * 2 * .pi } ?? dot.angle,
+               radius: (newRadius ?? dot.radius).clamped(to: 0...1))
+        return true
+    }
+
+    /// The knob was released. Ends the gesture exactly as the dial's release
+    /// does — committing only if the dot travelled past `movementEpsilon`, which
+    /// is the pad's own movement gate and not the knob's.
+    @discardableResult
+    public func knobReleased() -> Bool { endGesture() }
+
+    /// Double-click on the ANGLE knob: back to the top of the ring.
+    ///
+    /// ⛔ **ONE KNOB RESETS ONE AXIS.** The first version of this was a single
+    /// `resetKnobs()` wired to both `onReset` closures, so double-clicking DEPTH
+    /// swung the ANGLE too — a control silently moving a parameter it does not
+    /// name. Every other knob in the app (`KnobControl.onReset`, `DeferredKnob`)
+    /// resets its own value and nothing else, and a panel is not the place to
+    /// break that contract. The coupled version also had a TEST asserting it,
+    /// which is how a defect gets certified rather than caught.
+    ///
+    /// It moves the dot and **commits nothing**: a reset is a re-aim, not an
+    /// edit, and WRITE THE SHAPE is one press away.
+    public func resetAngle() {
+        endGestureWithoutCommitting()
+        setDot(angle: 0, radius: dot.radius)
+    }
+
+    /// Double-click on the DEPTH knob: back to full strength.
+    ///
+    /// ⚠️ Deliberately **1, not 0**. Radius 0 is the "exactly as written" no-op
+    /// where `canApply` turns off — a double-click that silently disabled the
+    /// apply button would read as a broken panel, not as a reset.
+    public func resetDepth() {
+        endGestureWithoutCommitting()
+        setDot(angle: dot.angle, radius: 1)
+    }
 
     // MARK: - Hardware-knob adapter (m28-knob)
 

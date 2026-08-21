@@ -2244,8 +2244,8 @@ var require_resolve = __commonJS({
       }
       return count;
     }
-    function getFullPath(resolver, id = "", normalize) {
-      if (normalize !== false)
+    function getFullPath(resolver, id = "", normalize2) {
+      if (normalize2 !== false)
         id = normalizeId(id);
       const p = resolver.parse(id);
       return _getFullPath(resolver, p);
@@ -3641,7 +3641,7 @@ var require_fast_uri = __commonJS({
     "use strict";
     var { normalizeIPv6, removeDotSegments, recomposeAuthority, normalizePercentEncoding, normalizePathEncoding, escapePreservingEscapes, reescapeHostDelimiters, isIPv4, nonSimpleDomain } = require_utils();
     var { SCHEMES, getSchemeHandler } = require_schemes();
-    function normalize(uri, options) {
+    function normalize2(uri, options) {
       if (typeof uri === "string") {
         uri = /** @type {T} */
         normalizeString(uri, options);
@@ -3908,7 +3908,7 @@ var require_fast_uri = __commonJS({
     }
     var fastUri = {
       SCHEMES,
-      normalize,
+      normalize: normalize2,
       resolve: resolve5,
       resolveComponent,
       equal,
@@ -11083,17 +11083,17 @@ var require_sha256 = __commonJS({
       exports2.HMAC = HMAC;
       function hash(data) {
         var h = new Hash().update(data);
-        var digest = h.digest();
+        var digest2 = h.digest();
         h.clean();
-        return digest;
+        return digest2;
       }
       exports2.hash = hash;
       exports2["default"] = hash;
       function hmac(key, data) {
         var h = new HMAC(key).update(data);
-        var digest = h.digest();
+        var digest2 = h.digest();
         h.clean();
-        return digest;
+        return digest2;
       }
       exports2.hmac = hmac;
       function fillBuffer(buffer, hmac2, info, counter) {
@@ -43902,10 +43902,513 @@ async function generateImage(input) {
 }
 
 // src/mcp-log.ts
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync as mkdirSync2 } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname as dirname5, join as join4 } from "node:path";
+import { dirname as dirname5, join as join5 } from "node:path";
+
+// src/result-spill.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as join4 } from "node:path";
+var DEFAULT_MAX_RESULT_CHARS = 24e3;
+function maxResultChars() {
+  const raw = process.env["DAWPRO_MCP_MAX_RESULT_CHARS"];
+  if (raw !== void 0 && raw !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return DEFAULT_MAX_RESULT_CHARS;
+}
+function spillDir() {
+  const raw = process.env["DAWPRO_MCP_SPILL_DIR"];
+  if (raw !== void 0 && raw !== "") return raw;
+  return join4(tmpdir(), "dawpro-mcp-results");
+}
+var SPILL_TTL_MS = 24 * 60 * 60 * 1e3;
+var SPILL_FILE_PREFIX = "dawpro-mcp-";
+var SPILL_FILE_RE = /^dawpro-mcp-[A-Za-z0-9_.-]+\.(json|txt)$/;
+var PASSES = [
+  { inlineMax: 4096, maxRecurseElements: 64, headSamples: 3, strideSamples: 4, outlineBudget: 1200 },
+  { inlineMax: 2048, maxRecurseElements: 32, headSamples: 3, strideSamples: 4, outlineBudget: 1e3 },
+  { inlineMax: 1024, maxRecurseElements: 16, headSamples: 2, strideSamples: 3, outlineBudget: 700 },
+  { inlineMax: 512, maxRecurseElements: 8, headSamples: 2, strideSamples: 2, outlineBudget: 400 },
+  { inlineMax: 256, maxRecurseElements: 4, headSamples: 1, strideSamples: 1, outlineBudget: 200 },
+  { inlineMax: 128, maxRecurseElements: 0, headSamples: 1, strideSamples: 0, outlineBudget: 0 }
+];
+var MAX_RECURSE_KEYS = 128;
+var MAX_SAMPLE_ELEMENT_CHARS = 300;
+var MAX_SAMPLE_CHARS = 1200;
+var MAX_INDEX_ENTRIES = 50;
+var MAX_DEPTH = 200;
+var STRING_PREVIEW_CHARS = 160;
+var ROOT_STRING_PREVIEW_CHARS = 600;
+var toolNameStore = new AsyncLocalStorage();
+function runWithToolName(name, fn) {
+  return toolNameStore.run(name, fn);
+}
+function currentToolName() {
+  return toolNameStore.getStore();
+}
+function isDict(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function normalize(node) {
+  if (node !== null && typeof node === "object") {
+    const maybe = node.toJSON;
+    if (typeof maybe === "function") {
+      try {
+        return maybe.call(node, "");
+      } catch {
+        return node;
+      }
+    }
+  }
+  return node;
+}
+function emittedKeys(obj) {
+  const out = [];
+  for (const k of Object.keys(obj)) {
+    const v = obj[k];
+    if (v === void 0 || typeof v === "function" || typeof v === "symbol") continue;
+    out.push(k);
+  }
+  return out;
+}
+function arrayElement(v) {
+  if (v === void 0 || typeof v === "function" || typeof v === "symbol") return null;
+  return v;
+}
+var Sizer = class {
+  memo = /* @__PURE__ */ new WeakMap();
+  size(node, depth = 0) {
+    const v = normalize(node);
+    if (v === null || v === void 0) return 4;
+    switch (typeof v) {
+      case "string":
+        return JSON.stringify(v).length;
+      case "number":
+        return Number.isFinite(v) ? String(v).length : 4;
+      case "boolean":
+        return v ? 4 : 5;
+      case "bigint":
+      case "function":
+      case "symbol":
+        return 4;
+    }
+    if (depth > MAX_DEPTH) return 4;
+    const obj = v;
+    const hit = this.memo.get(obj);
+    if (hit !== void 0) return hit;
+    let n;
+    if (Array.isArray(v)) {
+      n = 2 + Math.max(0, v.length - 1);
+      for (const el of v) n += this.size(arrayElement(el), depth + 1);
+    } else {
+      const keys = emittedKeys(v);
+      n = 2 + Math.max(0, keys.length - 1);
+      for (const k of keys) n += JSON.stringify(k).length + 1 + this.size(v[k], depth + 1);
+    }
+    this.memo.set(obj, n);
+    return n;
+  }
+};
+var LineCounter = class {
+  memo = /* @__PURE__ */ new WeakMap();
+  overflowed = false;
+  lines(node, depth = 0) {
+    const v = normalize(node);
+    if (v === null || typeof v !== "object") return 1;
+    if (depth > MAX_DEPTH) {
+      this.overflowed = true;
+      return 1;
+    }
+    const obj = v;
+    const hit = this.memo.get(obj);
+    if (hit !== void 0) return hit;
+    let n;
+    if (Array.isArray(v)) {
+      if (v.length === 0) n = 1;
+      else {
+        n = 2;
+        for (const el of v) n += this.lines(arrayElement(el), depth + 1);
+      }
+    } else {
+      const keys = emittedKeys(v);
+      if (keys.length === 0) n = 1;
+      else {
+        n = 2;
+        for (const k of keys) n += this.lines(v[k], depth + 1);
+      }
+    }
+    this.memo.set(obj, n);
+    return n;
+  }
+};
+function verifiedRange(ctx, start, end, node, key) {
+  if (!ctx.enabled) return null;
+  if (start < 1 || end < start || end > ctx.lines.length) {
+    ctx.failures += 1;
+    return null;
+  }
+  const first = ctx.lines[start - 1];
+  const last = ctx.lines[end - 1];
+  if (first === void 0 || last === void 0) {
+    ctx.failures += 1;
+    return null;
+  }
+  if (key !== void 0 && !first.includes(`${JSON.stringify(key)}:`)) {
+    ctx.failures += 1;
+    return null;
+  }
+  const v = normalize(node);
+  const isArr = Array.isArray(v);
+  const isObj2 = isDict(v);
+  if (isArr || isObj2) {
+    const open3 = isArr ? "[" : "{";
+    const close = isArr ? "]" : "}";
+    const emptyToken = isArr ? "[]" : "{}";
+    const firstTrimmed = first.trimEnd();
+    const lastTrimmed = last.trim();
+    if (start === end) {
+      if (!firstTrimmed.endsWith(emptyToken) && !firstTrimmed.endsWith(`${emptyToken},`)) {
+        ctx.failures += 1;
+        return null;
+      }
+    } else {
+      if (!firstTrimmed.endsWith(open3)) {
+        ctx.failures += 1;
+        return null;
+      }
+      if (lastTrimmed !== close && lastTrimmed !== `${close},`) {
+        ctx.failures += 1;
+        return null;
+      }
+    }
+  } else if (start !== end) {
+    ctx.failures += 1;
+    return null;
+  }
+  return [start, end];
+}
+function childStartLines(ctx, start, children) {
+  const out = [];
+  let cursor = start + 1;
+  for (const c of children) {
+    out.push(cursor);
+    cursor += ctx.liner.lines(c);
+  }
+  return out;
+}
+function sampleArray(ctx, arr) {
+  const out = {};
+  let budget = MAX_SAMPLE_CHARS;
+  const take = (i) => {
+    const el = arrayElement(arr[i]);
+    const sz = ctx.sizer.size(el);
+    if (sz > MAX_SAMPLE_ELEMENT_CHARS || sz > budget) return void 0;
+    budget -= sz;
+    return el;
+  };
+  const head = [];
+  for (let i = 0; i < Math.min(ctx.pass.headSamples, arr.length); i += 1) {
+    const el = take(i);
+    if (el === void 0) break;
+    head.push(el);
+  }
+  if (head.length > 0) out["head"] = head;
+  const strideCount = ctx.pass.strideSamples;
+  if (strideCount > 0 && arr.length > head.length + 1) {
+    const stride = Math.max(1, Math.floor(arr.length / (strideCount + 1)));
+    const items = [];
+    for (let n = 1; n <= strideCount; n += 1) {
+      const idx = Math.min(arr.length - 1, n * stride);
+      if (idx < head.length) continue;
+      const el = take(idx);
+      if (el === void 0) break;
+      items.push({ index: idx, value: el });
+    }
+    if (items.length > 0) out["sampled"] = { stride, items };
+  }
+  if (head.length === 0 && out["sampled"] === void 0) {
+    const outline = outlineElements(ctx, arr);
+    if (outline !== null) out["outline"] = outline;
+    else {
+      const first = arrayElement(arr[0]);
+      if (isDict(first)) out["elementKeys"] = Object.keys(first).slice(0, 40);
+      else out["elementType"] = first === null ? "null" : typeof first;
+    }
+  }
+  return out;
+}
+function outlineOf(ctx, el) {
+  const v = normalize(el);
+  if (!isDict(v)) return void 0;
+  const out = {};
+  for (const k of emittedKeys(v)) {
+    const child = normalize(v[k]);
+    if (child === null || typeof child !== "object") {
+      if (typeof child === "string" && child.length > 64) out[k] = `${child.slice(0, 64)}\u2026`;
+      else out[k] = child;
+    } else if (Array.isArray(child)) {
+      out[k] = `<array of ${child.length}, omitted>`;
+    } else {
+      out[k] = `<object, ${emittedKeys(child).length} keys, omitted>`;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : void 0;
+}
+function outlineElements(ctx, arr) {
+  let budget = ctx.pass.outlineBudget;
+  if (budget <= 0 || arr.length === 0) return null;
+  const items = [];
+  for (let i = 0; i < arr.length; i += 1) {
+    const o = outlineOf(ctx, arrayElement(arr[i]));
+    if (o === void 0) break;
+    const sz = ctx.sizer.size(o);
+    if (sz > budget) break;
+    budget -= sz;
+    items.push(o);
+  }
+  if (items.length === 0) return null;
+  return {
+    note: "PARTIAL \u2014 each element reduced to its scalar fields; every array/object field inside it was dropped and is marked as such. " + (ctx.fileAvailable ? "Read the file for full elements." : "The full elements were NOT saved anywhere \u2014 see the warning above."),
+    covered: items.length === arr.length ? `all ${arr.length}` : `first ${items.length} of ${arr.length}`,
+    items
+  };
+}
+function elideArray(ctx, arr, path6, range) {
+  const approxChars = ctx.sizer.size(arr);
+  ctx.elided.push({ path: path6, kind: "array", elementCount: arr.length, fileLineRange: range });
+  let linesPerElement = null;
+  if (arr.length > 0) {
+    const firstLines = ctx.liner.lines(arrayElement(arr[0]));
+    linesPerElement = firstLines;
+    for (let i = 1; i < arr.length; i += 1) {
+      if (ctx.liner.lines(arrayElement(arr[i])) !== firstLines) {
+        linesPerElement = null;
+        break;
+      }
+    }
+  }
+  const out = {
+    _elided: "array",
+    elementCount: arr.length,
+    approxChars,
+    path: path6,
+    fileLineRange: range
+  };
+  if (range !== null && linesPerElement !== null) {
+    out["linesPerElement"] = linesPerElement;
+    out["readElements"] = `To read elements N..M from the spill file: read lines ${range[0] + 1} + N*${linesPerElement} through ${range[0]} + (M+1)*${linesPerElement} (1-based, inclusive). Element 0 starts at line ${range[0] + 1}.`;
+  }
+  Object.assign(out, sampleArray(ctx, arr));
+  return out;
+}
+function elideObject(ctx, obj, path6, range) {
+  const keys = emittedKeys(obj);
+  ctx.elided.push({ path: path6, kind: "object", keyCount: keys.length, fileLineRange: range });
+  return {
+    _elided: "object",
+    keyCount: keys.length,
+    keys: keys.slice(0, 40),
+    approxChars: ctx.sizer.size(obj),
+    path: path6,
+    fileLineRange: range
+  };
+}
+function elideString(ctx, s, path6, range) {
+  ctx.elided.push({ path: path6, kind: "string", chars: s.length, fileLineRange: range });
+  return {
+    _elided: "string",
+    chars: s.length,
+    preview: `${s.slice(0, STRING_PREVIEW_CHARS)}${s.length > STRING_PREVIEW_CHARS ? "\u2026" : ""}`,
+    path: path6,
+    fileLineRange: range
+  };
+}
+function digest(ctx, node, path6, start, key, depth) {
+  const v = normalize(node);
+  if (ctx.sizer.size(v) <= ctx.pass.inlineMax) return node;
+  if (depth > MAX_DEPTH) return node;
+  const range = ctx.fileAvailable ? verifiedRange(ctx.ranges, start, start + ctx.liner.lines(v) - 1, v, key) : null;
+  const shrinkOrKeep = (make) => {
+    const before = ctx.elided.length;
+    const placeholder = make();
+    if (ctx.sizer.size(placeholder) < ctx.sizer.size(v)) return placeholder;
+    ctx.elided.length = before;
+    return node;
+  };
+  if (typeof v === "string") return shrinkOrKeep(() => elideString(ctx, v, path6, range));
+  if (Array.isArray(v)) {
+    if (v.length > 0 && v.length <= ctx.pass.maxRecurseElements) {
+      const elements = v.map(arrayElement);
+      const starts = childStartLines(ctx, start, elements);
+      return elements.map(
+        (el, i) => digest(ctx, el, `${path6}[${i}]`, starts[i] ?? start, void 0, depth + 1)
+      );
+    }
+    return shrinkOrKeep(() => elideArray(ctx, v, path6, range));
+  }
+  if (isDict(v)) {
+    const keys = emittedKeys(v);
+    if (keys.length > 0 && keys.length <= MAX_RECURSE_KEYS) {
+      const values = keys.map((k) => v[k]);
+      const starts = childStartLines(ctx, start, values);
+      const out = {};
+      keys.forEach((k, i) => {
+        out[k] = digest(ctx, v[k], `${path6}.${k}`, starts[i] ?? start, k, depth + 1);
+      });
+      return out;
+    }
+    return shrinkOrKeep(() => elideObject(ctx, v, path6, range));
+  }
+  return node;
+}
+function sanitizeToolName(name) {
+  if (!name) return "tool";
+  const cleaned = name.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 60);
+  return cleaned.length > 0 ? cleaned : "tool";
+}
+function spillFileName(extension) {
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  const salt = randomBytes(3).toString("hex");
+  return `${SPILL_FILE_PREFIX}${sanitizeToolName(currentToolName())}-${stamp}-${salt}.${extension}`;
+}
+function pruneStaleSpills(dir) {
+  try {
+    const now = Date.now();
+    for (const name of readdirSync(dir)) {
+      if (!SPILL_FILE_RE.test(name)) continue;
+      const full = join4(dir, name);
+      try {
+        const st = statSync(full);
+        if (st.isFile() && now - st.mtimeMs > SPILL_TTL_MS) unlinkSync(full);
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+function writeSpill(body, extension) {
+  const dir = spillDir();
+  try {
+    mkdirSync(dir, { recursive: true });
+    pruneStaleSpills(dir);
+    const path6 = join4(dir, spillFileName(extension));
+    writeFileSync(path6, body, "utf8");
+    return { path: path6, bytes: Buffer.byteLength(body, "utf8"), error: null };
+  } catch (err) {
+    return { path: null, bytes: null, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+var DO_NOT_RERUN = "DO NOT re-run this tool call to recover the omitted content: the call ALREADY SUCCEEDED, and re-running a mutating tool (edit_undo, clip_apply_effort_shape, \u2026) repeats the edit.";
+function buildNotice(args) {
+  const { fullChars, fullLines, limit: limit3, spill, elided, lineRangesVerified, kind } = args;
+  const notice = {
+    status: spill.path ? "ELIDED_TO_FILE" : "ELIDED_NO_FILE",
+    reason: `This reply was ${fullChars} characters (${fullLines} lines) \u2014 over the ${limit3}-character inline limit. THIS IS NOT THE COMPLETE REPLY. ` + (kind === "json" ? 'Every scalar and short field is inline below, unchanged; only oversized nodes were replaced, each by a placeholder object carrying "_elided", its element/key count, and where to read it.' : "The reply was a single large text value."),
+    fullChars,
+    fullLines,
+    inlineLimit: limit3
+  };
+  if (spill.path) {
+    notice["file"] = spill.path;
+    notice["fileBytes"] = spill.bytes;
+    notice["howToRead"] = `The COMPLETE reply was written to the file above. Read it with your file-reading tool (Read, cat, \u2026) \u2014 it is ${kind === "json" ? "pretty-printed JSON" : "plain text"}, ${fullLines} lines. Read only the line range you need (see fileLineRange on each placeholder) rather than the whole file. ${DO_NOT_RERUN}`;
+  } else {
+    notice["file"] = null;
+    notice["writeError"] = spill.error;
+    notice["warning"] = `THE OMITTED CONTENT IS NOT RETRIEVABLE. The spill file could not be written (${spill.error ?? "unknown error"}), so the elided nodes below exist nowhere else. Work from the inline fields, or re-read the state with a READ-ONLY tool (project_snapshot, clip_get_notes, controller_lane_get). ${DO_NOT_RERUN}`;
+  }
+  if (kind === "json") {
+    if (spill.path) notice["lineRangesVerified"] = lineRangesVerified;
+    if (spill.path && !lineRangesVerified) {
+      notice["lineRangeNote"] = "Computed line ranges did not verify against the emitted file, so all fileLineRange values are null. The file content itself is complete and correct; only the line-offset shortcut is unavailable \u2014 search the file for the path instead.";
+    }
+    notice["elidedCount"] = elided.length;
+    notice["elided"] = elided.slice(0, MAX_INDEX_ENTRIES);
+    if (elided.length > MAX_INDEX_ENTRIES) {
+      notice["elidedIndexTruncated"] = elided.length - MAX_INDEX_ENTRIES;
+    }
+  }
+  return notice;
+}
+function envelope(notice, body) {
+  if (isDict(body) && !("_elided" in body)) return { _elided: notice, ...body };
+  return { _elided: notice, result: body };
+}
+function formatToolText(value) {
+  if (value === void 0) return "ok";
+  const limit3 = maxResultChars();
+  if (typeof value === "string") {
+    if (value.length <= limit3) return value;
+    const spill2 = writeSpill(value, "txt");
+    const notice2 = buildNotice({
+      fullChars: value.length,
+      fullLines: value.split("\n").length,
+      limit: limit3,
+      spill: spill2,
+      elided: [],
+      lineRangesVerified: false,
+      kind: "string"
+    });
+    notice2["preview"] = `${value.slice(0, ROOT_STRING_PREVIEW_CHARS)}\u2026`;
+    return JSON.stringify({ _elided: notice2 }, null, 2);
+  }
+  const full = JSON.stringify(value, null, 2);
+  if (full === void 0) return "ok";
+  if (full.length <= limit3) return full;
+  const lines = full.split("\n");
+  const sizer = new Sizer();
+  const liner = new LineCounter();
+  const computedTotal = liner.lines(value);
+  const lineIndexOk = !liner.overflowed && computedTotal === lines.length;
+  const ranges = { lines, enabled: lineIndexOk, failures: 0 };
+  const spill = writeSpill(full, "json");
+  let rendered = null;
+  let notice = null;
+  for (const pass of PASSES) {
+    ranges.failures = 0;
+    const ctx = {
+      pass,
+      sizer,
+      liner,
+      ranges,
+      elided: [],
+      fileAvailable: spill.path !== null
+    };
+    const body = digest(ctx, value, "$", 1, void 0, 0);
+    const candidateNotice = buildNotice({
+      fullChars: full.length,
+      fullLines: lines.length,
+      limit: limit3,
+      spill,
+      elided: ctx.elided,
+      lineRangesVerified: lineIndexOk && ranges.failures === 0,
+      kind: "json"
+    });
+    const text = JSON.stringify(envelope(candidateNotice, body), null, 2);
+    if (text.length <= limit3) {
+      rendered = text;
+      notice = candidateNotice;
+      break;
+    }
+    rendered = text;
+    notice = candidateNotice;
+  }
+  if (rendered !== null && rendered.length <= limit3) return rendered;
+  const fallbackNotice = notice ?? {};
+  fallbackNotice["status"] = spill.path ? "ELIDED_TO_FILE_SUMMARY_ONLY" : "ELIDED_NO_FILE";
+  fallbackNotice["summaryOnly"] = "Even the field-by-field summary exceeded the inline limit, so only this notice is returned. Read the file for anything you need.";
+  fallbackNotice["elided"] = [];
+  const topLevelKeys = isDict(value) ? emittedKeys(value).slice(0, 100) : Array.isArray(value) ? [`<array of ${value.length}>`] : [];
+  return JSON.stringify({ _elided: fallbackNotice, topLevelKeys }, null, 2);
+}
+
+// src/mcp-log.ts
 var currentRegistrationIsMutating = false;
 function withMutatingRegistration(fn) {
   currentRegistrationIsMutating = true;
@@ -43997,13 +44500,13 @@ var resolvedLogPath;
 var logDirEnsured = false;
 var loggingDegraded = false;
 function defaultLogDir() {
-  return join4(homedir(), "Library", "Logs", "DAWPro", "mcp");
+  return join5(homedir(), "Library", "Logs", "DAWPro", "mcp");
 }
 function mcpLogFilePath() {
   if (resolvedLogPath) return resolvedLogPath;
   const dir = process.env["DAWPRO_MCP_LOG_DIR"] || defaultLogDir();
   const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
-  resolvedLogPath = join4(dir, `mcp-session-${stamp}-${process.pid}.jsonl`);
+  resolvedLogPath = join5(dir, `mcp-session-${stamp}-${process.pid}.jsonl`);
   return resolvedLogPath;
 }
 function writeLogLineSafely(entry) {
@@ -44022,7 +44525,7 @@ function writeLogLineSafely(entry) {
   try {
     const filePath = mcpLogFilePath();
     if (!logDirEnsured) {
-      mkdirSync(dirname5(filePath), { recursive: true });
+      mkdirSync2(dirname5(filePath), { recursive: true });
       logDirEnsured = true;
     }
     appendFileSync(filePath, line, "utf8");
@@ -44122,7 +44625,7 @@ function wrapHandler(name, hasInputSchema, isMutating, original, bridge2) {
     let rawError;
     let rawResult;
     try {
-      rawResult = await original(...callArgs);
+      rawResult = await runWithToolName(name, () => original(...callArgs));
     } catch (err) {
       threw = true;
       rawError = err;
@@ -44168,12 +44671,11 @@ function installMcpLogging(server2, bridge2) {
 
 // src/server.ts
 function textResult(value) {
-  const text = value === void 0 ? "ok" : typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return { content: [{ type: "text", text }] };
+  return { content: [{ type: "text", text: formatToolText(value) }] };
 }
 function errorResult(err) {
   const message = err instanceof Error ? err.message : String(err);
-  return { content: [{ type: "text", text: message }], isError: true };
+  return { content: [{ type: "text", text: formatToolText(message) }], isError: true };
 }
 async function toToolResult(fn) {
   try {

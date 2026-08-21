@@ -1,5 +1,70 @@
 # Changelog
 
+## 2026-08-20 — A clip plays at its own pitch, not the bend left behind
+
+When a clip had no pitch-bend lane of its own, it would inherit the pitch bend left behind by an
+earlier clip on the same track. A clip meant to be in tune played a full semitone sharp — that is
+exactly how wrong it was. A preceding clip holding bend 12288 made the next clip play +100 cents
+sharp.
+
+The cause was in how the engine chases controller state when playback starts or seeks. That chase
+ran once per audio block rather than once per clip, so a new clip beginning mid-block picked up
+whatever bend the last clip had set, instead of starting clean.
+
+Now a clip with no bend lane begins at centre pitch, explicitly, at its first beat. Seeking into
+such a clip also chases centre rather than the earlier bend. The fixed rendering measures A440, not
+a semitone sharp.
+
+Here is an important distinction: mod wheel, breath (CC 11), and other continuous controllers are
+not reset at a clip boundary, and this is correct, not an oversight. Resetting them would be actively
+wrong — CC 11's neutral value is full, so resetting breath at every clip start would jump it to
+maximum. A test pins this.
+
+The reset touches bend-using tracks only and emits exactly one event carrying one value. Tracks with
+no bend are untouched. One thing remains open: the same leak still exists when exporting a MIDI file,
+which uses a different code path and has not yet been fixed.
+
+## 2026-08-20 — Bounces now tell a hosted plugin it is rendering offline
+
+When you bounced a track through a hosted Audio Unit instrument, the first clip often disappeared
+from the bounce. The only way to get it back was to place a dummy note in front of it. A real bounce
+would silently lose an instrument's opening.
+
+The cause: Apple's Audio Unit API has a flag that tells a plugin it is rendering offline rather than
+live. DAW Pro never set this flag. A plugin that loads its sounds lazily had no way to know it must
+load before the render starts, rather than streaming in as playback happens.
+
+The fix sets that flag on every hosted Audio Unit before that unit allocates its render resources,
+which is the only moment at which the flag has any effect — set it later and the plugin has already
+decided how to behave. Live playback is unchanged: only the offline renderer sets it, the live engine
+never does, and a test holds that boundary in place.
+
+Here is what we measured: bouncing through a built-in Apple effect and a General MIDI sound bank
+produces byte-identical audio. That proves the change is harmless where nothing was broken; it does
+not prove it cures the reported case, because those components were never dropping anything in the
+first place. The fix rests on Apple's documented behaviour for the offline flag, and has not yet been
+confirmed against the reporter's own project.
+
+## 2026-08-20 — The Sampler stops reporting a Release you cannot hear
+
+Load a sample library and the Sampler's own **Release** knob often does nothing. That is correct, and
+it is not new: most `.sfz` libraries set a release time on every zone they contain, and a zone's own
+setting wins over the instrument-wide knob — the same way it works in every other SFZ player. The
+knob is the fallback for zones that stay silent about it, and a library that speaks for all of them
+leaves nothing for it to do.
+
+What was wrong is that nothing said so. Asking the Sampler to describe itself answered "release:
+3.4465 seconds" for an instrument that audibly stopped in half a second, and there was no way to
+tell that number was dead. An answer that looks exactly like a real answer and is not one is worse
+than no answer, and it is worse still for an AI agent, which has no ears to catch it with.
+
+Now the description says which of **Release**, **Attack** and **One-shot** the zones have taken over,
+and what the instrument will actually do — including the mixed case, where some zones override and
+the rest still follow the knob. If a knob is doing nothing, it now says so in that many words, and
+points at the per-zone setting that will work instead.
+
+Nothing about how your projects sound has changed; this is the report catching up with the engine.
+
 ## 2026-08-20 — Turn a real knob, move the breath pad
 
 The breath pad has a dot you drag around a circle to say how a player is blowing. You can now drive
@@ -28,10 +93,25 @@ Mapping a knob currently goes through the control surface or an AI agent, not th
 
 ## 2026-08-20 — Your bounce now sounds like what you heard
 
-If you put a vibrato or a tremolo on a track using one of the built-in sound banks — the GM sax, the
-GM strings — the export used to disagree with the monitor. It played back correctly and bounced
+If you put a vibrato or a tremolo on a track that plays through a **sound bank** or a **hosted Audio
+Unit plugin**, the export used to disagree with the monitor. It played back correctly and bounced
 wrong, which is the worst way for a bug to behave, because everything sounds fine right up until you
 send the file to someone.
+
+**Check which of your tracks this applies to before re-bouncing**, because it is not all of them. The
+project snapshot reports each track's instrument `kind`:
+
+| `kind` | What it is | Affected? |
+|---|---|---|
+| `soundBank` | An SF2/DLS bank program — the GM instruments | **Yes** |
+| `audioUnit` | A hosted AU plugin instrument | **Yes** |
+| `sampler` | Our own sample player | No — never was |
+| `polySynth` | The built-in poly synth | No — never was |
+
+The last two never went through the coarse path, so a sax on our own sampler was always bouncing its
+vibrato correctly. This distinction was missing from the first version of this entry, and a tester
+had to measure their own project to discover it — which is precisely the work good documentation is
+supposed to save.
 
 The cause was ours, not the instrument's. A bounce fed those instruments their controller moves in
 blocks eight times coarser than live playback does, and a wobble sampled that coarsely comes back as

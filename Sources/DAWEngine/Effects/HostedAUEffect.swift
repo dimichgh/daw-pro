@@ -53,12 +53,21 @@ public final class HostedAUEffect: EffectRendering, @unchecked Sendable {
     /// Sample rate the AU's render resources are currently allocated at.
     private var preparedSampleRate: Double
 
+    /// Leg R-1: the offline-render flag this effect's AU was prepared with,
+    /// carried ONLY so the rate-renegotiation path below can re-assert it
+    /// across its dealloc/realloc (the `HostedAUInstrument` rule — Apple's
+    /// ordering contract is per-allocate). Never read on the render thread;
+    /// false for every live effect.
+    let rendersOffline: Bool
+
     @MainActor
-    init(au: AUAudioUnit, sampleRate: Double, maxFrames: Int) {
+    init(au: AUAudioUnit, sampleRate: Double, maxFrames: Int,
+         rendersOffline: Bool = false) {
         // Called AFTER allocateRenderResources — renderBlock is only valid then.
         auAudioUnit = au
         renderBlock = au.renderBlock
         self.maxFrames = maxFrames
+        self.rendersOffline = rendersOffline
         preparedSampleRate = sampleRate
         latencySamples = Int((au.latency * sampleRate).rounded())
         scratchSamples = .allocate(capacity: 2 * maxFrames)
@@ -131,6 +140,14 @@ public final class HostedAUEffect: EffectRendering, @unchecked Sendable {
                 try auAudioUnit.outputBusses[0].setFormat(format)
                 // v2-bridge input busses default to disabled (registry rule).
                 auAudioUnit.inputBusses[0].isEnabled = true
+                // Leg R-1 — the second allocate site. BELT-AND-BRACES: the flag
+                // was measured to survive a dealloc/realloc cycle on every
+                // component tested, so deleting this reddens nothing today. See
+                // `HostedAUInstrument.prepare` for the full measurement and for
+                // why it stays anyway (Apple words the contract per-allocate
+                // and documents no survival guarantee).
+                AUHostRegistry.applyOfflineRenderFlag(to: auAudioUnit,
+                                                     rendersOffline: rendersOffline)
                 try auAudioUnit.allocateRenderResources()
                 preparedSampleRate = sampleRate
                 latencySamples = Int((auAudioUnit.latency * sampleRate).rounded())

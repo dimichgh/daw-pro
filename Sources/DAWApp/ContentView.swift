@@ -155,6 +155,11 @@ struct ContentView: View {
             if model.breathPadClipID != nil {
                 BreathPadView(
                     model: model.breathPad,
+                    // m28-knob-ui: the hardware-mapping section's model. It
+                    // holds closures, never the store — so this panel appearing
+                    // cannot bring the CoreMIDI client up. Only the LEARN button
+                    // can.
+                    hardware: model.breathPadHardware,
                     onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeBreathPad() } }
                 )
             }

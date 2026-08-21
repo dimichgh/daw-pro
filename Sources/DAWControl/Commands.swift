@@ -1339,6 +1339,19 @@ public final class CommandRouter {
                 "gain": .number(describeSamplerParams.gain),
                 "zoneSummary": Self.samplerZoneSummaryJSON(describeSamplerParams.zones),
             ]
+            // The `release`/`attack`/`oneShot` above are the STORED globals.
+            // Whether the engine ever reads them depends on the zones, and a
+            // global every zone overrides is a number that looks exactly like
+            // a valid answer while being inert (field report 2026-08-20: a
+            // global release of 3.4465 s on an instrument that decayed in
+            // 0.5 s, because the imported SFZ authored ampeg_release on every
+            // region). Omitted for a zero-zone sampler, the same rule
+            // pitchCoverage/velocityCoverage already follow — there is no
+            // inheritance to describe without zones.
+            if !describeSamplerParams.zones.isEmpty {
+                describeSamplerResult["effectiveGlobals"] =
+                    Self.samplerEffectiveGlobalsJSON(describeSamplerParams)
+            }
             if let sourcePath = describeSamplerParams.sourcePath {
                 describeSamplerResult["sourcePath"] = .string(sourcePath)
             }
@@ -9732,6 +9745,84 @@ public final class CommandRouter {
         let files = Set(zones.map { $0.audioFileURL.path })
         obj["distinctSampleFiles"] = .number(Double(files.count))
         return .object(obj)
+    }
+
+    /// `instrument.describeSampler`'s `effectiveGlobals` (2026-08-20 field
+    /// report): for each global scalar a zone is allowed to override, what the
+    /// ENGINE will actually apply.
+    ///
+    /// The response's top-level `release`/`attack`/`oneShot` are the STORED
+    /// globals and stay exactly as they were (additive-only; `project.snapshot`
+    /// and `track.setInstrument` keep echoing the model unchanged). What was
+    /// missing is the second half of the sentence: a zone's own value WINS, so
+    /// a library that authors the field on every zone — which is what an SFZ
+    /// with `ampeg_release` in `<global>` produces — leaves the stored global
+    /// unreachable. `globalIsInert` is the flag that says so in one boolean,
+    /// and `note` says it in one sentence for a caller that reads prose.
+    ///
+    /// `effectiveValues` is the answer to "then what WILL I hear": the distinct
+    /// values across every zone, ascending. It is present in the MIXED case
+    /// too, which is the case that matters most and the one a bare boolean
+    /// cannot describe — some zones on 0.5 s, the rest still tracking the
+    /// global. `effectiveMin`/`effectiveMax` stay exact even when the list
+    /// truncates.
+    ///
+    /// The COMPUTATION lives in `DAWCore.SamplerGlobalUse` so the sampler
+    /// editor reads the same rule (the `SamplerZoneCoverage` precedent); only
+    /// this shaping is here.
+    private static func samplerEffectiveGlobalsJSON(_ params: SamplerParams) -> JSONValue {
+        func numericField(_ use: SamplerGlobalUse, _ name: String) -> JSONValue {
+            var obj: [String: JSONValue] = [
+                "global": .number(use.global),
+                "zonesOverriding": .number(Double(use.zonesOverriding)),
+                "zonesInheriting": .number(Double(use.zonesInheriting)),
+                "globalIsInert": .bool(use.globalIsInert),
+                "effectiveValues": .array(use.effectiveValues.map { .number($0) }),
+            ]
+            if let min = use.effectiveMin { obj["effectiveMin"] = .number(min) }
+            if let max = use.effectiveMax { obj["effectiveMax"] = .number(max) }
+            // Only-when-true (the A-imp-1 idiom): an always-present false adds
+            // a key to every response to say nothing happened.
+            if use.valuesTruncated { obj["effectiveValuesTruncated"] = .bool(true) }
+            if use.globalIsInert {
+                obj["note"] = .string(
+                    "every zone sets its own \(name), so the stored global \(use.global) is NOT"
+                        + " used — the engine applies the value(s) in effectiveValues."
+                        + " Change what you hear per zone (track.setInstrument with"
+                        + " sampler.zonePatches [{id, \(name)}]); changing the global"
+                        + " will do nothing.")
+            }
+            return .object(obj)
+        }
+        let oneShotUse = SamplerOneShotUse.oneShot(of: params)
+        var oneShot: [String: JSONValue] = [
+            "global": .bool(oneShotUse.global),
+            "zonesOverriding": .number(Double(oneShotUse.zonesOverriding)),
+            "zonesInheriting": .number(Double(oneShotUse.zonesInheriting)),
+            "globalIsInert": .bool(oneShotUse.globalIsInert),
+        ]
+        // Reported, never folded into the counts above: loop mode wins over
+        // one-shot in the engine, but only for a loop whose bounds survive the
+        // load-time check against the real audio file, which this layer cannot
+        // see. Saying so is honest; guessing would swap one confidently wrong
+        // number for another.
+        if oneShotUse.zonesWithLoopMode > 0 {
+            oneShot["zonesWithLoopMode"] = .number(Double(oneShotUse.zonesWithLoopMode))
+            oneShot["note"] = .string(
+                "\(oneShotUse.zonesWithLoopMode) zone(s) author a loop mode; a looping voice is"
+                    + " never one-shot regardless of this field, provided its loop bounds are"
+                    + " valid for the loaded sample.")
+        }
+        if oneShotUse.globalIsInert, oneShot["note"] == nil {
+            oneShot["note"] = .string(
+                "every zone sets its own oneShot, so the stored global"
+                    + " \(oneShotUse.global) is NOT used.")
+        }
+        return .object([
+            "release": numericField(SamplerGlobalUse.release(of: params), "release"),
+            "attack": numericField(SamplerGlobalUse.attack(of: params), "attack"),
+            "oneShot": .object(oneShot),
+        ])
     }
 
     /// The JSON shaping for one coverage envelope. The COMPUTATION moved to

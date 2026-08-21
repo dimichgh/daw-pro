@@ -78,6 +78,166 @@ struct SampleLibraryMapperTests {
 
     // MARK: - m27 leg B: dynamic-layer crossfade opcodes
 
+    // MARK: - Global-vs-zone inheritance reporting (2026-08-20 field report)
+
+    /// The report: "Sampler global release is inert when zones carry their own
+    /// (SFZ imports always do)." The engine is RIGHT to prefer the zone (its
+    /// own §4.4 design, and SFZ's region-over-global precedence); what was
+    /// broken is that nothing said so. These tests pin the computation that
+    /// `instrument.describeSampler` now reports, and they run it over a REAL
+    /// mapped import rather than hand-built zones, because "SFZ imports always
+    /// do" is precisely the claim under test.
+    @Test("ampeg_release in <global> reaches EVERY zone, which makes the sampler's own global release inert")
+    func sfzGlobalReleaseOverridesEveryZone() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        try writeSample("b.wav", in: dir)
+        let (params, _) = try map("""
+        <global> ampeg_release=0.5
+        <region> sample=a.wav lokey=0 hikey=59
+        <region> sample=b.wav lokey=60 hikey=127
+        """, in: dir)
+        // The import itself: the <global> opcode landed on both regions.
+        #expect(params.zones.count == 2)
+        #expect(params.zones.allSatisfy { $0.release == 0.5 })
+
+        // The reporter's own numbers: a stored global of 3.4465 s over an
+        // instrument that behaves at 0.5 s.
+        var withReportedGlobal = params
+        withReportedGlobal.release = 3.4465
+        let use = SamplerGlobalUse.release(of: withReportedGlobal)
+        print("[measured] release use — inert: \(use.globalIsInert), "
+              + "overriding/inheriting: \(use.zonesOverriding)/\(use.zonesInheriting), "
+              + "effective: \(use.effectiveValues)")
+        #expect(use.global == 3.4465)            // the number still reported…
+        #expect(use.globalIsInert)               // …and now labelled dead
+        #expect(use.zonesOverriding == 2)
+        #expect(use.zonesInheriting == 0)
+        #expect(use.effectiveValues == [0.5])    // what will ACTUALLY be heard
+        #expect(use.effectiveMin == 0.5)
+        #expect(use.effectiveMax == 0.5)
+        #expect(!use.valuesTruncated)
+    }
+
+    /// The case a bare "is the global inert?" boolean cannot describe, and the
+    /// case that forces the computation to be real: an SFZ authoring
+    /// `ampeg_release` on SOME regions. The global is live for the rest, so
+    /// neither "inert" nor "fine" is the whole answer — only the effective
+    /// value list is.
+    @Test("a MIXED library leaves the global live for the zones that inherit, and says both values")
+    func mixedReleaseOverridesReportBothValues() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        try writeSample("b.wav", in: dir)
+        try writeSample("c.wav", in: dir)
+        let (params, _) = try map("""
+        <region> sample=a.wav lokey=0 hikey=41 ampeg_release=0.5
+        <region> sample=b.wav lokey=42 hikey=83 ampeg_release=1.25
+        <region> sample=c.wav lokey=84 hikey=127
+        """, in: dir)
+        var withGlobal = params
+        withGlobal.release = 3.4465
+        let use = SamplerGlobalUse.release(of: withGlobal)
+        print("[measured] mixed release use — inert: \(use.globalIsInert), "
+              + "effective: \(use.effectiveValues)")
+        #expect(!use.globalIsInert)              // one zone still listens
+        #expect(use.zonesOverriding == 2)
+        #expect(use.zonesInheriting == 1)
+        // Ascending, and the inheriting zone contributes the GLOBAL's value —
+        // that is the whole point of "effective".
+        #expect(use.effectiveValues == [0.5, 1.25, 3.4465])
+        #expect(use.effectiveMin == 0.5)
+        #expect(use.effectiveMax == 3.4465)
+    }
+
+    /// The control that keeps `globalIsInert` from being a stuck `true`: a
+    /// library authoring no envelope opcodes at all leaves the global fully
+    /// live, and the reported effective value IS the global.
+    @Test("a library with no ampeg_release leaves the global live for every zone")
+    func noReleaseOpcodeLeavesGlobalLive() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let (params, _) = try map("""
+        <region> sample=a.wav
+        """, in: dir)
+        var withGlobal = params
+        withGlobal.release = 3.4465
+        let use = SamplerGlobalUse.release(of: withGlobal)
+        #expect(!use.globalIsInert)
+        #expect(use.zonesOverriding == 0)
+        #expect(use.zonesInheriting == 1)
+        #expect(use.effectiveValues == [3.4465])
+
+        // ATTACK is release's exact twin at the same engine trigger site, so it
+        // gets the same treatment and the same control.
+        let attackUse = SamplerGlobalUse.attack(of: withGlobal)
+        #expect(!attackUse.globalIsInert)
+        #expect(attackUse.effectiveValues == [withGlobal.attack])
+    }
+
+    /// A zero-zone sampler is deliberately NOT "inert": it is silent for
+    /// reasons that have nothing to do with inheritance, and pointing a caller
+    /// at the global would send them to fix the wrong thing.
+    @Test("a sampler with no zones reports no inert global — silence there is not an inheritance problem")
+    func zeroZoneSamplerIsNotInert() {
+        let use = SamplerGlobalUse.release(of: SamplerParams(zones: [], release: 3.4465))
+        #expect(!use.globalIsInert)
+        #expect(use.zonesOverriding == 0)
+        #expect(use.zonesInheriting == 0)
+        #expect(use.effectiveValues.isEmpty)
+        #expect(use.effectiveMin == nil)
+        #expect(use.effectiveMax == nil)
+    }
+
+    /// More distinct values than the cap: the LIST truncates, the RANGE does
+    /// not. A truncated list that also lost its extremes would be a second
+    /// quietly-wrong number, which is the class of defect this whole change
+    /// exists to remove.
+    @Test("more distinct effective values than the cap truncates the list but keeps min/max exact")
+    func manyDistinctValuesTruncateTheListNotTheRange() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        let regions = (0..<12).map { i in
+            "<region> sample=a.wav lokey=\(i * 10) hikey=\(i * 10 + 9)"
+                + " ampeg_release=\(Double(i + 1) / 10)"
+        }.joined(separator: "\n")
+        let (params, _) = try map(regions, in: dir)
+        #expect(params.zones.count == 12)
+        let use = SamplerGlobalUse.release(of: params)
+        print("[measured] truncation — values: \(use.effectiveValues), "
+              + "truncated: \(use.valuesTruncated), "
+              + "range: \(String(describing: use.effectiveMin))…\(String(describing: use.effectiveMax))")
+        #expect(use.valuesTruncated)
+        #expect(use.effectiveValues.count == SamplerGlobalUse.valueCap)
+        #expect(use.effectiveMin == 0.1)
+        #expect(use.effectiveMax == 1.2)
+        #expect(use.globalIsInert)
+    }
+
+    /// One-shot's own caveat: loop mode wins over one-shot in the engine, but
+    /// only for a loop whose bounds survive the load-time check against the
+    /// real audio — which DAWCore cannot evaluate. The count is REPORTED
+    /// beside the inheritance figures instead of being folded into them.
+    @Test("oneShot reports zones with a loop mode separately rather than guessing the engine's loop-validity check")
+    func oneShotReportsLoopModeZonesWithoutFoldingThem() throws {
+        let dir = tempDir()
+        try writeSample("a.wav", in: dir)
+        try writeSample("b.wav", in: dir)
+        let (params, _) = try map("""
+        <region> sample=a.wav lokey=0 hikey=59 loop_mode=one_shot
+        <region> sample=b.wav lokey=60 hikey=127 loop_mode=loop_continuous loop_start=0 loop_end=1
+        """, in: dir)
+        let use = SamplerOneShotUse.oneShot(of: params)
+        print("[measured] oneShot use — overriding/inheriting: "
+              + "\(use.zonesOverriding)/\(use.zonesInheriting), "
+              + "loop-mode zones: \(use.zonesWithLoopMode)")
+        // one_shot sets the override; loop_continuous does not touch it.
+        #expect(use.zonesOverriding == 1)
+        #expect(use.zonesInheriting == 1)
+        #expect(!use.globalIsInert)              // one zone still reads the global
+        #expect(use.zonesWithLoopMode == 1)      // reported, not folded
+    }
+
     @Test("xfin_locc/xfout_hicc import as a CONTINUOUS crossfade naming their CC")
     func ccCrossfadeImports() throws {
         let dir = tempDir()

@@ -308,6 +308,38 @@ public enum MIDIControllerType: Hashable, Sendable, Codable {
         }
     }
 
+    /// Whether this controller's state is **CLIP-LOCAL** — i.e. whether a clip
+    /// that establishes no value of its own at its onset should open at
+    /// `neutralDefault` rather than inherit whatever the previous clip left on
+    /// the wire (m29-bend-leak).
+    ///
+    /// ⛔ **TRUE FOR PITCH BEND ONLY, and the narrowness is the whole point.**
+    /// A blanket "reset every controller at every clip boundary" would be a
+    /// Reset-All-Controllers at every clip onset; on CC 11 alone that undoes the
+    /// breath round (`BreathContour`), because a lane-less clip would snap to
+    /// expression 127 mid-phrase. This is the per-type table, with what decided
+    /// each row:
+    ///
+    /// | Type | Resets | Why |
+    /// |---|---|---|
+    /// | `.pitchBend` | **YES** | A **measured field defect** (2026-08-20): a lane-less clip read a uniform **+100.000 cents across all 22 notes**, inherited from an earlier clip's lane ending on 12288, and reordering clips retuned the part with no edit to it. Reproduced here as **466.1638 Hz where A440 was authored** — +100.000 cents by construction, the pre-fix run printing Hz — and closed to 2.0e-06 cents. Bend is also the one controller whose neutral is a *rest position no performer holds* — every hardware wheel springs back to centre — so inheriting it is never what the author meant. The tree already agrees at the OTHER seam it controls: the loop-wrap chase deliberately re-establishes centre at every cycle (`MIDIControllerScheduleTests.loopWrapChaseAndRank`, "the stale-bend trap fixture"). Making the clip seam behave like the loop seam is a convergence, not a new policy. |
+    /// | `.cc(11)` expression | **NO** | ⛔ **MEASURED BY PLANTING IT, and the numbers are the argument.** Phrase expression is *meant* to carry: `BreathContour` writes CC 11 per clip, and a reset forces `neutralDefault` = **127 (full)** at the onset of any clip that declares none. Rendered through the built-in sampler with CC 11 temporarily added to this set, a breath-contoured clip followed by a plain one **stepped UP at the seam instead of continuing**: the default contour (taper ends CC 103) went −0.36 dB → **+1.46 dB**, and an ordinary decrescendo phrase-ending (`depth 0.9, releaseLevel 0`, taper ends CC 13) went −8.43 dB → **+11.37 dB — a 19.8 dB error**, in the one direction `PadPreview` §"the limit of rule 3" already names as this tree's characteristic silent failure. ⚠️ The field report's own suggestion says "reset bend (and ideally all channel controllers)"; the "ideally" is where those 19.8 dB live, which is why it was measured rather than followed. `expressionDoesNotResetAtClipOnset` holds this row shut. |
+    /// | `.cc(64)` sustain | **NO** | A pedal is a *held* control with an explicit release; MIDI's own model is that pedal state spans whatever it spans. Lifting it at a clip boundary the author did not author would cut sustained tails — an audible, unrequested edit. No field report. |
+    /// | `.cc(7)` volume, `.cc(10)` pan | **NO** | Mixer-plane settings a user sets deliberately and expects to STICK; their neutrals (100 / 64) are conventions, not rest positions. |
+    /// | `.cc(1)` mod, `.cc(2)` breath | **NO** | Wheel/breath positions a player parks and leaves. Their neutral is 0, so a reset would *silence* an authored modulation depth on any lane-less clip. |
+    /// | `.channelPressure` | **NO** | ⛔ **Declined on evidence, not on principle.** `MIDIControllerRouting.routing` reports it `.inert` on BOTH built-in instruments ("the built-in poly synth / sampler consumes no channel pressure"), so a reset here is UNOBSERVABLE on anything this tree can render cheaply — it would change bytes only in hosted-AU projects, with no field report and no gate able to see the result. Adding it is one line plus a rendered gate on a hosted AU; that is the price of admission. |
+    ///
+    /// ⚠️ **A `true` here changes rendered bytes.** The blast radius is stated
+    /// and machine-checked at the consuming site — see `MIDIEventSchedule.build-
+    /// Events`' "clip-onset reset" comment and `MIDIControllerScheduleTests`
+    /// §m29-bend-leak, which pins that non-resetting types stay byte-identical.
+    public var resetsAtClipOnset: Bool {
+        switch self {
+        case .pitchBend: return true
+        case .cc, .channelPressure: return false
+        }
+    }
+
     /// Stable canonical order key (design-m16b §3): CC ascending BY CONTROLLER,
     /// then pitchBend, then channelPressure. A CC controller is clamp-bounded to
     /// 0...127, so it never collides with the 1000/1001 sentinels.

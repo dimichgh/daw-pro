@@ -71,6 +71,21 @@ public final class MIDIControlController {
     /// `feedEnded` when the subscription is torn down. Installed by the app.
     public var pumpHandler: ((MIDIControlPump) -> Void)?
 
+    /// Called after any call that CHANGES the table — `setBindings`, `armLearn`,
+    /// `cancelLearn` (m28-knob-ui).
+    ///
+    /// ⭐ **Why this exists, measured rather than imagined.** A render probe
+    /// wrote a mapping through `midi.setControlMap` with the breath pad's panel
+    /// already open, and the panel went on reading "No knobs mapped" over a live
+    /// binding. This type is a plain final class, not `@Observable`, so nothing
+    /// invalidates a view when an AGENT edits the table — and the pump only
+    /// speaks when a controller actually moves, which a wire write does not do.
+    ///
+    /// ⛔ Deliberately **not** fired from `ingest`: a learn completing there is
+    /// already announced through `pumpHandler`, and firing both would deliver
+    /// one change twice at 30 Hz cadence.
+    public var mapChangedHandler: (() -> Void)?
+
     /// Whether the engine subscription is currently installed.
     public private(set) var isSubscribed = false
 
@@ -87,6 +102,7 @@ public final class MIDIControlController {
                             engine: (any AudioEngineControlling)?) {
         map = MIDIControlMap(bindings: bindings)
         refreshSubscription(engine: engine)
+        mapChangedHandler?()
     }
 
     /// Arms learn for `target` and brings the MIDI client UP.
@@ -103,6 +119,7 @@ public final class MIDIControlController {
                          engine: (any AudioEngineControlling)?) -> [MIDIInputDevice] {
         map.armLearn(target: target)
         refreshSubscription(engine: engine)
+        mapChangedHandler?()
         return engine?.availableMIDIInputs() ?? []
     }
 
@@ -110,6 +127,7 @@ public final class MIDIControlController {
     public func cancelLearn(engine: (any AudioEngineControlling)?) {
         map.cancelLearn()
         refreshSubscription(engine: engine)
+        mapChangedHandler?()
     }
 
     // MARK: The pump

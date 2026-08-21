@@ -262,7 +262,7 @@ import Testing
                                               hasRecoveryNote: true)
         #expect(regions.dial == BreathPadLayout.dialFloor)
         #expect(regions.warnings == BreathPadLayout.warningsFloor)
-        // 3. ⚠️ AND THE BARE CARD DOES NOT FIT AT THE FLOOR EITHER — by 17 pt,
+        // 3. ⚠️ AND THE BARE CARD DOES NOT FIT AT THE FLOOR EITHER — by 94.5 pt,
         //    with the dial already clamped. The first version of this line
         //    asserted the opposite ("no warnings, no recovery sentence, so it
         //    fits") and went red the moment `fixedChrome` was measured properly.
@@ -270,13 +270,36 @@ import Testing
         //    pad scrolls even at rest, and that is the size the scroll path has
         //    to be right at.
         #expect(BreathPadLayout.cardHeight(available: floor) > room)
-        // It stops scrolling the moment the CASCADE can absorb the shortfall,
-        // which for the bare card is `fixedChrome + dialFloor` = 609 pt of card
-        // in `available - 48` of room: 657 is the crossover, so 660 fits and 656
-        // does not. ⚠️ The obvious probe values (700, 800) both PASS — the dial
-        // yields exactly enough — and would have said nothing.
-        #expect(BreathPadLayout.cardHeight(available: 660) <= 660 - BreathPadLayout.windowMargin * 2)
-        #expect(BreathPadLayout.cardHeight(available: 656) > 656 - BreathPadLayout.windowMargin * 2)
+
+        // It stops scrolling the moment the CASCADE can absorb the shortfall:
+        // the bare card is `fixedChrome + dialFloor` of content in
+        // `available - 2 * windowMargin` of room, so the crossover is their sum.
+        //
+        // ⚠️⚠️ **DERIVED, THEN PINNED TO A LITERAL — and both halves are needed.**
+        // This was `660` and `656`, hardcoded, which was correct for a
+        // `fixedChrome` of 433 and went red the moment m28-knob-ui re-measured it
+        // at 510.5. Deriving the probe points alone would have made the test
+        // silently follow the constant anywhere, including somewhere wrong — the
+        // thing being checked would be choosing the check. So the crossover is
+        // derived (the probes stay on the boundary as the card grows) AND
+        // asserted against a literal (a constant that moves is LOUD, and lands
+        // here, where the window-floor consequence is written down).
+        //
+        // ⚠️ The obvious probe values (700, 800) both PASS — the dial yields
+        // exactly enough — and would have said nothing.
+        let crossover = BreathPadLayout.fixedChrome + BreathPadLayout.dialFloor
+            + BreathPadLayout.windowMargin * 2
+        #expect(crossover == 734.5, """
+            The bare breath pad's scroll crossover moved to \(crossover). That is not \
+            wrong by itself, but it is a fact about the smallest window at which the \
+            pad renders without scrolling, and it has been 657 and 734.5 before. \
+            Re-measure `fixedChrome` from the panel's own report (the m28-knob-ui probe \
+            prints it), confirm the window floor still behaves, then update this literal.
+            """)
+        #expect(BreathPadLayout.cardHeight(available: crossover)
+                <= crossover - BreathPadLayout.windowMargin * 2)
+        #expect(BreathPadLayout.cardHeight(available: crossover - 4)
+                > crossover - 4 - BreathPadLayout.windowMargin * 2)
     }
 
     // MARK: - The air gauge — the legibility surface

@@ -45,6 +45,25 @@ container is a zip archive — unzip it and import the `.dspreset` inside.
 | Sustain loops | `loop_mode=loop_continuous` / `loop_sustain`, `loop_start`/`loop_end` (also the v1 spellings `loopstart`/`loopend`; `loop_end` is inclusive) | `loopEnabled="true"` (continuous), `loopStart`/`loopEnd` (frames, end inclusive) |
 | Loop fallback (WAV `smpl` chunk) | When the text authors no loop opcodes, a forward loop embedded in a WAV sample's `smpl` chunk enables continuous looping with the chunk's points. Authored opcodes win per field; an explicit `loop_mode=no_loop` (or `loopEnabled="false"`) suppresses the fallback entirely. | same |
 
+### Per-zone envelope vs the Sampler's own global knobs
+
+A zone's `attack`/`release`/`oneShot` **win** over the Sampler's instrument-wide
+knobs of the same name; the global applies only to zones that leave the field
+unset. This follows SFZ's own region-over-group-over-global precedence and is
+the engine's documented design (`SamplerInstrument` §4.4).
+
+The consequence is easy to trip over and was a field report (2026-08-20): a
+library authoring `ampeg_release` in its `<global>` block gives **every** zone
+its own release, so the Sampler's global Release knob does nothing at all on
+that instrument. Turning it up will be accepted and silently change no audio.
+To change the release of an imported library, change it **per zone**.
+
+`instrument.describeSampler` now says so directly: its `effectiveGlobals` block
+reports, for each of the three, how many zones override it, whether the stored
+global is `globalIsInert`, and the `effectiveValues` the engine will actually
+apply. Read that before quoting the top-level `release`/`attack`/`oneShot`,
+which are the STORED globals and not necessarily the audible ones.
+
 Loop boundaries: only the FIRST forward (`dwType 0`) `smpl` loop is used —
 ping-pong/backward loops, finite play counts (`dwPlayCount`), and
 `dwFraction` sub-sample points are ignored; AIFF `INST`/`MARK` loop metadata

@@ -134,6 +134,19 @@ final class MIDIEventSchedule {
     /// stays no-chase unless `chaseHeldNotes` is passed (m23-bp), which a
     /// loop-cycle block never does.
     ///
+    /// m29-bend-leak — THE CLIP-ONSET RESET. ⚠️ The prefix above is PER-BLOCK,
+    /// which is why it does not close this: after it fires, a clip that
+    /// establishes no value of its own inherits whatever the previous clip left
+    /// on the wire and plays with it for its whole length. For the types
+    /// `MIDIControllerType.resetsAtClipOnset` marks CLIP-LOCAL — **pitch bend
+    /// only**, and see that property for the measured per-type table — every
+    /// clip that has no value in effect at its own beat 0 contributes a virtual
+    /// point there carrying `neutralDefault`, subject to every rule a real point
+    /// obeys (window, chase candidate, same-frame coalescing, anchor
+    /// suppression). Gated on the type appearing in SOME clip of the track, so a
+    /// project that never used bend is byte-identical; the full containment
+    /// argument sits at the emission site below.
+    ///
     /// m16-b2 signature (C5): returns the events AND the next unconsumed
     /// noteID — controller events consume IDs from the same running counter
     /// (uniqueness = sort determinism), so the old `count / 2` pair
@@ -208,46 +221,157 @@ final class MIDIEventSchedule {
         // fromBeat" is the last point scanned below the start. Note-only
         // clips add ZERO events here (C1b). Main-actor build math only.
         let anchorFrame = Int64((offsetSeconds * sampleRate).rounded())
-        var laneTypes: [MIDIControllerType] = []       // first-seen; sorted at injection
-        var seenTypes = Set<MIDIControllerType>()
         var chase: [MIDIControllerType: (beat: Double, value: Int)] = [:]
         var literalAtAnchor = Set<MIDIControllerType>()
+
+        // PASS 1 — the lane types present in ANY clip, in first-seen order
+        // (sorted at injection). Collected in its own walk, BEFORE any
+        // emission, because the clip-onset reset below is keyed on the WHOLE
+        // track's type set: deriving it as the emission loop advanced would
+        // make a clip's reset depend on its position in `clips`, reintroducing
+        // the exact order-sensitivity m29-bend-leak exists to remove.
+        var laneTypes: [MIDIControllerType] = []
+        var seenTypes = Set<MIDIControllerType>()
         for clip in clips where clip.isMIDI {
-            for lane in clip.controllerLanes {
-                if seenTypes.insert(lane.type).inserted { laneTypes.append(lane.type) }
-                var coalesceIndex = -1
-                var coalesceFrame = Int64.min
-                for point in lane.points {
-                    guard point.beat < clip.lengthBeats else { continue }  // [0, clipLen)
-                    let absBeat = clip.startBeat + point.beat
-                    if absBeat < fromBeat {
-                        // Chase candidate: latest absolute beat wins across
-                        // clips; `>=` keeps later-array clips deterministic
-                        // on an exact tie.
-                        if let best = chase[lane.type], absBeat < best.beat { continue }
-                        chase[lane.type] = (absBeat, point.value)
-                        continue
-                    }
-                    if let onsetEndBeat, absBeat >= onsetEndBeat { continue }  // loop window
-                    let frame = Int64(((offsetSeconds
-                        + tempoMap.seconds(from: fromBeat, to: absBeat)) * sampleRate).rounded())
-                    if frame == coalesceFrame {
-                        // Same-frame same-lane coalescing: the LAST value wins
-                        // in place; the slot's noteID is kept (coalescing
-                        // replaces a value, it never mints an ID).
-                        events[coalesceIndex] = controllerEvent(
-                            type: lane.type, value: point.value,
-                            sampleTime: frame, noteID: events[coalesceIndex].noteID)
-                    } else {
-                        events.append(controllerEvent(
-                            type: lane.type, value: point.value,
-                            sampleTime: frame, noteID: nextNoteID))
-                        nextNoteID += 1
-                        coalesceIndex = events.count - 1
-                        coalesceFrame = frame
-                    }
-                    if frame == anchorFrame { literalAtAnchor.insert(lane.type) }
+            for lane in clip.controllerLanes where seenTypes.insert(lane.type).inserted {
+                laneTypes.append(lane.type)
+            }
+        }
+        // m29-bend-leak — THE CLIP-ONSET RESET, and the reason it is spelled as
+        // a VIRTUAL LANE POINT rather than as an extra injection step.
+        //
+        // THE DEFECT, measured (field report 2026-08-20, and
+        // `MIDIControllerScheduleTests` §m29-bend-leak): the chase prefix below
+        // opens every BLOCK, not every CLIP. In a linear render there is one
+        // prefix, at frame 0. After it, clip A's bend points fire; a following
+        // clip that declares no bend value at its own onset emits nothing, so
+        // the instrument holds A's last value and plays transposed for its whole
+        // length — a rendered A440 came back at 466 Hz, a full semitone sharp,
+        // and reordering clips retuned the part.
+        //
+        // WHICH TYPES: `MIDIControllerType.resetsAtClipOnset` is the ONE home of
+        // that decision and carries the per-type table (pitch bend only; CC 11
+        // is measured and deliberately excluded, which is what protects the
+        // breath round). Intersecting it with `laneTypes` is load-bearing — see
+        // the containment argument below.
+        //
+        // WHY A VIRTUAL POINT rather than a second injection pass. A separate
+        // "emit a reset at each clip onset" step would have to re-derive the
+        // window guard, the chase-candidate merge, the same-frame coalescing
+        // and the literal-at-anchor suppression — four rules that already exist
+        // exactly once, right here. A second, subtly-different copy of them is a
+        // worse lie than the defect (the `PadPreview` §"the real fix" argument).
+        // Expressed as a point at clip-relative beat 0 the reset inherits all
+        // four for free: it is windowed like a point, it becomes the chase
+        // candidate for a seek INTO the clip (so seek and play-from-top agree —
+        // the `OfflineChaseDivergenceTests` failure class), it is overwritten
+        // LAST-WINS by a real point that rounds to the same frame, and it
+        // suppresses the block prefix when it lands on the anchor.
+        //
+        // ⚠️ THIS CHANGES RENDERED BYTES, and the blast radius is CONTAINED —
+        // machine-checked by `bendResetContainment`, not argued:
+        //  1. `resetTypes` is `laneTypes ∩ resetsAtClipOnset`, so a track with NO
+        //     pitch-bend lane in ANY clip is byte-identical. No project gains a
+        //     controller stream it never had; note-only builds stay C1b-exact.
+        //     ⚠️ PRECONDITION, verified rather than assumed: `clips` must be the
+        //     track's WHOLE array. Both production call sites pass `node.clips`,
+        //     which is assigned `track.clips` unfiltered at `PlaybackGraph`
+        //     :1005 and :2102 — the head build and the loop-cycle block. A
+        //     caller that ever passed a SUBSET (a region schedule, a stem pass)
+        //     could hide the only bend lane outside its slice, and this gate
+        //     would then silently restore the leaking behaviour for that build.
+        //     Window with `fromBeat`/`onsetEndBeat`, which are beat-domain and
+        //     leave the type set intact — never by pre-filtering `clips`.
+        //  2. A clip that establishes its own value at its onset
+        //     (`value(atBeat: 0) != nil`) is byte-untouched. That covers the
+        //     reporter's workaround AND every SPLIT/TRIM product, since
+        //     `Clip.windowedControllerLanes` seeds a beat-0 point with the value
+        //     in effect — the split-seam equivalence (C3) is preserved by
+        //     construction rather than by luck.
+        //  3. Every non-resetting type is untouched: no CC, and no channel
+        //     pressure, gains a single event.
+        //  4. The addition is exactly ONE event per (resetting type, bend-less
+        //     clip, block), at that clip's own onset frame, with the fixed value
+        //     `neutralDefault` — never at an interior frame and never a value
+        //     derived from anything else.
+        //
+        // ⚠️ KNOWN EDGE, stated rather than discovered later: with OVERLAPPING
+        // MIDI clips on one track, clip B's onset reset lands inside clip A's
+        // sweep and cancels it, because one instrument channel has one bend
+        // state and the later event wins. That is the same ambiguity overlapping
+        // clips already have for every lane point; this makes it reachable one
+        // more way.
+        // Canonical order once, not once per clip: it only decides which
+        // synthetic reset mints its noteID first, and that must not depend on a
+        // clip's lane declaration order.
+        let resetTypes = laneTypes.filter(\.resetsAtClipOnset)
+            .sorted { typeOrderKey($0) < typeOrderKey($1) }
+
+        // PASS 2 — emission. One walk per (clip, lane); `emit` is shared by the
+        // declared lanes and the synthetic reset-only lanes so both obey the
+        // identical four rules.
+        func emit(type: MIDIControllerType, points: [MIDIControllerPoint], clip: Clip) {
+            var coalesceIndex = -1
+            var coalesceFrame = Int64.min
+            for point in points {
+                guard point.beat < clip.lengthBeats else { continue }  // [0, clipLen)
+                let absBeat = clip.startBeat + point.beat
+                if absBeat < fromBeat {
+                    // Chase candidate: latest absolute beat wins across
+                    // clips; `>=` keeps later-array clips deterministic
+                    // on an exact tie.
+                    if let best = chase[type], absBeat < best.beat { continue }
+                    chase[type] = (absBeat, point.value)
+                    continue
                 }
+                if let onsetEndBeat, absBeat >= onsetEndBeat { continue }  // loop window
+                let frame = Int64(((offsetSeconds
+                    + tempoMap.seconds(from: fromBeat, to: absBeat)) * sampleRate).rounded())
+                if frame == coalesceFrame {
+                    // Same-frame same-lane coalescing: the LAST value wins
+                    // in place; the slot's noteID is kept (coalescing
+                    // replaces a value, it never mints an ID).
+                    events[coalesceIndex] = controllerEvent(
+                        type: type, value: point.value,
+                        sampleTime: frame, noteID: events[coalesceIndex].noteID)
+                } else {
+                    events.append(controllerEvent(
+                        type: type, value: point.value,
+                        sampleTime: frame, noteID: nextNoteID))
+                    nextNoteID += 1
+                    coalesceIndex = events.count - 1
+                    coalesceFrame = frame
+                }
+                if frame == anchorFrame { literalAtAnchor.insert(type) }
+            }
+        }
+        for clip in clips where clip.isMIDI {
+            var declared = Set<MIDIControllerType>()
+            for lane in clip.controllerLanes {
+                declared.insert(lane.type)
+                // The reset rides as a virtual FIRST point when — and only
+                // when — the clip's own lane establishes nothing at its onset.
+                // `value(atBeat:)` is DAWCore's ONE definition of "the value in
+                // effect at beat B", and its `nil` is documented to mean "no
+                // state established yet; the caller applies neutralDefault" —
+                // so this is that documented contract, not a new rule. Beat 0
+                // is ≤ every canonical point, so the sequence stays ascending
+                // and the coalescing walk above is unaffected.
+                if lane.type.resetsAtClipOnset, lane.value(atBeat: 0) == nil {
+                    emit(type: lane.type,
+                         points: [MIDIControllerPoint(beat: 0, value: lane.type.neutralDefault)]
+                             + lane.points,
+                         clip: clip)
+                } else {
+                    emit(type: lane.type, points: lane.points, clip: clip)
+                }
+            }
+            // A clip that declares the lane not at all: the reset is the whole
+            // lane. `resetTypes` is already in canonical order.
+            for type in resetTypes where !declared.contains(type) {
+                emit(type: type,
+                     points: [MIDIControllerPoint(beat: 0, value: type.neutralDefault)],
+                     clip: clip)
             }
         }
         // Chase prefix (§5): one event per present lane type at the block's

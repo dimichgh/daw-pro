@@ -260,6 +260,17 @@ final class AppModel {
     /// this adds NO wire surface (the m10-c/sp-b pure-view rule).
     let breathPad: BreathPadModel
 
+    /// The breath pad's HARDWARE section (m28-knob-ui): which knob on the user's
+    /// desk drives the pad, and what we last heard from it.
+    ///
+    /// ⛔⛔ **IT HOLDS CLOSURES, NOT THE STORE — and that is the whole safety
+    /// argument.** `armMIDIControlLearn` brings the CoreMIDI client up and
+    /// connects to every online source, so it must follow from the user pressing
+    /// LEARN and never from a panel appearing. A model that could reach the
+    /// store could also reach `listMIDIInputs()`, which wakes the same client;
+    /// this one cannot reach either.
+    let breathPadHardware: BreathPadHardwareModel
+
     /// The clip the breath pad is open for (nil = closed). Set by the piano-roll
     /// header BREATH chip, the arrange clip context menu (Pro, MIDI only) and
     /// `debug.breathPad`; the panel renders as a centered overlay.
@@ -4196,6 +4207,24 @@ final class AppModel {
                 _ = try store.previewEffort(trackID: trackID, value: value, phase: phase)
             })
 
+        // The pad's HARDWARE section (m28-knob-ui). Four closures and no store
+        // reference: `arm` is the ONLY one that can wake CoreMIDI, and it is
+        // reachable from exactly one button. `readBack` re-reads the store's own
+        // table after every mutation rather than trusting that the setter took —
+        // this tree's signature mistake is a setter's return read as proof.
+        self.breathPadHardware = BreathPadHardwareModel(
+            arm: { [weak store] target in
+                store?.armMIDIControlLearn(target: target) ?? []
+            },
+            cancel: { [weak store] in store?.cancelMIDIControlLearn() },
+            setBindings: { [weak store] bindings in
+                store?.setMIDIControlBindings(bindings)
+            },
+            readBack: { [weak store] in
+                guard let store else { return (MIDIControlMap(), false) }
+                return (store.midiControlMap, store.midiControl.isSubscribed)
+            })
+
         // The Export dialog model (m23-m3). Stateless to construct — it takes
         // its track list as a VALUE snapshot at open time (`prepare(tracks:)`)
         // and drives the store only through the export call it is handed, so it
@@ -4397,7 +4426,36 @@ final class AppModel {
     /// the empty ones would leave a preview parked on the instrument forever.
     private func wireMIDIControlPump() {
         store.midiControl.pumpHandler = { [weak self] pump in
-            self?.breathPad.pumpExternalControl(pump)
+            guard let self else { return }
+            self.breathPad.pumpExternalControl(pump)
+            // ⭐ THE PANEL'S ONLY WAY TO SEE A LEARN COMPLETE (m28-knob-ui).
+            // `MIDIControlController` is a plain final class, NOT `@Observable`,
+            // so a view reading `store.midiControlMap` is never invalidated when
+            // a hardware turn binds — the mapping row would sit on "Turn a
+            // knob…" forever while the binding it was waiting for already
+            // existed. The table is pushed IN instead.
+            //
+            // ⚠️ `refresh` is EQUALITY-GUARDED, and that guard is what makes
+            // this safe to call here: this closure runs ~30 Hz including empty
+            // passes (the empty pass is the idle tick the pad releases on), and
+            // an unguarded write to an `@Observable` property would invalidate
+            // the whole card thirty times a second for as long as any binding
+            // exists — redrawing a dial this panel deliberately keeps idle
+            // between gestures.
+            self.breathPadHardware.refresh(map: self.store.midiControlMap,
+                                           isSubscribed: self.store.midiControl.isSubscribed)
+        }
+        // The OTHER direction the table can change: an AGENT writing it through
+        // `midi.setControlMap` / `midi.learnControl`. The pump cannot announce
+        // that — it speaks only when a controller actually moves — so a wire
+        // write with the panel open left the section reading "No knobs mapped"
+        // over a live binding. MEASURED by the m28-knob-ui render probe, which
+        // is exactly the class of defect this project keeps closing: a surface
+        // that looks settled while the truth moved underneath it.
+        store.midiControl.mapChangedHandler = { [weak self] in
+            guard let self else { return }
+            self.breathPadHardware.refresh(map: self.store.midiControlMap,
+                                           isSubscribed: self.store.midiControl.isSubscribed)
         }
     }
 
@@ -9976,6 +10034,18 @@ final class AppModel {
               let clip = track.clips.first(where: { $0.id == clipID }) else { return }
         breathPad.prepare(clipID: clipID, trackID: track.id,
                           clipName: clip.name, isMIDI: clip.isMIDI)
+        // ⭐ The mapping table may have been written through `midi.setControlMap`
+        // while the panel was closed, and a section reading "No knobs mapped"
+        // over a live mapping would be lying. `sync()` READS `midiControlMap` and
+        // `isSubscribed` — two stored properties, no engine call.
+        //
+        // ⛔⛔ THIS IS THE LINE TO SUSPECT if the pad ever starts waking CoreMIDI
+        // on open. It must never become a device enumeration:
+        // `availableMIDIInputs()` / `listMIDIInputs()` CREATE the MIDI client and
+        // connect to every online source on the user's desk, and that has to
+        // follow from the user pressing LEARN. `BreathPadHardwareSiteTests` and
+        // `MIDIControlTests` gate it from both ends.
+        breathPadHardware.sync()
         breathPadClipID = clipID
     }
 
@@ -9984,6 +10054,13 @@ final class AppModel {
     /// value on the strip until `PadPreviewController`'s 30 s ceiling fired.
     func closeBreathPad() {
         breathPad.endGestureWithoutCommitting()
+        // ⭐ AN ARMED LEARN IS MODAL-SCOPED (m28-knob-ui). Leaving it armed
+        // after the panel closes would leave the app waiting to capture the next
+        // controller change on the desk with nothing on screen saying so — the
+        // next stray mod-wheel nudge would silently re-point the pad. Cancelling
+        // changes no BINDINGS, and it is a no-op when nothing is armed, so this
+        // cannot itself touch the engine.
+        breathPadHardware.cancelLearn()
         breathPadClipID = nil
     }
 
@@ -10033,6 +10110,23 @@ final class AppModel {
                 radius: radius ?? breathPad.dot.radius)
         }
         if let enforced = params["airEnforced"]?.boolValue { breathPad.airEnforced = enforced }
+        // ⭐ THE HARDWARE SECTION'S DISCLOSURE (m28-knob-ui). Without this the
+        // render probe could not photograph the expanded card at all, and the
+        // one lesson this panel has already paid for is that a UI phase is not
+        // done until someone has LOOKED at it. Setting it changes no mapping and
+        // touches no device — it is a view flag the height budget reads.
+        if let expanded = params["hardwareExpanded"]?.boolValue {
+            breathPadHardware.isExpanded = expanded
+        }
+        // ⭐⭐ SCROLL THE CARD SO ITS BOTTOM CAN BE PHOTOGRAPHED. With the
+        // hardware section open the card is taller than the tallest window this
+        // display grants, so the section is always below the fold — and a probe
+        // that captured the window was capturing the section's ABSENCE while
+        // logging a pass. Moves a scroll offset; changes no state a user could
+        // notice afterwards and touches no device.
+        if params["scrollTo"]?.stringValue == "bottom" {
+            breathPad.scrollToBottomRequest &+= 1
+        }
         switch params["gesture"]?.stringValue {
         case "end": _ = breathPad.endGesture()
         case "cancel": breathPad.endGestureWithoutCommitting()
@@ -10085,11 +10179,44 @@ final class AppModel {
             "layoutDialSide": .number(Double(BreathPadLayout.dialSide(
                 available: breathPad.measuredLayout.available,
                 hasWarnings: !breathPad.warnings.isEmpty,
-                hasRecoveryNote: breathPad.gauge.recoveryNote != nil))),
+                hasRecoveryNote: breathPad.gauge.recoveryNote != nil,
+                hardwareExpanded: breathPadHardware.isExpanded))),
             "layoutPredictedCard": .number(Double(BreathPadLayout.cardHeight(
                 available: breathPad.measuredLayout.available,
                 hasWarnings: !breathPad.warnings.isEmpty,
-                hasRecoveryNote: breathPad.gauge.recoveryNote != nil))),
+                hasRecoveryNote: breathPad.gauge.recoveryNote != nil,
+                hardwareExpanded: breathPadHardware.isExpanded))),
+            // The HARDWARE section (m28-knob-ui), so a probe can assert on the
+            // sentences the panel is DRAWING. `hardwareSubscribed` is the fact
+            // the round's hard rule is about: opening the pad must leave it
+            // false, because bringing the CoreMIDI client up connects to every
+            // online source on the user's desk.
+            "hardwareExpanded": .bool(breathPadHardware.isExpanded),
+            // The SECTION's own drawn height — what `hardwareExpandedChrome` is
+            // measured from. The card's height cannot supply it once the scroll
+            // cascade clamps the card (see `MeasuredLayout.hardwareHeight`).
+            "hardwareSectionHeight": .number(Double(breathPad.measuredLayout.hardwareHeight)),
+            // The CONSTANT the budget uses, echoed beside the MEASUREMENT above
+            // so a probe can compare the two directly. That comparison works at
+            // any window size, which "predicted == drawn" does not: once the
+            // card scrolls, `drawn` is the clamp and the constant is unobserved.
+            "layoutHardwareChrome": .number(Double(BreathPadLayout.hardwareExpandedChrome)),
+            "hardwareSubscribed": .bool(breathPadHardware.state.isSubscribed),
+            "hardwareBoundCount": .number(Double(breathPadHardware.state.boundCount)),
+            "hardwareLearning": .bool(breathPadHardware.state.isLearning),
+            "hardwareSummary": .string(breathPadHardware.state.summaryLine),
+            "hardwareLastHeard": .string(breathPadHardware.state.lastHeardLine),
+            "hardwareFeedLine": .string(breathPadHardware.state.feedLine),
+            "hardwareRows": .array(breathPadHardware.state.rows.map { row in
+                .object([
+                    "target": .string(row.target.rawValue),
+                    "name": .string(row.name),
+                    "status": .string(row.statusLine),
+                    "bound": .bool(row.isBound),
+                    "learning": .bool(row.isLearning),
+                    "inverted": .bool(row.isInverted),
+                ])
+            }),
         ])
     }
 

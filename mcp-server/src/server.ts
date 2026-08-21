@@ -29,6 +29,7 @@ import { z } from "zod";
 import { DawBridge } from "./bridge.js";
 import { generateImage, generateLyrics, generateSongSuno } from "./ai.js";
 import { installMcpLogging, withMutatingRegistration } from "./mcp-log.js";
+import { formatToolText } from "./result-spill.js";
 
 interface ToolTextContent {
   type: "text";
@@ -42,18 +43,27 @@ interface ToolResult {
 }
 
 function textResult(value: unknown): ToolResult {
-  // Commands with no result body resolve `undefined`; JSON.stringify(undefined)
-  // returns the JS value `undefined` (not the string "undefined"), which would
-  // produce an invalid MCP content item ({type:"text", text: undefined}) and
-  // fail client-side validation even though the command executed successfully.
-  const text =
-    value === undefined ? "ok" : typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return { content: [{ type: "text", text }] };
+  // `formatToolText` (src/result-spill.ts) IS the old one-liner below the size
+  // limit — byte-identical `JSON.stringify(value, null, 2)`, and "ok" for the
+  // commands with no result body (JSON.stringify(undefined) returns the JS
+  // value `undefined`, not the string, which would produce an invalid MCP
+  // content item and fail client-side validation even though the command
+  // executed successfully). Above the limit it keeps every scalar/short field
+  // inline and replaces only the oversized nodes with placeholders pointing at
+  // a spill file — see that module's header for the two measured replies
+  // (146,744 and 2,222,508 characters) this exists for. This is the ONE seam
+  // every one of the 191 registrations passes through, via `toToolResult`.
+  return { content: [{ type: "text", text: formatToolText(value) }] };
 }
 
 function errorResult(err: unknown): ToolResult {
   const message = err instanceof Error ? err.message : String(err);
-  return { content: [{ type: "text", text: message }], isError: true };
+  // The same size guard as the success path — an error is the other corner an
+  // oversized payload can escape through (an app-side error that echoes the
+  // payload it choked on would blow the caller's context just as effectively).
+  // Below the limit `formatToolText` returns the message BYTE-IDENTICALLY, so
+  // every actionable error sentence this server is built around is unchanged.
+  return { content: [{ type: "text", text: formatToolText(message) }], isError: true };
 }
 
 /** Run `fn`, wrapping the outcome as MCP tool content either way (never throws). */
@@ -2294,7 +2304,31 @@ registerTool(
       "or track_set_instrument {kind:\"sampler\", sampler:{zones:[...]}} first) — but a " +
       "sampler that IS configured with zero zones (the deliberate `zones: []` clear) is a " +
       "legal answer, not a refusal: you get `zoneSummary.count: 0` back. Returns {trackId, " +
-      "kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary}. " +
+      "kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary, " +
+      "effectiveGlobals?}. " +
+      "⚠️ READ `effectiveGlobals` BEFORE TRUSTING top-level `release`/`attack`/`oneShot`. " +
+      "Those three are the STORED globals, and a zone that sets its own value WINS over " +
+      "them — so on an imported library they are routinely numbers the engine never reads. " +
+      "(Field report 2026-08-20: this verb answered `release: 3.4465` for an instrument " +
+      "that audibly released in 0.5 s, because the imported SFZ authored `ampeg_release` in " +
+      "its `<global>` block and every region inherited it. The engine was right; the answer " +
+      "was not.) `effectiveGlobals` is {release, attack, oneShot}, each " +
+      "{global, zonesOverriding, zonesInheriting, globalIsInert, effectiveValues, " +
+      "effectiveMin?, effectiveMax?, effectiveValuesTruncated?, note?}. " +
+      "`globalIsInert: true` means NO zone inherits that global: writing it with " +
+      "instrument_set_sampler_param will be accepted and change nothing you can hear — " +
+      "change the per-zone values instead (instrument_set_sampler_zones, patching `release` " +
+      "/ `attack` / `oneShot` per zone). `effectiveValues` is the list of values the engine " +
+      "will actually apply across the zones, ascending, and is the number to quote to a " +
+      "user; it is meaningful in the MIXED case too (some zones overriding, some still " +
+      "tracking the global), which no single boolean can describe. It caps at 8 distinct " +
+      "values with `effectiveValuesTruncated: true`, but `effectiveMin`/`effectiveMax` stay " +
+      "exact. `oneShot` additionally reports `zonesWithLoopMode` when any zone loops: a " +
+      "looping voice is never one-shot regardless of the flag, provided its loop bounds are " +
+      "valid for the loaded sample (which only the engine can confirm, so it is reported " +
+      "rather than folded into the counts). `effectiveGlobals` is omitted entirely for a " +
+      "zero-zone sampler — there is no inheritance to describe, and such a sampler is " +
+      "silent for an unrelated reason. " +
       "`sourcePath`/`displayName` (provenance from an import; `displayName` is a file STEM " +
       "and therefore NOT unique — two different folders can both hold a \"Bass.sfz\", so " +
       "`sourcePath` is what actually disambiguates them) appear only when set — a hand-built " +

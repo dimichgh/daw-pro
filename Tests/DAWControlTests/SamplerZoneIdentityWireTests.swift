@@ -703,6 +703,214 @@ struct SamplerZoneIdentityWireTests {
         #expect(summary["distinctSampleFiles"]?.doubleValue == 2)
     }
 
+    // MARK: - effectiveGlobals (2026-08-20 field report)
+
+    /// THE reported defect: `instrument.describeSampler` answered "release:
+    /// 3.4465" for an instrument that audibly released in 0.5 s, because every
+    /// imported zone carried its own `ampeg_release` and the engine prefers a
+    /// zone's own value. The engine is right; the ANSWER was wrong — and wrong
+    /// in this codebase's signature way, by returning something shaped exactly
+    /// like a valid number.
+    ///
+    /// The top-level `release` deliberately still reports the stored global
+    /// (additive-only: `project.snapshot` and every existing reader keep their
+    /// byte shape). What is new is that it can no longer be read without
+    /// `effectiveGlobals` beside it saying the global is not used and naming
+    /// what is.
+    @Test("instrument.describeSampler: a global release every zone overrides is reported as INERT, with the values that will actually be heard")
+    func describeSamplerReportsInertGlobalRelease() async throws {
+        let (router, store) = makeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+        #expect(await router.handle(ControlRequest(
+            id: "0", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object([
+                         // The reporter's own numbers.
+                         "release": .number(3.4465), "attack": .number(0.02),
+                         "zones": .array([
+                             .object(["path": .string(Self.pingPath), "minPitch": .number(0),
+                                     "maxPitch": .number(59), "release": .number(0.5)]),
+                             .object(["path": .string(Self.pingPath), "minPitch": .number(60),
+                                     "maxPitch": .number(127), "release": .number(0.5)]),
+                         ]),
+                     ])])).ok)
+
+        let response = await describeSampler(router, trackID)
+        #expect(response.ok)
+        // The stored global still reports, unchanged — additive-only.
+        #expect(response.result?["release"]?.doubleValue == 3.4465)
+
+        let release = try #require(response.result?["effectiveGlobals"]?["release"])
+        #expect(release["global"]?.doubleValue == 3.4465)
+        #expect(release["globalIsInert"]?.boolValue == true)
+        #expect(release["zonesOverriding"]?.doubleValue == 2)
+        #expect(release["zonesInheriting"]?.doubleValue == 0)
+        // The answer to "then what WILL I hear".
+        let values = try #require(release["effectiveValues"]?.arrayValue)
+        #expect(values.count == 1)
+        #expect(values[0].doubleValue == 0.5)
+        #expect(release["effectiveMin"]?.doubleValue == 0.5)
+        #expect(release["effectiveMax"]?.doubleValue == 0.5)
+        #expect(release["effectiveValuesTruncated"] == nil)   // only-when-true
+        // …and in prose, for a caller that reads the sentence and not the flag.
+        let note = try #require(release["note"]?.stringValue)
+        print("[measured] inert-release note: \(note)")
+        #expect(note.contains("NOT"))
+        #expect(note.contains("effectiveValues"))
+        #expect(note.contains("zonePatches"))
+
+        // ATTACK is release's twin at the same engine trigger site, and here no
+        // zone overrides it — so the SAME response must call one global dead
+        // and the other live. A blanket "inert" would pass the release
+        // assertions above and fail this one.
+        let attack = try #require(response.result?["effectiveGlobals"]?["attack"])
+        #expect(attack["globalIsInert"]?.boolValue == false)
+        #expect(attack["zonesInheriting"]?.doubleValue == 2)
+        #expect(attack["effectiveValues"]?.arrayValue?.first?.doubleValue == 0.02)
+        #expect(attack["note"] == nil)                        // nothing to warn about
+    }
+
+    /// The `note` on an inert global does not just say "this does nothing" — it
+    /// prescribes a remedy, and a remedy that refuses is the same class of
+    /// defect one layer out (an answer shaped exactly like a good one). So this
+    /// test EXECUTES the sentence: it reads the note, performs the
+    /// `sampler.zonePatches [{id, release}]` edit the note names, and asserts
+    /// the reported effective value moves. Reading the parser and concluding
+    /// the keys are accepted is not the same as watching the call land.
+    @Test("instrument.describeSampler: the inert-global note prescribes a zonePatches edit that actually WORKS")
+    func inertGlobalNoteRemedyIsExecutable() async throws {
+        let (router, store) = makeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+        #expect(await router.handle(ControlRequest(
+            id: "0", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object([
+                         "release": .number(3.4465),
+                         "zones": .array([
+                             .object(["path": .string(Self.pingPath), "release": .number(0.5)]),
+                             .object(["path": .string(Self.pingPath), "release": .number(0.5)]),
+                         ]),
+                     ])])).ok)
+
+        let before = await describeSampler(router, trackID)
+        let note = try #require(before.result?["effectiveGlobals"]?["release"]?["note"]?.stringValue)
+        #expect(note.contains("zonePatches"))
+
+        // Do exactly what the note says, with ids read the way it says to.
+        let page = await describeSampler(router, trackID, offset: 0, limit: 10)
+        let zoneIDs = try #require(page.result?["zones"]?.arrayValue).map {
+            $0["id"]?.stringValue ?? ""
+        }
+        #expect(zoneIDs.count == 2)
+        let patch = await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: ["trackId": .string(trackID),
+                     "sampler": .object(["zonePatches": .array(zoneIDs.map {
+                         .object(["id": .string($0), "release": .number(1.25)])
+                     })])]))
+        #expect(patch.ok, "the remedy the note prescribes must not refuse: \(patch.error ?? "")")
+
+        // …and the report moves to the new number, still inert.
+        let after = await describeSampler(router, trackID)
+        let release = try #require(after.result?["effectiveGlobals"]?["release"])
+        #expect(release["globalIsInert"]?.boolValue == true)
+        #expect(release["effectiveValues"]?.arrayValue?.map { $0.doubleValue } == [1.25])
+        // The global the note called dead is still exactly where it was — the
+        // remedy changed the audio, not the stored knob.
+        #expect(after.result?["release"]?.doubleValue == 3.4465)
+    }
+
+    /// The MIXED library — some zones overriding, some inheriting. This is the
+    /// shape a single boolean cannot describe, and the shape that forces the
+    /// computation to be real: an all-overriding fixture passes against a
+    /// hardcoded `globalIsInert: true`.
+    @Test("instrument.describeSampler: a partly-overridden global stays LIVE and the effective list names both values")
+    func describeSamplerReportsMixedOverrides() async throws {
+        let (router, store) = makeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+        #expect(await router.handle(ControlRequest(
+            id: "0", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object([
+                         "release": .number(3.4465),
+                         "zones": .array([
+                             .object(["path": .string(Self.pingPath), "minPitch": .number(0),
+                                     "maxPitch": .number(59), "release": .number(0.5)]),
+                             // No release: this one still tracks the global.
+                             .object(["path": .string(Self.pingPath), "minPitch": .number(60),
+                                     "maxPitch": .number(127)]),
+                         ]),
+                     ])])).ok)
+
+        let response = await describeSampler(router, trackID)
+        let release = try #require(response.result?["effectiveGlobals"]?["release"])
+        #expect(release["globalIsInert"]?.boolValue == false)
+        #expect(release["zonesOverriding"]?.doubleValue == 1)
+        #expect(release["zonesInheriting"]?.doubleValue == 1)
+        let values = try #require(release["effectiveValues"]?.arrayValue)
+        #expect(values.map { $0.doubleValue } == [0.5, 3.4465])
+        // No inert claim, so no note — the global genuinely does something.
+        #expect(release["note"] == nil)
+    }
+
+    /// A zero-zone sampler has no inheritance to describe, so the key is
+    /// ABSENT rather than present-and-meaningless — the same rule
+    /// `pitchCoverage`/`velocityCoverage` already follow. Calling that global
+    /// "inert" would send a caller to fix the wrong thing: the sampler is
+    /// silent because it has no zones.
+    @Test("instrument.describeSampler: a zero-zone sampler omits effectiveGlobals entirely")
+    func describeSamplerOmitsEffectiveGlobalsWithoutZones() async throws {
+        let (router, store) = makeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+        #expect(await router.handle(ControlRequest(
+            id: "0", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object(["release": .number(3.4465),
+                                         "zones": .array([])])])).ok)
+        let response = await describeSampler(router, trackID)
+        #expect(response.ok)
+        #expect(response.result?["release"]?.doubleValue == 3.4465)
+        #expect(response.result?["effectiveGlobals"] == nil)
+    }
+
+    /// End-to-end over a REAL `.sfz` import, because "SFZ imports always do
+    /// [carry their own release]" is the reporter's claim and a hand-built
+    /// fixture cannot test it. `ampeg_release` in `<global>` is the ordinary
+    /// way a library authors this, and it reaches every region.
+    @Test("instrument.describeSampler: an imported SFZ with ampeg_release in <global> reports the sampler global as inert")
+    func describeSamplerInertAfterRealSFZImport() async throws {
+        let (router, store) = makeRouter()
+        let track = store.addTrack(kind: .instrument)
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("describe-sampler-inert-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: URL(fileURLWithPath: Self.pingPath),
+            to: dir.appendingPathComponent("ping.aiff"))
+        let sfz = dir.appendingPathComponent("Tenor Sax.sfz")
+        try Data("""
+        <global> ampeg_release=0.5
+        <region> sample=ping.aiff lokey=28 hikey=52
+        <region> sample=ping.aiff lokey=53 hikey=76
+        """.utf8).write(to: sfz)
+        _ = try store.importSampleLibrary(trackID: track.id, path: sfz.path)
+
+        // Now set the global the reporter saw. It is accepted and stored…
+        #expect(await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: ["trackId": .string(track.id.uuidString),
+                     "sampler": .object(["release": .number(3.4465)])])).ok)
+
+        let response = await describeSampler(router, track.id.uuidString)
+        #expect(response.ok)
+        #expect(response.result?["release"]?.doubleValue == 3.4465)   // …stored…
+        let release = try #require(response.result?["effectiveGlobals"]?["release"])
+        #expect(release["globalIsInert"]?.boolValue == true)          // …and dead
+        #expect(release["zonesOverriding"]?.doubleValue == 2)
+        #expect(release["effectiveValues"]?.arrayValue?.first?.doubleValue == 0.5)
+    }
+
     @Test("instrument.describeSampler: an imported library's sourcePath/displayName are surfaced; a hand-built sampler shows neither")
     func describeSamplerProvenanceSurfaced() async throws {
         let (router, store) = makeRouter()

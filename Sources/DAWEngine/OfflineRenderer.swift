@@ -76,7 +76,27 @@ public final class OfflineRenderer {
     /// at the renderer's rate — never the live engine's instruments). Wired to
     /// the graph's `audioUnitProvider` inside `render`. Internal so hosting
     /// tests can read per-track status via @testable.
-    let auRegistry = AUHostRegistry()
+    ///
+    /// ⭐ Leg R-1: built with `rendersOffline: true`, which is the ONE place in
+    /// production that flag is ever set. That is admissible only because this
+    /// registry is separate from `AudioEngine`'s — the flag invites a plugin to
+    /// BLOCK at render time, which is right for a bounce with no deadline and
+    /// catastrophic for live playback. See `AUHostRegistry.rendersOffline`.
+    ///
+    /// ⚠️ CONSEQUENCE FOR `renderCooperatively`, stated rather than discovered
+    /// later. m19-j's doc says yielding every quantum "caps the block at ONE
+    /// quantum (~85 ms of audio)" — that was always a bound on AUDIO time whose
+    /// translation to WALL time assumed each pull returns promptly. A plugin
+    /// that honours `renderingOffline` may now WAIT inside a pull for its own
+    /// loader, so one quantum's wall cost is bounded by the plugin, not by us,
+    /// and a long enough wait holds the main actor past the m18-b wedge
+    /// threshold. That is the trade this leg makes deliberately: a bounce that
+    /// takes longer beats a bounce that is silently missing its opening. It is
+    /// unmeasured against a real lazy-loading plugin (see the observation tests
+    /// in `OfflineRenderReadinessTests` for what could and could not be
+    /// measured), and it is the strongest argument for Leg R-2's pre-roll,
+    /// which moves the waiting OUT of the metered render pass.
+    let auRegistry: AUHostRegistry
 
     /// C0 SPIKE SEAM ONLY (m13-d, `MasterSandwichTransparencyTests`):
     /// forwarded to the graph so the KEPT bit-transparency gate can render
@@ -101,11 +121,24 @@ public final class OfflineRenderer {
     /// Default: a private throwaway (direct construction stays isolated).
     var performance = EnginePerformanceContext()
 
-    public init(sampleRate: Double = 48_000, channelCount: Int = 2,
-                maximumFrameCount: Int = RenderBlockSize.offlineFrames) {
+    public convenience init(sampleRate: Double = 48_000, channelCount: Int = 2,
+                            maximumFrameCount: Int = RenderBlockSize.offlineFrames) {
+        self.init(sampleRate: sampleRate, channelCount: channelCount,
+                  maximumFrameCount: maximumFrameCount, rendersOffline: true)
+    }
+
+    /// Leg R-1 GATE SEAM ONLY (`OfflineRenderReadinessTests`), the
+    /// `masterSandwichEnabled`/`referenceLaneEnabled` precedent: production has
+    /// exactly one value, `true`, and the public initializer above is the only
+    /// door to it. `false` reconstructs the PRE-Leg-R-1 host — the negative
+    /// control the §15.5 gate needs, since a gate that cannot be shown going
+    /// red proves nothing. Internal: @testable only.
+    init(sampleRate: Double, channelCount: Int, maximumFrameCount: Int,
+         rendersOffline: Bool) {
         self.sampleRate = sampleRate
         self.channelCount = channelCount
         self.maximumFrameCount = maximumFrameCount
+        self.auRegistry = AUHostRegistry(rendersOffline: rendersOffline)
     }
 
     /// Instantiates and prepares a hosted instrument for every `.audioUnit`
