@@ -21,9 +21,26 @@ probe's load-bearing claims is not established by the evidence it presents.
 
 ⚠️ **§15 and §16 were folded in on 2026-08-20 from new measured tester data that arrived
 after the first draft. Both are INDEPENDENT of the out-of-process decision and neither
-needs it. §15 in particular fixes a live defect that silently destroys the first 8–25
-seconds of real bounces and is recommended AHEAD of every other leg in this document
-(§9.1) — if the user rules "no" on out-of-process entirely, §15 and §16 still ship.**
+needs it. §15 in particular fixes a live defect that silently destroys the head of real
+bounces and is recommended AHEAD of every other leg in this document (§9.1) — if the user
+rules "no" on out-of-process entirely, §15 and §16 still ship.**
+
+⛔⛔ **REVISED 2026-08-20, SECOND ROUND. An external tester measured the SHIPPED build
+(`412cb33`) and FALSIFIED TWO OF THIS DOCUMENT'S OWN PREMISES.** Both lived in §15 and a
+multi-day leg (R-2) was about to be built on them:
+**(1)** *"where decode/parse dominates — 46 zones — warm and cold are the same number"*
+(§15.1) — **false; it warms monotonically, and the retention mechanism is unidentified**;
+**(2)** *"the sax bounce is byte-identical cold and warm"* (§15.5(c), §14) — **false; two
+fully-warm renders leave a −3.07 dB residual, controlled.** Rejecting byte identity is
+still right, but **the failure mode is inverted: it would never terminate, not terminate
+early.** Corrections are made where the reasoning lives, with the old claim shown. Three
+further changes fell out: **§1** gains a third crash report and two corrected fault
+addresses (measured by re-parsing the `.ips` files, not by re-reading the draft); **§15.7**
+records that the dropout is path-specific and tracks a double instantiation; **§15.8** files
+warm-render non-reproducibility as a defect of its own. ⭐ **The strategic consequence is in
+§15.7 and §3.1 G0: the dropout and the crash may be two symptoms of ONE decision — fresh AU
+instances per render — and instance reuse should be costed before this milestone is
+committed to.**
 
 Related: `docs/research/design-m23av-prepare-status-offmain.md` (route (a), shipped),
 `docs/research/design-vi-b-au-windows.md` (plugin windows — §10 Leg 7 depends on it),
@@ -34,17 +51,28 @@ why it cannot reach this crash class).
 
 ## 1. THE FINDING — the crash is on disk, and it is not a render-thread crash
 
-The tester's two crashes are `~/Library/Logs/DiagnosticReports/DAWApp-2026-08-20-153332.ips`
-and `DAWApp-2026-08-20-154549.ips`. I read both. They are the report.
+The tester's crashes are `~/Library/Logs/DiagnosticReports/DAWApp-2026-08-20-153332.ips`,
+`DAWApp-2026-08-20-154549.ips`, and — **added 2026-08-20, a THIRD report the first draft of
+this section did not have** — `DAWApp-2026-08-20-204257.ips`. I read all three. They are
+the report.
 
-| | crash 1 | crash 2 |
-|---|---|---|
-| captured | 2026-08-20 15:33:29 −0700 | 2026-08-20 15:45:46 −0700 |
-| process launched | 13:45:24 | 15:39:18 |
-| **age at crash** | **1 h 48 m** | **6 m 28 s** |
-| signal | SIGSEGV / EXC_BAD_ACCESS | SIGSEGV / EXC_BAD_ACCESS |
-| fault address | `0x9f6` | `0x706d6153223d` |
-| faulting thread | 0, `com.apple.main-thread` | 0, `com.apple.main-thread` |
+| | crash 1 | crash 2 | crash 3 |
+|---|---|---|---|
+| report | `…-153332.ips` | `…-154549.ips` | `…-204257.ips` |
+| captured | 2026-08-20 15:33:29 −0700 | 2026-08-20 15:45:46 −0700 | 2026-08-20 20:42:53 −0700 |
+| process launched | 13:45:24 | 15:39:18 | 20:14:26 |
+| **age at crash** | **1 h 48 m** | **6 m 28 s** | **28 m 27 s** |
+| signal | SIGSEGV / EXC_BAD_ACCESS | SIGSEGV / EXC_BAD_ACCESS | SIGSEGV / EXC_BAD_ACCESS |
+| fault address | `0x656c706d6153223d` | `0x9f6` | `0xc0642da9f002a7f4` |
+| faulting thread | 0, `com.apple.main-thread` | 0, `com.apple.main-thread` | 0, `com.apple.main-thread` |
+
+⚠️ **CORRECTION TO THIS TABLE, MEASURED 2026-08-20 by re-parsing the `.ips` files rather
+than re-reading the draft.** The first draft printed the two fault addresses **attributed to
+the wrong reports**, and printed the text-shaped one **two bytes short**: it read *"crash 1
+`0x9f6`, crash 2 `0x706d6153223d`"*. Both halves are wrong. `…-153332.ips` faults at
+`0x656c706d6153223d`; `…-154549.ips` faults at `0x9f6`. The value `0x706d6153223d` never
+appeared in any report — it is a truncation that this document invented. The correction is
+not cosmetic; the full eight-byte width is the whole point of consequence 3 below.
 
 The faulting stack is byte-for-byte identical, down to the image offsets — the tester's
 "identical stack" is literally true:
@@ -69,9 +97,19 @@ dozens of `WavePlayers` threads).
 
 ### 1.1 Five consequences, each of which changes the design
 
-1. **It is not a render crash.** At crash time `com.apple.audio.IOThread.client`
-   (thread 51) was parked in `HALC_ProxyIOContext::IOWorkLoop()` — waiting, not rendering,
-   and not inside the plugin. Frame 4 is `__CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE0_PERFORM_FUNCTION__`:
+1. **It is not a render crash.** The faulting thread is thread 0, `com.apple.main-thread`,
+   in all three reports, and the faulting stack is identical in all three.
+   ⚠️ **PARTIAL CORRECTION, MEASURED 2026-08-20:** the first draft said flatly that
+   *"at crash time `com.apple.audio.IOThread.client` (thread 51) was parked in
+   `HALC_ProxyIOContext::IOWorkLoop()` — waiting, not rendering"*. That is true of crashes
+   **1 and 2** and **false of crash 3**, where the audio IO thread was **deep inside a live
+   render** — `HALC_ProxyIOContext::IOWorkLoop()` → `AUHALOutputUnit_ProvideOutputCallback`
+   → six nested `AUAudioUnitV2Bridge_Renderer::renderInputProc` / `AudioUnitRender` levels
+   → our own `DAWApp` frames. So in one of three crashes **the live graph was actively
+   pulling hosted AUv2s while the main thread faulted inside the plugin**. The conclusion of
+   this point survives (the fault is not *on* the render thread); the concurrency picture
+   does not, and §1.2 now leans on the difference.
+   Frame 4 of the faulting stack is `__CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE0_PERFORM_FUNCTION__`:
    this is JUCE's message-thread queue, delivered as a `CFRunLoopSource` **on our main run
    loop**, because the plugin's binary is mapped into our address space. *Out-of-process
    hosting fixes this crash — but not by isolating the render path.* It fixes it by never
@@ -84,17 +122,26 @@ dozens of `WavePlayers` threads).
    SIGSEGV. A Mach exception handler that "recovered" would be resuming inside an address
    space we have just proven is corrupt — see point 3.
 
-3. **The two fault addresses differ, and the second one is text.**
-   `0x706d6153223d` read little-endian is the byte sequence `=`, `"`, `S`, `a`, `m`, `p`
-   — i.e. `="Samp`, a fragment of exactly the XML that DecentSampler's `.dspreset` files
-   are made of. A pointer whose bits are preset text is memory corruption or a
-   use-after-free, not a null check somebody forgot. **Same code path, two different
-   corruptions.** Address-space separation is the only mitigation with a mechanism behind
-   it.
+3. **Three fault addresses, all different, and one of them is a whole pointer's worth of
+   text.** `0x656c706d6153223d` read little-endian is the byte sequence
+   `=`, `"`, `S`, `a`, `m`, `p`, `l`, `e` — i.e. **`="Sample`**, a fragment of exactly the
+   XML that DecentSampler's `.dspreset` files are made of, filling **all eight bytes** of
+   the pointer. (The first draft printed six of those bytes and read it `="Samp`; corrected
+   in the table above. Eight-of-eight is the stronger fact — this is not a pointer with a
+   corrupted low half, it is a pointer that is *entirely* preset text.) `0x9f6` is a small
+   integer. `0xc0642da9f002a7f4` decodes to no ASCII at all. A pointer whose bits are
+   preset text is memory corruption or a use-after-free, not a null check somebody forgot.
+   **Same code path, three different corruptions, only one of them text.**
+   ⚠️ **INFERRED, not measured:** a *family* of related garbage would point at a
+   data-driven over-read of one buffer; three *mutually unrelated* values arriving from one
+   stack read instead as **a pointer dereferenced after the memory it names was freed and
+   reused**, because the reuse contents differ every time. §1.2 builds on this and labels
+   its confidence. Address-space separation is the only mitigation with a mechanism behind
+   it under either reading.
 
-4. **It is not an instantiation crash and not a startup crash.** 6 minutes and 108
-   minutes. A pre-flight "validate the plugin in a sacrificial subprocess" scheme would
-   have passed both times (§4, A4).
+4. **It is not an instantiation crash and not a startup crash.** 6 minutes, 28 minutes,
+   and 108 minutes into three separate sessions. A pre-flight "validate the plugin in a
+   sacrificial subprocess" scheme would have passed all three times (§4, A4).
 
 5. **It is not the Surge XT wedge, and the two must not be blurred.** A wedge is a hang;
    this is a segfault. `docs/research/m23av-routeb-feasibility-probe.md` §3 recorded that
@@ -103,15 +150,55 @@ dozens of `WavePlayers` threads).
    *render* hang only via `kAudioUnitErr_RenderTimeout`, and a hung *instantiate* not at
    all (that is `DeadlineRace`'s job and it already ships).
 
-### 1.2 What I could not attribute
+### 1.2 What I could not attribute — and the hypothesis that now leads
 
-Nothing of ours was on any stack in either report. That is consistent with the plugin's
-own asynchronous work (its online browser / thumbnail cache / timer) faulting on its own;
-it is **also** consistent with a use-after-free seeded earlier by our teardown ordering
-(`AUHostRegistry.releaseInstrument` disposes on the main actor; a queued JUCE message for
-that instance would then fire against freed memory). I cannot distinguish these from the
-reports. §10 Leg 0 includes a cheap discriminator, and §11 F12 carries a candidate cheap
-mitigation if it turns out to be ours.
+Nothing of ours is on the *faulting* stack in any of the three reports. That is consistent
+with the plugin's own asynchronous work (its online browser / thumbnail cache / timer)
+faulting on its own; it is **also** consistent with a use-after-free seeded earlier by our
+teardown ordering (`AUHostRegistry.releaseInstrument` disposes on the main actor; a queued
+JUCE message for that instance would then fire against freed memory). The faulting stack
+alone cannot distinguish these.
+
+**⭐ UPDATED 2026-08-20 — the leading hypothesis has changed, and it now points at us.**
+All three crashes happened **during heavy offline-render activity** (tester's report). The
+candidate mechanism is **our own per-render instantiate/teardown racing the plugin's
+`CFRunLoopSource` deferred work**: every bounce builds fresh AU instances and disposes them
+(§15.1), the disposal runs on the main actor, and frame 4 of every one of these faulting
+stacks is a main-run-loop `source0` callback — precisely the queue on which a disposed JUCE
+instance's still-pending messages would fire.
+
+Provenance, stated exactly, because this is a third theory and the first two did not
+survive:
+
+- **MEASURED** (by re-parsing the three `.ips` files on 2026-08-20): the thread inventories
+  differ across the crashes and they differ *by multiples*. `WavePlayers` threads number
+  **54 / 36 / 18** — exactly 3×18, 2×18, 1×18. DecentSampler's other per-instance threads
+  appear **in duplicate** in crash 1 (2× `Sample Loading Thread`,
+  2× `JUCE v8.0.12: thumb cache`, 2× `OnlineManager TaskRunner`), while the process-global
+  `JUCE v8.0.12: Timer` appears **once** in all three.
+- **MEASURED:** in crash 3 the live audio graph was mid-render through six nested hosted
+  AUv2 bridges while the main thread faulted inside the plugin (consequence 1 above). In
+  crashes 1 and 2 the IO thread was parked. Concurrent live render is therefore **not
+  necessary** for the crash — but it was present once.
+- **INFERRED, NOT VERIFIED:** that the thread multiples mean **three, two, and one**
+  concurrent DecentSampler instances alive at fault time. The thread-per-instance mapping
+  is undocumented and I did not verify it, and the two instruments **disagree**: the
+  auxiliary threads run 2 / 2 / 1 where `WavePlayers` runs 3 / 2 / 1. That disagreement is
+  the signal, not a rounding error. **Do not quote 3 / 2 / 1 as a fact.**
+- **UNVERIFIED — the race itself.** There is **no controlled repro**. This defect has
+  already refuted **two** prior theories: the prepare-timeout hypothesis, retracted in
+  §15.1, and the reading that it is purely the plugin's own async work, which the
+  render-activity correlation now strains without refuting. A third theory arriving without
+  a repro has earned exactly as much scepticism as the two before it.
+
+§10 Leg 0-E is still the discriminator, and it now has a **cheap instrument attached**:
+count per-instance JUCE threads (`WavePlayers`, `Sample Loading Thread`) across an
+open/close cycle on the `releaseInstrument` pattern and see whether the count returns to
+baseline. §11 F12 carries the candidate cheap mitigation if it turns out to be ours.
+⚠️ **A non-reproduction attributes nothing** — that is the weakest evidence there is, and
+the close-out must record it as inconclusive rather than as the plugin's fault confirmed.
+**§15.7 is where this hypothesis meets the bounce defect: they may be one design decision
+wearing two symptoms.**
 
 ---
 
@@ -327,10 +414,11 @@ produce, for DecentSampler specifically (the plugin that actually crashed):
 
 | gate | measurement | if it fails |
 |---|---|---|
+| **G0** ⭐ | **ADDED 2026-08-20. Cost AU-instance reuse across renders first.** §15.7 measured that the bounce dropout is **path-specific** and tracks a **double instantiation**, and §1.2 now suspects the crash of being our own instantiate/teardown racing the plugin's deferred work. If both are symptoms of *fresh AU instances per render*, then reusing an instance addresses both — for a fraction of this milestone's cost. | **This gate fails by not being run.** If nobody costs instance reuse, Legs 3–7 may buy, at weeks of RT-risky work, something a lifecycle change buys in days. Not a measurement gate: a **costing** gate, and it precedes G1 in time. |
 | **G1** | `isLoadedInProcess == false` after `[.loadOutOfProcess]` | The AUv2 route does not exist. Legs 3–7 are cancelled; Legs 1 + 2 still ship and still deliver. Reopen only if the user's plugin set gains a real AUv3. |
 | **G2** | Kill the helper mid-render → host survives; `renderBlock` returns −66749 (or −66745); the invalidation notification fires | Out-of-process is decoration. Abandon; Leg 1 still ships. |
 | **G3** | Per-quantum `renderBlock` p99 ≤ 15 % of the 512-frame budget (10.67 ms @ 48 kHz), max ≤ 50 %, zero `RenderTimeout` in 10 min — **thresholds PROPOSED, not measured (§6.1); the first real distribution may move them** | Ship as opt-in only, with an explicit "this plugin may glitch under load" warning; never default it on. |
-| **G4** | An out-of-process AU survives a faster-than-realtime `OfflineRenderer` pull without dropouts | Out-of-process is disabled for bounces; the offline path re-instantiates in-process. **Non-negotiable — see §11 F11.** |
+| **G4** | An out-of-process AU survives a faster-than-realtime `OfflineRenderer` pull without dropouts. ⚠️ **WIDENED 2026-08-20: name the verbs.** The dropout is path-specific (§15.7) — `render_mixdown` was correct from the first cold call while `render_stems` and `track_bounce_in_place` both dropped — so G4 run against `render_mixdown` alone can pass while the two broken paths stay broken. G4 must be run against **all three verbs**, cold and warm, and report all three. | Out-of-process is disabled for bounces; the offline path re-instantiates in-process. **Non-negotiable — see §11 F11.** |
 
 **"Measure first" is not a deferral of the decision.** The decision is made: per-component
 opt-in, verified locality, built-ins never. What Leg 0 decides is whether the feature has a
@@ -384,6 +472,13 @@ would have passed, twice, and then handed the user a green light.
 **Why it loses:** autosave protects the *file*, not the *session* (§7.2). It cannot save a
 take in progress, a bounce in progress, or an hour of flow state. The tester's own wording
 concedes the mitigation works and asks for the failure not to matter.
+
+⚠️ **ONE CANDIDATE IS DELIBERATELY NOT IN THIS SECTION.** *Reuse AU instances across
+renders instead of building fresh ones* was added 2026-08-20 and it does **not** lose —
+which is why it is not listed here among alternatives that do. It is a **precondition** on
+the whole milestone rather than a competitor to it, so it lives in §3.1 as **G0**, with the
+measurement behind it in **§15.7**. A reader scanning this section for "everything else was
+considered and rejected" would otherwise conclude wrongly.
 
 ---
 
@@ -636,7 +731,8 @@ is completely safe to land while other agents hold `Sources/DAWEngine/`.
 | **5** | **Default flip, per component, evidence-gated.** | 1 day | yes (G1–G4) | yes |
 | **6** | **Reload + crash-loop policy** (§7.4). | 1–2 days | yes | yes |
 | **7** | **Plugin UI across the boundary.** Live-gate-only, human eyes required. | ? | yes | yes |
-| **R** | **Render readiness (§15).** `renderingOffline` before allocate, + a convergence pre-roll. **Fixes a live user-reported bounce defect and is INDEPENDENT of the whole out-of-process question.** | **~4 h** for R-1; 2–3 d for R-2 | **no** | yes |
+| **R** | **Render readiness (§15).** `renderingOffline` before allocate, + a discardable pre-roll. **Fixes a live user-reported bounce defect and is INDEPENDENT of the whole out-of-process question.** ✅ **R-1 SHIPPED (`412cb33`) and MEASURED NOT TO CURE IT** — DecentSampler ignores the flag. ⛔ **R-2 is therefore REQUIRED, not optional.** | ~~~4 h~~ R-1 done; 2–3 d for R-2 | **no** | yes |
+| **G0** | ⚠️ **A COSTING GATE, NOT A LEG — there is no "Leg G0" in §10; it lives in §3.1 with the other gates.** **Cost AU-instance reuse across renders (§15.7, §3.1).** The bounce dropout tracks instantiation count across verbs and the crash's leading hypothesis is our own per-render instantiate/teardown — one lifecycle change may address both. **Fails by not being run.** | ~1 d to cost | **no** | no (costing only) |
 | **B** | **Pitch-bend range (§16).** Emit RPN 0 so a hosted AU is not silently stuck at ±2 semitones. Independent. | ~1 d | **no** | yes |
 
 ### 9.1 The cheapest useful first leg
@@ -652,16 +748,25 @@ If the user rules "no" on the whole milestone, Leg 1 is still worth doing.
 **Leg 2 is cheaper still** (~2 h, no `Sources/` change) but it addresses a different hole.
 Do both first, in either order; they cannot conflict.
 
-**Recommended order: R-1 → −1 → 2 → 1 → 0 → (gate G1–G4) → 3 → 4 → 5 → 6 → 7**, with
-**B** and **R-2** droppable in anywhere (both are independent of the out-of-process
-decision).
+**Recommended order, REVISED 2026-08-20 now that R-1 has shipped and failed to cure:
+~~R-1~~ → G0 → R-2 → −1 → 2 → 1 → 0 → (gate G1–G4) → 3 → 4 → 5 → 6 → 7**, with **B**
+droppable in anywhere.
 
-⚠️⚠️ **R-1 GOES FIRST — AHEAD OF EVERYTHING, INCLUDING LEG −1.** It is ~4 hours, it fixes
-a *live, measured, user-reported* defect that silently destroys the first 8–25 seconds of
-real bounces (§15), and it is a hard prerequisite of Leg 5 (§11 F11). Legs −1 through 7 all
-concern a crash that autosave already survives; R-1 concerns audio the user has already
-lost twice, in files they may have shipped. **Fix the thing that silently corrupts output
-before the thing that loudly stops the app.**
+⚠️⚠️ **THE ORIGINAL "R-1 GOES FIRST" RULING WAS RIGHT AND IS NOW SPENT.** R-1 shipped in
+`412cb33`; the tester verified the wiring rather than assuming it; **DecentSampler does not
+honour the flag and the bounces still drop** (§15.5 status block). The reasoning that put
+it first is unchanged and now transfers to **R-2**: it is a *live, measured, user-reported*
+defect that silently destroys the head of real bounces, and it is a hard prerequisite of
+Leg 5 (§11 F11). Legs −1 through 7 all concern a crash that autosave already survives; R
+concerns audio the user has already lost, in files they may have shipped. **Fix the thing
+that silently corrupts output before the thing that loudly stops the app.**
+
+⭐ **G0 GOES AHEAD OF R-2, AND IT IS A DAY.** §15.7 measured that the dropout is
+path-specific and tracks a double instantiation, and §1.2's leading crash hypothesis is the
+same lifecycle. If reusing an AU instance across renders addresses both, R-2's 2–3 days of
+pre-roll machinery — and possibly Legs 3–7 — are the wrong purchase. This is the same
+argument that puts Leg −1 ahead of Legs 2 and 1, applied one level up. ⛔ **Cost it against
+BOTH criteria in §15.5, never against "did the dropout go away".**
 
 ⚠️ **Leg −1 runs FIRST, ahead of everything, and it is two hours.** It is the only step
 that can make Legs 3–7 unnecessary: if the identical stack reproduces on the
@@ -847,11 +952,24 @@ Leg 0's probe modes.
 2. G2 (kill test) recorded per component being flipped.
 3. G4 (`OfflineRenderer` survives a faster-than-realtime pull) green.
 4. ⛔ **The silent-head bounce defect (§15) is RE-RUN with the flipped component,
-   in-process and out-of-process, and the two bounces compared — cold cache AND warm
-   cache, because the defect's whole signature is that those differ (24 s vs 8.4 s
-   measured).** It lives in exactly the path this leg changes, and §15.6 argues
-   out-of-process may make it WORSE. **Leg R is a hard prerequisite of Leg 5.** A leg
-   that cannot produce that four-way comparison does not ship.
+   in-process and out-of-process.** It lives in exactly the path this leg changes, and
+   §15.6 argues out-of-process may make it WORSE. **Leg R is a hard prerequisite of
+   Leg 5.**
+   ⚠️ **REWRITTEN 2026-08-20 — as originally drafted this criterion was unexecutable.**
+   It quoted the cold/warm signature as ~~"24 s vs 8.4 s"~~ and asked for "the two bounces
+   compared", i.e. an identity comparison. Both premises are dead: the warming signature is
+   now the five-run series in §15.1 (**31.974 → 15.001 → 15.001 → 9.869 → 9.869 s**, correct
+   onset 9.868 s), and **two renders never null to identity at all** (§15.8, −3.07 dB
+   floor), so an identity comparison can only ever report "different". The executable form:
+   - **per verb, all three** — `render_mixdown`, `render_stems`, `track_bounce_in_place`;
+     the defect is path-specific (§15.7) and a mixdown-only run passes vacuously;
+   - **cold** — run 1 in a **fresh process**, with no warming renders ahead of it, onset
+     recorded against 9.868 s. This measurement is **single-shot per process**; the second
+     attempt is not a cold measurement and will look better for free (§15.5);
+   - **warm** — and compared as a **residual against the −3.07 dB floor**, not as identity.
+     Out-of-process must not make reproducibility worse either.
+
+   A leg that cannot produce that matrix does not ship.
 
 ### Leg 6 — reload + crash-loop policy
 
@@ -891,9 +1009,10 @@ the leg most likely to surprise us.
 | F8 | Two hosting modes = two code paths = a bug that reproduces in only one. | — | One shared options function, both call sites (R2); test both modes; Apple pinned (R4). |
 | F9 | A preference outliving its plugin (uninstalled, updated, renamed). | — | Key by (type, subType, manufacturer); tolerate misses silently; never fail a prepare because a preference is stale. |
 | F10 | Reported `latency` no longer describes the bridged path → PDC drift (B4). | m25-n's suspicion is already open. | Rider; the close-out must not claim PDC is unaffected. |
-| F11 | **Offline render regression.** `OfflineRenderer` pulls faster than realtime; an out-of-process AU with a render deadline may not keep up → dropouts or `RenderTimeout` **in bounces**. | **G4**, Leg 0-D. | If G4 fails, the offline path re-instantiates in-process. ⛔ **THE OPEN BOUNCE BUG IS NOW CHARACTERISED AND IT IS NOT "the first clip is dropped" — it is "the first 8–25 SECONDS are silent" (§15).** Out-of-process **makes this harder, not easier** (§15.6): the fix depends on letting the AU BLOCK at render time, and a blocking render across an XPC boundary is what `kAudioUnitErr_RenderTimeout` exists to kill. **Leg R must land, and be re-verified out-of-process, before any default flip.** |
-| F12 | The crash is ours (teardown-ordering UAF), not the plugin's, and out-of-process merely relocates it. | Leg 0-E reproduction attempt. | If reproduced: drain the main run loop before `AudioComponentInstanceDispose` — the m18-d `dlsBankQueue` hand-off is the precedent for a deferred-release policy, and it would be far cheaper than Legs 3–7. **Check this before spending the milestone.** |
+| F11 | **Offline render regression.** `OfflineRenderer` pulls faster than realtime; an out-of-process AU with a render deadline may not keep up → dropouts or `RenderTimeout` **in bounces**. | **G4**, Leg 0-D. | If G4 fails, the offline path re-instantiates in-process. ⛔ **THE OPEN BOUNCE BUG IS NOW CHARACTERISED AND IT IS NOT "the first clip is dropped" — it is "the head of the bounce is silent, by 0.001–22.1 s depending on how many renders ran before it, and on some verbs the whole stem" (§15.1).** ⛔ **AND IT IS PATH-SPECIFIC (§15.7): G4 run against `render_mixdown` alone passes while `render_stems` and `track_bounce_in_place` stay broken — name the verb.** Out-of-process **makes this harder, not easier** (§15.6): the fix depends on letting the AU BLOCK at render time, and a blocking render across an XPC boundary is what `kAudioUnitErr_RenderTimeout` exists to kill. **Leg R-1 shipped and did NOT cure it; R-2 must land, and be re-verified out-of-process, before any default flip.** |
+| F12 | The crash is ours (per-render instantiate/teardown racing the plugin's deferred main-run-loop work), not the plugin's, and out-of-process merely relocates it. ⭐ **UPGRADED 2026-08-20 from "a possibility" to THE LEADING HYPOTHESIS** (§1.2): three crashes, all during heavy offline-render activity, all faulting in a main-run-loop `source0` callback, with per-instance JUCE thread counts appearing in multiples. **UNVERIFIED — no controlled repro, and two prior theories on this defect have already been refuted.** | Leg 0-E reproduction attempt, now with a cheap instrument: count per-instance JUCE threads across an open/close cycle. | If reproduced: drain the main run loop before `AudioComponentInstanceDispose` — the m18-d `dlsBankQueue` hand-off is the precedent for a deferred-release policy — or stop building fresh instances per render at all (**G0**, §15.7), which would address the bounce defect in the same change. Far cheaper than Legs 3–7. **Check this before spending the milestone.** |
 | F13 | The undocumented AUv2-out-of-process behaviour changes in a macOS update and silently reverts to in-process. | R3's `isLoadedInProcess` check runs on every prepare, so a regression is visible rather than assumed. | Per-component opt-in means the blast radius is one plugin; the reported locality is on the wire. |
+| F14 | **Bounces are not reproducible even when correct** — two fully-warm renders of the same material differ by −3.07 dB peak (§15.8). A change can cure the dropout and worsen this, and a dropout-only pass condition cannot see it. | Warm-vs-warm null, controlled against a self-null. | **Cost every render-path change against BOTH criteria in §15.5.** Cause unchased; unreset plugin state between offline renders would fit. |
 
 ---
 
@@ -931,8 +1050,12 @@ overclaim:
    batched.** Undocumented. B1 and B2 are the two largest RT unknowns.
 4. **The render-timeout interval.** `kAudioUnitErr_RenderTimeout` exists; its value appears
    in no header I read.
-5. **Whether the DecentSampler crash is triggered by our teardown ordering.** Nothing of
-   ours was on any stack — which does not exonerate an earlier use-after-free (§1.2, F12).
+5. **Whether the DecentSampler crash is triggered by our own AU lifecycle.** Nothing of
+   ours is on any *faulting* stack — which does not exonerate an earlier use-after-free.
+   ⭐ **This is now the LEADING hypothesis rather than one of two** (§1.2, F12): all three
+   crashes occurred during heavy offline-render activity, and §15.7 measured that the
+   render paths instantiate and discard plugin instances per render. **Still unproven — no
+   controlled repro, and this defect has already refuted two prior theories.**
 6. **Whether an out-of-process AU survives faster-than-realtime offline pulls** (G4, F11).
 7. **Whether the Surge XT wedge is real at all.** It did not reproduce warm on 2026-08-04
    and has not been retried cold. The standing "prefer GM sound banks" rule rests on it and
@@ -941,10 +1064,16 @@ overclaim:
    two that do are the two JUCE builds. Suggestive, unverified.
 9. **Whether the plugin UI works across the boundary at all** (Leg 7). Only a human, in a
    bundled app, can answer this.
-10. **Whether `renderingOffline` alone fixes the silent-head defect** (§15). It is the
-    documented mechanism, it is free, and this host has never set it — but Apple's own
-    wording is *"an audio unit **may** respond"*. A plugin that ignores it still drops.
-    R-1 measures it; R-2 exists because the answer may be "partly".
+10. ✅ **ANSWERED 2026-08-20, and the answer is NO.** *"Whether `renderingOffline` alone
+    fixes the silent-head defect"* (§15) is settled: R-1 shipped in `412cb33`, the wiring
+    was verified by the tester rather than assumed, and **DecentSampler does not honour the
+    flag** — Apple's *"an audio unit **may** respond"* took its other branch. The bounces
+    still drop. R-2 is therefore required, not contingent. What remains open in its place:
+    **(10a)** the retention mechanism that makes renders warm across fresh AU instances
+    (§15.1 — measured, unexplained); **(10b)** whether the double instantiation on
+    `render_stems`/`track_bounce_in_place` is *causal* for the dropout or merely correlated
+    (§15.7 — the correlation is across the only three verbs there are; the experiment is
+    cheap and unrun); **(10c)** why two fully-warm renders differ by −3.07 dB (§15.8).
 11. **Whether an out-of-process AU is permitted to block at render time at all** (§15.6).
     `renderingOffline` asks the AU to block; the remote-render deadline behind
     `kAudioUnitErr_RenderTimeout` may forbid it. These two mechanisms may be in direct
@@ -983,38 +1112,75 @@ ready; apply it only when they rule, with the ruling folded in.
 > `docs/research/design-m29-oop-au-hosting.md` §5. The failure lane already exists: both
 > hosted adapters' step 4 turn any non-`noErr` status into exact silence / dry passthrough
 > with an atomic breadcrumb, so `−66749` and `−66745` are handled today with zero
-> render-path edits. Design + legs:
-> `docs/research/design-m29-oop-au-hosting.md`. Supersedes ROADMAP m23-av-3.
+> render-path edits. ⛔ **AND A CHEAPER CANDIDATE MUST BE COSTED FIRST (G0, added
+> 2026-08-20): the crash and the silent-bounce-head defect below may be two symptoms of ONE
+> decision — fresh AU instances per render.** Three crashes, all during heavy offline-render
+> activity, all faulting in a main-run-loop `source0` callback; and the bounce dropout is
+> path-specific, hitting exactly the two verbs that instantiate the plugin twice. Reusing an
+> AU instance across renders would be days of lifecycle work against weeks of RT-risky IPC
+> work, and needs no amendment to the render-thread invariant at all. **Unproven — no
+> controlled repro, and two prior theories on this crash have already been refuted** — but
+> it is cheap to cost and it is not costed. Design + legs:
+> `docs/research/design-m29-oop-au-hosting.md` (§15.7 for G0). Supersedes ROADMAP m23-av-3.
 
 **Second entry, INDEPENDENT of the ruling above — this one is a defect finding, not a
-proposal, and it should be added whether or not out-of-process is ever approved:**
+proposal, and it should be added whether or not out-of-process is ever approved.**
 
-> - **Offline renders never told hosted AUs they were offline (M29 Leg R, FOUND
-> 2026-08-20).** A 296 s bounce of a sax on a 46-zone hosted SFZ came back **silent until
-> 25.25 s**; the same bounce with samples warm was dead for **8.4 s** instead of 24 s, and
-> repeats at equal warmth were byte-identical. Cause: `prepareAudioUnits` awaits
+⚠⚠ **REWRITTEN 2026-08-20. The first draft of this block embedded TWO claims that were
+subsequently FALSIFIED BY MEASUREMENT** — *"the same bounce with samples warm was dead for
+8.4 s … repeats at equal warmth were byte-identical"* and *"a byte-identity convergence
+criterion … would declare convergence having warmed nothing"*. **The wording is replaced
+rather than annotated, deliberately.** This block exists to be pasted into
+`docs/ARCHITECTURE.md` verbatim by whoever the user's ruling reaches; a struck-through
+premise inside a paste-me block gets pasted anyway. The falsified wording and what killed
+it are preserved where the reasoning lives — §15.1 and §15.5(c).
+
+> - **Offline renders never told hosted AUs they were offline — and telling them turned out
+> not to be enough (M29 Leg R, FOUND 2026-08-20).** A 296 s bounce of a sax on a 46-zone
+> hosted SFZ came back **silent until 25.25 s**. Cause: `prepareAudioUnits` awaits
 > `allocateRenderResources()`, whose contract (`AUAudioUnit.h:426-434`) says **nothing about
 > content** — a sampler that loads zones lazily on background threads is not finished when
 > it returns, and `OfflineRenderer` then pulls **faster than realtime**, so a loader needing
 > seconds of WALL time eats tens of seconds of TIMELINE. A realtime sampler whose data is
-> not ready is *right* to emit silence. ⭐ **Apple has a property for exactly this and this
-> host has never set it: `AUAudioUnit.renderingOffline` (`:1024-1035`) — *"allowing itself
-> to block at render time if data being generated on secondary work threads is not ready in
-> time. (Normally, in a realtime thread, this data would have to be dropped.)"* — set
-> BEFORE `allocateRenderResources`, and never anywhere in this tree (four spellings grepped,
-> positive-controlled, 2026-08-20).** It goes on the OFFLINE registry only; setting it live
-> would invite a plugin to block the render thread. ⚠️ **There is NO general "my samples are
-> loaded" signal in the AU API** — `renderResourcesAllocated` is true the instant allocate
-> returns, and Apple defines no load-state notification; `renderingOffline` is the mechanism
-> provided *instead* of a signal. Because Apple's word is *"may"*, a **discardable full
-> pre-roll pass** (render the timeline once, throw the audio away, reset, render for real)
-> backs it up — chosen over a cleverer head-window convergence scheme precisely because it
-> has **no termination question**; ⛔ a byte-identity convergence criterion was drafted and
-> REJECTED, because the sax bounce is byte-identical cold and warm, so it would declare
-> convergence having warmed nothing. And a *silent* pre-roll cannot work at all, since lazy
-> loads are triggered by note-ons: **the output is discarded, not the input.** ⚠️⚠️ **This
-> pulls AGAINST out-of-process hosting**, whose render deadline (`kAudioUnitErr_RenderTimeout`)
-> is precisely what forbids a blocking render; if the two cannot be reconciled the answer is
+> not ready is *right* to emit silence. ⭐ Apple has a property for exactly this and this host
+> had never set it: **`AUAudioUnit.renderingOffline`** (`:1024-1035`) — *"allowing itself to
+> block at render time if data being generated on secondary work threads is not ready in
+> time. (Normally, in a realtime thread, this data would have to be dropped.)"* — set BEFORE
+> `allocateRenderResources`, on the OFFLINE registry only (setting it live would invite a
+> plugin to block the render thread). ✅⛔ **Leg R-1 SHIPPED it in `412cb33`
+> (`AUHostRegistry.rendersOffline`, an immutable `let`, applied before allocate in both
+> prepare bodies) and it MEASURED NOT TO CURE THE DEFECT: DecentSampler does not honour the
+> flag**, which Apple's *"may"* expressly permits. ⚠️ **The AU API defines no general "my
+> samples are loaded" signal — and no reliable way to reset a third-party AU between renders
+> either.** `renderResourcesAllocated` is true the instant allocate returns; `reset()` is a
+> DSP-state call with no contract about loaded content. ⛔ **Three things measured AFTER R-1
+> shipped, each of which changes what comes next: (1) IT WARMS.** The same 46-zone sax
+> converged monotonically across five renders in one session (22.1 s of lost audio → 0.001 s;
+> correct onset 9.868 s) **even though `OfflineRenderer` builds fresh AU instances per
+> render** — so something survives an AU instance's lifetime and **the mechanism is not
+> identified** (a process-global sample cache keyed by path would fit; unverified).
+> **(2) IT IS PATH-SPECIFIC.** `render_stems` and `track_bounce_in_place` drop;
+> `render_mixdown` was correct from the first cold call of the session — and the two failing
+> verbs are exactly the two that build a **throwaway `OfflineRenderer`** via
+> `offlineCompensationTargets` (`AudioEngine.swift:2322`) before the real one (`:2277`),
+> instantiating every hosted plugin twice and discarding the warmed first instance.
+> **(3) BOUNCES ARE NOT REPRODUCIBLE.** Two fully-warm renders with identical correct onsets
+> differ by **−3.07 dB** peak (controlled: a self-null gives −inf). ⭐⭐ **STRATEGIC
+> CONSEQUENCE: this defect and the plugin segfault above may be two symptoms of ONE design
+> decision — fresh AU instances per render — and reusing an instance across renders should
+> be COSTED BEFORE the out-of-process milestone is committed to.** ⚠️ **Cost any fix against
+> BOTH "run 1 lands correct COLD, with no warming renders ahead of it" AND "warm-vs-warm
+> nulls better than −3.07 dB"** — a change can cure the dropout while worsening
+> reproducibility, and a dropout-only criterion cannot see that. A **discardable full
+> pre-roll** (render the timeline once, throw the audio away, render for real) remains the
+> standing proposal, chosen over a head-window convergence scheme because it has **no
+> termination question**. ⛔ A byte-identity convergence criterion was drafted and REJECTED —
+> **and note the reason, which an earlier draft of this entry stated backwards: successive
+> renders are NEVER byte-identical, so such a criterion would NEVER TERMINATE**, not
+> terminate early. And a *silent* pre-roll cannot work at all, since lazy loads are triggered
+> by note-ons: **the output is discarded, not the input.** ⚠️⚠️ **This pulls AGAINST
+> out-of-process hosting**, whose render deadline (`kAudioUnitErr_RenderTimeout`) is
+> precisely what forbids a blocking render; if the two cannot be reconciled the answer is
 > **out-of-process live, in-process offline** — the registries are already separate.
 > Detail: `docs/research/design-m29-oop-au-hosting.md` §15.
 
@@ -1045,21 +1211,51 @@ everywhere, including §11 F11.**
 
 ### 15.1 The measurement
 
+**Round one — 2026-08-20, on the pre-Leg-R-1 build.** Two of these six rows did not
+survive round two and are struck in place rather than deleted:
+
 | observation | measured |
 |---|---|
 | 296 s `track_bounce_in_place`, sax on a hosted AU (46-zone SFZ) | silent until **25.25 s (beat 32)** — intro pickup and four bars gone |
-| the identical bounce repeated, **samples already cached** | truncated at **exactly 25.25 s again** |
+| ⛔ ~~the identical bounce repeated, **samples already cached**~~ | ⛔ ~~truncated at **exactly 25.25 s again**~~ — **FALSIFIED.** It warms. Sole support for the cache-insensitivity claim struck below. |
 | a smaller test track, cold | **24 s** dead |
 | the same track, warm | **8.4 s** dead |
-| renders 2 and 3 at equal warmth | **byte-identical** |
+| ⛔ ~~renders 2 and 3 at equal warmth~~ | ⛔ ~~**byte-identical**~~ — **FALSIFIED by a controlled null.** Sole support for §15.5(c)'s rejection argument, which is rewritten there. |
 | scaling | the dead span grows with **the number of distinct sample zones the part touches** |
+
+**Round two — 2026-08-20, measured by an external tester against the SHIPPED build
+(commit `412cb33`, the running `dist/DAWPro.app`), with Leg R-1 already in it and verified
+wired.** Their method anchors every detector against both a known-clean and a
+known-defective control and reports numbers against them; where a control was not run they
+label the finding untested.
+
+Repeated renders of the same 46-zone sax, **within one session**. The correct first-note
+onset is **9.868 s**:
+
+| render | first non-silent sample | audio lost |
+|---|---|---|
+| a 35 s stem | **never** — silent throughout | ≥ 25 s |
+| run 1 | 31.974 s | 22.1 s |
+| run 2 | 15.001 s | 5.1 s |
+| run 3 | 15.001 s | 5.1 s |
+| run 4 | 9.869 s | 0.001 s |
+| run 5 | 9.869 s | 0.001 s |
+
+**It warms, monotonically, and it converges on correct.** And two *fully warm* renders —
+runs 4 and 5, both landing on the correct onset — **do not null against each other**: the
+residual peaks at **−3.07 dB**. That null is controlled: a file nulled against itself gives
+**−inf**. The second fact is a distinct defect with its own identity and is recorded as one
+in **§15.8**.
 
 The tester's own reading — *"the render appears to re-prepare the plugin each time"* — is
 **correct, and it is in our code**: `OfflineRenderer` keeps **its own registry** and
 instantiates **fresh AU instances per render**
 (`Sources/DAWEngine/OfflineRenderer.swift:119-135`, whose doc comment says so in as many
 words: *"the bank loads AGAIN into this renderer's own registry: fresh AU instances per
-render"*). Every bounce therefore re-loads every sample, every time.
+render"*). ⛔ **The inference originally drawn from that — *"every bounce therefore re-loads
+every sample, every time"* — DOES NOT FOLLOW and is struck.** Round two shows the loading
+cost falling to nothing across five renders in one process. The code fact stands; the
+conclusion about what it costs does not. See the falsification below.
 
 ⚠️ **A retraction is recorded here on purpose:** the coordinator earlier told the user this
 defect was timing-independent and withdrew a prepare-timeout-shaped hypothesis. **That
@@ -1069,28 +1265,75 @@ determinism at fixed cache state is not timing-independence. This is the same sh
 this project's standing law that a mechanism is not a cause; recorded so nobody
 re-derives the retraction from the byte-identical half of the evidence alone.
 
-⚠️⚠️ **THE TABLE CONTAINS ITS OWN APPARENT COUNTEREXAMPLE AND IT MUST NOT BE GLOSSED.**
-The two cases disagree about cache sensitivity:
+⚠️ **AND THAT HALF OF THE EVIDENCE IS NOW GONE TOO.** Round two shows the repeats were
+never byte-identical (−3.07 dB residual, controlled). So the retraction was not merely
+wrong about *timing-independence* — the determinism it was reasoning from **did not
+exist**. ⚠️ **Round one's comparison method is not recorded anywhere in this document**, so
+how it reached "byte-identical" cannot be reconstructed — an onset match read as a file
+match is one possibility among several and is INFERRED, not established. A future reader
+should take the whole retraction as withdrawn, not just its conclusion.
 
-- small track: **24 s cold → 8.4 s warm** — cache-sensitive;
-- sax, 46 zones: **25.25 s cold → 25.25 s warm, exactly** — cache-INSENSITIVE.
+⛔⛔ **THE RECONCILIATION THIS SUBSECTION WAS BUILT AROUND HAS BEEN FALSIFIED. THE FALSIFIED
+REASONING IS PRINTED HERE RATHER THAN DELETED, BECAUSE A SILENTLY-PATCHED PREMISE GETS
+RE-DERIVED.**
 
-A pure disk-I/O story explains the first and is refuted by the second, and the second is
-precisely the observation that motivated the (wrong) retraction. **The reconciliation that
-fits both is one mechanism with two bottlenecks**, and the enabling fact is already in this
-section: `OfflineRenderer` builds **fresh AU instances per render**, so every bounce
-re-parses and re-decodes the program from scratch **whatever the OS file cache holds**.
-Where decode/parse dominates — 46 zones — warm and cold are the same number. Where disk I/O
-dominates — the smaller track — warming it cuts the time by two thirds. Both are "the
-loader is still working while the render clock runs", which is what `renderingOffline`
-addresses either way.
+**What this subsection used to say.** Round one's two cases appeared to disagree about
+cache sensitivity — small track **24 s cold → 8.4 s warm** (cache-sensitive); sax, 46 zones,
+**25.25 s cold → 25.25 s warm, exactly** (cache-INSENSITIVE) — and the reconciliation
+offered was *one mechanism with two bottlenecks*, resting on this sentence:
 
-⚠️ **STATED AS A HYPOTHESIS, NOT A MEASUREMENT.** It is consistent with every number above
-and with the code, and nothing here establishes it. It is falsifiable cheaply: instrument
-the wall time between `allocateRenderResources` returning and the first non-silent output
-sample, cold and warm, for both parts. **Leg R-1 should take that reading while it is in
-the file**, because it also tells us whether the sax case is cache-insensitive for the
-reason claimed or for some other one — and §15.5's pre-roll design depends on the answer.
+> ⛔ *"Where decode/parse dominates — 46 zones — warm and cold are the same number. Where
+> disk I/O dominates — the smaller track — warming it cuts the time by two thirds."*
+
+⛔ **FALSIFIED by round two.** The same 46-zone sax warmed across five renders in one
+session, monotonically, from 22.1 s of lost audio to 0.001 s. Cache-insensitivity was never
+a property of the sax part; it was a property of one pair of observations.
+
+⭐ **AND THE ARGUMENT UNDERNEATH IT WAS NEVER A MEASUREMENT — IT WAS AN ARGUMENT FROM CODE
+STRUCTURE**, which is why no appeal to build differences rescues it. The claim was that
+`OfflineRenderer` builds **fresh AU instances per render**, so every bounce re-parses and
+re-decodes the program from scratch *whatever the OS file cache holds*, so the sax case
+**cannot** warm. Round two says it does. Leg R-1 does not create cross-render retention,
+and the falsified claim was not "it happened not to warm" but "it is structurally unable
+to". A structural impossibility that is observed to happen is refuted outright.
+
+⚠️⚠️ **THE RETENTION MECHANISM IS NOT IDENTIFIED. THIS DOCUMENT DOES NOT HAVE ONE AND WILL
+NOT INVENT ONE.** What is actually established, by provenance:
+
+- **MEASURED:** successive renders in one process get monotonically better and converge on
+  the correct onset.
+- **MEASURED, in our code:** `OfflineRenderer` really does keep **its own registry** and
+  instantiate **fresh AU instances per render**
+  (`Sources/DAWEngine/OfflineRenderer.swift:119-135`, whose doc comment says so in as many
+  words: *"the bank loads AGAIN into this renderer's own registry: fresh AU instances per
+  render"*). Both facts hold at once, and together they say plainly that **something
+  survives an AU instance's lifetime.** What, is not known.
+- **UNVERIFIED CANDIDATE, offered only so the next investigator has somewhere to aim a
+  probe:** the plugin may hold **process-global cached state keyed by sample path**,
+  independent of instance lifetime. A static or singleton sample cache is an ordinary thing
+  for a sampler to own, and it would survive instance disposal exactly as observed. **There
+  is no evidence for this beyond its fitting the shape.** It was not tested. The OS file
+  cache is not excluded either — the structural argument that ruled it out is the one just
+  falsified, so it is back on the table with nothing said for or against it. Do not promote
+  this candidate to a mechanism by repeating it.
+- **UNRESOLVED:** round one's *"25.25 s cold, 25.25 s warm, exactly"* is still unexplained.
+  INFERRED, and it is the most that should be claimed: round two's plateau structure
+  (15.001 s twice, then 9.869 s twice) shows that **two consecutive renders landing on an
+  identical onset is a normal intermediate state of warming, not evidence of
+  cache-insensitivity.** Round one may simply have sampled a plateau.
+
+**What survives all of it — and the section's own conclusion does survive.** The defect is
+"the loader is still working while the render clock runs". Every number in both rounds is
+consistent with that, and it is what `renderingOffline` (§15.3) and a pre-roll (§15.5) each
+address. What does *not* survive is any claim about *which* bottleneck dominates *where*,
+and any design that depends on knowing.
+
+⚠️ **THE FALSIFIABLE READING IS STILL UNTAKEN, AND IT IS NOW OWED BY LEG R-2.** The original
+text asked Leg R-1 to instrument the wall time between `allocateRenderResources` returning
+and the first non-silent output sample, cold and warm, for both parts. **R-1 shipped
+without taking it.** That reading is now worth more, not less: it is the cheapest
+instrument that could identify the retention mechanism above, and §15.5's pre-roll design
+depends on the answer.
 
 ### 15.2 The mechanism, and why it is a hosting-design question
 
@@ -1107,7 +1350,7 @@ correct behaviour for a sampler whose data is not ready is **to output silence r
 miss the deadline**. It is doing exactly what a well-written realtime sampler should do.
 **We never told it this was not a realtime context.**
 
-### 15.3 ⭐ THE FINDING — Apple has a property for precisely this, and this host has never set it
+### 15.3 ⭐ THE FINDING — Apple has a property for precisely this, and this host had never set it (⚠️ IT DOES NOW)
 
 `AUAudioUnit.h:1024-1035`, verbatim:
 
@@ -1123,22 +1366,44 @@ miss the deadline**. It is doing exactly what a well-written realtime sampler sh
 That parenthesis is a description of the reported defect, written by Apple, years in
 advance.
 
-**Measured, positive-controlled 2026-08-20: this property is never set anywhere in the
-tree.** Grepped across `Sources/` and `Tests/`, each spelling read by its **own** exit
-status: `renderingOffline` → exit 1 / 0 lines; `isRenderingOffline` → exit 1 / 0 lines;
-`kAudioUnitProperty_OfflineRender` → exit 1 / 0 lines. Positive control
-`maximumFramesToRender` → exit 0 / 11 lines.
-⚠️ **Stated honestly because it would otherwise be a false zero:** a bare `OfflineRender`
-substring returns **244 lines** — every one of them our own `OfflineRenderer` *class*
-name, bar two test-function names (`everyOfflineRenderCarriesLiveState`,
-`headlessOfflineRenderCounts`), verified by filtering `OfflineRenderer` out and reading
-what survived. None is the AU property. Grep the property spellings, not the word.
+⛔⛔ **THE MEASURED ZERO BELOW IS A PRE-R-1 MEASUREMENT AND IS NO LONGER TRUE OF THIS TREE.
+IT IS THE MOST QUOTABLE PARAGRAPH IN §15 AND WOULD BE QUOTED WRONG.** R-1 shipped in
+`412cb33`; the property **is** set today. Re-grepped 2026-08-20, post-R-1: the spellings now
+return matches in `Sources/DAWEngine/AudioUnits/AUHostRegistry.swift`,
+`Sources/DAWEngine/OfflineRenderer.swift`, `Sources/DAWEngine/AudioUnits/HostedAUInstrument.swift`,
+`Sources/DAWEngine/Effects/HostedAUEffect.swift` and
+`Tests/DAWEngineTests/OfflineRenderReadinessTests.swift`. **What is preserved below is the
+FINDING as it stood when this defect was diagnosed** — that the host had never set the
+property — because that is the fact the design turns on. ⚠️ **Setting it did not fix the
+defect** (§15.5 status block). Do not read this paragraph as current state.
+
+> **Measured, positive-controlled 2026-08-20, BEFORE Leg R-1: this property is never set
+> anywhere in the tree.** Grepped across `Sources/` and `Tests/`, each spelling read by its
+> **own** exit status: `renderingOffline` → exit 1 / 0 lines; `isRenderingOffline` → exit
+> 1 / 0 lines; `kAudioUnitProperty_OfflineRender` → exit 1 / 0 lines. Positive control
+> `maximumFramesToRender` → exit 0 / 11 lines.
+> ⚠️ **Stated honestly because it would otherwise be a false zero:** a bare `OfflineRender`
+> substring returns **244 lines** — every one of them our own `OfflineRenderer` *class*
+> name, bar two test-function names (`everyOfflineRenderCarriesLiveState`,
+> `headlessOfflineRenderCounts`), verified by filtering `OfflineRenderer` out and reading
+> what survived. None is the AU property. Grep the property spellings, not the word.
 
 Note the ordering requirement: **before** `allocateRenderResources`. That lands it inside
-the registry's existing restore-order contract, which today reads
-maxFrames → format → state → allocate and must become
-**maxFrames → format → state → `renderingOffline` → allocate**
-(`AUHostRegistry.swift:590-621` effects, `:761-800` instruments).
+the registry's existing restore-order contract, which before R-1 read
+maxFrames → format → state → allocate.
+
+✅ **AS SHIPPED, AND IT IS NOT THE ORDER THIS SECTION PROPOSED.** R-1 sets the flag
+**before the state restore**, not after it —
+**maxFrames → format → `renderingOffline` → state → allocate** — at
+`Sources/DAWEngine/AudioUnits/AUHostRegistry.swift:699` (effects) and **`:879`**
+(instruments), through the shared
+`applyOfflineRenderFlag(to:rendersOffline:)` (**`:330-341`**). The deviation is deliberate
+and argued in the code: `fullStateForDocument =` is itself what kicks off a plugin's
+secondary-thread sample loading, so telling the unit it is offline *first* can only widen
+the window in which the flag matters. Both orders satisfy Apple's only stated requirement.
+**Line references measured 2026-08-20; the pre-R-1 refs this section used to carry
+(`:590-621` effects, `:761-800` instruments) have drifted with R-1's own edits and must not
+be re-quoted.**
 
 ### 15.4 What the AU API does and does not give us as a start gate
 
@@ -1148,7 +1413,7 @@ Enumerated from `AUAudioUnit.h` on this machine, not from memory:
 |---|---|---|
 | `renderResourcesAllocated` (`:446-449`) | *"returns YES if the unit has render resources allocated"* — a mirror of the call we already awaited | **No.** It is true the instant `allocateRenderResources` returns, with zero samples loaded. |
 | `allocateRenderResourcesAndReturnError` (`:426-434`) | the call itself | **No** — already awaited; that is the whole problem. |
-| **`renderingOffline`** (`:1024-1035`) | tells the AU there is no deadline, so it **may block instead of dropping** | **The one real lever.** Not a *signal* — a *request*, and Apple's word is "may". |
+| **`renderingOffline`** (`:1024-1035`) | tells the AU there is no deadline, so it **may block instead of dropping** | **The one real lever — and MEASURED INSUFFICIENT.** Not a *signal* but a *request*, and Apple's word is "may". R-1 shipped it; **DecentSampler declines** (§15.5), so the lever exists and this plugin is not attached to it. |
 | `allParameterValues` (`:588`) | a KVO pseudo-property for parameter-tree change coalescing | **No.** Parameter readiness, not content readiness. |
 | `isLoadedInProcess` (`:931-947`) | where the unit is hosted | **No** — locality, unrelated. |
 | `parameterTree`, `fullState` | present at allocate | **No.** A plugin's parameters are ready long before its samples. |
@@ -1158,13 +1423,37 @@ Enumerated from `AUAudioUnit.h` on this machine, not from memory:
 **Conclusion: there is no general "my samples are loaded" signal in the AU API, and this
 is not an oversight in our host — Apple does not define one.** Any host that renders
 faster than realtime has to solve it structurally. `renderingOffline` is the mechanism
-Apple provides *instead* of a signal: it does not tell you when the AU is ready, it makes
-the AU's not-being-ready stop mattering.
+Apple provides *instead* of a signal: it does not tell you when the AU is ready, it is
+*supposed* to make the AU's not-being-ready stop mattering.
+
+⛔ **RIDER, MEASURED 2026-08-20 — that last clause was an over-claim and R-1 falsified it.**
+`renderingOffline` makes not-being-ready stop mattering **only for a plugin that honours
+it**, and the plugin in the defect report does not. There is therefore **no API-level answer
+at all** here: Apple defines no load-state signal (this subsection), no reliable reset
+(§15.5), and the one lever is advisory. The remaining answers are all structural — a
+pre-roll (§15.5) or not building fresh instances per render (§15.7). ⚠️ **And the same wall
+runs in both directions:** a host can neither ask "are you loaded?" nor say "become
+unloaded", which is why §15.8's warm-render non-determinism is hard to attack directly.
 
 ### 15.5 THE DECISION — two legs, cheap one first
 
+> ✅ **STATUS UPDATE 2026-08-20 — LEG R-1 IS SHIPPED AND IT DID NOT CURE THE DEFECT.**
+> It landed in commit `412cb33` as `AUHostRegistry.rendersOffline` (a `public let`, not the
+> proposed `var` — immutability makes "the live registry never sets it" unforgettable
+> rather than merely conventional), applied through
+> `AUHostRegistry.applyOfflineRenderFlag(to:rendersOffline:)` before `allocateRenderResources`
+> in both prepare bodies, with `Tests/DAWEngineTests/OfflineRenderReadinessTests.swift`
+> pinning it. **The tester verified the wiring themselves rather than assuming it**, and it
+> is correct. DecentSampler simply does not honour the flag — which is exactly what Apple's
+> *"may"* permits, and exactly what our own comment at
+> `Sources/DAWEngine/AudioUnits/AUHostRegistry.swift:299-308` predicted, naming Leg R-2's
+> discardable pre-roll as the answer for the residue.
+> ⛔ **CONSEQUENCE: LEG R-2 IS NO LONGER OPTIONAL. It is the only remaining proposal
+> against a live, measured defect that destroys the head of real bounces.** Everything
+> below that reads as "R-1 first, R-2 if needed" should be read as "R-2, now".
+
 **Leg R-1 (~4 h) — set `renderingOffline` on the offline registry's instances, before
-allocate.**
+allocate. ✅ SHIPPED; see the status block above for what it bought and what it did not.**
 
 - `AUHostRegistry` gains one stored flag (proposed `var rendersOffline = false`), set by
   `OfflineRenderer` on **its own** registry instance. The live registry never sets it, and
@@ -1185,24 +1474,65 @@ allocate.**
      **unless `renderingOffline` was set before allocate**, and emits signal otherwise.
      Assert the bounce head is non-silent with the flag and silent without it.
      ⚠️ **The obvious gate — "bounce a real lazy-loading plugin, cold, assert non-silence" —
-     was drafted here first and is REJECTED: "cold" is not reproducible inside a test
-     process, and per §15.1 the sax case may not be cache-sensitive at all.** That gate can
-     pass vacuously, which is the exact failure this project has a named law about. The stub
-     is deterministic, headless, and tests **the host's behaviour** rather than a plugin's
-     cache state.
+     was drafted here first and is REJECTED.** ⛔ **ITS ORIGINAL SECOND REASON WAS
+     FALSIFIED and is struck:** ~~"per §15.1 the sax case may not be cache-sensitive at
+     all"~~ — round two shows it *is*, monotonically. The rejection stands anyway, and the
+     replacement reason is **stronger** than the one it replaces: a real-plugin gate is not
+     merely irreproducible, it is **order-dependent and monotonically self-defeating**. The
+     first run in a session sees 22.1 s of lost audio; the fourth sees 0.001 s. The same
+     assertion therefore passes or fails on **how many renders ran before it**, which no
+     test in this tree controls, and it drifts green as a suite grows. That gate can pass
+     vacuously, which is the exact failure this project has a named law about. The stub is
+     deterministic, headless, and tests **the host's behaviour** rather than a plugin's
+     accumulated cache state.
   4. Negative control — the same gate must FAIL with the flag forced off, or it proves
      nothing.
   5. A real-plugin cold bounce stays valuable as an **observation, explicitly NON-GATING**,
      recorded with its numbers in the close-out. It is evidence about the world; the stub is
      the assertion about us.
 
-**Leg R-2 (2–3 d) — the discardable pre-roll, for plugins that ignore the property.**
+**Leg R-2 (2–3 d) — the discardable pre-roll, for plugins that ignore the property.
+⛔ NO LONGER CONDITIONAL: R-1 shipped, DecentSampler ignores the flag, and this is now the
+only standing proposal against a live defect.**
 
-Apple's word is *"may"*. A plugin that ignores `renderingOffline` still drops, so the
-general answer is a pre-roll — and the tester proposed exactly this. One correction to
-their wording, and it matters: **a *silent* pre-roll does not work.** Lazy loads are
-triggered by note-ons, so the pre-roll must play the real notes; what is discarded is the
-**output**, not the input.
+Apple's word is *"may"*, and we now know of one plugin that took the *"may not"* branch. A
+plugin that ignores `renderingOffline` still drops, so the general answer is a pre-roll —
+and the tester proposed exactly this. One correction to their wording, and it matters:
+**a *silent* pre-roll does not work.** Lazy loads are triggered by note-ons, so the pre-roll
+must play the real notes; what is discarded is the **output**, not the input.
+
+⛔⛔ **HOW R-2 MUST BE COSTED — a methodological correction from the tester, recorded here
+because it changes the pass condition and would otherwise be discovered after the work is
+built.**
+
+**Do NOT cost a fix as "does the dropout go away."** Fresh instantiation is not buying
+determinism today: two fully-warm renders already fail to null at **−3.07 dB** (§15.8). A
+change could remove the dropout and **worsen reproducibility at the same time**, and that
+is a bad trade nobody would notice under a dropout-only criterion. Cost R-2 — and any
+AU-instance-reuse work, §15.7 — against **both**:
+
+- **(a) COLD CORRECTNESS.** Run 1 lands at **9.869 s**, with **no warming renders ahead of
+  it**.
+- **(b) WARM DETERMINISM.** Warm-vs-warm nulls **better than −3.07 dB**.
+
+⚠️ **CRITERION (a) IS SINGLE-SHOT PER SESSION STATE, AND THIS IS THE TRAP.** The warming
+series means any earlier render in the same process invalidates it, and the plateau
+structure (31.974 → 15.001 → 15.001 → 9.869 → 9.869) means a **second** attempt passes for
+free at a partial value and a **fourth** passes outright for reasons that have nothing to
+do with the fix. An implementing agent who runs this gate in a loop will watch it go green
+and ship. **Run (a) once, first, in a fresh process, and record the process's render count
+alongside the number.** This is the same vacuous-gate shape the stub-AU decision above
+already turns on.
+
+⚠️ **AND THERE IS NO RELIABLE WAY TO RESET A THIRD-PARTY AU BETWEEN RENDERS.** Shapes (a)
+and (c) below both say *"then reset"*. `AUAudioUnit.reset()` is a DSP-state reset with no
+contract about loaded content or internal caches, and there is no API that says "return to
+the state you were in at allocate". This is **the same wall §15.4 hit** looking for a
+load-state signal, in the opposite direction: Apple defines neither "am I loaded" nor
+"become unloaded". Whatever R-2 ships must state what its reset step actually guarantees,
+which today is *nothing verifiable*. §15.8's −3.07 dB residual is consistent with exactly
+this — unreset plugin state carried between offline renders — and is the reason criterion
+(b) exists.
 
 Three shapes, and the recommendation:
 
@@ -1221,19 +1551,40 @@ Three shapes, and the recommendation:
   render for real. Cost is bounded by the head window and a hard pass cap rather than by
   the full 296 s.
   ⛔ **A BYTE-IDENTITY STOP CONDITION IS WRONG AND AN EARLIER DRAFT OF THIS SECTION
-  PROPOSED ONE. The retraction is recorded rather than edited away.** The argument was
-  *"renders 2 and 3 at equal warmth were byte-identical, so convergence terminates"* — but
-  those were **separate render sessions with separate AU instances**, and the pre-roll
-  converges across **passes within one session on one live instance**. Cross-session
-  determinism is not evidence about the within-session property. **And it fails on the very
-  datapoint that motivated this section:** the sax bounce is byte-identical cold and warm at
-  25.25 s, so a byte-identity test would declare convergence after pass 2 having warmed
-  nothing — **the criterion is satisfied by a defect that is merely deterministic.**
-  A usable stop condition must be measured on a quantity that **moves when loading
-  completes**: head-window **energy** (or first-non-silent-sample index) rising and then
-  stabilising across passes — with **non-silence at the head as a precondition**, so
-  "stable at zero" can never read as converged. That is the shape to build if (c) is built
-  at all.
+  PROPOSED ONE. The retraction is recorded rather than edited away.** The first half of the
+  original argument stands: those were **separate render sessions with separate AU
+  instances**, and the pre-roll converges across **passes within one session on one live
+  instance** — cross-session determinism is not evidence about the within-session property.
+
+  ⛔⛔ **THE SECOND HALF WAS FALSIFIED, AND ITS FAILURE MODE IS THE EXACT OPPOSITE OF WHAT
+  THIS DOCUMENT CLAIMED. THE INVERSION IS THE POINT; READ IT BEFORE DESIGNING THE
+  REPLACEMENT.** The struck argument was:
+
+  > ⛔ *"And it fails on the very datapoint that motivated this section: the sax bounce is
+  > byte-identical cold and warm at 25.25 s, so a byte-identity test would declare
+  > convergence after pass 2 having warmed nothing — the criterion is satisfied by a defect
+  > that is merely deterministic."*
+
+  **That datapoint is false. The sax bounce is NEVER byte-identical** — two *fully warm*
+  renders, runs 4 and 5, both landing on the correct 9.869 s onset, leave a **−3.07 dB**
+  peak residual against each other (controlled: self-null gives −inf; §15.1, §15.8).
+
+  ⭐ **So the criterion does not terminate EARLY. It NEVER TERMINATES.** Successive renders
+  never become byte-identical, so a byte-identity stop condition runs to its pass cap on
+  every bounce, every time — a 2× cost becomes an N× cost, and "convergence not reached"
+  becomes the permanent answer. **A reader who remembers only "we rejected byte-identity
+  because it stops too early" will build the replacement backwards**, guarding against
+  premature termination when the real hazard is non-termination.
+
+  **The conclusion is unchanged and is if anything firmer: do not use byte identity.** A
+  usable stop condition must be measured on a quantity that **moves when loading completes
+  and then stops moving even though the samples do not**: head-window **energy** (or the
+  first-non-silent-sample index) rising and then stabilising across passes, **to a
+  tolerance**, never to equality — with **non-silence at the head as a precondition**, so
+  "stable at zero" can never read as converged, and with a **hard pass cap that reports
+  `converged: false`** rather than looping. That is the shape to build if (c) is built at
+  all. Note that the −3.07 dB residual sets a floor on any tolerance chosen: a threshold
+  tighter than the plugin's own run-to-run noise is another way to never terminate.
 
 Whichever ships, it must be **observable**: the bounce result should carry how many
 pre-roll passes ran and whether convergence was reached. A silent 2× render-time increase
@@ -1258,9 +1609,13 @@ directions**, and nothing in Apple's documentation reconciles them:
 
 **Nobody in this tree knows which.** Consequences, and they are binding:
 
-1. **Leg R-1 must land before Leg 5**, so the in-process baseline is fixed and correct
+1. **Leg R must land before Leg 5**, so the in-process baseline is fixed and correct
    first. Fixing a bounce defect and flipping a hosting default in the same cycle would
-   make an ambiguous result uninterpretable.
+   make an ambiguous result uninterpretable. ⚠️ **UPDATED 2026-08-20: R-1 has landed and
+   the baseline is still NOT correct** — it did not cure the defect (§15.5). The
+   prerequisite therefore transfers to **R-2** (or to whatever G0 costing replaces it,
+   §15.7). "R-1 shipped" is not "the baseline is fixed", and a close-out must not read it
+   that way.
 2. **G4 (§3.1) is widened**: it must be measured **with `renderingOffline` set and a
    lazy-loading plugin**, cold and warm, not merely "does a faster-than-realtime pull
    survive".
@@ -1270,6 +1625,99 @@ directions**, and nothing in Apple's documentation reconciles them:
    loads, where isolation buys much less because a bounce is repeatable and a lost bounce
    is not a lost take). The registries are **already separate**, so this costs almost
    nothing structurally. Record it as the fallback rather than discovering it late.
+
+### 15.7 ⭐⭐ THE DROPOUT IS PATH-SPECIFIC, AND THE PATHS DIFFER BY ONE INSTANTIATION
+
+**Added 2026-08-20. This is the finding that puts a cheaper answer in front of the whole
+milestone, and §3.1's G0 exists because of it.**
+
+**MEASURED (tester, shipped build `412cb33`):** the defect does not affect every render
+verb. `render_stems` and `track_bounce_in_place` **both drop audio**. `render_mixdown` was
+**correct from the very first cold call of the session** — no warming, no pre-roll, no
+flag beyond what R-1 already sets.
+
+**MEASURED (in our code, line references re-verified 2026-08-20 rather than quoted from
+memory):** the working path instantiates the hosted plugin **once**; the two failing paths
+instantiate it **twice and throw the first one away**.
+
+| verb | route | hosted-AU instantiations |
+|---|---|---|
+| `render_mixdown` | `ProjectStore.renderMixdown` (`Sources/DAWCore/ProjectStore.swift:6373`) → `AudioEngine.renderMixdown` (`Sources/DAWEngine/AudioEngine.swift:2229`) → `renderOffline(forcedCompensationTargets: nil)` (`:2253`) → **one** `OfflineRenderer()` (`:2277`) | **1** |
+| `render_stems` | `Sources/DAWCore/ProjectStore+Render.swift:281` calls `engine.offlineCompensationTargets` **first**, then one `renderOffline` per stem descriptor | **1 throwaway + N** |
+| `track_bounce_in_place` | `Sources/DAWCore/ProjectStore+Bounce.swift:107` calls `engine.offlineCompensationTargets` **first**, then `renderOffline` | **1 throwaway + 1** |
+
+The throwaway is `AudioEngine.offlineCompensationTargets`
+(`Sources/DAWEngine/AudioEngine.swift:2317-2325`): it builds an `OfflineRenderer()` at
+**`:2322`**, calls `prepareAudioUnits` on it — a full instantiate-and-allocate of every
+hosted plugin in the session — reads a compensation plan out of it, and **discards it**,
+before the real renderer is constructed at `:2277`.
+
+⚠️ **The negative half of that claim is positive-controlled.** Grepping
+`offlineCompensationTargets` across `Sources/` and `Tests/` returns the two production call
+sites above, two `EngineProtocol` declarations, and five test sites — and **not**
+`ProjectStore.swift`. The pattern demonstrably finds things, so its silence on the mixdown
+path is an absence rather than a broken probe.
+
+**⚠️ PROVENANCE — the causal step is INFERRED, and one thing about it does not fit.** That
+the two double-instantiating verbs are exactly the two that drop is a strong correlation
+across the only three verbs there are. But a throwaway that *prepares* a plugin should
+naively **help** a later render, not hurt it — and §15.1 has just established that
+something warms across instances. The candidate resolution is that
+`prepareAudioUnits` allocates but **never renders**, so it triggers no note-on-driven lazy
+loads at all; whatever it costs, it costs in instance churn rather than buying warmth. That
+is a guess. **Nobody has run the discriminating experiment**, which is cheap: make the two
+failing verbs reuse one renderer (or take the plan off the real one) and re-measure.
+⛔ Re-measure against **both** §15.5 criteria, not just the dropout — that is the whole
+point of the costing rule recorded there.
+
+**⭐⭐ THE STRATEGIC CONSEQUENCE, STATED PLAINLY.** The silent bounce head (§15) and the
+app-killing segfault (§1) may be **two symptoms of one design decision: fresh AU instances
+per render.** The dropout tracks instantiation count across verbs. The crash's leading
+hypothesis (§1.2) is our per-render instantiate/teardown racing the plugin's own deferred
+main-run-loop work, and the crash reports carry per-instance JUCE thread counts in
+multiples. **Reusing an AU instance across renders may address both, and it is far cheaper
+than the out-of-process milestone this document proposes** — days of lifecycle work against
+weeks of RT-risky IPC work, with no amendment to the render-thread invariant (§5) required.
+
+⛔ **That option deserves costing BEFORE this milestone is committed to.** It is **G0** in
+§3.1, and it is the one gate that fails by nobody running it. It is not a rival design in
+§4 — §4 lists alternatives that lose, and this one does not lose; it may make Legs 3–7
+unnecessary the same way Leg −1 might (§9.1). Note also that instance reuse cuts **against**
+this document's own §5.4/§15.5 comfort that the offline registry is disposable: a reused
+instance carries state between renders, which is exactly the hazard §15.8 has already
+measured. It is cheaper, not free.
+
+### 15.8 ⛔ OPEN FINDING — two fully-warm renders of the same material do not null
+
+**Its own defect, not a footnote to the dropout. Filed 2026-08-20; cause not chased.**
+
+**MEASURED:** two stem renders of a hosted AU with **identical, correct** first-note onsets
+(runs 4 and 5 of §15.1, both at 9.869 s) differ by a **−3.07 dB peak residual** when nulled
+against each other. The method is controlled: nulling a file against **itself** gives
+**−inf**, so the instrument can report a true null and did not.
+
+**Why this matters independently of the silent head:** a bounce is supposed to be
+reproducible. Two identical requests against an unchanged session produce audibly different
+files, at a residual far too large to be dither or rounding. Every gate in this tree that
+compares one render against another — stem-sum partitions, WYSIWYG bounce comparisons, the
+Leg 5 exit criteria — is measuring on top of this, and none of them knew.
+
+**Provenance:**
+- **MEASURED:** the residual and the control.
+- **UNVERIFIED, would fit:** unreset plugin state carried between offline renders. §15.5
+  records that there is no reliable way to reset a third-party AU, which is what makes this
+  candidate plausible and also what makes it hard to test directly.
+- **NOT ESTABLISHED:** whether this is specific to DecentSampler, to hosted AUv2s, to
+  samplers with background loaders, or general to any hosted plugin. One render of a
+  hosted **Apple** unit, twice, would narrow it in minutes and has not been done.
+- **NOT ESTABLISHED:** whether R-1 caused it, was innocent of it, or masked it. Round one
+  reported byte-identical repeats on the pre-R-1 build; round two contradicts that on the
+  post-R-1 build — but round one's comparison method is not recorded and may never have
+  been a null (§15.1). **Do not assume R-1 introduced this.**
+
+**It bounds every design in §15.5.** Any convergence criterion, any "the fix worked"
+comparison, and any regression gate built on bounce-vs-bounce identity has a **−3.07 dB
+noise floor** under it until this is chased.
 
 ---
 

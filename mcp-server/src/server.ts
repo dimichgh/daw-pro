@@ -909,6 +909,11 @@ const samplerCrossfadeSchema = z
           "finishes fading out. See `velOutLo`."
       ),
   })
+  // `.strict()` (m26/sax-team defect B precedent — see `samplerZonePatchSchema`
+  // below): without it a typo'd field inside `crossfade` (e.g. "ccInL0") is
+  // silently stripped by zod's default parse mode instead of rejected, and
+  // the call still reports success with one fewer field than intended.
+  .strict()
   .optional()
   .describe(
     "Dynamic-layer crossfade for THIS zone — the SFZ pp/mf/ff-layer technique: fade " +
@@ -1202,7 +1207,16 @@ const samplerZoneSchema = z.object({
         "end)."
     ),
   crossfade: samplerCrossfadeSchema,
-});
+})
+  // `.strict()` (sax-team defect B, 2026-08-20): closes the same hole one
+  // level up from `samplerCrossfadeSchema` above — a typo'd field inside one
+  // element of `track_set_instrument`'s wholesale `sampler.zones` array (e.g.
+  // "minPtich") would otherwise be silently stripped instead of rejected.
+  // `samplerZonePatchSchema` below reuses this schema's `.shape` (not this
+  // schema itself), so its own independent `.strict()` is unaffected either
+  // way — this fixes the SEPARATE `zones` (replace) path, not `zonePatches`
+  // (merge), which was already closed.
+  .strict();
 
 const samplerSchema = z
   .object({
@@ -1313,7 +1327,56 @@ const samplerSchema = z
           "at its low cutoff is dark, not silent). Only takes effect once " +
           "`expressionFilterDepth` is above 0."
       ),
+    bendRangeSemitones: z
+      .number()
+      .min(0)
+      .max(48)
+      .optional()
+      .describe(
+        "How many semitones a FULL pitch-bend deflection (raw 0 or 16383 on a pitch-bend " +
+          "controller lane; 8192 is centre) moves the note on the built-in Sampler. " +
+          "OMITTED = 2, the General MIDI default — and it stays 2 on purpose: every bend " +
+          "lane already written in every existing project was authored against ±2, so a " +
+          "wider default would multiply all of them silently on load. Set it per " +
+          "instrument instead. For a WIND library, measurement on 36 sax phrases (131 " +
+          "note boundaries) says ±2 leaves 28 boundaries audibly rough, ±4 leaves 6, and " +
+          "±6 leaves 0 — the curve SATURATES at 6, so 6 is the value to reach for; 12 " +
+          "buys full-range portamento but no further smoothness. 0 makes bend inert. " +
+          "⚠️ If you also generate vibrato with clip_apply_breath_contour or " +
+          "clip_apply_effort_shape, pass the SAME figure to that tool's own " +
+          "`bendRangeSemitones` — it converts cents to bend units and will scale every " +
+          "vibrato by the ratio if the two disagree (you get a warning when they do)."
+      ),
+    voiceMode: z
+      .enum(["poly", "mono"])
+      .optional()
+      .describe(
+        "How many notes the Sampler lets sound at once. Omitted = `poly` (the existing " +
+          "behaviour, 64 voices). `mono` is LAST-NOTE PRIORITY: a new note always takes " +
+          "over from the one sounding, because a wind line is one airstream and the " +
+          "newest note is the one being played. Use it for sax/flute/trumpet/solo-lead " +
+          "parts. Under the slight note OVERLAPS that legato writing needs, mono " +
+          "retriggers to the newest pitch — the overlap becomes the slur. A note-off for " +
+          "a note that has already been superseded is discarded: releasing an older " +
+          "still-held key does NOT fall back to it, because on a wind instrument that " +
+          "note ended when the player moved."
+      ),
   })
+  // `.strict()` — DEFECT B (sax-team, 2026-08-20): `registerTool`'s wrapper
+  // only applies `.strict()` at the TOP level of a tool's own inputSchema
+  // (see that function's header comment), so a NESTED object like this one
+  // fell back to zod's default "strip" parse mode. `track_set_instrument`
+  // ({..., sampler: samplerSchema.optional()}) accepted `sampler.zonePatches`
+  // — a real, working key one level down at the RAW control-protocol layer
+  // (`Commands.swift`'s `parseSampler`) but NOT a key this schema ever
+  // recognized — stripped it silently, and reported success having changed
+  // nothing. `instrument_set_sampler_zones`'s own `zonePatches` path (via
+  // `samplerZonePatchSchema`, already `.strict()`) was and remains the
+  // supported MCP route to that merge; this schema deliberately does not
+  // re-expose `zonePatches`, so it must now REJECT the key loudly instead of
+  // eating it — additive-only in effect, since no caller had a WORKING call
+  // that depended on this silent drop.
+  .strict()
   .describe(
     "Sampler configuration, used only when `kind` is (or already is) `sampler`. Every field " +
       "here is independently a PARTIAL update — omit a field and it keeps its current value " +
@@ -2305,20 +2368,31 @@ registerTool(
       "sampler that IS configured with zero zones (the deliberate `zones: []` clear) is a " +
       "legal answer, not a refusal: you get `zoneSummary.count: 0` back. Returns {trackId, " +
       "kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary, " +
-      "effectiveGlobals?}. " +
+      "effectiveGlobals?, warnings?}. " +
       "⚠️ READ `effectiveGlobals` BEFORE TRUSTING top-level `release`/`attack`/`oneShot`. " +
       "Those three are the STORED globals, and a zone that sets its own value WINS over " +
       "them — so on an imported library they are routinely numbers the engine never reads. " +
-      "(Field report 2026-08-20: this verb answered `release: 3.4465` for an instrument " +
-      "that audibly released in 0.5 s, because the imported SFZ authored `ampeg_release` in " +
-      "its `<global>` block and every region inherited it. The engine was right; the answer " +
-      "was not.) `effectiveGlobals` is {release, attack, oneShot}, each " +
+      "ANY per-zone value can do this, whichever way the sampler was built: a hand-authored " +
+      "zone over the wire, a `.dspreset` region (whose `attack`/`release` attributes carry " +
+      "no special prefix), or an SFZ region/group/global (whose native opcode names are " +
+      "`ampeg_attack`/`ampeg_release`) — SFZ is not the only way in. (Field report 2026-08-20: " +
+      "this verb answered `release: 3.4465` for an instrument that audibly released in 0.5 s, " +
+      "because the imported SFZ authored `ampeg_release` in its `<global>` block and every " +
+      "region inherited it. The engine was right; the answer was not.) `effectiveGlobals` is " +
+      "{release, attack, oneShot}, each " +
       "{global, zonesOverriding, zonesInheriting, globalIsInert, effectiveValues, " +
       "effectiveMin?, effectiveMax?, effectiveValuesTruncated?, note?}. " +
       "`globalIsInert: true` means NO zone inherits that global: writing it with " +
       "instrument_set_sampler_param will be accepted and change nothing you can hear — " +
       "change the per-zone values instead (instrument_set_sampler_zones, patching `release` " +
-      "/ `attack` / `oneShot` per zone). `effectiveValues` is the list of values the engine " +
+      "/ `attack` / `oneShot` per zone). `note` (present only when `globalIsInert`) says so in " +
+      "prose and, for `release`/`attack`, names the SFZ opcode (`ampeg_release`/`ampeg_attack`) " +
+      "ONLY when `sourcePath` actually ends in `.sfz` — never for a hand-built sampler or a " +
+      "`.dspreset` import, which would make the opcode name meaningless. Top-level `warnings` " +
+      "(a string array, present only when at least one global is inert) restates the same " +
+      "fact with BOTH the stored and the actually-applied number inline, so it is impossible " +
+      "to miss even for a caller that only reads the top level and never descends into " +
+      "`effectiveGlobals` at all. `effectiveValues` is the list of values the engine " +
       "will actually apply across the zones, ascending, and is the number to quote to a " +
       "user; it is meaningful in the MIXED case too (some zones overriding, some still " +
       "tracking the global), which no single boolean can describe. It caps at 8 distinct " +
@@ -2388,9 +2462,11 @@ const samplerGlobalParamSchema = z
     "expressionModDepth",
     "expressionFilterDepth",
     "expressionFilterCC",
+    "bendRangeSemitones",
+    "voiceMode",
   ])
   .describe(
-    "Which Sampler GLOBAL to set — exactly one per call, matching one of the seven fields " +
+    "Which Sampler GLOBAL to set — exactly one per call, matching one of the nine fields " +
       "track_set_instrument's own `sampler` object carries at this level (everything else " +
       "there, i.e. `zones`, is per-zone and out of reach of this narrower tool). `oneShot` " +
       "(boolean): true = every triggered sample always plays to completion regardless of " +
@@ -2408,18 +2484,25 @@ const samplerGlobalParamSchema = z
       "filter — NIL/0 IS OFF, the filter branch is skipped entirely, not run at unity. " +
       "`expressionFilterCC` (integer 0-127): which CC drives that filter sweep; omitted/nil " +
       "= 11 (expression, the same controller that already drives loudness) — set it to 1 " +
-      "or 2 to drive brightness from mod wheel/breath instead. See track_set_instrument's " +
-      "`sampler` object for the full field-by-field description of each."
+      "or 2 to drive brightness from mod wheel/breath instead. `bendRangeSemitones` " +
+      "(number 0-48): how many semitones a full pitch-bend deflection moves the note; " +
+      "omitted/nil = 2 (the General MIDI default, and what every already-authored bend " +
+      "lane assumes) — 6 is the measured saturation point for expressive wind writing. " +
+      "`voiceMode` (STRING, \"poly\" or \"mono\" — the one param here that takes a string): " +
+      "`mono` is last-note priority, for sax/flute/solo-lead lines. See " +
+      "track_set_instrument's `sampler` object for the full field-by-field description of " +
+      "each."
   );
 
 registerTool(
   "instrument_set_sampler_param",
   {
-    title: "Set one Sampler global (oneShot/attack/release/gain/expression*)",
+    title: "Set one Sampler global (oneShot/attack/release/gain/expression*/bend range/voice mode)",
     description:
       "Set exactly ONE global knob on a track's built-in Sampler — `oneShot`, `attack`, " +
-      "`release`, `gain`, `expressionModDepth`, `expressionFilterDepth`, or " +
-      "`expressionFilterCC` — without touching anything else on the sampler. This is a " +
+      "`release`, `gain`, `expressionModDepth`, `expressionFilterDepth`, " +
+      "`expressionFilterCC`, `bendRangeSemitones` or `voiceMode` — without touching " +
+      "anything else on the sampler. This is a " +
       "thin, narrower wrapper around track_set_instrument {sampler: {<param>: value}}: the " +
       "whole reason it exists is so you don't have to know that a partial sampler update is " +
       "safe (added m26-g/h) — this call is GUARANTEED to leave the track's zones, " +
@@ -2429,20 +2512,24 @@ registerTool(
       "track's active instrument kind is `sampler` (see instrument_describe_sampler's " +
       "`kind` field), though the value is still stored and takes effect the next time it is. " +
       "Sending a boolean for a numeric param (or vice versa) is a readable error naming the " +
-      "mismatch; out-of-range numbers clamp silently through the same ranges " +
-      "track_set_instrument uses (see `param`'s own description for each range). Returns " +
-      "the full resolved instrument object, same shape as track_set_instrument.",
+      "mismatch. Out-of-range numbers clamp silently for the six original numeric params, " +
+      "through the same ranges track_set_instrument uses; `bendRangeSemitones` and " +
+      "`voiceMode` instead REFUSE an out-of-range number / unrecognised mode with a " +
+      "readable error, so a typo cannot land as a silently-different setting (see " +
+      "`param`'s own description for each range). Returns the full resolved instrument " +
+      "object, same shape as track_set_instrument.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the instrument track, from project_snapshot."),
       param: samplerGlobalParamSchema,
       value: z
-        .union([z.number(), z.boolean()])
+        .union([z.number(), z.boolean(), z.string()])
         .describe(
-          "The new value: a boolean for `param: \"oneShot\"`, a number for every other " +
-            "`param` (seconds for `attack`/`release`, a 0-1 level for `gain`/" +
+          "The new value: a boolean for `param: \"oneShot\"`, the string \"poly\" or " +
+            "\"mono\" for `param: \"voiceMode\"`, and a number for every other `param` " +
+            "(seconds for `attack`/`release`, a 0-1 level for `gain`/" +
             "`expressionModDepth`/`expressionFilterDepth`, an integer CC 0-127 for " +
-            "`expressionFilterCC`). See `param`'s description for which type and range " +
-            "applies."
+            "`expressionFilterCC`, semitones 0-48 for `bendRangeSemitones`). See " +
+            "`param`'s description for which type and range applies."
         ),
     },
   },

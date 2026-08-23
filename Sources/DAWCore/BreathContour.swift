@@ -292,8 +292,21 @@ public enum BreathContour {
         public var bendSpacingSeconds: Double
 
         /// The instrument's pitch-bend range in semitones for the full ±8192
-        /// deflection. **Default 2** — `SamplerInstrument.bendRangeSemitones`
-        /// is exactly 2.0, so cents map exactly on the built-in sampler.
+        /// deflection. **Default 2**, which matches the built-in sampler's own
+        /// default, so cents map exactly on a sampler track that has not been
+        /// retuned.
+        ///
+        /// ⚠️ **NO LONGER GUARANTEED TO MATCH — this is an AUTHORING figure and
+        /// the sampler now has its own PLAYBACK figure.**
+        /// `SamplerParams.bendRangeSemitones` used to be a hard-wired 2.0 in the
+        /// engine; it is settable per instrument, and when the two disagree
+        /// every generated vibrato comes out scaled by exactly their ratio.
+        /// `ProjectStore.applyBreathContour` WARNS when it can see the mismatch
+        /// — see `MIDIControllerRouting.bendRangeMismatchWarning` for why they
+        /// are not auto-coupled, and for the one case it deliberately stays
+        /// silent about (a sampler whose range is unset: that is the GM 2.0 and
+        /// a lane authored at some other figure against it is a hazard that
+        /// predates the setting).
         ///
         /// ⚠️ **UNVERIFIED for hosted AUs.** `AUHostRegistry` never sets
         /// `kAUSamplerProperty`'s bend range, so a hosted AUSampler uses its own

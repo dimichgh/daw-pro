@@ -104,6 +104,60 @@ public enum MIDIControllerRouting {
         }
     }
 
+    /// One sentence when a bend lane is about to be AUTHORED against a
+    /// different bend range than the instrument will PLAY it at — or nil when
+    /// the two agree, which is the only case that existed before
+    /// `SamplerParams.bendRangeSemitones` was settable.
+    ///
+    /// ⚠️ THE COUPLING THIS EXISTS FOR. There are two independently-settable
+    /// bend-range figures in this codebase and they mean different things:
+    ///  · `BreathContour.Options.bendRangeSemitones` — an AUTHORING figure.
+    ///    `BreathContour` converts a musical width in cents into raw 14-bit
+    ///    bend units by dividing by `range × 100 / 8192`, so it must be told
+    ///    the range of the instrument the lane is FOR.
+    ///  · `SamplerParams.bendRangeSemitones` — a PLAYBACK figure: what the
+    ///    built-in sampler multiplies a raw deflection by.
+    ///
+    /// They were previously guaranteed equal because the playback one was a
+    /// hard-wired 2.0 and the authoring one defaults to 2. Making playback
+    /// settable is what lets them disagree, and the failure is silent and
+    /// exactly proportional: author a 35-cent vibrato at range 2, set the
+    /// sampler to 12, and it comes out 210 cents — a tone and a bit of wobble
+    /// where a singer's vibrato was asked for. Nothing crashes, nothing
+    /// refuses, and the numbers on every surface stay right.
+    ///
+    /// They are NOT auto-coupled, and that is a decision rather than an
+    /// omission: `BreathContour` is DAWCore lane math with no knowledge of the
+    /// track it is being written to, and lanes deliberately survive an
+    /// instrument switch (see this type's own header). Auto-coupling would also
+    /// silently rewrite a figure a caller passed explicitly. So: warn, name
+    /// both numbers, and let the caller decide.
+    ///
+    /// ⚠️ Fires ONLY when the sampler's range is EXPLICITLY set. A nil range is
+    /// the GM 2.0 the engine always used, and a lane authored at some other
+    /// figure against it is a pre-existing authoring hazard that predates this
+    /// field — warning about it here would change the response of projects
+    /// nobody edited, which is the same class of regression as changing the
+    /// default. It is named in the docs instead.
+    public static func bendRangeMismatchWarning(
+        authoredSemitones: Double,
+        instrument: InstrumentDescriptor?
+    ) -> String? {
+        guard let instrument, instrument.kind == .sampler,
+              let played = instrument.resolvedSampler.bendRangeSemitones,
+              abs(played - authoredSemitones) > 1e-9
+        else { return nil }
+        let ratio = authoredSemitones > 0 ? played / authoredSemitones : Double.infinity
+        let factor = ratio.isFinite
+            ? "\(((ratio * 100).rounded() / 100))×"
+            : "an undefined multiple of"
+        return "the bend lane was authored for a \(authoredSemitones)-semitone bend range but "
+            + "this track's sampler plays bend at \(played) semitones, so every bend — vibrato "
+            + "width included — will sound \(factor) what was asked for. Pass "
+            + "bendRangeSemitones: \(played) to match the instrument, or set the track's "
+            + "sampler.bendRangeSemitones to \(authoredSemitones) to match the lane"
+    }
+
     /// One sentence for a lane that will not sound, or nil when it will.
     /// Names the CONTROLLER and the REASON, so the caller can act without
     /// reading source. Shape follows the media-import warning idiom: a plain

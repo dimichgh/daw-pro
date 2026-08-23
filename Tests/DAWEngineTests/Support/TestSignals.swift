@@ -167,7 +167,9 @@ enum TestSignals {
 
     /// Dominant frequency estimated from interpolated zero-crossing spacing
     /// over `range`. Assumes a single steady tone within the window.
-    static func dominantFrequency(byZeroCrossings samples: [Float],
+    // Pure over its parameters (no shared state), so it is reachable from the
+    // free suites the @MainActor @Suite budget requires new tests to use.
+    nonisolated static func dominantFrequency(byZeroCrossings samples: [Float],
                                   sampleRate: Double, in range: Range<Int>) -> Double {
         var crossings: [Double] = []
         for index in range.dropFirst() {

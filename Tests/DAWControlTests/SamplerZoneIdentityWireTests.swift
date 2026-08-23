@@ -758,6 +758,31 @@ struct SamplerZoneIdentityWireTests {
         #expect(note.contains("NOT"))
         #expect(note.contains("effectiveValues"))
         #expect(note.contains("zonePatches"))
+        // Defect A (2026-08-20 sax-team round): the note is read by TWO
+        // audiences. `sampler.zonePatches` is a real, working merge path over
+        // the RAW control protocol (executed below and in
+        // inertGlobalNoteRemedyIsExecutable), but `track_set_instrument`'s MCP
+        // schema does NOT expose it — the only MCP tool that reaches it is
+        // `instrument_set_sampler_zones`, which this note must name so an
+        // MCP-only reader has a remedy they can actually follow.
+        #expect(note.contains("instrument_set_sampler_zones"))
+        // Defect C: this sampler was built BY HAND (no sourcePath at all) —
+        // naming an SFZ opcode here would assert a provenance that never
+        // happened, so none may appear.
+        #expect(!note.contains("ampeg_release"))
+
+        // Defect D: the top-level scalar keeps reporting the STORED value
+        // (round-trip fidelity), so the sibling `warnings` array is what makes
+        // the discrepancy impossible to miss for a caller who never descends
+        // into `effectiveGlobals` at all — both the stored AND the actually-
+        // applied number appear in the SAME sentence.
+        let warnings = try #require(response.result?["warnings"]?.arrayValue).map {
+            $0.stringValue ?? ""
+        }
+        print("[measured] top-level warnings: \(warnings)")
+        let releaseWarning = try #require(warnings.first { $0.hasPrefix("release:") })
+        #expect(releaseWarning.contains("3.4465"))
+        #expect(releaseWarning.contains("0.5"))
 
         // ATTACK is release's twin at the same engine trigger site, and here no
         // zone overrides it — so the SAME response must call one global dead
@@ -768,6 +793,9 @@ struct SamplerZoneIdentityWireTests {
         #expect(attack["zonesInheriting"]?.doubleValue == 2)
         #expect(attack["effectiveValues"]?.arrayValue?.first?.doubleValue == 0.02)
         #expect(attack["note"] == nil)                        // nothing to warn about
+        // Defect D's discriminator: only ONE global is inert here, so
+        // `warnings` must carry exactly one entry, not one per field.
+        #expect(warnings.count == 1)
     }
 
     /// The `note` on an inert global does not just say "this does nothing" — it
@@ -851,6 +879,15 @@ struct SamplerZoneIdentityWireTests {
         #expect(values.map { $0.doubleValue } == [0.5, 3.4465])
         // No inert claim, so no note — the global genuinely does something.
         #expect(release["note"] == nil)
+        // Defect D's negative control: NOTHING is inert in this response (not
+        // release, not attack, not oneShot), so the top-level `warnings` key
+        // must be ABSENT, not an empty array — the A-imp-1 idiom this verb
+        // already follows for effectiveValuesTruncated/effectiveGlobals
+        // itself. This is the discriminating half of the gate: a `warnings`
+        // key emitted UNCONDITIONALLY (regardless of whether any global is
+        // actually inert) would pass every other assertion in this file and
+        // fail only here.
+        #expect(response.result?["warnings"] == nil)
     }
 
     /// A zero-zone sampler has no inheritance to describe, so the key is
@@ -909,6 +946,65 @@ struct SamplerZoneIdentityWireTests {
         #expect(release["globalIsInert"]?.boolValue == true)          // …and dead
         #expect(release["zonesOverriding"]?.doubleValue == 2)
         #expect(release["effectiveValues"]?.arrayValue?.first?.doubleValue == 0.5)
+        // Defect C's POSITIVE control: real SFZ provenance (`sourcePath` ends
+        // in `.sfz`) IS reason enough to name the opcode a caller would find
+        // if they opened the file.
+        let note = try #require(release["note"]?.stringValue)
+        #expect(note.contains("ampeg_release"))
+    }
+
+    /// Defect C's other half, over a REAL `.dspreset` import: `sourcePath` is
+    /// set here too, but a `.dspreset` group's `release` attribute carries NO
+    /// `ampeg_` prefix at all (DSPresetParser.swift) — so gating the opcode
+    /// clause on `sourcePath` merely being non-nil (rather than on the file
+    /// actually being `.sfz`) would misname this library's own inheritance
+    /// mechanism. One `<group>` wraps BOTH samples so both zones inherit the
+    /// SAME per-zone release from the group (nearest-wins merge), landing
+    /// `zonesOverriding: 2, zonesInheriting: 0` — genuinely inert, same as the
+    /// SFZ fixture above, but from a format with no opcode to quote.
+    @Test("instrument.describeSampler: an imported .dspreset group release is inert too, but names no SFZ opcode")
+    func describeSamplerInertAfterRealDSPresetImportNamesNoOpcode() async throws {
+        let (router, store) = makeRouter()
+        let track = store.addTrack(kind: .instrument)
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("describe-sampler-dspreset-inert-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: URL(fileURLWithPath: Self.pingPath),
+            to: dir.appendingPathComponent("a.wav"))
+        try FileManager.default.copyItem(
+            at: URL(fileURLWithPath: Self.pingPath),
+            to: dir.appendingPathComponent("b.wav"))
+        let dspreset = dir.appendingPathComponent("Tenor Sax.dspreset")
+        try Data("""
+        <DecentSampler>
+          <groups>
+            <group release="0.4">
+              <sample path="a.wav" loNote="0" hiNote="63" rootNote="60"/>
+              <sample path="b.wav" loNote="64" hiNote="127" rootNote="72"/>
+            </group>
+          </groups>
+        </DecentSampler>
+        """.utf8).write(to: dspreset)
+        _ = try store.importSampleLibrary(trackID: track.id, path: dspreset.path)
+
+        #expect(await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: ["trackId": .string(track.id.uuidString),
+                     "sampler": .object(["release": .number(3.4465)])])).ok)
+
+        let response = await describeSampler(router, track.id.uuidString)
+        #expect(response.ok)
+        #expect(response.result?["sourcePath"]?.stringValue == dspreset.path)  // provenance IS set…
+        let release = try #require(response.result?["effectiveGlobals"]?["release"])
+        #expect(release["globalIsInert"]?.boolValue == true)                   // …and IS inert…
+        #expect(release["zonesOverriding"]?.doubleValue == 2)
+        let note = try #require(release["note"]?.stringValue)
+        // …but this is not an SFZ, so no opcode is invented.
+        #expect(!note.contains("ampeg_release"))
+        #expect(!note.contains("ampeg"))
+        #expect(note.contains("instrument_set_sampler_zones"))
     }
 
     @Test("instrument.describeSampler: an imported library's sourcePath/displayName are surfaced; a hand-built sampler shows neither")

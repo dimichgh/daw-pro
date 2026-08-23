@@ -1675,6 +1675,39 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// that gates `expressionModDepth` does not apply to brightness.
     public var expressionFilterCC: Int?
 
+    /// How many semitones a FULL pitch-bend deflection (raw 0 or 16383, i.e.
+    /// ±8192 from centre) moves the note. ADDITIVE-OPTIONAL: **nil = 2.0**, the
+    /// General MIDI default, which is the value the engine hard-wired before
+    /// this field existed — so a project saved without it renders
+    /// byte-identically.
+    ///
+    /// ⚠️ **THE DEFAULT IS 2.0 AND MUST STAY 2.0.** The request that produced
+    /// this field asked for ±12 "as the constant", on the sound reasoning that a
+    /// fixed constant costs the same whatever its value. That reasoning holds
+    /// only while it IS a constant. Once the range is settable the calculus
+    /// inverts: every bend lane already authored in every existing project was
+    /// written against ±2, and shipping ±12 as the default would multiply the
+    /// depth of every one of them by six, silently, on load, in projects nobody
+    /// edited. Wide range is one `bendRangeSemitones: 12` away; a changed
+    /// default is unrecoverable without hand-editing every lane.
+    ///
+    /// Measurement behind the feature (36 sax phrases, 131 note boundaries,
+    /// weighted by audibility): ±2 leaves 28 boundaries audibly rough; ±3 → 14;
+    /// ±4 → 6; **±6 → 0, and the curve saturates there** (±12 buys no further
+    /// coverage of ROUGHNESS, only more fully-slurred phrases — 36/36 vs 32/36).
+    /// A sax library wanting continuous portamento across its whole range wants
+    /// 12; one wanting standard expressive bend wants 6; the default stays 2
+    /// because that is what already-written music means.
+    ///
+    /// 0 is legal and means "bend does nothing" — the multiplier collapses to
+    /// exactly 1.0, an IEEE identity. (`BreathContour.Options.bendRangeSemitones`
+    /// excludes 0 because it DIVIDES by the figure; here it only multiplies.)
+    public var bendRangeSemitones: Double?
+
+    /// Poly (nil, the default and today's behaviour) or mono. ADDITIVE-OPTIONAL:
+    /// nil = `.poly`, which is byte-identical to the pre-existing engine.
+    public var voiceMode: SamplerVoiceMode?
+
     public static let attackRange: ClosedRange<Double> = 0...1
     public static let releaseRange: ClosedRange<Double> = 0.001...8
     public static let gainRange: ClosedRange<Double> = 0...1
@@ -1691,6 +1724,14 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// full expression is effectively unfiltered (a one-pole at 20 kHz is
     /// −1 dB at 10 kHz).
     public static let expressionFilterHighHz: Double = 20_000
+    /// The GM default, and what `bendRangeSemitones == nil` resolves to. ONE
+    /// home for the number: the engine, the wire, the routing advisor and the
+    /// tests all read this rather than re-typing 2.0, so they cannot drift.
+    public static let defaultBendRangeSemitones: Double = 2
+    /// 0 = bend inert; 48 = four octaves, the same ceiling
+    /// `BreathContour.Options` uses, so the authoring and playback figures are
+    /// expressible over the same domain.
+    public static let bendRangeSemitonesRange: ClosedRange<Double> = 0...48
 
     public init(
         zones: [SamplerZone] = [],
@@ -1702,7 +1743,9 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         displayName: String? = nil,
         expressionModDepth: Double? = nil,
         expressionFilterDepth: Double? = nil,
-        expressionFilterCC: Int? = nil
+        expressionFilterCC: Int? = nil,
+        bendRangeSemitones: Double? = nil,
+        voiceMode: SamplerVoiceMode? = nil
     ) {
         self.zones = zones
         self.oneShot = oneShot
@@ -1722,7 +1765,39 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         self.expressionFilterCC = expressionFilterCC.map {
             $0.clamped(to: MIDIControllerType.cc(controller: 0).valueRange)
         }
+        // Clamp rather than reject, matching every other field here. nil stays
+        // nil: "unset" and "explicitly 2" are the same SOUND but not the same
+        // wire shape, and only nil keeps a pre-existing project's JSON
+        // byte-identical on a round trip.
+        self.bendRangeSemitones = bendRangeSemitones.map {
+            $0.clamped(to: Self.bendRangeSemitonesRange)
+        }
+        self.voiceMode = voiceMode
     }
+
+    /// The figure the ENGINE uses — the stored value, or the GM default. One
+    /// accessor so no caller has to remember which way nil resolves.
+    public var effectiveBendRangeSemitones: Double {
+        bendRangeSemitones ?? Self.defaultBendRangeSemitones
+    }
+
+    /// The mode the ENGINE uses — the stored value, or poly.
+    public var effectiveVoiceMode: SamplerVoiceMode { voiceMode ?? .poly }
+}
+
+/// How many notes the built-in sampler lets sound at once.
+///
+/// `.mono` is **LAST-NOTE priority**, and that is the whole point rather than a
+/// default among several: a wind line is ONE airstream. The newest note is the
+/// one being played, and the previous pitch ends because the player moved —
+/// not because it lost a priority contest. Low- and high-note priority are
+/// keyboard-synth conventions for two-handed playing; on a melodic line they
+/// produce the wrong note every time the phrase turns around, and under the
+/// slight note OVERLAPS that legato writing needs they randomly refuse to move
+/// at all. Last-note degrades correctly: the overlap becomes the slur.
+public enum SamplerVoiceMode: String, Codable, Sendable {
+    case poly
+    case mono
 }
 
 /// One sampler key zone: an audio file mapped across a pitch span, played

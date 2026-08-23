@@ -333,6 +333,25 @@ test("instrument_set_sampler_zones forwards a patch that swaps the sample file a
   });
 });
 
+test("instrument_set_sampler_zones accepts {id, release}/{id, attack}/{id, oneShot} — the exact fields the describeSampler inert-global note (Defect A) tells a reader to patch here", async () => {
+  const trackId = randomUUID();
+  queuedResult = { kind: "sampler", sampler: { zones: [] } };
+
+  for (const patch of [
+    { id: randomUUID(), release: 1.25 },
+    { id: randomUUID(), attack: 0.2 },
+    { id: randomUUID(), oneShot: true },
+  ]) {
+    calls = [];
+    const result = (await client.callTool({
+      name: "instrument_set_sampler_zones",
+      arguments: { trackId, zones: [patch] },
+    })) as any;
+    assert.ok(!result.isError, `patching ${JSON.stringify(patch)} must be accepted: ${JSON.stringify(result)}`);
+    assert.deepEqual(calls[0]!.params, { trackId, sampler: { zonePatches: [patch] } });
+  }
+});
+
 test("instrument_set_sampler_zones requires trackId and zones (schema layer, zero bridge calls)", async () => {
   const trackId = randomUUID();
 
@@ -414,6 +433,92 @@ test("instrument_set_sampler_zones surfaces an app-side teaching error (e.g. an 
 });
 
 // ---------------------------------------------------------------------------
+// track_set_instrument's `sampler` object — DEFECT B (sax-team, 2026-08-20)
+//
+// `registerTool`'s wrapper (server.ts:94-135) only applies `.strict()` at the
+// TOP level of a tool's own inputSchema. `samplerSchema` (nested one level
+// down, under `sampler`) fell through that net: an unrecognized key inside it
+// — concretely `zonePatches`, a REAL key one layer further down at the raw
+// control-protocol level (`sampler.zonePatches`, m26-g) but never one this
+// schema exposed — was silently STRIPPED by zod's default parse mode, and
+// `track_set_instrument` reported success having changed nothing. Fixed by
+// giving `samplerSchema`, `samplerZoneSchema` (the wholesale `zones[]` path),
+// and `samplerCrossfadeSchema` their own `.strict()`, matching the
+// `samplerZonePatchSchema` precedent a few hundred lines below.
+// ---------------------------------------------------------------------------
+
+test("track_set_instrument rejects sampler.zonePatches at the MCP schema layer (Defect B) — it used to be silently stripped and report success", async () => {
+  const trackId = randomUUID();
+  const result = (await client.callTool({
+    name: "track_set_instrument",
+    arguments: { trackId, sampler: { zonePatches: [{ id: randomUUID(), release: 1.25 }] } },
+  })) as any;
+  assert.equal(result?.isError, true, `expected an MCP tool error, got: ${JSON.stringify(result)}`);
+  const text = result.content?.[0]?.text ?? "";
+  assert.match(
+    text,
+    /unrecognized_keys/,
+    `expected a zod "unrecognized_keys" schema-validation error (proving the handler never ran), got: ${text}`
+  );
+  assert.match(text, /zonePatches/, `expected the schema error to name the dropped key, got: ${text}`);
+  assert.equal(calls.length, 0, "the call must never reach the bridge — this is what made it a SILENT no-op before the fix");
+});
+
+test("track_set_instrument rejects an unrecognized key inside one element of the wholesale sampler.zones[] array", async () => {
+  const trackId = randomUUID();
+  const result = (await client.callTool({
+    name: "track_set_instrument",
+    arguments: { trackId, kind: "sampler", sampler: { zones: [{ path: "/x.wav", minPtich: 90 }] } },
+  })) as any;
+  assert.ok(result.isError, "a typo'd zone field must be rejected, not silently stripped");
+  assert.match(result.content?.[0]?.text ?? "", /unrecognized_keys/);
+  assert.equal(calls.length, 0);
+});
+
+test("track_set_instrument rejects an unrecognized key inside sampler.zones[].crossfade", async () => {
+  const trackId = randomUUID();
+  const result = (await client.callTool({
+    name: "track_set_instrument",
+    arguments: {
+      trackId,
+      kind: "sampler",
+      sampler: { zones: [{ path: "/x.wav", crossfade: { ccInL0: 1 } }] },
+    },
+  })) as any;
+  assert.ok(result.isError, "a typo'd crossfade field must be rejected, not silently stripped");
+  assert.match(result.content?.[0]?.text ?? "", /unrecognized_keys/);
+  assert.equal(calls.length, 0);
+});
+
+test("track_set_instrument still accepts a legitimate sampler object (no regression from the new .strict() schemas)", async () => {
+  const trackId = randomUUID();
+  const zoneId = randomUUID();
+  queuedResult = { kind: "sampler", sampler: { zones: [{ id: zoneId, path: "/x.wav", rootPitch: 60, minPitch: 0, maxPitch: 127, gain: 0.8 }] } };
+
+  const result = (await client.callTool({
+    name: "track_set_instrument",
+    arguments: {
+      trackId,
+      kind: "sampler",
+      sampler: {
+        release: 0.4,
+        zones: [
+          {
+            path: "/x.wav",
+            minPitch: 0,
+            maxPitch: 127,
+            crossfade: { controller: 1, ccInLo: 0, ccInHi: 64 },
+          },
+        ],
+      },
+    },
+  })) as any;
+  assert.ok(!result.isError, `a fully legitimate sampler object must still be accepted: ${JSON.stringify(result)}`);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "track.setInstrument");
+});
+
+// ---------------------------------------------------------------------------
 // Description assertions — the descriptions ARE the contract here
 // ---------------------------------------------------------------------------
 
@@ -450,6 +555,21 @@ test("descriptions teach: displayName is a non-unique file stem, sourcePath disa
   assert.match(description, /displayName/);
   assert.match(description, /NOT unique/i);
   assert.match(description, /sourcePath/);
+});
+
+test("descriptions teach: an inert global is NOT SFZ-specific (Defect C) — dspreset and hand-built samplers can hit it too", () => {
+  const describeTool = tools.find((t) => t.name === "instrument_describe_sampler");
+  const description = describeTool.description as string;
+  assert.match(description, /ANY per-zone value/, "names the general cause, not just SFZ");
+  assert.match(description, /dspreset/i);
+  assert.match(description, /ampeg_release.*ONLY when.*sourcePath.*\.sfz/s, "gates the opcode mention on real .sfz provenance");
+});
+
+test("descriptions teach: top-level `warnings` (Defect D) restates the stored-vs-effective mismatch for a caller reading only the top level", () => {
+  const describeTool = tools.find((t) => t.name === "instrument_describe_sampler");
+  const description = describeTool.description as string;
+  assert.match(description, /warnings/);
+  assert.match(description, /impossible to miss/);
 });
 
 test("all three sampler tools have a non-empty title and pass the beginner-readable description bar", () => {

@@ -8,9 +8,20 @@ import Foundation
 /// oldest stolen when full; noteOff pairs by noteID (same policies as
 /// `PolySynthInstrument`).
 ///
-/// m16-b2 controllers (design-m16b §4.3): honors PITCH BEND (±2 st GM range,
-/// playback-rate factor 2^(semitones/12) on every voice) and SUSTAIN (CC64 ≥
-/// 64: noteOffs defer until pedal-up; one-shot mode is unaffected).
+/// m16-b2 controllers (design-m16b §4.3): honors PITCH BEND (playback-rate
+/// factor 2^(semitones/12) on every voice) and SUSTAIN (CC64 ≥ 64: noteOffs
+/// defer until pedal-up; one-shot mode is unaffected).
+///
+/// Bend RANGE is per-instrument (`SamplerParams.bendRangeSemitones`) and rides
+/// the scalar snapshot; **nil = 2.0, the GM default the engine used to
+/// hard-wire**, so a project that never sets it renders byte-identically. See
+/// that field for why the default may not be widened.
+///
+/// VOICE MODE (`SamplerParams.voiceMode`): poly (nil/default, unchanged) or
+/// MONO with LAST-NOTE priority — a new note chokes the sounding one into its
+/// release ramp, and a note-off for an already-superseded note is discarded
+/// rather than falling back to a note still held. See `monoChoke` and the
+/// note-off branch of `apply(_:)` for the wind-instrument reasoning.
 ///
 /// m27 continuous expression: CC11 (expression), CC2 (breath) and CC1 (mod
 /// wheel) now reach the voice as a SMOOTHED per-voice amplitude multiplier —
@@ -183,6 +194,12 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         /// unity — that is what keeps an opted-out project byte-identical).
         var expressionFilterDepth: Double
         var expressionFilterCC: Int
+        /// Semitones per full bend deflection; nil in the model resolves HERE,
+        /// once, to the GM default — the render thread never sees an Optional.
+        var bendRangeSemitones: Double
+        /// `SamplerVoiceMode` flattened to a Bool so the snapshot stays POD and
+        /// the render thread branches on a plain load.
+        var monoVoiceMode: Bool
 
         init(_ params: SamplerParams) {
             oneShot = params.oneShot
@@ -192,6 +209,8 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             expressionModDepth = params.expressionModDepth ?? 0
             expressionFilterDepth = params.expressionFilterDepth ?? 0
             expressionFilterCC = params.expressionFilterCC ?? 11
+            bendRangeSemitones = params.effectiveBendRangeSemitones
+            monoVoiceMode = params.effectiveVoiceMode == .mono
         }
     }
 
@@ -305,7 +324,45 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     // one exp2, no allocation).
     private var bendFactor = 1.0
     private var pedalDown = false
-    private static let bendRangeSemitones = 2.0
+    /// Semitones per FULL deflection. Was a `static let 2.0`; it is now a
+    /// per-instrument setting (`SamplerParams.bendRangeSemitones`) that crosses
+    /// into the render thread through the SAME `ScalarParams` snapshot the
+    /// other scalars ride — no new mechanism, no second writer. Written only in
+    /// `init` and in `recomputeCoefficients` (render thread, once per adopted
+    /// generation); read only here.
+    ///
+    /// ⚠️ NOT RAMPED, deliberately. The `expGain` one-pole exists because
+    /// amplitude lanes are stepwise and a stepwise multiply is one CLICK per
+    /// lane point — a stream of them, which is what zipper noise is. This is
+    /// neither: it is a configuration value, not a controller lane, so it
+    /// cannot produce a stream of steps at all; and the quantity it moves is
+    /// PITCH, which the bend path itself already applies unsmoothed on purpose
+    /// (a pitch step detunes, it does not click — see
+    /// `BreathContour.Options.bendSpacingSeconds`). Changing the range while a
+    /// DEFLECTED note sounds retunes it in one step, exactly as moving the bend
+    /// wheel that far would have.
+    private var bendRangeSemitones = SamplerParams.defaultBendRangeSemitones
+    /// The last raw 14-bit bend value applied (8192 = centre). Kept so a
+    /// mid-note RANGE change can re-derive `bendFactor` without waiting for the
+    /// next bend event — otherwise a deflected note would keep the old range's
+    /// pitch until the lane's next point, which on a held note is forever.
+    private var lastBendRaw = 8_192
+    /// m30 mono (last-note priority). Render-thread scalars under the same
+    /// single-writer discipline as `bendFactor`/`pedalDown`.
+    private var monoVoiceMode = false
+    /// The noteID of the note mono last actually SOUNDED. Never cleared on
+    /// note-off — see the note-off rule in `apply(_:)`.
+    private var monoActiveNoteID: UInt64 = 0
+    /// False until mono has triggered its first note, so a note-off for a voice
+    /// that started under POLY (mono switched on mid-flight) still releases
+    /// normally instead of being discarded as "superseded".
+    private var monoStarted = false
+    /// Set at each mono note-on, cleared by the first `trigger` that note
+    /// causes. Makes the choke LAZY: a note-on that selects no zone (out of
+    /// every span) must not silence the note that IS sounding, and a note-on
+    /// that fires several zones (one voice per group, m19-a) must choke the
+    /// PREVIOUS note once — not choke itself on its own second group.
+    private var monoPendingChoke = false
     // m19-a RR/RNG runtime state (design §4.3): per-zone round-robin counters
     // and one xorshift64* state var — allocated/seeded in init (main actor),
     // mutated ONLY inside `apply(event:)` on the render thread, the same
@@ -406,6 +463,12 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     init(params: SamplerParams, sampleRate: Double = 48_000, randomSeed: UInt64? = nil) {
         self.sampleRate = sampleRate
         lastAppliedScalars = ScalarParams(params)
+        // Seed the two render-thread settings from the SAME resolved snapshot
+        // the first quantum will adopt, so they are already right for any event
+        // that lands before that adoption. (Adoption then finds them equal and
+        // does nothing — see `recomputeCoefficients`.)
+        bendRangeSemitones = lastAppliedScalars.bendRangeSemitones
+        monoVoiceMode = lastAppliedScalars.monoVoiceMode
         // xorshift64* has one degenerate state: 0 sticks at 0. Substitute a
         // fixed odd constant so a (vanishingly unlikely) zero seed still runs.
         var systemGenerator = SystemRandomNumberGenerator()
@@ -752,7 +815,16 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             voices[index] = Voice()
         }
         bendFactor = 1.0
+        lastBendRaw = 8_192
         pedalDown = false
+        // Mono's note identity is PERFORMANCE state, not configuration, so it
+        // neutralises with the voice wipe exactly like the bend re-centre
+        // above. Surviving it would let a post-flush note-off be discarded as
+        // "superseded" by a note that no longer exists. `monoVoiceMode` itself
+        // is configuration and deliberately SURVIVES, like oneShot.
+        monoActiveNoteID = 0
+        monoStarted = false
+        monoPendingChoke = false
         // m27: controller state neutralises with the voice wipe, exactly like
         // the bend re-centre above. A stale attenuator surviving a stop/seek
         // would quietly duck the next notes; if a lane really is present, the
@@ -929,6 +1001,22 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
         // per SNAPSHOT — never per frame, never per event.
         expressionRampCoeff = Float(
             1.0 - exp(-1.0 / max(1.0, Self.expressionSmoothingSeconds * sampleRate)))
+        // Voice mode takes effect on the NEXT note-on: switching poly → mono
+        // does not choke what is already sounding. Chopping held voices at a
+        // snapshot boundary would be a gain step on every one of them — the
+        // click `expGain` exists to prevent — for a mode change the user made
+        // between notes anyway.
+        monoVoiceMode = params.monoVoiceMode
+        // A range change must retune a note that is CURRENTLY deflected, or a
+        // held note keeps the old range until the lane's next point. One
+        // compare per generation; the sweep is the bend branch's own shape and
+        // only runs when the number actually moved (so the common
+        // snapshot-with-unchanged-range costs nothing and, critically, an
+        // unchanged range cannot perturb `bendFactor`'s bits).
+        if params.bendRangeSemitones != bendRangeSemitones {
+            bendRangeSemitones = params.bendRangeSemitones
+            applyBendFactor()
+        }
         expressionModDepth = Float(params.expressionModDepth)
         filterDepth = Float(params.expressionFilterDepth)
         filterCC = Int32(params.expressionFilterCC)
@@ -1053,6 +1141,11 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             // Legacy zones (all group 0, full spans, no gates) degenerate to
             // the original first-match scan; no eligible zone → the note is
             // silently ignored. O(zoneCount) compares, no allocation.
+            // MONO, last-note priority: arm the choke. It fires inside
+            // `trigger` — the first zone this note-on actually sounds — never
+            // here, so a note that selects no zone leaves the sounding note
+            // alone rather than opening a hole.
+            monoPendingChoke = monoVoiceMode
             let pitch = Int32(event.pitch)
             let velocity = Int32(event.velocity)
             let draw = nextRandom01()
@@ -1080,6 +1173,27 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
                 lastFiredGroup = zone.group
             }
         } else if event.kind == ScheduledMIDIEvent.noteOff {
+            // MONO, and this is the decision the mode turns on: a note-off for
+            // a note mono has already SUPERSEDED is DISCARDED — there is no
+            // fall-back to a note still held underneath.
+            //
+            // Both behaviours are defensible on a keyboard synth; on a wind
+            // instrument only this one is. The overlap that triggers the case
+            // at all is the LEGATO idiom — write A, start B before A ends, so
+            // the two slur — and in that idiom A's note-off arrives AFTER B has
+            // started. Falling back would fire a phantom backwards slur to A on
+            // every slurred pair in the part, which is both wrong and the exact
+            // thing the writing was trying to express. The keyboard convention
+            // exists so a player can trill by holding a low note with the other
+            // hand; a sax player has one airstream and cannot do that. The
+            // earlier note ended when the player moved, and it cannot come back
+            // without a new articulation — i.e. without a new note-on.
+            //
+            // Identity, not liveness: `monoActiveNoteID` is never cleared on
+            // note-off, so a superseded note stays superseded after the current
+            // note has also ended. `monoStarted` keeps the rule off voices that
+            // began under poly.
+            if monoVoiceMode, monoStarted, event.noteID != monoActiveNoteID { return }
             for index in 0..<Self.voiceCount
             where voices[index].active && voices[index].noteID == event.noteID {
                 // m19-b per-voice one-shot: the zone override (0/1) wins; the
@@ -1149,15 +1263,63 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
             // m16-b2: data1 = LSB, data2 = MSB (THE ONE DATA RULE); center
             // 8192 → factor 1. Playback-rate bend, applied to every sounding
             // voice in place — releasing tails bend too.
-            let raw = Int(event.pitch & 0x7F) | (Int(event.velocity & 0x7F) << 7)
-            bendFactor = exp2(Double(raw - 8_192) / 8_192.0
-                              * Self.bendRangeSemitones / 12.0)
-            for index in 0..<Self.voiceCount where voices[index].active {
-                voices[index].increment = voices[index].baseIncrement * bendFactor
-            }
+            lastBendRaw = Int(event.pitch & 0x7F) | (Int(event.velocity & 0x7F) << 7)
+            applyBendFactor()
         }
         // Channel pressure (kind 4) and any future kind fall through
         // silently — the C4 unknown-kind contract.
+    }
+
+    /// Re-derives `bendFactor` from the last raw bend value and the live range,
+    /// then pushes it onto every sounding voice. Render thread: one `exp2` and
+    /// an O(64) sweep — the shape the pitch-bend branch has always had — with
+    /// no allocation, no lock and no ObjC.
+    ///
+    /// ⚠️ The arithmetic is character-for-character what the pitch-bend branch
+    /// used to inline, in the same associativity: `(raw − 8192)/8192 × range`
+    /// THEN `/ 12`. Refactoring it into `range/12` first would change the
+    /// rounding and break the byte-identity guarantee at the default.
+    @inline(__always)
+    private func applyBendFactor() {
+        bendFactor = exp2(Double(lastBendRaw - 8_192) / 8_192.0
+                          * bendRangeSemitones / 12.0)
+        for index in 0..<Self.voiceCount where voices[index].active {
+            voices[index].increment = voices[index].baseIncrement * bendFactor
+        }
+    }
+
+    /// MONO choke: the previous note ends because the player moved.
+    ///
+    /// Every sounding voice is put into its RELEASE stage rather than hard-
+    /// killed — a hard kill is a gain step, i.e. a click, on exactly the held
+    /// notes this mode exists to serve; the release ramp is the same anti-click
+    /// ramp a note-off uses, and the brief overlap it leaves IS the slur.
+    ///
+    /// Two deliberate departures from the note-off path, both because mono is a
+    /// stronger statement than either thing it overrides:
+    ///  · the SUSTAIN PEDAL does not defer this. A pedal-held voice is still a
+    ///    sounding voice, and "one note at a time" would be a lie if CC64 could
+    ///    suspend it.
+    ///  · ONE-SHOT voices are choked too. One-shot says "ignore note-OFF"; this
+    ///    is not a note-off. A one-shot sampler set to mono is a choke group —
+    ///    the hi-hat convention — which is the only reading of that combination
+    ///    that does anything at all.
+    /// Render thread; one O(64) sweep, no allocation.
+    @inline(__always)
+    private func monoChoke() {
+        for index in 0..<Self.voiceCount where voices[index].active {
+            if voices[index].level <= 0 {
+                voices[index] = Voice()  // never audible; free the slot outright
+                continue
+            }
+            // m20-g: a sustain loop disarms at true release start, exactly as
+            // in the note-off and pedal-up paths. A continuous loop keeps
+            // looping through its release, also as there.
+            if voices[index].loopMode == 1 { voices[index].looping = false }
+            voices[index].sustained = false
+            voices[index].stage = Stage.release
+            voices[index].releaseFrom = voices[index].level
+        }
     }
 
     /// Starts one voice on `zoneIndex` — the same slot-scan/oldest-steal
@@ -1165,6 +1327,15 @@ final class SamplerInstrument: InstrumentRendering, @unchecked Sendable {
     /// voice per GROUP on a single note-on. Render thread; no allocation.
     @inline(__always)
     private func trigger(zoneIndex: Int, event: ScheduledMIDIEvent) {
+        // MONO: the armed choke fires HERE, at the first zone this note-on
+        // actually sounds, and disarms itself — so a multi-group note-on chokes
+        // the previous note once and never its own earlier group.
+        if monoPendingChoke {
+            monoPendingChoke = false
+            monoChoke()
+            monoActiveNoteID = event.noteID
+            monoStarted = true
+        }
         let zone = zones[zoneIndex]
         var slot = -1
         var oldestSerial = UInt64.max

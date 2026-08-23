@@ -319,6 +319,10 @@ extension ProjectStore {
         warnings += breathWarnings(trackIndex: t,
                                    expressionType: expressionType,
                                    wroteBend: !bendPoints.isEmpty,
+                                   // The CALL's figure: effort scaling varies
+                                   // depth per note, never the range the cents
+                                   // are converted through.
+                                   authoredBendRangeSemitones: options.bendRangeSemitones,
                                    vibratoRequested: vibratoRequested,
                                    notesWithVibrato: notesWithVibrato,
                                    notesTouched: selected.count,
@@ -415,6 +419,7 @@ extension ProjectStore {
     func breathWarnings(trackIndex: Int,
                         expressionType: MIDIControllerType,
                         wroteBend: Bool,
+                        authoredBendRangeSemitones: Double,
                         vibratoRequested: Bool,
                         notesWithVibrato: Int,
                         notesTouched: Int,
@@ -428,6 +433,15 @@ extension ProjectStore {
         if wroteBend,
            let warning = MIDIControllerRouting.inertLaneWarning(for: .pitchBend,
                                                                instrument: instrument) {
+            out.append(warning)
+        }
+        // The AUTHORING range and the PLAYBACK range are two settable numbers
+        // that used to be one constant. When they disagree the vibrato this
+        // whole feature generates comes out proportionally wrong, silently —
+        // see `MIDIControllerRouting.bendRangeMismatchWarning`.
+        if wroteBend,
+           let warning = MIDIControllerRouting.bendRangeMismatchWarning(
+            authoredSemitones: authoredBendRangeSemitones, instrument: instrument) {
             out.append(warning)
         }
         if instrument?.kind == .sampler,

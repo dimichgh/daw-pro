@@ -1348,9 +1348,25 @@ public final class CommandRouter {
             // region). Omitted for a zero-zone sampler, the same rule
             // pitchCoverage/velocityCoverage already follow — there is no
             // inheritance to describe without zones.
+            //
+            // Defect D (2026-08-20 sax-team round): the stored scalars above
+            // stay exactly as they were — additive-only, and round-trip
+            // fidelity for a caller reading one back and writing it forward —
+            // but that means a caller who reads ONLY the top level (never
+            // descends into `effectiveGlobals`) saw nothing to warn them one
+            // was inert. `warnings` (only-when-nonempty, the A-imp-1 idiom
+            // used elsewhere on this same verb family — see reference.import)
+            // is the sibling top-level key that makes it impossible to miss:
+            // each entry names both the stored number and what the engine
+            // actually applies, so a caller never has to descend to learn the
+            // scalar is wrong.
             if !describeSamplerParams.zones.isEmpty {
-                describeSamplerResult["effectiveGlobals"] =
+                let (effectiveGlobals, warnings) =
                     Self.samplerEffectiveGlobalsJSON(describeSamplerParams)
+                describeSamplerResult["effectiveGlobals"] = effectiveGlobals
+                if !warnings.isEmpty {
+                    describeSamplerResult["warnings"] = .array(warnings.map(JSONValue.string))
+                }
             }
             if let sourcePath = describeSamplerParams.sourcePath {
                 describeSamplerResult["sourcePath"] = .string(sourcePath)
@@ -1369,6 +1385,15 @@ public final class CommandRouter {
             }
             if let filterCC = describeSamplerParams.expressionFilterCC {
                 describeSamplerResult["expressionFilterCC"] = .number(Double(filterCC))
+            }
+            // Bend range + voice mode: settable-but-unreadable would be the
+            // same silent discard the line above exists to end. Only-when-SET,
+            // so an untouched sampler's shape is unchanged.
+            if let bendRange = describeSamplerParams.bendRangeSemitones {
+                describeSamplerResult["bendRangeSemitones"] = .number(bendRange)
+            }
+            if let voiceMode = describeSamplerParams.voiceMode {
+                describeSamplerResult["voiceMode"] = .string(voiceMode.rawValue)
             }
             if params["offset"] != nil || params["limit"] != nil {
                 let describeSamplerOffset = try Self.parseZonePageOffset(params)
@@ -9224,8 +9249,57 @@ public final class CommandRouter {
                 ?? fallback.expressionFilterDepth,
             expressionFilterCC: try Self.optionalInteger(
                 obj["expressionFilterCC"], "sampler.expressionFilterCC")
-                ?? fallback.expressionFilterCC
+                ?? fallback.expressionFilterCC,
+            // Bend range + voice mode: the SAME fall-back-to-current rule, so
+            // tuning any other knob never quietly resets these two either.
+            // Both REFUSE a bad value rather than clamping it — an agent that
+            // asked for a 60-semitone range and silently got 48 has no way to
+            // find out (the m23 silent-discard defect class).
+            bendRangeSemitones: try Self.optionalBoundedNumber(
+                obj["bendRangeSemitones"], "sampler.bendRangeSemitones",
+                SamplerParams.bendRangeSemitonesRange,
+                "how many semitones a FULL pitch-bend deflection moves the note; omit for the "
+                    + "General MIDI default of 2, which is what every already-authored bend lane "
+                    + "was written against")
+                ?? fallback.bendRangeSemitones,
+            voiceMode: try Self.optionalSamplerVoiceMode(obj["voiceMode"])
+                ?? fallback.voiceMode
         )
+    }
+
+    /// One optional, RANGE-CHECKED number inside the `sampler` object. Refuses
+    /// out-of-range rather than clamping, and says what the field MEANS in the
+    /// same breath — the `boundedOption` idiom, applied inside a nested object
+    /// where that helper (which reads top-level params) cannot reach.
+    private static func optionalBoundedNumber(
+        _ value: JSONValue?, _ name: String,
+        _ bounds: ClosedRange<Double>, _ meaning: String
+    ) throws -> Double? {
+        guard let number = try Self.optionalNumber(value, name) else { return nil }
+        guard number.isFinite, bounds.contains(number) else {
+            throw ControlError("\(name) must be between \(bounds.lowerBound) and "
+                               + "\(bounds.upperBound) — \(meaning)")
+        }
+        return number
+    }
+
+    /// `"poly"` / `"mono"`, or nil when the key is absent. An unrecognised
+    /// string is REFUSED and lists the two legal values: a typo silently
+    /// falling back to poly would be a sampler that ignores the mode it was
+    /// told to use, reported as success.
+    private static func optionalSamplerVoiceMode(_ value: JSONValue?) throws -> SamplerVoiceMode? {
+        switch value {
+        case .none, .some(.null): return nil
+        case .some(.string(let raw)):
+            guard let mode = SamplerVoiceMode(rawValue: raw.lowercased()) else {
+                throw ControlError("sampler.voiceMode must be \"poly\" or \"mono\" — mono is "
+                                   + "LAST-NOTE priority, so a new note always takes over from "
+                                   + "the one sounding")
+            }
+            return mode
+        case .some:
+            throw ControlError("sampler.voiceMode must be a string (\"poly\" or \"mono\")")
+        }
     }
 
     /// Wire wording for an inaudible audition (m23-d). The events were still
@@ -9620,6 +9694,15 @@ public final class CommandRouter {
         if let filterCC = sampler.expressionFilterCC {
             samplerObject["expressionFilterCC"] = .number(Double(filterCC))
         }
+        // Bend range + voice mode, same only-when-SET rule: an untouched
+        // sampler's wire shape does not grow two keys, and "unset" stays
+        // distinguishable from "explicitly the default" on a round trip.
+        if let bendRange = sampler.bendRangeSemitones {
+            samplerObject["bendRangeSemitones"] = .number(bendRange)
+        }
+        if let voiceMode = sampler.voiceMode {
+            samplerObject["voiceMode"] = .string(voiceMode.rawValue)
+        }
         if let sourcePath = sampler.sourcePath {
             samplerObject["sourcePath"] = .string(sourcePath)
         }
@@ -9770,8 +9853,37 @@ public final class CommandRouter {
     /// The COMPUTATION lives in `DAWCore.SamplerGlobalUse` so the sampler
     /// editor reads the same rule (the `SamplerZoneCoverage` precedent); only
     /// this shaping is here.
-    private static func samplerEffectiveGlobalsJSON(_ params: SamplerParams) -> JSONValue {
-        func numericField(_ use: SamplerGlobalUse, _ name: String) -> JSONValue {
+    /// Builds `effectiveGlobals` (the JSON) and, alongside it, the plain-English
+    /// `warnings` a caller reading only the response's TOP LEVEL (release/
+    /// attack/oneShot scalars, never descending into `effectiveGlobals`) will
+    /// still see (2026-08-20 sax-team defect D): the stored scalars stay the
+    /// AUTHORED value on purpose (round-trip fidelity — a caller reading one
+    /// back and writing it forward must get what the user configured, not a
+    /// collapsed "effective" number that is ill-defined once zones disagree
+    /// with EACH OTHER, not just with the global), so the only way to make an
+    /// inert global impossible to miss for that caller is a sibling top-level
+    /// key naming it.
+    private static func samplerEffectiveGlobalsJSON(
+        _ params: SamplerParams
+    ) -> (json: JSONValue, warnings: [String]) {
+        var warnings: [String] = []
+        // Defect C (2026-08-20 sax-team round): a per-zone override is the
+        // ordinary cause of an inert global regardless of how the sampler was
+        // built — hand-authored over the wire, imported from a `.dspreset`, or
+        // imported from an SFZ. Only an SFZ import gives that override a fixed
+        // OPCODE name worth quoting — `.dspreset` spells the very same field
+        // `attack`/`release` with no `ampeg_` prefix at all (DSPresetParser.swift)
+        // — so naming `ampeg_release` for a hand-built or `.dspreset`-sourced
+        // sampler would be inventing provenance that isn't there. Gated on the
+        // source file's own extension, not merely on `sourcePath` being set.
+        let isSFZSource = params.sourcePath.map { $0.lowercased().hasSuffix(".sfz") } ?? false
+
+        func formattedEffectiveValues(_ use: SamplerGlobalUse) -> String {
+            let values = use.effectiveValues.map { "\($0)" }.joined(separator: ", ")
+            return use.valuesTruncated ? "\(values), …" : values
+        }
+
+        func numericField(_ use: SamplerGlobalUse, _ name: String, sfzOpcode: String) -> JSONValue {
             var obj: [String: JSONValue] = [
                 "global": .number(use.global),
                 "zonesOverriding": .number(Double(use.zonesOverriding)),
@@ -9785,12 +9897,30 @@ public final class CommandRouter {
             // a key to every response to say nothing happened.
             if use.valuesTruncated { obj["effectiveValuesTruncated"] = .bool(true) }
             if use.globalIsInert {
+                let opcodeClause = isSFZSource
+                    ? " (authored per zone as SFZ's `\(sfzOpcode)`)" : ""
+                // Defect A (2026-08-20 sax-team round): this string is read by
+                // TWO audiences — a raw control-protocol caller (for whom
+                // `sampler.zonePatches` is a real, working merge path) and an
+                // MCP-connected agent, whose `track_set_instrument` schema does
+                // NOT expose `zonePatches` at all; the only MCP tool that
+                // reaches it is `instrument_set_sampler_zones`. A note that
+                // named only the raw form sent an MCP caller into a silent
+                // no-op (the exact defect this field exists to end, one layer
+                // out) — so name the MCP tool FIRST and keep the raw form as a
+                // parenthetical, since either reader must be able to follow
+                // this sentence and succeed.
                 obj["note"] = .string(
-                    "every zone sets its own \(name), so the stored global \(use.global) is NOT"
-                        + " used — the engine applies the value(s) in effectiveValues."
-                        + " Change what you hear per zone (track.setInstrument with"
-                        + " sampler.zonePatches [{id, \(name)}]); changing the global"
-                        + " will do nothing.")
+                    "every zone sets its own \(name)\(opcodeClause), so the stored global"
+                        + " \(use.global) is NOT used — the engine applies the value(s) in"
+                        + " effectiveValues. Change what you hear per zone with"
+                        + " instrument_set_sampler_zones (patch [{id, \(name)}]) — or, over the"
+                        + " raw control protocol, track.setInstrument's sampler.zonePatches"
+                        + " [{id, \(name)}]; changing the global will do nothing.")
+                warnings.append(
+                    "\(name): the stored global (\(use.global)) is NOT what you'll hear — every"
+                        + " zone overrides it; the engine actually applies"
+                        + " \(formattedEffectiveValues(use)). See effectiveGlobals.\(name).")
             }
             return .object(obj)
         }
@@ -9814,15 +9944,28 @@ public final class CommandRouter {
                     + " valid for the loaded sample.")
         }
         if oneShotUse.globalIsInert, oneShot["note"] == nil {
+            // No SFZ opcode named here (unlike release/attack): the SFZ
+            // analogue of a per-zone one-shot override is `loop_mode=one_shot`,
+            // not an `ampeg_*` field, so there is no single opcode to quote.
             oneShot["note"] = .string(
                 "every zone sets its own oneShot, so the stored global"
-                    + " \(oneShotUse.global) is NOT used.")
+                    + " \(oneShotUse.global) is NOT used — the engine applies each zone's own"
+                    + " flag. Change what you hear per zone with instrument_set_sampler_zones"
+                    + " (patch [{id, oneShot}]) — or, over the raw control protocol,"
+                    + " track.setInstrument's sampler.zonePatches [{id, oneShot}]; changing the"
+                    + " global will do nothing.")
         }
-        return .object([
-            "release": numericField(SamplerGlobalUse.release(of: params), "release"),
-            "attack": numericField(SamplerGlobalUse.attack(of: params), "attack"),
+        if oneShotUse.globalIsInert {
+            warnings.append(
+                "oneShot: the stored global (\(oneShotUse.global)) is NOT what happens — every"
+                    + " zone sets its own flag. See effectiveGlobals.oneShot.")
+        }
+        let json = JSONValue.object([
+            "release": numericField(SamplerGlobalUse.release(of: params), "release", sfzOpcode: "ampeg_release"),
+            "attack": numericField(SamplerGlobalUse.attack(of: params), "attack", sfzOpcode: "ampeg_attack"),
             "oneShot": .object(oneShot),
         ])
+        return (json, warnings)
     }
 
     /// The JSON shaping for one coverage envelope. The COMPUTATION moved to
