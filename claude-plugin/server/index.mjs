@@ -44825,14 +44825,14 @@ registerTool(
         external_exports.object({
           startBeat: external_exports.number().min(0).describe("Beat where this tempo begins. Segment 0 must be 0; later segments strictly increasing."),
           bpm: external_exports.number().min(20).max(400).describe("Tempo in BPM for this segment. Range 20-400.")
-        })
+        }).strict()
       ).min(1).describe("Ordered tempo segments; segment 0 at beat 0 sets the base tempo."),
       meterChanges: external_exports.array(
         external_exports.object({
           startBeat: external_exports.number().min(0).describe("Beat where this time signature begins. Change 0 must be 0."),
           beatsPerBar: external_exports.number().int().min(1).describe("Beats per bar \u2014 the top number (e.g. 3 for 3/4)."),
           beatUnit: external_exports.number().int().min(1).describe("Beat unit \u2014 the bottom number (e.g. 4 for 3/4).")
-        })
+        }).strict()
       ).min(1).optional().describe(
         "Optional time-signature changes; omit to leave the meter unchanged. Change 0 must be at beat 0; each later change must fall on a barline."
       )
@@ -45054,7 +45054,7 @@ var samplerCrossfadeSchema = external_exports.object({
 );
 var samplerZoneSchema = external_exports.object({
   path: external_exports.string().min(1).describe(
-    "REQUIRED. Absolute file path to this zone's sample audio file (wav/aiff/etc.). The file is copied into the project bundle on project_save, so the project stays portable \u2014 always pass the original source path here, not a bundle-relative one."
+    "REQUIRED. Absolute file path to this zone's sample audio file (wav/aiff/etc.), or the name of a sample the app ships, written `builtin:<name>`. The file is copied into the project bundle on project_save, so the project stays portable \u2014 always pass the original source path here, not a bundle-relative one. The only bundled sample today is `builtin:test-tone-a4` (m30-a): a 0.35 s A4 one-shot whose root pitch is MIDI 69, there so the sampler can be played and smoke-tested on a machine with no sample library of its own \u2014 e.g. to exercise `bendRangeSemitones` or `voiceMode`. A `builtin:` name that does not exist is REFUSED, and the error lists the ones that do; it is never silently accepted."
   ),
   rootPitch: external_exports.number().int().min(0).max(127).optional().describe(
     "MIDI pitch, 0-127 (60 = middle C), at which this sample plays back at its original recorded speed/pitch. Notes above or below are pitch-shifted relative to this root. Defaults to 60."
@@ -45174,7 +45174,7 @@ var audioUnitSchema = external_exports.object({
   manufacturer: external_exports.string().length(4).describe(
     'REQUIRED. Audio Unit component manufacturer, a 4-character FourCC string EXACTLY as returned by instrument_list_audio_units (e.g. "appl" for Apple).'
   )
-}).describe(
+}).strict().describe(
   "Identifies one installed Audio Unit instrument by its component triple (type/subType/manufacturer), used only when `kind` is (or is being set to) `audioUnit`. Call instrument_list_audio_units first to discover installed AUs and copy their exact FourCC strings verbatim, including significant trailing spaces. Selecting an `audioUnit` implies `kind` `audioUnit` even if `kind` is omitted from this call. An unknown/uninstalled component triple is rejected with a readable error pointing you back to instrument_list_audio_units. The AU's own preset/parameter state persists in the project automatically on project_save. If a project referencing an AU is opened on a machine where that AU isn't installed, the track loads silently with an instrument `status` of \"missing\" in project_snapshot rather than failing to open. Omit `audioUnit` to leave the track's current instrument untouched."
 );
 var soundBankSchema = external_exports.object({
@@ -45190,7 +45190,7 @@ var soundBankSchema = external_exports.object({
   bankLSB: external_exports.number().int().min(0).max(127).optional().describe(
     "Bank select LSB, 0-127. Defaults to 0. Most banks (General MIDI included) never use a nonzero LSB; instrument_list_sound_bank_programs reports it when a bank does."
   )
-}).describe(
+}).strict().describe(
   'Addresses a SoundFont2 (.sf2) or DLS (.dls) bank program \u2014 General MIDI or any other discovered/imported bank \u2014 used only when `kind` is (or is being set to) `soundBank`. ZERO-SETUP flow: call instrument_list_sound_banks (General MIDI is always listed first, no downloads required) to see available banks, instrument_list_sound_bank_programs to see that bank\'s exact program numbers/names, then pass the chosen `source`/`program`/`bankMSB`/`bankLSB` here \u2014 e.g. `{source: "gm", program: 56}` selects General MIDI\'s Trumpet. Providing `soundBank` implies `kind` `soundBank` even if `kind` is omitted, and is MUTUALLY EXCLUSIVE with `audioUnit` in the same call \u2014 providing both is rejected with "provide either audioUnit or soundBank, not both" and nothing lands. The resolved selection echoes back (and rides project_snapshot) as `soundBank: {source, path, program, bankMSB, bankLSB, name, status}`: `name` is a server-derived display name (e.g. "Trumpet \u2014 General MIDI"); `status` starts "pending" and becomes "ready" once the bank finishes loading into the sampler, "missing" if the bank file can\'t be found on this machine, or `failed: <reason>` (may include a low-level OSStatus code) if loading it otherwise fails. Omit `soundBank` to leave the track\'s current instrument untouched.'
 );
 registerTool(
@@ -45351,7 +45351,7 @@ registerTool(
           channel: external_exports.number().int().min(0).max(15).optional().describe("MIDI channel filter; omit for omni (usually right)"),
           sourceId: external_exports.number().int().optional().describe("a device `uniqueID` from midi_list_inputs; omit for any device"),
           inverted: external_exports.boolean().optional().describe("flip the sweep for a knob wired backwards")
-        })
+        }).strict()
       ).describe("the WHOLE table \u2014 [] clears every mapping")
     }
   },
@@ -45503,7 +45503,7 @@ registerTool(
   "instrument_describe_sampler",
   {
     title: "Read a track's Sampler configuration (read-only)",
-    description: "Read the built-in Sampler's configuration on an instrument track \u2014 the ANSWER to 'which library is loaded and how is it mapped' without paying for project_snapshot's whole-project cost (measured 296,809 bytes on a real song). Mirrors au_describe_params: a cheap describe you call BEFORE editing, so instrument_set_sampler_param/instrument_set_sampler_zones don't have to guess a track's current state. Works even when the track's ACTIVE instrument is something else right now \u2014 sampler configuration is carried across kind switches (like soundBank/audioUnit), so you can inspect a previously-built sampler map before switching back to it; the response's own `kind` field tells you whether `sampler` is actually the SOUNDING instrument or just preserved state. Refuses readably for an audio/bus track (only instrument tracks carry an instrument), an unknown trackId, or an instrument track that has never had a sampler configured at all (use instrument_import_sample_library or track_set_instrument {kind:\"sampler\", sampler:{zones:[...]}} first) \u2014 but a sampler that IS configured with zero zones (the deliberate `zones: []` clear) is a legal answer, not a refusal: you get `zoneSummary.count: 0` back. Returns {trackId, kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary, effectiveGlobals?, warnings?}. \u26A0\uFE0F READ `effectiveGlobals` BEFORE TRUSTING top-level `release`/`attack`/`oneShot`. Those three are the STORED globals, and a zone that sets its own value WINS over them \u2014 so on an imported library they are routinely numbers the engine never reads. ANY per-zone value can do this, whichever way the sampler was built: a hand-authored zone over the wire, a `.dspreset` region (whose `attack`/`release` attributes carry no special prefix), or an SFZ region/group/global (whose native opcode names are `ampeg_attack`/`ampeg_release`) \u2014 SFZ is not the only way in. (Field report 2026-08-20: this verb answered `release: 3.4465` for an instrument that audibly released in 0.5 s, because the imported SFZ authored `ampeg_release` in its `<global>` block and every region inherited it. The engine was right; the answer was not.) `effectiveGlobals` is {release, attack, oneShot}, each {global, zonesOverriding, zonesInheriting, globalIsInert, effectiveValues, effectiveMin?, effectiveMax?, effectiveValuesTruncated?, note?}. `globalIsInert: true` means NO zone inherits that global: writing it with instrument_set_sampler_param will be accepted and change nothing you can hear \u2014 change the per-zone values instead (instrument_set_sampler_zones, patching `release` / `attack` / `oneShot` per zone). `note` (present only when `globalIsInert`) says so in prose and, for `release`/`attack`, names the SFZ opcode (`ampeg_release`/`ampeg_attack`) ONLY when `sourcePath` actually ends in `.sfz` \u2014 never for a hand-built sampler or a `.dspreset` import, which would make the opcode name meaningless. Top-level `warnings` (a string array, present only when at least one global is inert) restates the same fact with BOTH the stored and the actually-applied number inline, so it is impossible to miss even for a caller that only reads the top level and never descends into `effectiveGlobals` at all. `effectiveValues` is the list of values the engine will actually apply across the zones, ascending, and is the number to quote to a user; it is meaningful in the MIXED case too (some zones overriding, some still tracking the global), which no single boolean can describe. It caps at 8 distinct values with `effectiveValuesTruncated: true`, but `effectiveMin`/`effectiveMax` stay exact. `oneShot` additionally reports `zonesWithLoopMode` when any zone loops: a looping voice is never one-shot regardless of the flag, provided its loop bounds are valid for the loaded sample (which only the engine can confirm, so it is reported rather than folded into the counts). `effectiveGlobals` is omitted entirely for a zero-zone sampler \u2014 there is no inheritance to describe, and such a sampler is silent for an unrelated reason. `sourcePath`/`displayName` (provenance from an import; `displayName` is a file STEM and therefore NOT unique \u2014 two different folders can both hold a \"Bass.sfz\", so `sourcePath` is what actually disambiguates them) appear only when set \u2014 a hand-built sampler has neither. `zoneSummary` is {count, pitchCoverage?, velocityCoverage?, groupCount, distinctSampleFiles}: `pitchCoverage`/`velocityCoverage` are each {min, max, gaps?} \u2014 the UNION of every zone's range, not a naive min/max, so a keymap with a hole in the middle is visible as a `gaps` entry INSIDE the envelope instead of silently reading as full 0-127 coverage (this is exactly the bug class the field report hit twice: a bass silent below MIDI 35, a library silent above 45). Both are omitted entirely when the sampler has zero zones. `groupCount` counts distinct layering groups (an unset zone group counts as group 0, the classic first-match default) and `distinctSampleFiles` counts unique sample audio files across all zones. The zone list itself is a SEPARATE, opt-in page: omit both `offset` and `limit` and the response has no `zones` key at all (just the summary); pass either one and you get a paged `zones` array (the exact shape track_set_instrument echoes back, ids included) plus `offset`, `limit`, `returnedZones`, and `truncated` so you know whether to page further.",
+    description: "Read the built-in Sampler's configuration on an instrument track \u2014 the ANSWER to 'which library is loaded and how is it mapped' without paying for project_snapshot's whole-project cost (measured 296,809 bytes on a real song). Mirrors au_describe_params: a cheap describe you call BEFORE editing, so instrument_set_sampler_param/instrument_set_sampler_zones don't have to guess a track's current state. Works even when the track's ACTIVE instrument is something else right now \u2014 sampler configuration is carried across kind switches (like soundBank/audioUnit), so you can inspect a previously-built sampler map before switching back to it; the response's own `kind` field tells you whether `sampler` is actually the SOUNDING instrument or just preserved state. Refuses readably for an audio/bus track (only instrument tracks carry an instrument), an unknown trackId, or an instrument track that has never had a sampler configured at all (use instrument_import_sample_library or track_set_instrument {kind:\"sampler\", sampler:{zones:[...]}} first; with no sample library of your own, mount the bundled one-shot \u2014 {path: \"builtin:test-tone-a4\", rootPitch: 69} \u2014 and you have a sound) \u2014 but a sampler that IS configured with zero zones (the deliberate `zones: []` clear) is a legal answer, not a refusal: you get `zoneSummary.count: 0` back. Returns {trackId, kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary, effectiveGlobals?, warnings?}. \u26A0\uFE0F READ `effectiveGlobals` BEFORE TRUSTING top-level `release`/`attack`/`oneShot`. Those three are the STORED globals, and a zone that sets its own value WINS over them \u2014 so on an imported library they are routinely numbers the engine never reads. ANY per-zone value can do this, whichever way the sampler was built: a hand-authored zone over the wire, a `.dspreset` region (whose `attack`/`release` attributes carry no special prefix), or an SFZ region/group/global (whose native opcode names are `ampeg_attack`/`ampeg_release`) \u2014 SFZ is not the only way in. (Field report 2026-08-20: this verb answered `release: 3.4465` for an instrument that audibly released in 0.5 s, because the imported SFZ authored `ampeg_release` in its `<global>` block and every region inherited it. The engine was right; the answer was not.) `effectiveGlobals` is {release, attack, oneShot}, each {global, zonesOverriding, zonesInheriting, globalIsInert, effectiveValues, effectiveMin?, effectiveMax?, effectiveValuesTruncated?, note?}. `globalIsInert: true` means NO zone inherits that global: writing it with instrument_set_sampler_param will be accepted and change nothing you can hear \u2014 change the per-zone values instead (instrument_set_sampler_zones, patching `release` / `attack` / `oneShot` per zone). `note` (present only when `globalIsInert`) says so in prose and, for `release`/`attack`, names the SFZ opcode (`ampeg_release`/`ampeg_attack`) ONLY when `sourcePath` actually ends in `.sfz` \u2014 never for a hand-built sampler or a `.dspreset` import, which would make the opcode name meaningless. Top-level `warnings` (a string array, present only when at least one global is inert) restates the same fact with BOTH the stored and the actually-applied number inline, so it is impossible to miss even for a caller that only reads the top level and never descends into `effectiveGlobals` at all. `effectiveValues` is the list of values the engine will actually apply across the zones, ascending, and is the number to quote to a user; it is meaningful in the MIXED case too (some zones overriding, some still tracking the global), which no single boolean can describe. It caps at 8 distinct values with `effectiveValuesTruncated: true`, but `effectiveMin`/`effectiveMax` stay exact. `oneShot` additionally reports `zonesWithLoopMode` when any zone loops: a looping voice is never one-shot regardless of the flag, provided its loop bounds are valid for the loaded sample (which only the engine can confirm, so it is reported rather than folded into the counts). `effectiveGlobals` is omitted entirely for a zero-zone sampler \u2014 there is no inheritance to describe, and such a sampler is silent for an unrelated reason. `sourcePath`/`displayName` (provenance from an import; `displayName` is a file STEM and therefore NOT unique \u2014 two different folders can both hold a \"Bass.sfz\", so `sourcePath` is what actually disambiguates them) appear only when set \u2014 a hand-built sampler has neither. `zoneSummary` is {count, pitchCoverage?, velocityCoverage?, groupCount, distinctSampleFiles}: `pitchCoverage`/`velocityCoverage` are each {min, max, gaps?} \u2014 the UNION of every zone's range, not a naive min/max, so a keymap with a hole in the middle is visible as a `gaps` entry INSIDE the envelope instead of silently reading as full 0-127 coverage (this is exactly the bug class the field report hit twice: a bass silent below MIDI 35, a library silent above 45). Both are omitted entirely when the sampler has zero zones. `groupCount` counts distinct layering groups (an unset zone group counts as group 0, the classic first-match default) and `distinctSampleFiles` counts unique sample audio files across all zones. The zone list itself is a SEPARATE, opt-in page: omit both `offset` and `limit` and the response has no `zones` key at all (just the summary); pass either one and you get a paged `zones` array (the exact shape track_set_instrument echoes back, ids included) plus `offset`, `limit`, `returnedZones`, and `truncated` so you know whether to page further.",
     inputSchema: {
       trackId: external_exports.string().min(1).describe("Id of the instrument track to describe, from project_snapshot."),
       offset: external_exports.number().int().min(0).optional().describe(
@@ -45542,7 +45542,19 @@ registerTool(
       )
     }
   },
-  async ({ trackId, param, value }) => toToolResult(() => bridge.send("track.setInstrument", { trackId, sampler: { [param]: value } }))
+  async ({ trackId, param, value }) => toToolResult(() => {
+    if (typeof value === "string" && param !== "voiceMode") {
+      throw new Error(
+        `sampler param "${param}" does not take a string \u2014 got ${JSON.stringify(value)}. Only "voiceMode" is a string param ("poly" or "mono").`
+      );
+    }
+    if (param === "voiceMode" && typeof value !== "string") {
+      throw new Error(
+        `sampler param "voiceMode" takes the string "poly" or "mono" \u2014 got ${typeof value}.`
+      );
+    }
+    return bridge.send("track.setInstrument", { trackId, sampler: { [param]: value } });
+  })
 );
 var samplerZonePatchSchema = external_exports.object({
   id: external_exports.string().uuid().describe(
@@ -45860,7 +45872,7 @@ var noteSchema = external_exports.object({
   id: external_exports.string().uuid().optional().describe(
     "Note id (uuid). Omit when creating new notes \u2014 the server mints one; include an existing note's id when resubmitting it unchanged via clip_set_notes."
   )
-});
+}).strict();
 registerTool(
   "clip_add_audio",
   {
@@ -45880,7 +45892,7 @@ registerTool(
   "clip_add_midi",
   {
     title: "Create a MIDI clip with notes",
-    description: "Create a MIDI clip on an INSTRUMENT track (see track_add with kind=instrument) and write its notes in one call \u2014 the way to compose a whole melody, riff, or chord progression at once. Each note carries `pitch` (MIDI number, 0-127; 60 = middle C), `velocity` (1-127, defaults to 100), `startBeat` (RELATIVE TO THE CLIP'S START, not the timeline), and `lengthBeats` (defaults to 1 beat). Audio and bus tracks reject MIDI clips. Returns the created clip with server-minted note ids and the notes normalized and sorted by startBeat. NOTE: MIDI clips are silent until an instrument is wired up (M3) \u2014 the data model and editing already work, so compose freely now and expect sound once an instrument lands.",
+    description: "Create a MIDI clip on an INSTRUMENT track (see track_add with kind=instrument) and write its notes in one call \u2014 the way to compose a whole melody, riff, or chord progression at once. Each note carries `pitch` (MIDI number, 0-127; 60 = middle C), `velocity` (1-127, defaults to 100), `startBeat` (RELATIVE TO THE CLIP'S START, not the timeline), and `lengthBeats` (defaults to 1 beat). Audio and bus tracks reject MIDI clips. Returns the created clip with server-minted note ids and the notes normalized and sorted by startBeat. A new instrument track already SOUNDS \u2014 it resolves to the default poly synth even when nothing has been configured on it, so a clip written here is audible immediately. Use track_set_instrument to put it on a sound bank, sampler, or hosted Audio Unit instead. `returnNotes` (default true, UNCHANGED from before this param existed) controls whether the response echoes the notes array back at all: on the hot path of a composing session this echo is often the single biggest cost in the call, since the useful result is almost always just the new clip id, not per-note ids you rarely edit immediately. Pass `returnNotes: false` to get the clip back WITHOUT its `notes` array \u2014 the response instead carries `notesOmitted: true` and `noteCount` (how many notes were actually written), so it can never be mistaken for a genuinely empty clip. Nothing is lost: read the notes back any time with clip_get_notes (read-only, no undo step, takes the returned clip's id). Note this only trims what crosses back to YOU \u2014 the full payload still crosses the app's own control connection either way, so it saves your context budget, not wire bytes.",
     inputSchema: {
       trackId: external_exports.string().min(1).describe("Id of the instrument track to add the clip to, from project_snapshot or track_add."),
       name: external_exports.string().min(1).optional().describe("Display name for the clip. Defaults to a generic name."),
@@ -45892,10 +45904,20 @@ registerTool(
       ),
       notes: external_exports.array(noteSchema).max(4096).optional().describe(
         "Notes to write into the clip, up to 4096. Each note's startBeat is relative to the clip's own start. Omit (or pass an empty array) to create an empty MIDI clip."
+      ),
+      returnNotes: external_exports.boolean().optional().describe(
+        "Whether the response echoes the written notes back, each with its server-minted id. Defaults to true (unchanged prior behavior). Pass false to drop the notes array from the response and get back `notesOmitted: true` plus `noteCount` instead \u2014 the notes are still written and are always readable afterward via clip_get_notes; this only shrinks what comes back to you, not what crosses the app's own control connection."
       )
     }
   },
-  async ({ trackId, name, atBeat, lengthBeats, notes }) => toToolResult(() => bridge.send("clip.addMIDI", { trackId, name, atBeat, lengthBeats, notes }))
+  async ({ trackId, name, atBeat, lengthBeats, notes, returnNotes }) => toToolResult(async () => {
+    const result = await bridge.send("clip.addMIDI", { trackId, name, atBeat, lengthBeats, notes });
+    if (returnNotes === false && result && typeof result === "object" && Array.isArray(result.notes)) {
+      const { notes: writtenNotes, ...rest } = result;
+      return { ...rest, notesOmitted: true, noteCount: writtenNotes.length };
+    }
+    return result;
+  })
 );
 registerTool(
   "clip_set_notes",
@@ -46046,7 +46068,7 @@ registerTool(
             "Breakpoint position in beats, RELATIVE TO THE CLIP'S START (not the timeline). Clamped into 0..the clip's length."
           ),
           gainDb: external_exports.number().describe("Gain at this breakpoint in decibels. Clamped to -72..24; 0 = unity.")
-        })
+        }).strict()
       ).optional().describe(
         "Gain breakpoints, sorted by beat ascending with no duplicate beats. Empty or omitted CLEARS the envelope."
       )
@@ -46319,7 +46341,7 @@ var controllerPointSchema = external_exports.object({
   value: external_exports.number().int().min(0).max(16383).describe(
     "Raw MIDI value at this point. 0-16383 for a pitchBend lane (8192 = center, no bend); 0-127 for cc / channelPressure lanes \u2014 a value outside the OWNING lane's domain errors readably, naming the exact range."
   )
-});
+}).strict();
 registerTool(
   "clip_set_controller_lane",
   {
@@ -46713,7 +46735,7 @@ var compSegmentSchema = external_exports.object({
   laneId: external_exports.string().uuid().describe("Id of the lane (take) this segment plays, from take_group's result or project_snapshot."),
   startBeat: external_exports.number().describe("Segment start, in ABSOLUTE timeline beats (not lane-relative)."),
   endBeat: external_exports.number().describe("Segment end, in ABSOLUTE timeline beats. Must be greater than startBeat.")
-});
+}).strict();
 registerTool(
   "take_group",
   {
@@ -47138,21 +47160,26 @@ registerTool(
   async ({ genre, tempoBPM, sections, tracks }) => toToolResult(() => bridge.send("macro.songSkeleton", { genre, tempoBPM, sections, tracks }))
 );
 var automationTargetSchema = external_exports.discriminatedUnion("type", [
+  // `.strict()` on each discriminated-union member (m30-c): closes the
+  // same per-element hole for automation_add_lane's `target` — a typo'd
+  // field (e.g. "sendld") would otherwise be silently stripped instead of
+  // rejected. `.strict()` still returns a ZodObject, so discriminatedUnion
+  // accepts it unchanged.
   external_exports.object({
     type: external_exports.literal("volume").describe("Automate the track's fader volume (linear gain multiplier).")
-  }),
+  }).strict(),
   external_exports.object({
     type: external_exports.literal("pan").describe("Automate the track's pan position.")
-  }),
+  }).strict(),
   external_exports.object({
     type: external_exports.literal("sendLevel").describe("Automate one send's level (see `sendId`). Rejected in v0 \u2014 no render path yet."),
     sendId: external_exports.string().min(1).describe("Id of the send to automate, from track_add_send's result or project_snapshot.")
-  }),
+  }).strict(),
   external_exports.object({
     type: external_exports.literal("effectParam").describe("Automate one parameter of a built-in effect (see `effectId`/`param`)."),
     effectId: external_exports.string().min(1).describe("Id of the effect to automate, from fx_add's result or project_snapshot."),
     param: external_exports.string().min(1).describe("Exact parameter name, as listed by fx_describe for the effect's kind.")
-  })
+  }).strict()
 ]).describe(
   "What this lane drives on the track, by discriminator `type`. `volume`: the track fader gain \u2014 while the lane is enabled it REPLACES manual fader control (track_set_volume), the way to draw fades, swells, and rides \u2014 no other fields. `pan`: the track pan, same override behavior as volume \u2014 no other fields. `sendLevel` (needs `sendId`, from track_add_send/project_snapshot): one send's level \u2014 REJECTED in v0 (automation_add_lane errors: send-level automation has no render path yet; the shape is accepted now so projects stay forward-compatible). `effectParam` (needs `effectId` from fx_add/project_snapshot, and `param` \u2014 the EXACT name from fx_describe for that effect's kind): one parameter of a BUILT-IN effect already in the track's insert chain \u2014 use it for filter sweeps, reverb-mix rises, delay-feedback build-ups, etc.; built-in kinds (gain, eq, compressor, limiter, reverb, delay, saturator, gate, chorus, bassEnhancer) work today. `effectParam` is REJECTED in v0 when the effect is a hosted Audio Unit (`kind: \"audioUnit\"` from fx_add), since its generic parameter surface is empty."
 );
@@ -47166,7 +47193,7 @@ var automationPointSchema = external_exports.object({
   curve: external_exports.enum(["linear", "hold"]).optional().describe(
     "Interpolation of the segment LEAVING this point toward the next one. `linear` (the default when omitted) ramps smoothly; `hold` stays flat at this point's value until the next point steps. Has no effect on the lane's last point (nothing follows it)."
   )
-});
+}).strict();
 registerTool(
   "automation_add_lane",
   {
@@ -47544,10 +47571,13 @@ registerTool(
     inputSchema: {
       trackId: external_exports.string().uuid().optional().describe(
         "Track to paste into, from project_snapshot. Overrides the resolved active track for THIS paste only. Omit to use the same active-track resolution a bare Cmd-V would use."
+      ),
+      atBeat: external_exports.number().optional().describe(
+        "Project beat to anchor the paste on. The EARLIEST copied clip lands here and the rest keep their offsets from it. Overrides the transport playhead for THIS paste only and does NOT move the playhead. Omit to anchor on the playhead, exactly as a bare Cmd-V does. A negative value slides the whole group to beat 0 rather than erroring."
       )
     }
   },
-  async ({ trackId }) => toToolResult(() => bridge.send("edit.pasteClips", { trackId }))
+  async ({ trackId, atBeat }) => toToolResult(() => bridge.send("edit.pasteClips", { trackId, atBeat }))
 );
 server.registerTool(
   "project_snapshot",
@@ -47871,7 +47901,7 @@ registerTool(
           prompt: external_exports.string().optional().describe(
             `This track's OWN local description, e.g. "round sub bass, laid back, syncopated". Omit for a bare generic instruction.`
           )
-        })
+        }).strict()
       ).min(1).describe("The tracks to generate \u2014 one entry per new track, each with its own local prompt."),
       model: external_exports.string().optional().describe(
         'DiT model name to use, e.g. "acestep-v15-xl-sft". OPTIONAL \u2014 same default-model + auto-load behavior as extract_stems\' `model` note; leave unset for the normal case.'

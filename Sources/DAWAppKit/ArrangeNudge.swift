@@ -269,6 +269,14 @@ public enum ArrangeNudge {
     /// honest answer). A second clamp here would be a second computation of the
     /// same quantity, free to agree by luck — the m23-f finding.
     ///
+    /// ⚠️ THE REQUEST IS ±1; THE DELTA THE STORE IS ASKED FOR MAY NOT BE
+    /// (m25-l-1 ④). Between this producer and the store sits
+    /// `ArrangeVerticalNudgeReach.delta`, which passes the press OVER a lane
+    /// that cannot hold the selection — so a single ↓ can ask for +2. That
+    /// belongs there and not here for the same reason the clamp does: it needs
+    /// every selected clip's track index and the project's track list, neither
+    /// of which this pure step-sizing rule has or should acquire.
+    ///
     /// KEY REPEAT IS WELCOME, as on the horizontal axis: no `isRepeat` parameter
     /// exists, the view mounts `phases: [.down, .repeat]`, and the undo cost of a
     /// held arrow is paid by `ProjectStore.moveClipsKey(ids:)`'s

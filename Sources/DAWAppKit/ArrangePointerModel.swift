@@ -135,6 +135,43 @@ public enum ArrangePointer {
         lanes.firstIndex { y >= $0.clipTop && y < $0.clipBottom }
     }
 
+    /// The row a right-click on EMPTY LANE SPACE names (m25-f-4), or nil when
+    /// the point names no pasteable destination at all.
+    ///
+    /// COMPOSED from `clipLaneIndex` + `clipIndex`, never a third geometry rule:
+    /// the y must be inside a row's CLIP BAND and the beat must hit no clip on
+    /// that row. Both halves are the ones the double-click create already uses,
+    /// which is what keeps "this lane is empty here" from having two spellings.
+    ///
+    /// ⚠️ **DELIBERATELY NOT `zone(...) == .empty`, for `clipLaneIndex`'s reason
+    /// one function up, and the trap is live for THIS caller in particular.**
+    /// `zone` checks the playhead grab tolerance BEFORE the clip lookup, so
+    /// empty space within 4 pt of the playhead classifies `.playheadGrab`. A
+    /// user clicks empty space (which SEEKS the playhead onto that point) and
+    /// then right-clicks the same place — under a zone guard the menu would
+    /// find no target on precisely the spot they had just pointed at.
+    ///
+    /// nil for the gap between rows, a row's expanded take/automation extras,
+    /// and the free space below the last lane: none of them name a track, and a
+    /// paste needs a track (`PasteAnchorPolicy.resolveClipPaste`). It is also
+    /// nil OVER A CLIP — the clip's own context menu owns that pointer, and
+    /// `TimelineLanesView.contextMenu`'s banner records why pasting "onto" a
+    /// clip has no meaning a user could predict.
+    ///
+    /// - Parameters:
+    ///   - y: content-space y.
+    ///   - beatRaw: the UNSNAPPED beat under the pointer x. Raw on purpose: the
+    ///     emptiness question is about the pixel the user pointed at, and the
+    ///     snapped beat can land inside a neighbouring clip (the same asymmetry
+    ///     `createClipLength` documents, which is why IT re-tests the snapped
+    ///     start against the residents).
+    public static func emptyLaneIndex(atY y: CGFloat, beatRaw: Double,
+                                      in lanes: [ArrangePointerLane]) -> Int? {
+        guard let index = clipLaneIndex(atY: y, in: lanes) else { return nil }
+        guard clipIndex(atBeat: beatRaw, in: lanes[index].clipSpans) == nil else { return nil }
+        return index
+    }
+
     /// The length (in beats) of the empty MIDI clip an empty-lane double-click
     /// creates at `startBeat` (m23-e), or nil when there is no room for one.
     ///

@@ -87,6 +87,149 @@ public enum PianoRollZoom {
                                   offset: offset, viewportWidth: viewportWidth)
     }
 
+    // MARK: - Vertical scale (pitch-row height, m25-b-4)
+
+    /// The historical fixed row height (docs/DESIGN-LANGUAGE.md "Piano roll":
+    /// 14 pt) — the default and the reset target, and THE source of truth:
+    /// `PianoRollModel.defaultRowHeight` reads this, exactly as it reads
+    /// `defaultPixelsPerBeat` above (the model type is `@MainActor`, so the
+    /// constant lives here where `@Sendable` renderers can also reach it).
+    ///
+    /// ⚠️ **UNCHANGED AT 14 ON PURPOSE.** m25-b-4 added the zoom, not a new look:
+    /// a session that never touches the new driver draws exactly as it did.
+    public static let defaultRowHeight: CGFloat = 14
+
+    /// Clamp bounds for the pitch-row height. **Not the arrange's `24...64`** —
+    /// `PanelLayoutStore.rowHeight` is the arrange TRACK-LANE height, a different
+    /// surface with different content, and copying its range here would be a name
+    /// collision doing the reasoning.
+    ///
+    /// **The floor, 10 pt, is MEASURED and is the gutter's, not the grid's.** The
+    /// m25-i keyboard gutter names EVERY one of the 128 keys in 8 pt SF Mono, each
+    /// name drawn vertically centred in its row, and that face lays out in a
+    /// **10.0 pt line box** (`NSLayoutManager.defaultLineHeight` and
+    /// `NSAttributedString.size().height` agree at 10.0 for both the medium and
+    /// the bold weight the gutter uses — re-measured for this item, because the
+    /// tree carried two different figures for it: DESIGN-LANGUAGE said 10.0 and
+    /// `KeyboardSidebar` said "~9.5", and 9.5 is the INK height, not the line
+    /// box). So adjacent key names first touch at exactly 10 pt, and putting the
+    /// floor there is what lets the gutter stay out of this item's blast radius
+    /// entirely: `KeyboardSidebar`'s own doc anticipated owning a label-density
+    /// ladder when a vertical zoom landed, and a floor at the measured fit bound
+    /// means there is no density to ladder — every reachable row height names
+    /// every key. The grid agrees the floor is safe rather than merely tolerable:
+    /// at 10 pt a note's hit rect (`PianoRollModel.noteRect`, full row height) is
+    /// still taller than the roll's own smallest shipped grab dimension
+    /// (`resizeHandleWidth`, 8 pt), and the pill draws 7 pt tall (the one draw
+    /// site insets `dy: 1.5`), still above 2× its 3 pt corner radius, so it reads
+    /// as a rounded BAR rather than as a lozenge.
+    ///
+    /// **The ceiling, 56 pt (4× the default), is a JUDGEMENT and is recorded as
+    /// one** — nothing breaks above it, which is exactly why it needs stating.
+    /// What a taller row buys is hit area and nothing else: a pill's only vertical
+    /// content is its 8 pt name (`PianoRollNoteLabel`), so past ~4× the row is
+    /// empty glass. What it costs is visible pitch span, and that cost is not
+    /// symmetric — at 56 pt the m25-b-1 MAXIMIZED editor still shows about an
+    /// octave, while the pane the app OPENS in (`editorFractionRange`'s 0.30 floor)
+    /// shows about a triad. A ceiling that showed less than a triad in the default
+    /// pane would make chord editing impossible in the default pane.
+    public static let rowHeightRange: ClosedRange<CGFloat> = 10...56
+
+    /// Tames any requested row height into the legal range.
+    public static func clampRowHeight(_ rowHeight: CGFloat) -> CGFloat {
+        rowHeight.clamped(to: rowHeightRange)
+    }
+
+    /// One ladder step taller. The SAME multiplicative `stepFactor` the horizontal
+    /// ladder uses, so one press feels like one press on either axis.
+    public static func tallerRow(_ rowHeight: CGFloat) -> CGFloat {
+        clampRowHeight(rowHeight * stepFactor)
+    }
+
+    /// One ladder step shorter.
+    public static func shorterRow(_ rowHeight: CGFloat) -> CGFloat {
+        clampRowHeight(rowHeight / stepFactor)
+    }
+
+    /// The header/menu readout's percent of the default row height ("100%" at
+    /// 14 pt) — the `percentLabel` sibling, kept here so a future header stepper
+    /// does not compose the string itself.
+    public static func rowPercentLabel(rowHeight: CGFloat) -> String {
+        "\(Int(((rowHeight / defaultRowHeight) * 100).rounded()))%"
+    }
+
+    // MARK: - Anchor-preserving VERTICAL zoom (m25-b-4 — the no-jump rule's twin)
+
+    /// The screen-y a row-height zoom anchors on: **the viewport's CENTRE row**,
+    /// always.
+    ///
+    /// ⚠️ **THAT IS ONE BRANCH WHERE THE HORIZONTAL RULE HAS TWO, AND THE MISSING
+    /// BRANCH IS NOT AN OMISSION.** `anchorScreenX` prefers the PLAYHEAD and falls
+    /// back to the centre. **The pitch axis has no playhead** — `PianoRollPlayhead`
+    /// produces an x, and follow-the-playhead is scoped out of this axis on
+    /// purpose (`PianoRollView.editorVerticalScrollReader`: feeding follow a second
+    /// axis' reports would make every pitch scroll look like a manual horizontal
+    /// scroll) — so the first branch has no vertical counterpart and what remains
+    /// is exactly the documented fallback.
+    ///
+    /// **The SELECTION was considered as the anchor and refused.** It is often
+    /// empty, it can be scrolled out of frame, and it can span 60 semitones — an
+    /// anchor that is sometimes absent forces a second rule for when it is, and an
+    /// anchor the user cannot see is precisely what m25-b-3's off-clip case exists
+    /// to refuse. **The POINTER is not available either**: this item's drivers are
+    /// a menu chord and the debug seam, and neither has one (`MagnifyGesture` is a
+    /// single scalar and stays on the horizontal axis — see `PianoRollView.gridPinch`).
+    ///
+    /// It delegates so that "the centre" keeps ONE definition in the tree (the
+    /// m25-b-3 law): a playhead that cannot be in frame is handed to
+    /// `ArrangeZoom.anchorScreenX`, whose own fallback answers it. The argument
+    /// labels read `X`/`width` because that shared rule is written on the
+    /// horizontal axis; the arithmetic is axis-free, and a re-typed
+    /// `max(0, viewportHeight / 2)` here would be the second definition.
+    public static func rowAnchorScreenY(viewportHeight: CGFloat) -> CGFloat {
+        ArrangeZoom.anchorScreenX(playheadContentX: .infinity, offset: 0,
+                                  viewportWidth: viewportHeight)
+    }
+
+    /// The new VERTICAL scroll offset that keeps the pitch at the viewport's
+    /// centre under the centre after the row height changes.
+    ///
+    /// ⭐ **THE ARITHMETIC IS `ArrangeZoom.offsetPreservingAnchor`, BORROWED, NOT
+    /// COPIED.** `(oldOffset + anchor) / oldScale · newScale − anchor` has nothing
+    /// horizontal in it and nothing arrange-specific in it; the anchor's unit is
+    /// simply a ROW here instead of a beat. `PianoRollZoom` already borrows
+    /// `pixelsPerBeatRange`, `stepFactor` and the anchor rule from that enum, so a
+    /// second copy would fork a home that is already shared three ways.
+    ///
+    /// ⚠️⚠️ **THE ONE THING THAT IS GENUINELY NEW IS THE TOP CLAMP, AND IT IS NOT
+    /// COSMETIC.** The horizontal rule floors at 0 and lets the scroll view clamp
+    /// its own right edge. This axis cannot do that: the offset is delivered to the
+    /// roll through `verticalTargetY`, whose safety argument
+    /// (`PianoRollView.verticalJumpMarker`) rests on the target always landing
+    /// strictly inside the keyboard gutter — an `.overlay` marker taller than its
+    /// parent is COMPRESSED, and `scrollTo` then lands somewhere other than the
+    /// value asked for. That argument was written when `verticalTargetY` had
+    /// exactly one writer and says in terms that it "dies with" a second one. This
+    /// is the second writer, so the clamp is what keeps it alive — against the
+    /// **NEW** content height, since the rescale is what changes it.
+    ///
+    /// - Parameters:
+    ///   - oldRowHeight: the row height the current offset was measured at.
+    ///   - newRowHeight: the row height being applied.
+    ///   - oldOffset: the live vertical scroll offset (`gridScrollY`).
+    ///   - viewportHeight: the editor scroller's visible height.
+    public static func rowZoomOffset(oldRowHeight: CGFloat, newRowHeight: CGFloat,
+                                     oldOffset: CGFloat,
+                                     viewportHeight: CGFloat) -> CGFloat {
+        let anchor = rowAnchorScreenY(viewportHeight: viewportHeight)
+        let raw = ArrangeZoom.offsetPreservingAnchor(
+            oldPPB: oldRowHeight, newPPB: newRowHeight,
+            oldOffset: oldOffset, anchorScreenX: anchor)
+        let contentHeight = CGFloat(PianoRollModel.pitchCount) * newRowHeight
+        return Swift.min(raw, FollowPlayhead.maxOffset(contentWidth: contentHeight,
+                                                       viewportWidth: Swift.max(0, viewportHeight)))
+    }
+
     // MARK: - Grid density (sub-beat lines fade with zoom, never fork)
 
     /// Below this line spacing a sub-beat hairline is pure noise — it draws at

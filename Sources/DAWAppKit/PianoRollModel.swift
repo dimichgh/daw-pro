@@ -139,14 +139,25 @@ public final class PianoRollModel {
     /// `PianoRollZoom` (the `ArrangeZoom` sibling — and the nonisolated home
     /// of this constant).
     public static let defaultPixelsPerBeat: CGFloat = PianoRollZoom.defaultPixelsPerBeat
-    /// One semitone row's height.
-    public static let defaultRowHeight: CGFloat = 14
+    /// Default vertical scale — the roll's historical fixed 14 pt semitone row.
+    /// The LIVE row height is zoomable (m25-b-4): the view feeds `rowHeight` from
+    /// the persisted `PanelLayoutStore.pianoRollRowHeight` slot, clamped by
+    /// `PianoRollZoom` (the nonisolated home of this constant, exactly as it is
+    /// the home of `defaultPixelsPerBeat` above).
+    public static let defaultRowHeight: CGFloat = PianoRollZoom.defaultRowHeight
     /// MIDI pitches 0...127 → 128 rows. `nonisolated` so the pitch↔y affine mapping
     /// can be reproduced inside `@Sendable` Canvas renderers (m16-a) — it is a
     /// compile-time constant, never actor state.
     public nonisolated static let pitchCount = 128
     /// Grab zone on a note's right edge that means "resize" not "move".
-    public static let resizeHandleWidth: CGFloat = 8
+    ///
+    /// `nonisolated` for `pitchCount`'s reason verbatim — it is a compile-time
+    /// constant, never actor state. m25-b-4 needed it readable from a nonisolated
+    /// context: it is the roll's SMALLEST SHIPPED interactive dimension, so it is
+    /// what the vertical zoom's floor is checked against (a row shorter than this
+    /// would make a note's vertical hit target smaller than the smallest grab zone
+    /// the roll already asks a user to hit).
+    public nonisolated static let resizeHandleWidth: CGFloat = 8
 
     public var pixelsPerBeat: CGFloat
     public var rowHeight: CGFloat

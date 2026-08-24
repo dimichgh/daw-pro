@@ -517,4 +517,86 @@ struct PasteAnchorPolicyTests {
         let out = PasteAnchorPolicy.translatedNotes(notes, toAnchor: 900)
         #expect(out.first?.startBeat == 900)
     }
+    // MARK: - m25-f-4: the empty-lane right-click's composition
+
+    /// ⭐ **THE ITEM'S WHOLE PROMISE, IN ONE ASSERTION**: a right-click on empty
+    /// lane space names a TRACK and a BEAT, and the paste honours both.
+    ///
+    /// The gesture cannot be driven from here — nothing in this tree can
+    /// right-click — so what is pinned is the composition it rides: the lane's
+    /// track fed in as `.explicit` (which is what
+    /// `AppModel.pasteClipsFromClipboardDetailed(intoTrack:atBeat:)` produces by
+    /// handing it to `ArrangeActiveTrack.resolve`'s `explicit:` input), and the
+    /// pointer's beat as the anchor.
+    ///
+    /// ⚠️ **THE SOURCE TRACK IS DELIBERATELY STILL LIVE**, which is the ordinary
+    /// copy-then-paste case and is EXACTLY the configuration that made this item
+    /// wait for m25-l-3: before that ruling a live-source paste was always
+    /// `.inPlace` and the named destination was DISCARDED, so this menu would
+    /// have pasted into a lane other than the one it was opened on.
+    @Test("m25-f-4: a lane-named destination and a pointer-named beat are both honoured")
+    func laneRightClickHonoursTrackAndBeat() {
+        let source = midiTrack("Keys")
+        let other = midiTrack("Pad")
+        let target = midiTrack("Bass")
+        let clip = midiClip("riff", start: 16)
+        let plan = PasteAnchorPolicy.resolveClipPaste(
+            payload: [entry(clip, track: source, index: 0)],
+            anchorBeat: 37.5,                       // the pointer's snapped beat
+            tracks: [source, other, target],
+            activeTrack: explicit(target))          // the lane that was clicked
+
+        #expect(plan.refusedBy == nil)
+        #expect(plan.skipped.isEmpty)
+        #expect(plan.mode == .relocated)
+        #expect(plan.landings.count == 1)
+        #expect(plan.landings.first?.targetTrackID == target.id)
+        #expect(plan.landings.first?.startBeat == 37.5)
+        // NEGATIVE CONTROL for the assertion above: the same call with the
+        // destination merely INFERRED lands home at the same beat. So the track
+        // move is the `.explicit` origin doing work, not the anchor override.
+        let inferredPlan = PasteAnchorPolicy.resolveClipPaste(
+            payload: [entry(clip, track: source, index: 0)],
+            anchorBeat: 37.5, tracks: [source, other, target],
+            activeTrack: inferred(target))
+        #expect(inferredPlan.mode == .inPlace)
+        #expect(inferredPlan.landings.first?.targetTrackID == source.id)
+        #expect(inferredPlan.landings.first?.startBeat == 37.5)
+    }
+
+    @Test("m25-f-4: a MIDI payload right-clicked onto an AUDIO lane is a NAMED skip, never silence")
+    func laneRightClickOntoAWrongKindLaneSkipsWithAReason() {
+        // The menu deliberately does NOT grey out on kind (that decision is
+        // `ClipboardMenuPolicy.laneContextPasteItem`'s banner) — the refusal
+        // happens here, per clip, WITH a reason and the clip's name, which is
+        // what the amber bubble renders.
+        let source = midiTrack("Keys")
+        let lane = audioTrack("Vox")
+        let clip = midiClip("riff", start: 0)
+        let plan = PasteAnchorPolicy.resolveClipPaste(
+            payload: [entry(clip, track: source, index: 0)],
+            anchorBeat: 8, tracks: [source, lane], activeTrack: explicit(lane))
+        #expect(plan.landings.isEmpty)
+        #expect(plan.skipped.map(\.reason) == [.trackKindMismatch])
+        #expect(plan.skipped.first?.clipName == "riff")
+        // NOT a policy-level refusal: a plan WAS resolved and one member was
+        // skipped, which is what lets the app say WHICH clip and WHY.
+        #expect(plan.refusedBy == nil)
+    }
+
+    @Test("m25-f-4: the group clamp still owns a negative pointer beat")
+    func laneRightClickNegativeBeatClampsTheGroup() {
+        // The wire route (`edit.pasteClips {atBeat}`) does not validate the beat
+        // — this is the one home for that rule, and it slides the group rigidly
+        // rather than welding its members onto 0.
+        let track = midiTrack("Keys")
+        let a = midiClip("a", start: 8)
+        let b = midiClip("b", start: 12)
+        let plan = PasteAnchorPolicy.resolveClipPaste(
+            payload: [entry(a, track: track, index: 0), entry(b, track: track, index: 0)],
+            anchorBeat: -5, tracks: [track], activeTrack: explicit(track))
+        #expect(plan.anchorBeat == 0)
+        #expect(plan.landings.map(\.startBeat) == [0, 4])
+    }
+
 }

@@ -8,7 +8,16 @@ user-invocable: false
 
 This is the shared reference every agent in this plugin (`producer`, `composer`,
 `arranger`, `sound-designer`, `mix-engineer`, `finisher`) and every skill
-points at. It reflects the ACTUAL current tool surface enumerated from
+points at.
+
+⚠️ **THE TWO COUNTS BELOW ARE STALE (last measured 2026-08-17) and are kept only as a
+rough sense of scale. Do not quote them as current — and do NOT infer from a wrong count
+that the traps further down are stale too: each of those is pinned to a session that paid
+for it and is maintained separately.** Live totals live in `docs/ARCHITECTURE.md`
+§"Wire surface — CURRENT TOTALS"; naive greps lie on both surfaces, so a real count needs
+a `ReferenceCommandTests` run, not a `grep -c`.
+
+It reflects the tool surface enumerated from
 `mcp-server/src/server.ts` (185 tools — re-counted 2026-08-17, m26-k:
 151 registered through the strict wrapper + 34 direct) and
 `Sources/DAWControl/Commands.swift`
@@ -144,6 +153,25 @@ project: **7.5 KB.** So:
   say what you needed from it and hand the question back to the main
   session, which can read the overflow file from disk.
 
+### `clip_add_midi` echoes every note back — turn it off when composing
+
+`project_snapshot`'s size is the famous trap; this is the quiet one, and it sits
+on the hot path instead of an occasional deep read. **`clip_add_midi` returns the
+whole created clip, every note in it, each with a freshly minted id.** A 64-note
+clip is about 6 KB, a song is dozens of such calls, and the documented maximum is
+4096 notes per clip — all spent out of YOUR context window, for a call whose
+useful answer is one clip id.
+
+Pass **`returnNotes: false`** unless you are about to edit individual notes right
+now. The reply then carries `notesOmitted: true` and `noteCount` instead of the
+array, so it can never be confused with a clip that genuinely has no notes. The
+notes stay readable with `clip_get_notes` whenever you actually want them.
+
+The default is unchanged — omit the flag and you get the full echo, exactly as
+before.
+
+⚠️ `clip_set_notes` has the SAME echo and does **not** yet have this opt-out.
+
 ### Sidechain: it is the DESTINATION that must be audio/bus, not the source
 
 `fx_set_sidechain` fails in an all-MIDI project for one reason only — the
@@ -173,6 +201,32 @@ merge-by-zone-id yet (zone ids are emitted in snapshots but re-minted on
 every set), so a partial zone list deletes the zones you left out. Send
 `zones` only when you mean the complete map; `zones: []` is the deliberate
 clear.
+
+### Making the sampler sound when you have no sample files
+
+A fresh project ships no sample audio, so until 2026-08-23 the sampler could
+not be smoke-tested at all without someone supplying a file — and the most
+likely first experience of a new sampler feature was silence.
+
+The app now ships **one generated one-shot**. Any sampler zone `path` accepts
+`builtin:test-tone-a4` in place of a filesystem path: a 0.35 s A4 (440.0 Hz)
+tone whose root pitch is **MIDI 69**. Use it to hear the sampler, and to
+exercise `bendRangeSemitones` and `voiceMode`, with no library of your own:
+
+```
+track_set_instrument {
+  kind: "sampler",
+  sampler: {
+    zones: [{path: "builtin:test-tone-a4", rootPitch: 69}],
+    bendRangeSemitones: 12
+  }
+}
+```
+
+**An unknown `builtin:` name is REFUSED and the error lists the known names.**
+It is never silently accepted — a path that fell through to the filesystem
+would report success and play silence, which is the failure mode this whole
+feature exists to remove.
 
 ### A windowed render is not an excerpt of the full render
 
@@ -210,14 +264,32 @@ seeded timing/velocity result is bit-identical to before they existed.
 Only note LENGTHS change — ids, order, start beats, pitches and velocities
 are preserved, and a note is never extended past the clip end.
 
-### Overlap masks a retrigger; it does not create legato
+### Overlap masks a retrigger. The BUILT-IN SAMPLER can now really slur; nothing else can.
 
-No instrument in this app has a legato mode. Every note-on starts a new
-voice with a fresh attack — the built-in sampler and the hosted AUSampler
-both. `legatoOverlapBeats` hides that attack under the previous note's
-decaying tail, which is why a slurred line stops sounding re-tongued. It
-is masking, not voice continuation, and a handoff that claims otherwise is
-wrong. True legato needs a scripted-legato Audio Unit or new engine work.
+⚠️ **CORRECTED 2026-08-23 (`06dca3d`). This section used to say "No instrument in this
+app has a legato mode". That is FALSE now, and an agent following the old wording would
+walk straight past a shipped feature to a workaround.**
+
+**The built-in `sampler` has a real monophonic mode.** `track_set_instrument` with
+`{sampler: {voiceMode: "mono"}}` gives LAST-NOTE priority: an overlapping note takes
+over the airstream instead of opening a second voice — voice *stealing*, not masking.
+It deliberately does NOT fall back to a note still held underneath, because the overlap
+that creates the case is the legato idiom itself and falling back would fire a phantom
+backwards slur on every slurred pair. Built for wind lines. Default stays `poly`.
+
+**Everything else still masks.** On the `soundBank` and hosted `audioUnit` paths every
+note-on starts a new voice with a fresh attack. There `legatoOverlapBeats` (m27-o) hides
+that attack under the previous note's decaying tail — masking, not voice continuation,
+and a handoff claiming otherwise is wrong. True legato on those paths needs a
+scripted-legato Audio Unit or new engine work.
+
+**Also new on the built-in sampler:** `bendRangeSemitones` is settable per instrument.
+Default is **2.0**, the GM standard that every already-authored bend lane assumes, so a
+wide slur must raise it explicitly. Raising it does not retune an unbent note.
+
+⚠️ `BreathContour`'s `bendRangeSemitones` is an AUTHORING figure; the sampler's is a
+PLAYBACK figure. They are no longer guaranteed equal, and when they disagree every
+generated vibrato is scaled by exactly their ratio.
 
 ⚠️ **Same-pitch repeats abut instead of overlapping, deliberately.** On the
 sound-bank path a note-off is plain MIDI with no note id, so overlapping a

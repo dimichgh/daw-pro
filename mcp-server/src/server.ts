@@ -384,6 +384,10 @@ registerTool(
               .max(400)
               .describe("Tempo in BPM for this segment. Range 20-400."),
           })
+            // `.strict()` (m30-c): a typo'd field (e.g. "bmp") inside one
+            // `segments` element would otherwise be silently stripped
+            // instead of rejected.
+            .strict()
         )
         .min(1)
         .describe("Ordered tempo segments; segment 0 at beat 0 sets the base tempo."),
@@ -405,6 +409,8 @@ registerTool(
               .min(1)
               .describe("Beat unit — the bottom number (e.g. 4 for 3/4)."),
           })
+            // `.strict()` (m30-c): same hole, one `meterChanges` element.
+            .strict()
         )
         .min(1)
         .optional()
@@ -939,9 +945,15 @@ const samplerZoneSchema = z.object({
     .string()
     .min(1)
     .describe(
-      "REQUIRED. Absolute file path to this zone's sample audio file (wav/aiff/etc.). The " +
-        "file is copied into the project bundle on project_save, so the project stays " +
-        "portable — always pass the original source path here, not a bundle-relative one."
+      "REQUIRED. Absolute file path to this zone's sample audio file (wav/aiff/etc.), or " +
+        "the name of a sample the app ships, written `builtin:<name>`. The file is copied " +
+        "into the project bundle on project_save, so the project stays portable — always " +
+        "pass the original source path here, not a bundle-relative one. " +
+        "The only bundled sample today is `builtin:test-tone-a4` (m30-a): a 0.35 s A4 " +
+        "one-shot whose root pitch is MIDI 69, there so the sampler can be played and " +
+        "smoke-tested on a machine with no sample library of its own — e.g. to exercise " +
+        "`bendRangeSemitones` or `voiceMode`. A `builtin:` name that does not exist is " +
+        "REFUSED, and the error lists the ones that do; it is never silently accepted."
     ),
   rootPitch: z
     .number()
@@ -1416,6 +1428,15 @@ const audioUnitSchema = z
           "as returned by instrument_list_audio_units (e.g. \"appl\" for Apple)."
       ),
   })
+  // `.strict()` (m30-c): closes the same nested-object hole for
+  // track_set_instrument's `audioUnit` param — a typo'd field (e.g.
+  // "subTyp") would otherwise be silently stripped instead of rejected.
+  // Safe: this schema is a fixed component-triple IDENTITY, not a
+  // parameter dictionary — the AU's own parameter surface is addressed
+  // elsewhere (and is explicitly EMPTY for automation_add_lane's
+  // `effectParam`, per this schema's own description below), so there is
+  // no legitimate reason for an extra key here.
+  .strict()
   .describe(
     "Identifies one installed Audio Unit instrument by its component triple (type/subType/" +
       "manufacturer), used only when `kind` is (or is being set to) `audioUnit`. Call " +
@@ -1478,6 +1499,13 @@ const soundBankSchema = z
           "a nonzero LSB; instrument_list_sound_bank_programs reports it when a bank does."
       ),
   })
+  // `.strict()` (m30-c): closes the same nested-object hole for
+  // track_set_instrument's `soundBank` param — a typo'd field (e.g.
+  // "progam") would otherwise be silently stripped instead of rejected.
+  // Safe: this is a fixed source/program/bankMSB/bankLSB address, not an
+  // arbitrary parameter dictionary — there is no legitimate reason for an
+  // extra key here.
+  .strict()
   .describe(
     "Addresses a SoundFont2 (.sf2) or DLS (.dls) bank program — General MIDI or any other " +
       "discovered/imported bank — used only when `kind` is (or is being set to) `soundBank`. " +
@@ -1924,6 +1952,10 @@ registerTool(
               .optional()
               .describe("flip the sweep for a knob wired backwards"),
           })
+            // `.strict()` (m30-c): a typo'd field (e.g. "contoller") inside
+            // one `bindings` element would otherwise be silently stripped
+            // instead of rejected.
+            .strict()
         )
         .describe("the WHOLE table — [] clears every mapping"),
     },
@@ -2364,7 +2396,9 @@ registerTool(
       "instrument or just preserved state. Refuses readably for an audio/bus track (only " +
       "instrument tracks carry an instrument), an unknown trackId, or an instrument track " +
       "that has never had a sampler configured at all (use instrument_import_sample_library " +
-      "or track_set_instrument {kind:\"sampler\", sampler:{zones:[...]}} first) — but a " +
+      "or track_set_instrument {kind:\"sampler\", sampler:{zones:[...]}} first; with no " +
+      "sample library of your own, mount the bundled one-shot — " +
+      "{path: \"builtin:test-tone-a4\", rootPitch: 69} — and you have a sound) — but a " +
       "sampler that IS configured with zero zones (the deliberate `zones: []` clear) is a " +
       "legal answer, not a refusal: you get `zoneSummary.count: 0` back. Returns {trackId, " +
       "kind, oneShot, attack, release, gain, sourcePath?, displayName?, zoneSummary, " +
@@ -2534,7 +2568,29 @@ registerTool(
     },
   },
   async ({ trackId, param, value }) =>
-    toToolResult(() => bridge.send("track.setInstrument", { trackId, sampler: { [param]: value } }))
+    toToolResult(() => {
+      // `value` had to widen to include `z.string()` so `voiceMode` could take
+      // "poly"/"mono" (m26-*, 2026-08-23). That widening SILENTLY re-admitted a
+      // string for every OTHER param — {param:"gain", value:"loud"} began passing
+      // schema validation and reaching the app, where it had previously been
+      // refused at this boundary. Re-narrow here, BEFORE the bridge call, so the
+      // boundary guarantee the union used to provide still holds.
+      // Deliberately minimal: this restores exactly what was lost and tightens
+      // nothing else (a boolean for a numeric param was accepted before and
+      // still is), because the wire contract is additive-only.
+      if (typeof value === "string" && param !== "voiceMode") {
+        throw new Error(
+          `sampler param "${param}" does not take a string — got ${JSON.stringify(value)}. ` +
+            `Only "voiceMode" is a string param ("poly" or "mono").`
+        );
+      }
+      if (param === "voiceMode" && typeof value !== "string") {
+        throw new Error(
+          `sampler param "voiceMode" takes the string "poly" or "mono" — got ${typeof value}.`
+        );
+      }
+      return bridge.send("track.setInstrument", { trackId, sampler: { [param]: value } });
+    })
 );
 
 /** Shared per-zone field shape (the samplerZoneSchema precedent) with `path`
@@ -3454,7 +3510,12 @@ const noteSchema = z.object({
       "Note id (uuid). Omit when creating new notes — the server mints one; " +
         "include an existing note's id when resubmitting it unchanged via clip_set_notes."
     ),
-});
+})
+  // `.strict()` (m30-c): `registerTool`'s wrapper only strictens the TOP
+  // level of clip_add_midi/clip_set_notes's own inputSchema — a typo'd field
+  // inside one element of the `notes` array (e.g. "velocty") would otherwise
+  // be silently stripped instead of rejected.
+  .strict();
 
 registerTool(
   "clip_add_audio",
@@ -3503,9 +3564,22 @@ registerTool(
       "not the timeline), and `lengthBeats` (defaults to 1 beat). Audio and " +
       "bus tracks reject MIDI clips. Returns the created clip with " +
       "server-minted note ids and the notes normalized and sorted by " +
-      "startBeat. NOTE: MIDI clips are silent until an instrument is wired " +
-      "up (M3) — the data model and editing already work, so compose freely " +
-      "now and expect sound once an instrument lands.",
+      "startBeat. A new instrument track already SOUNDS — it resolves to the " +
+      "default poly synth even when nothing has been configured on it, so a " +
+      "clip written here is audible immediately. Use track_set_instrument to " +
+      "put it on a sound bank, sampler, or hosted Audio Unit instead. " +
+      "`returnNotes` (default true, UNCHANGED from before this param existed) controls " +
+      "whether the response echoes the notes array back at all: on the hot path of a " +
+      "composing session this echo is often the single biggest cost in the call, since " +
+      "the useful result is almost always just the new clip id, not per-note ids you " +
+      "rarely edit immediately. Pass `returnNotes: false` to get the clip back WITHOUT " +
+      "its `notes` array — the response instead carries `notesOmitted: true` and " +
+      "`noteCount` (how many notes were actually written), so it can never be mistaken " +
+      "for a genuinely empty clip. Nothing is lost: read the notes back any time with " +
+      "clip_get_notes (read-only, no undo step, takes the returned clip's id). Note " +
+      "this only trims what crosses back to YOU — the full payload still crosses the " +
+      "app's own control connection either way, so it saves your context budget, not " +
+      "wire bytes.",
     inputSchema: {
       trackId: z
         .string()
@@ -3537,10 +3611,29 @@ registerTool(
             "relative to the clip's own start. Omit (or pass an empty array) to " +
             "create an empty MIDI clip."
         ),
+      returnNotes: z
+        .boolean()
+        .optional()
+        .describe(
+          "Whether the response echoes the written notes back, each with its " +
+            "server-minted id. Defaults to true (unchanged prior behavior). Pass " +
+            "false to drop the notes array from the response and get back " +
+            "`notesOmitted: true` plus `noteCount` instead — the notes are still " +
+            "written and are always readable afterward via clip_get_notes; this " +
+            "only shrinks what comes back to you, not what crosses the app's own " +
+            "control connection."
+        ),
     },
   },
-  async ({ trackId, name, atBeat, lengthBeats, notes }) =>
-    toToolResult(() => bridge.send("clip.addMIDI", { trackId, name, atBeat, lengthBeats, notes }))
+  async ({ trackId, name, atBeat, lengthBeats, notes, returnNotes }) =>
+    toToolResult(async () => {
+      const result = await bridge.send("clip.addMIDI", { trackId, name, atBeat, lengthBeats, notes });
+      if (returnNotes === false && result && typeof result === "object" && Array.isArray((result as any).notes)) {
+        const { notes: writtenNotes, ...rest } = result as Record<string, unknown>;
+        return { ...rest, notesOmitted: true, noteCount: (writtenNotes as unknown[]).length };
+      }
+      return result;
+    })
 );
 
 registerTool(
@@ -3910,6 +4003,10 @@ registerTool(
               .number()
               .describe("Gain at this breakpoint in decibels. Clamped to -72..24; 0 = unity."),
           })
+            // `.strict()` (m30-c): a typo'd field (e.g. "gainDB") inside one
+            // `points` element would otherwise be silently stripped instead
+            // of rejected.
+            .strict()
         )
         .optional()
         .describe(
@@ -4650,7 +4747,11 @@ const controllerPointSchema = z.object({
         "bend); 0-127 for cc / channelPressure lanes — a value outside the OWNING lane's " +
         "domain errors readably, naming the exact range."
     ),
-});
+})
+  // `.strict()` (m30-c): closes the same per-element hole for
+  // clip_set_controller_lane's `points` array — a typo'd field (e.g.
+  // "vlaue") would otherwise be silently stripped instead of rejected.
+  .strict();
 
 registerTool(
   "clip_set_controller_lane",
@@ -5819,7 +5920,11 @@ const compSegmentSchema = z.object({
   endBeat: z
     .number()
     .describe("Segment end, in ABSOLUTE timeline beats. Must be greater than startBeat."),
-});
+})
+  // `.strict()` (m30-c): closes the same per-element hole for
+  // take_set_comp's `segments` array — a typo'd field (e.g. "laneld") would
+  // otherwise be silently stripped instead of rejected.
+  .strict();
 
 registerTool(
   "take_group",
@@ -7010,34 +7115,47 @@ registerTool(
 
 const automationTargetSchema = z
   .discriminatedUnion("type", [
-    z.object({
-      type: z.literal("volume").describe("Automate the track's fader volume (linear gain multiplier)."),
-    }),
-    z.object({
-      type: z.literal("pan").describe("Automate the track's pan position."),
-    }),
-    z.object({
-      type: z
-        .literal("sendLevel")
-        .describe("Automate one send's level (see `sendId`). Rejected in v0 — no render path yet."),
-      sendId: z
-        .string()
-        .min(1)
-        .describe("Id of the send to automate, from track_add_send's result or project_snapshot."),
-    }),
-    z.object({
-      type: z
-        .literal("effectParam")
-        .describe("Automate one parameter of a built-in effect (see `effectId`/`param`)."),
-      effectId: z
-        .string()
-        .min(1)
-        .describe("Id of the effect to automate, from fx_add's result or project_snapshot."),
-      param: z
-        .string()
-        .min(1)
-        .describe("Exact parameter name, as listed by fx_describe for the effect's kind."),
-    }),
+    // `.strict()` on each discriminated-union member (m30-c): closes the
+    // same per-element hole for automation_add_lane's `target` — a typo'd
+    // field (e.g. "sendld") would otherwise be silently stripped instead of
+    // rejected. `.strict()` still returns a ZodObject, so discriminatedUnion
+    // accepts it unchanged.
+    z
+      .object({
+        type: z.literal("volume").describe("Automate the track's fader volume (linear gain multiplier)."),
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("pan").describe("Automate the track's pan position."),
+      })
+      .strict(),
+    z
+      .object({
+        type: z
+          .literal("sendLevel")
+          .describe("Automate one send's level (see `sendId`). Rejected in v0 — no render path yet."),
+        sendId: z
+          .string()
+          .min(1)
+          .describe("Id of the send to automate, from track_add_send's result or project_snapshot."),
+      })
+      .strict(),
+    z
+      .object({
+        type: z
+          .literal("effectParam")
+          .describe("Automate one parameter of a built-in effect (see `effectId`/`param`)."),
+        effectId: z
+          .string()
+          .min(1)
+          .describe("Id of the effect to automate, from fx_add's result or project_snapshot."),
+        param: z
+          .string()
+          .min(1)
+          .describe("Exact parameter name, as listed by fx_describe for the effect's kind."),
+      })
+      .strict(),
   ])
   .describe(
     "What this lane drives on the track, by discriminator `type`. `volume`: the track " +
@@ -7080,7 +7198,11 @@ const automationPointSchema = z.object({
         "value until the next point steps. Has no effect on the lane's last point " +
         "(nothing follows it)."
     ),
-});
+})
+  // `.strict()` (m30-c): closes the same per-element hole for
+  // automation_set_points's `points` array — a typo'd field (e.g. "vlaue")
+  // would otherwise be silently stripped instead of rejected.
+  .strict();
 
 registerTool(
   "automation_add_lane",
@@ -8223,9 +8345,21 @@ registerTool(
             "resolved active track for THIS paste only. Omit to use the " +
             "same active-track resolution a bare Cmd-V would use."
         ),
+      atBeat: z
+        .number()
+        .optional()
+        .describe(
+          "Project beat to anchor the paste on. The EARLIEST copied clip " +
+            "lands here and the rest keep their offsets from it. Overrides " +
+            "the transport playhead for THIS paste only and does NOT move " +
+            "the playhead. Omit to anchor on the playhead, exactly as a " +
+            "bare Cmd-V does. A negative value slides the whole group to " +
+            "beat 0 rather than erroring."
+        ),
     },
   },
-  async ({ trackId }) => toToolResult(() => bridge.send("edit.pasteClips", { trackId }))
+  async ({ trackId, atBeat }) =>
+    toToolResult(() => bridge.send("edit.pasteClips", { trackId, atBeat }))
 );
 
 // ---------------------------------------------------------------------------
@@ -9372,6 +9506,10 @@ registerTool(
                   "syncopated\". Omit for a bare generic instruction."
               ),
           })
+            // `.strict()` (m30-c): a typo'd field (e.g. "trackNam") inside
+            // one `tracks` element would otherwise be silently stripped
+            // instead of rejected.
+            .strict()
         )
         .min(1)
         .describe("The tracks to generate — one entry per new track, each with its own local prompt."),

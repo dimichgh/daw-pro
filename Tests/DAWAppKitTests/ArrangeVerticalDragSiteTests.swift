@@ -231,4 +231,51 @@ struct ArrangeVerticalDragSiteTests {
         }
         #expect(commit.contains("requestedTrackDelta: commit.requestedTrackDelta"))
     }
+
+    // MARK: - The KEYBOARD's site (m25-l-1 ④)
+
+    /// ⚠️ **THIS LIVES IN THE DRAG'S SITE SUITE ON PURPOSE.** m25-l-1 ④ is the
+    /// mouse/keyboard ASYMMETRY, and the two halves of an asymmetry are only
+    /// safe when they are pinned where a future reader trips over both. The
+    /// behavioural half is `ArrangeVerticalNudgeTests`; this is the wiring half,
+    /// and it exists for the same reason every pin above does — `DAWApp` has no
+    /// test target, so a resolver nobody calls and a resolver everybody calls
+    /// look identical to every other test in this repo.
+    @Test("the vertical nudge asks ArrangeVerticalNudgeReach, not the raw pressed step")
+    func verticalNudgeResolvesReachBeforeCallingTheStore() {
+        guard let nudge = Self.body(of: "verticalArrangeNudge", in: Self.code(Self.appModel))
+        else {
+            Issue.record("AppModel.verticalArrangeNudge not found — renamed? Re-derive this pin.")
+            return
+        }
+        #expect(nudge.contains("ArrangeVerticalNudgeReach.delta"),
+                "the press must be resolved to a REACHABLE delta — this call missing IS the user-reported defect: ↓ gets stuck against an audio lane it should pass over")
+        #expect(!nudge.contains("byTracks: step.trackDelta"),
+                "handing the store the raw pressed ±1 is exactly the bug; it must be handed the resolved delta")
+        #expect(nudge.contains("byTracks: reachDelta"),
+                "the store must be asked for the RESOLVED delta and nothing else")
+        // The echoed PRESS is a separate field and must survive: a gate reads
+        // `trackStepDelta` (pressed) against `requestedTrackDelta` (asked) to
+        // SEE a skipped lane, and collapsing them would hide it.
+        #expect(nudge.contains("trackStepDelta: step.trackDelta"),
+                "the outcome must still echo the PRESSED ±1, distinct from what was asked")
+    }
+
+    /// The other half of the asymmetry, stated as a pin rather than as prose: the
+    /// POINTER must not acquire the keyboard's search. A drag lands where you
+    /// point, and one that quietly slid past the lane under the cursor would be a
+    /// new and worse bug than the one m25-l-1 ④ fixed.
+    @Test("the drag path never reaches the keyboard's reach resolver")
+    func theDragNeverUsesTheKeyboardResolver() {
+        for site in ["dragArrangeClips", "previewArrangeDrag"] {
+            guard let fn = Self.body(of: site, in: Self.code(Self.appModel)) else {
+                Issue.record("AppModel.\(site) not found — renamed? Re-derive this pin.")
+                continue
+            }
+            #expect(!fn.contains("ArrangeVerticalNudgeReach"),
+                    "\(site) must resolve the pointer's lane with ArrangeVerticalDrag, which backs off to zero and NEVER searches")
+        }
+        #expect(!Self.code(Self.timeline).contains("ArrangeVerticalNudgeReach"),
+                "the lanes view must not reach the keyboard resolver either")
+    }
 }

@@ -138,10 +138,15 @@ struct EditHistoryCommandTests {
     /// Records every call and hands back a scripted result.
     private final class FakeEditPaste: EditPasteControlling {
         var calls: [UUID?] = []
+        /// The `atBeat` of every call (m25-f-4), recorded in a SECOND array
+        /// rather than by widening `calls` — the pre-existing assertions on
+        /// `calls` keep measuring exactly what they measured.
+        var beats: [Double?] = []
         var result: EditPasteResult = .emptyClipboard
 
-        func pasteClips(intoTrack: UUID?) -> EditPasteResult {
+        func pasteClips(intoTrack: UUID?, atBeat: Double?) -> EditPasteResult {
             calls.append(intoTrack)
+            beats.append(atBeat)
             return result
         }
     }
@@ -220,6 +225,53 @@ struct EditHistoryCommandTests {
         let id = UUID()
         _ = await paste(router, ["trackId": .string(id.uuidString)])
         #expect(fake.calls == [id])
+    }
+
+    // MARK: - 3b. atBeat, added ADDITIVELY at m25-f-4
+
+    @Test("omitted atBeat reaches the seam as nil — the playhead, exactly as before")
+    func omittedAtBeatPassesNil() async {
+        let router = makePasteRouter()
+        let fake = FakeEditPaste()
+        router.editPaste = fake
+        _ = await paste(router, [:])
+        // The regression guard for the additive claim: a caller that never
+        // sends the parameter cannot tell it exists.
+        #expect(fake.beats == [nil])
+    }
+
+    @Test("a numeric atBeat reaches the seam verbatim, alongside the trackId")
+    func atBeatPassesThrough() async {
+        let router = makePasteRouter()
+        let fake = FakeEditPaste()
+        router.editPaste = fake
+        let id = UUID()
+        _ = await paste(router, ["trackId": .string(id.uuidString), "atBeat": .number(37.5)])
+        #expect(fake.calls == [id])
+        #expect(fake.beats == [37.5])
+    }
+
+    @Test("a NEGATIVE atBeat is passed through, not rejected — the group clamp owns it")
+    func negativeAtBeatIsNotRejectedHere() async {
+        // `PasteAnchorPolicy.resolveClipPaste` is the ONE home for the
+        // `max(0, anchor)` GROUP clamp; validating here would be a second.
+        let router = makePasteRouter()
+        let fake = FakeEditPaste()
+        router.editPaste = fake
+        let r = await paste(router, ["atBeat": .number(-5)])
+        #expect(r.ok)
+        #expect(fake.beats == [-5])
+    }
+
+    @Test("a non-numeric atBeat is rejected before the seam is consulted")
+    func malformedAtBeatIsRejected() async {
+        let router = makePasteRouter()
+        let fake = FakeEditPaste()
+        router.editPaste = fake
+        let r = await paste(router, ["atBeat": .string("bar 3")])
+        #expect(!r.ok)
+        #expect(r.error?.contains("atBeat") == true)
+        #expect(fake.calls.isEmpty)
     }
 
     // MARK: - 4. the four distinguishable outcomes, each in its own wire shape

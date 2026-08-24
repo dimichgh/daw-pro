@@ -149,6 +149,14 @@ public enum ArrangeVerticalDrag {
     /// forbids, and a drag that quietly lands somewhere other than where the
     /// pointer is would be a worse lie than declining.
     ///
+    /// ⚠️ **THE KEYBOARD NOW DOES SEARCH, AND THAT ASYMMETRY IS DELIBERATE**
+    /// (m25-l-1 ④, `ArrangeVerticalNudgeReach.delta`). A press carries no
+    /// absolute row — only a direction — so "the next lane I can use" is the
+    /// whole of its meaning, while a drag names a row and must honour it. Do NOT
+    /// "harmonise" the two by teaching this function to search: the paragraph
+    /// above is the reason, and it is unchanged. Both resolvers ask the SAME two
+    /// homes (`clampedTrackDelta`, `Track.canHold`); only the question differs.
+    ///
     /// ⚠️ **COMP MEMBERS ARE NOT HANDLED HERE, DELIBERATELY.** A take-comp
     /// member refuses on BOTH axes (`requireNotCompMember` guards
     /// `moveClips(ids:byBeats:)` as well as the cross-track core), so backing

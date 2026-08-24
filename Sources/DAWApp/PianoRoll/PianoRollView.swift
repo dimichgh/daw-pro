@@ -985,6 +985,18 @@ struct PianoRollView: View {
             controllerModel.pixelsPerBeat = ppb
             repinZoomAnchor(oldPPB: oldPPB, newPPB: ppb)
         }
+        // m25-b-4: the VERTICAL twin, and the two are deliberately SEPARATE
+        // funnels rather than one. They are orthogonal by construction — a row
+        // height moves no beat→x mapping and a scale moves no pitch→y mapping — so
+        // each re-pins its own axis off its own slot's `onChange`, and both can
+        // land in the same frame without either recomputing the other's offset.
+        // Only the note grid + gutter read this one (the velocity lane and the
+        // controller strip have no pitch axis), which is why `controllerModel` is
+        // absent here and present above.
+        .onChange(of: layout.pianoRollRowHeight, initial: true) { oldRH, rowHeight in
+            model.rowHeight = rowHeight
+            repinRowZoomAnchor(oldRowHeight: oldRH, newRowHeight: rowHeight)
+        }
         // m18-i: the external-mutation seam. `.id(clip.id)` recreates this view
         // (and its seeded @State models) only on a clip IDENTITY switch; a
         // wire/arrange-side geometry op (`clip.trim`/`move`/`split`, arrange
@@ -1224,11 +1236,23 @@ struct PianoRollView: View {
     /// the gutter would be compressed and `scrollTo` would land somewhere other
     /// than `verticalTargetY`. It cannot happen here, by construction rather than
     /// by luck: the gutter is laid out at exactly `model.contentHeight`
-    /// (`KeyboardSidebar.swift:125`), `verticalTargetY` has exactly ONE writer
+    /// (`KeyboardSidebar.swift:125`) and every writer of `verticalTargetY` clamps
+    /// its value to `contentHeight − viewportHeight`, hence always strictly inside
+    /// the gutter.
+    ///
+    /// ⚠️⚠️ **SUPERSEDED IN PLACE BY m25-b-4 (the second writer arrived).** This
+    /// paragraph used to read *"`verticalTargetY` has exactly ONE writer
     /// (`jumpToMinimapTarget`), and the value it writes is
-    /// `PianoRollMinimap.scrollTarget`'s y — clamped to
-    /// `contentHeight − viewportHeight`, hence always strictly inside the gutter.
-    /// If a second writer ever appears, that argument dies with it.
+    /// `PianoRollMinimap.scrollTarget`'s y — clamped to `contentHeight −
+    /// viewportHeight`, hence always strictly inside the gutter. If a second writer
+    /// ever appears, that argument dies with it."* It is now
+    /// `jumpToMinimapTarget` **and** `repinRowZoomAnchor`, so what carries the
+    /// argument is no longer the writer's identity but the INVARIANT they both
+    /// hold. The vertical zoom's clamp lives in `PianoRollZoom.rowZoomOffset` and
+    /// is taken against the **NEW** content height — the rescale is what moves it,
+    /// so clamping against the old one would be exactly the plausible-looking
+    /// wrong number this note exists to prevent. A THIRD writer inherits the same
+    /// obligation, and it is now written as an obligation rather than as a count.
     private var verticalJumpMarker: some View {
         VStack(spacing: 0) {
             Color.clear.frame(width: 1, height: max(0, verticalTargetY))
@@ -1998,6 +2022,48 @@ struct PianoRollView: View {
         follow.scrollExternally(to: ArrangeZoom.offsetPreservingAnchor(
             oldPPB: base.ppb, newPPB: newPPB,
             oldOffset: base.offset, anchorScreenX: base.anchorScreenX))
+    }
+
+    /// ⭐⭐ **THE NO-JUMP RULE ON THE PITCH AXIS (m25-b-4)** — `repinZoomAnchor`'s
+    /// twin, in the same shape and for the same reason: every driver of the roll's
+    /// vertical zoom (the View menu's Note Row Height items and
+    /// `debug.panelLayout {pianoRollRowHeight}`) writes the ONE persisted
+    /// `panelLayout.pianoRollRowHeight` slot, so the change itself is the only
+    /// event they share and a driver cannot forget the rule.
+    ///
+    /// **Why this is not optional here, when `setWaveformVerticalZoom` gets away
+    /// without it one surface over:** that zoom rescales what is drawn INSIDE a
+    /// block whose height never changes. This one changes `contentHeight`
+    /// (`pitchCount · rowHeight`), so without a re-pin the rows the user is looking
+    /// at slide off the viewport by the full zoom step — the horizontal defect
+    /// m25-b-3 fixed, on the other axis.
+    ///
+    /// **The anchor is the viewport's CENTRE ROW**, always — one branch where the
+    /// horizontal rule has two, because this axis has no playhead and the drivers
+    /// have no pointer. The argument, including why the selection was refused, is
+    /// on `PianoRollZoom.rowAnchorScreenY`.
+    ///
+    /// ⚠️ **THE OFFSET GOES TO `verticalTargetY`, MAKING THIS ITS SECOND WRITER** —
+    /// see `verticalJumpMarker`, whose safety argument named that in advance. What
+    /// keeps that argument alive is the top clamp inside
+    /// `PianoRollZoom.rowZoomOffset` (against the NEW content height), not anything
+    /// at this call site.
+    ///
+    /// ⚠️ **FOLLOW-THE-PLAYHEAD IS NOT INVOLVED, AND THAT IS STRUCTURAL RATHER THAN
+    /// A DECISION I MADE.** Follow is a horizontal mechanism on this surface
+    /// (`editorVerticalScrollReader` explains why the pitch axis never reports to
+    /// it), so a vertical zoom has no precedence question to answer: there is no
+    /// competing writer of this offset during playback at all.
+    private func repinRowZoomAnchor(oldRowHeight: CGFloat, newRowHeight: CGFloat) {
+        // The `initial: true` call arrives with old == new, and so does a clamped
+        // write at either end of the ladder. A zero viewport is a view that has not
+        // been laid out yet — there is no centre to hold, and `height / 2` would be
+        // a fake one.
+        guard abs(newRowHeight - oldRowHeight) > 0.0001, editorViewportHeight > 0 else { return }
+        verticalTargetY = PianoRollZoom.rowZoomOffset(
+            oldRowHeight: oldRowHeight, newRowHeight: newRowHeight,
+            oldOffset: gridScrollY, viewportHeight: editorViewportHeight)
+        verticalNonce += 1
     }
 
     /// The live pinch (m21-c, anchored by m25-b-3): magnification is cumulative,

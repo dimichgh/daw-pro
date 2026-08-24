@@ -343,3 +343,79 @@ struct ArrangeCreateClipTests {
         }
     }
 }
+
+/// m25-f-4 — WHICH lane a right-click on EMPTY LANE SPACE names for a paste.
+///
+/// The gesture itself is unreachable from any test in this tree (nothing here
+/// can right-click, and `DAWApp` has no test target), so what is pinned is the
+/// decidable half: the composition `emptyLaneIndex` performs, including the two
+/// traps that would make the menu lie — the playhead grab tolerance, and a
+/// point over a clip.
+@Suite("ArrangePointer — empty-lane paste target (m25-f-4)")
+struct ArrangeEmptyLanePasteTargetTests {
+
+    /// The m23-e fixture, verbatim: row 0 plain, row 1 expanded with 64 pt of
+    /// extras. Clip bands [0, 34) and [40, 74), extras [74, 138).
+    private func lanes(spans0: [ArrangeClipSpan] = [],
+                       spans1: [ArrangeClipSpan] = []) -> [ArrangePointerLane] {
+        let r1Top: CGFloat = 40
+        return [
+            ArrangePointerLane(clipTop: 0, clipBottom: 34, bottom: 34, clipSpans: spans0),
+            ArrangePointerLane(clipTop: r1Top, clipBottom: r1Top + 34,
+                               bottom: r1Top + 34 + 64, clipSpans: spans1),
+        ]
+    }
+
+    @Test("an empty stretch of a clip band names its row")
+    func emptyStretchNamesItsRow() {
+        let l = lanes(spans0: [ArrangeClipSpan(startBeat: 0, lengthBeats: 4)])
+        #expect(ArrangePointer.emptyLaneIndex(atY: 10, beatRaw: 8, in: l) == 0)
+        #expect(ArrangePointer.emptyLaneIndex(atY: 50, beatRaw: 2, in: l) == 1)
+    }
+
+    @Test("a point OVER a clip names no paste target — the clip's own menu owns it")
+    func overAClipIsNoTarget() {
+        let l = lanes(spans0: [ArrangeClipSpan(startBeat: 4, lengthBeats: 4)])
+        #expect(ArrangePointer.emptyLaneIndex(atY: 10, beatRaw: 4, in: l) == nil)
+        #expect(ArrangePointer.emptyLaneIndex(atY: 10, beatRaw: 7.9, in: l) == nil)
+        // Half-open: the beat a resident ENDS on is empty again.
+        #expect(ArrangePointer.emptyLaneIndex(atY: 10, beatRaw: 8, in: l) == 0)
+    }
+
+    @Test("a clip on ANOTHER row does not block this row's target")
+    func residentsAreReadPerRow() {
+        // The negative control for the test above: the same beat that is refused
+        // on row 0 must resolve on row 1, so the nil there is the CLIP and not
+        // some geometry mistake that refuses everything.
+        let l = lanes(spans0: [ArrangeClipSpan(startBeat: 4, lengthBeats: 4)])
+        #expect(ArrangePointer.emptyLaneIndex(atY: 10, beatRaw: 5, in: l) == nil)
+        #expect(ArrangePointer.emptyLaneIndex(atY: 50, beatRaw: 5, in: l) == 1)
+    }
+
+    @Test("the row gap, a row's extras, below the stack and an empty project name nothing")
+    func nonLaneBandsNameNothing() {
+        let l = lanes()
+        #expect(ArrangePointer.emptyLaneIndex(atY: 36, beatRaw: 1, in: l) == nil)   // 6 pt gap
+        #expect(ArrangePointer.emptyLaneIndex(atY: 100, beatRaw: 1, in: l) == nil)  // extras
+        #expect(ArrangePointer.emptyLaneIndex(atY: 400, beatRaw: 1, in: l) == nil)  // below
+        #expect(ArrangePointer.emptyLaneIndex(atY: 10, beatRaw: 1, in: []) == nil)  // no tracks
+    }
+
+    /// ⚠️ THE TRAP THE ADVISOR NAMED, AND THE ONE THIS FUNCTION EXISTS FOR.
+    /// `zone(...)` checks the playhead grab tolerance BEFORE the clip lookup, so
+    /// empty space within 4 pt of the playhead reads `.playheadGrab`. A user
+    /// clicks empty space — which SEEKS the playhead onto that point — then
+    /// right-clicks there. Under a zone guard the menu would find no target on
+    /// exactly the spot they had just pointed at.
+    @Test("the target is independent of the playhead, unlike zone()")
+    func independentOfPlayhead() {
+        let l = lanes()
+        let ppb: CGFloat = 40
+        let x: CGFloat = 80              // beat 2, and the playhead is here
+        #expect(ArrangePointer.zone(
+            x: x, y: 10, playheadX: x, pixelsPerBeat: ppb, topInset: 0,
+            contentBottom: 200, lanes: l, laneSpacing: 6) == .playheadGrab)
+        #expect(ArrangePointer.emptyLaneIndex(
+            atY: 10, beatRaw: Double(x / ppb), in: l) == 0)
+    }
+}

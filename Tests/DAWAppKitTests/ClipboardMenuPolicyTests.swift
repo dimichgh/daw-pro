@@ -286,6 +286,82 @@ struct ClipboardMenuPolicyTests {
         #expect(ClipboardMenuPolicy.notePasteContextTitle(noteCount: 0) == "Paste")
     }
 
+    // MARK: - The empty-lane right-click Paste (m25-f-4)
+
+    @Test("an empty lane with clips on the clipboard offers a COUNTED Paste")
+    func laneContextPasteIsLiveAndCounted() {
+        let item = ClipboardMenuPolicy.laneContextPasteItem(
+            clipboardKind: .clips, clipCount: 3, hasTargetTrack: true)
+        #expect(item.isEnabled)
+        #expect(item.surface == .arrangeClips)
+        #expect(item.refusedBy == nil)
+        // The right-click menus name their blast radius (`clipContextCommand`);
+        // only the EDIT menu was stripped to bare words on 2026-08-12.
+        #expect(item.title == "Paste 3 Clips")
+        #expect(ClipboardMenuPolicy.laneContextPasteItem(
+            clipboardKind: .clips, clipCount: 1, hasTargetTrack: true).title == "Paste Clip")
+    }
+
+    @Test("an empty clipboard shows Paste GREYED rather than hiding it")
+    func laneContextPasteWithNothingCopied() {
+        let item = ClipboardMenuPolicy.laneContextPasteItem(
+            clipboardKind: nil, clipCount: 0, hasTargetTrack: true)
+        #expect(item.isEnabled == false)
+        #expect(item.refusedBy == .emptyClipboard)
+        // The bare greyed word — the user learns the operation exists and that
+        // it needs something copied. A present, ENABLED item that then does
+        // nothing is the defect class this item was written to avoid.
+        #expect(item.title == "Paste")
+    }
+
+    @Test("a NOTES payload refuses on the lane, and NOT with the Edit menu's reason")
+    func laneContextPasteRefusesNotes() {
+        let item = ClipboardMenuPolicy.laneContextPasteItem(
+            clipboardKind: .notes, clipCount: 0, hasTargetTrack: true)
+        #expect(item.isEnabled == false)
+        // ⚠️ `.notesPayload`, never `.noRollOpen`: opening a roll cannot help
+        // here, because notes never land in the arrange at all. A refusal that
+        // names an action which cannot help is worse than a bare refusal.
+        #expect(item.refusedBy == .notesPayload)
+        #expect(item.title == "Paste")
+    }
+
+    @Test("a point that names no lane refuses — the gap, the extras, an empty project")
+    func laneContextPasteNeedsALane() {
+        let item = ClipboardMenuPolicy.laneContextPasteItem(
+            clipboardKind: .clips, clipCount: 2, hasTargetTrack: false)
+        #expect(item.isEnabled == false)
+        #expect(item.refusedBy == .noLaneTarget)
+        #expect(item.title == "Paste")
+    }
+
+    @Test("the clipboard is asked BEFORE the pointer — a notes payload says so wherever you click")
+    func laneContextPastePrecedence() {
+        // Both guards would fire; the reported one must be the clipboard's,
+        // because moving the pointer cannot fix a notes payload.
+        let item = ClipboardMenuPolicy.laneContextPasteItem(
+            clipboardKind: .notes, clipCount: 0, hasTargetTrack: false)
+        #expect(item.refusedBy == .notesPayload)
+    }
+
+    @Test("every empty-lane Paste refusal branch is reachable and distinctly named")
+    func everyLaneContextPasteRefusalIsReachable() {
+        var seen: Set<ClipboardMenuRefusal> = []
+        seen.insert(ClipboardMenuPolicy.laneContextPasteItem(
+            clipboardKind: nil, clipCount: 0, hasTargetTrack: true).refusedBy!)
+        seen.insert(ClipboardMenuPolicy.laneContextPasteItem(
+            clipboardKind: .notes, clipCount: 0, hasTargetTrack: true).refusedBy!)
+        seen.insert(ClipboardMenuPolicy.laneContextPasteItem(
+            clipboardKind: .clips, clipCount: 1, hasTargetTrack: false).refusedBy!)
+        #expect(seen == [.emptyClipboard, .notesPayload, .noLaneTarget])
+        // ⚠️ NO TRACK-KIND REFUSAL IS REACHABLE HERE, DELIBERATELY: whether the
+        // payload fits THIS lane is per-clip (`Track.canHold` inside
+        // `PasteAnchorPolicy`) and surfaces as a named skip in the amber bubble.
+        // A menu-time kind guard could only ever be partial for a payload
+        // spanning an audio and an instrument track.
+        #expect(seen.contains(.noTracks) == false)
+    }
+
     // MARK: - EditMenuTitles — the ONE plural producer
 
     @Test("the hoisted plural rule reproduces DeleteMenuPolicy's titles character for character")

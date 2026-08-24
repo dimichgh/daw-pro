@@ -1,5 +1,147 @@
 # Changelog
 
+## 2026-08-23 — Arrow keys step over a track they cannot land on
+
+Dragging a clip to another track worked with the mouse and got stuck with the keyboard. With an
+audio track sitting between two instrument tracks, pressing the down arrow on a MIDI clip did
+nothing at all — the clip could not get past the lane it was not allowed to land on.
+
+The mouse never hit this because a drag lands where you point: it asks to move two lanes and
+never asks about the one in between. An arrow key can only say "down", so it asked for one lane,
+was told that lane was the wrong kind, and stopped.
+
+Arrow keys now step **over** a lane they cannot use and land on the next one that will take the
+clip. Nothing else changed: the audio lane is still not a legal destination, a mouse drag still
+lands exactly where you point and still refuses an impossible lane, and a press with no reachable
+lane in that direction refuses exactly as it did before. When several clips move together they
+still move as a rigid group — the step chosen is the first one where every clip lands somewhere
+it fits.
+
+This behaviour had been written down as a deliberate trade-off, with the advice to reorder your
+tracks instead. It was reported as a bug by someone using it, and that ruling has been reversed.
+
+## 2026-08-23 — Right-click an empty part of a track to paste there
+
+Copying a clip and pasting it put it back where the playhead was, on a track chosen for you.
+There was no way to say "put it here" with the mouse.
+
+Right-clicking empty space in a track now offers Paste, and the clip lands on that track at that
+point. If there is nothing to paste, or what you copied is notes rather than clips, the item is
+still shown but greyed, so it is clear the option exists and what it needs. Pasting a MIDI clip
+onto an audio track still refuses, and now says which clip and why.
+
+Right-clicking a clip is unchanged and still offers no Paste — pasting "onto" a clip has never
+had a well-defined meaning, and that argument still stands.
+
+## 2026-08-23 — The Sampler makes a sound on a machine with no samples
+
+Until now the Sampler could not be tried at all without a sample library of your own. A fresh
+project ships no audio, so anyone reaching for it — or for the bend range and voice mode added
+today — got silence, and would reasonably conclude the thing was broken.
+
+The app now ships a single generated one-shot: a third of a second of A4, at 440 Hz exactly,
+rooted at MIDI 69. Anywhere a sampler zone takes a file path it will also take the name
+`builtin:test-tone-a4`, so the Sampler can be played, and its bend range and voice mode heard,
+with nothing else on the machine.
+
+A `builtin:` name that does not exist is refused, and the message lists the ones that do. That
+matters more than it sounds: a name that quietly fell through to being treated as a filename
+would have reported success and played nothing, which is the exact experience this change
+exists to remove.
+
+## 2026-08-23 — Writing notes no longer sends them all back to you
+
+Adding notes to a clip returned the whole clip, every note in it, each with a freshly minted
+identifier. For anything driving the app in bulk that is a large reply to a request whose
+useful answer is a single clip id — and a clip may hold four thousand notes.
+
+There is now a way to ask for the notes to be left out. The default is unchanged: ask for
+nothing and you get exactly what you got before.
+
+When the notes are omitted the reply says so explicitly and gives their count, so a suppressed
+reply can never be mistaken for a clip that genuinely has no notes in it. The notes remain
+readable at any time.
+
+## 2026-08-23 — A misspelled setting is refused rather than quietly ignored
+
+Settings passed inside a nested group — the notes on a clip, a tempo map segment, an automation
+target, a sampler zone — were checked less strictly than settings passed at the top level. A
+misspelled name in one of those was discarded on the way through, and the request came back
+successful having done nothing.
+
+Two such gaps were already known and recorded. Rather than fix the two, we went looking: there
+were **seventeen**, including the one used by every single call that writes notes to a clip.
+
+All seventeen now refuse an unrecognised name instead of dropping it. Nothing that previously
+worked is affected — a name that was being thrown away was, by definition, already doing
+nothing.
+
+## 2026-08-23 — A nonsense value for a sampler knob is refused again
+
+Setting a sampler knob to a word instead of a number — a gain of `"loud"` — was accepted by the
+tool layer and passed through to the app, where it had previously been turned away immediately with
+a clear explanation.
+
+This was our own regression, hours old, and it came from a feature in this same release. The
+new voice mode below takes the words `"poly"` and `"mono"`, so the setting tool had to start
+accepting text. It did — for every setting, not just that one. Widening a door for one visitor
+opened it for everybody.
+
+The check is now made per setting rather than per shape: only voice mode takes words, and only
+words. Everything else is refused at the boundary again, with a message naming what it got. Nothing
+that worked before has been narrowed.
+
+## 2026-08-23 — The Sampler bends further than a tone, and can play one note at a time
+
+The Sampler's pitch-bend range was fixed at one whole tone, shared by every instrument in the
+project and adjustable by nobody. A wind or string part that bends a fourth had no way to ask for
+it.
+
+Each sampler instrument now carries its own bend range, from nothing up to four octaves, defaulting
+to the familiar whole tone so existing projects sound exactly as they did.
+
+Alongside it, a voice mode. In the new **mono** setting a new note takes over from the one before
+it instead of sounding on top of it — the way a single-reed or brass player physically has to play.
+Measured on a real render: a D5 arriving over a held A4 leaves the A4 six hundred times quieter,
+which is to say gone rather than merely covered. That distinction matters, because the older trick
+of overlapping notes only ever *hid* a re-attack under a decaying tail.
+
+**poly** remains the default and is unchanged.
+
+## 2026-08-23 — When a sampler setting is dead, the app says so and names a fix that works
+
+A sampler whose individual zones each carry their own release makes the instrument-wide release
+knob inert — the zones win. The app already said so. What it said to do about it did not work: the
+suggested remedy named a path that exists deep in the control protocol but is absent from the tool
+it named, so following the advice exactly produced a cheerful success and no change whatsoever.
+
+The note now names the verb that actually does the job, and keeps the older form as a parenthetical
+for anyone driving the app directly.
+
+A second, quieter version of the same problem sat underneath it. A misspelled setting name inside a
+sampler description was being silently discarded rather than refused — the request came back
+successful and did nothing. That was our own inconsistency, not a limitation: some of these
+descriptions were checked strictly and some were not. The sampler, its zones, and its crossfades are
+now all checked. Two others, for hosted Audio Units and sound banks, still have the gap; they are
+recorded rather than quietly left.
+
+Finally, the description of a sampler no longer guesses at where its settings came from. It names an
+SFZ opcode only when the instrument actually came from an SFZ file, and it now reports the stored
+value and the value in force side by side instead of trying to collapse them into one number that
+could not be defined once zones disagree with each other.
+
+## 2026-08-23 — The tool reference no longer describes a product we changed this morning
+
+Three pieces of guidance that AI agents read before touching this app had aged into being wrong.
+
+One told every agent that no instrument here can slur between notes — written before the voice mode
+above shipped, and stale within hours of it. One described a new MIDI clip as silent until an
+instrument is configured, which stopped being true a long time ago; a new track sounds immediately.
+One asserted a precise tool count, presented as freshly measured, that was out of date.
+
+All three are corrected, and the count is now marked as needing re-measurement rather than restated
+as a number that will rot again.
+
 ## 2026-08-20 — A clip plays at its own pitch, not the bend left behind
 
 When a clip had no pitch-bend lane of its own, it would inherit the pitch bend left behind by an

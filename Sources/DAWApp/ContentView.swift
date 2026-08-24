@@ -1117,6 +1117,19 @@ struct ContentView: View {
                     model.presentArrangeLaneRefusal(error, trackID: trackID, beat: beat)
                 }
             },
+            // m25-f-4: right-click ▸ Paste on EMPTY LANE SPACE. The clipboard
+            // flows in by value (both are `@Observable`, so a Copy un-greys the
+            // item on the next pass — the `pasteMenuItem` staleness rule), and
+            // the gesture calls the ONE HOME with the lane it was opened on and
+            // the beat it was opened at. `intoTrack` is what makes the
+            // destination `.explicit` (m25-l-3) and therefore honoured; `atBeat`
+            // overrides the playhead for this paste only. Neither moves the
+            // stored cursor or the transport.
+            clipboardKind: model.clipboard.kind,
+            clipboardClipCount: model.clipboard.clipCount,
+            onPasteIntoLane: { trackID, beat in
+                model.pasteClipsFromClipboardDetailed(intoTrack: trackID, atBeat: beat)
+            },
             // m23-v: the VISIBLE half of m23-e. The lanes compose the hint set
             // once, draw it, and report THAT value up — never a re-derivation
             // here, which is what keeps `debug.arrangePointer`'s echo an

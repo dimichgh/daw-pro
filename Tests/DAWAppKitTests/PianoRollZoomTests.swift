@@ -201,4 +201,143 @@ struct PianoRollZoomTests {
                     "\(snap.rawValue): \(divisions) divisions don't reconstruct \(beats)")
         }
     }
+
+    // MARK: - Vertical scale: pitch-row height (m25-b-4)
+
+    @Test("the row-height range is 10...56 with the historical 14 as the default")
+    func rowHeightRange() {
+        #expect(PianoRollZoom.defaultRowHeight == 14)
+        #expect(PianoRollZoom.rowHeightRange == 10...56)
+        #expect(PianoRollZoom.clampRowHeight(1) == 10)
+        #expect(PianoRollZoom.clampRowHeight(1000) == 56)
+        #expect(PianoRollZoom.clampRowHeight(14) == 14)
+
+        // THE FLOOR IS THE GUTTER'S, AND IT IS MEASURED: the m25-i key labels are
+        // 8 pt SF Mono, drawn centred in their row, and that face lays out in a
+        // 10.0 pt line box (NSLayoutManager.defaultLineHeight and
+        // NSAttributedString.size().height agree, both weights). Adjacent names
+        // first TOUCH at 10, so the floor sits exactly at the fit bound and every
+        // reachable row height names every key — which is why the gutter needed no
+        // density ladder. Re-derived here so lowering the floor breaks this test
+        // rather than the gutter.
+        #expect(PianoRollZoom.rowHeightRange.lowerBound >= 10)
+
+        // The floor is safe for the GRID too, on the roll's own shipped numbers: a
+        // note's hit rect is the full row (`noteRect`), and 10 pt clears the roll's
+        // smallest grab dimension...
+        #expect(PianoRollZoom.rowHeightRange.lowerBound > PianoRollModel.resizeHandleWidth)
+        // ...and the pill (inset dy 1.5 at its one draw site, corner radius 3)
+        // still draws taller than 2× its radius, so it reads as a rounded BAR.
+        #expect(PianoRollZoom.rowHeightRange.lowerBound - 3 >= 6)
+
+        // The ceiling is a JUDGEMENT about visible pitch span, recorded as 4×.
+        #expect(PianoRollZoom.rowHeightRange.upperBound == PianoRollZoom.defaultRowHeight * 4)
+    }
+
+    @Test("the row ladder is the SAME multiplicative step as the horizontal one")
+    func rowLadder() {
+        #expect(PianoRollZoom.tallerRow(14) == 14 * PianoRollZoom.stepFactor)
+        #expect(PianoRollZoom.shorterRow(14) == 14 / PianoRollZoom.stepFactor)
+        // Both ends clamp rather than running away.
+        #expect(PianoRollZoom.tallerRow(56) == 56)
+        #expect(PianoRollZoom.shorterRow(10) == 10)
+        // The ladder reaches both bounds from the default in finite presses.
+        var up = PianoRollZoom.defaultRowHeight
+        for _ in 0..<20 { up = PianoRollZoom.tallerRow(up) }
+        #expect(up == 56)
+        var down = PianoRollZoom.defaultRowHeight
+        for _ in 0..<20 { down = PianoRollZoom.shorterRow(down) }
+        #expect(down == 10)
+        #expect(PianoRollZoom.rowPercentLabel(rowHeight: 14) == "100%")
+        #expect(PianoRollZoom.rowPercentLabel(rowHeight: 28) == "200%")
+    }
+
+    @Test("the vertical anchor is the viewport CENTRE, borrowed not re-typed")
+    func rowAnchorIsTheCentre() {
+        // Pinned against ArrangeZoom's OWN fallback rather than a re-typed
+        // `height / 2`, so the delegation is observable (the m25-b-3 law: the
+        // centre keeps ONE definition).
+        for h in [0 as CGFloat, 1, 400, 1793] {
+            #expect(PianoRollZoom.rowAnchorScreenY(viewportHeight: h)
+                    == ArrangeZoom.anchorScreenX(playheadContentX: .infinity,
+                                                 offset: 0, viewportWidth: h))
+        }
+        #expect(PianoRollZoom.rowAnchorScreenY(viewportHeight: 400) == 200)
+        #expect(PianoRollZoom.rowAnchorScreenY(viewportHeight: 0) == 0)
+    }
+
+    /// ⭐ **THE ITEM'S HEADLINE RULE, WITH ITS OWN NEGATIVE CONTROL.** A vertical
+    /// zoom that rescales rows without re-pinning an anchor pitch throws the notes
+    /// the user is looking at off screen — so this leg asserts the anchored offset
+    /// holds the centre pitch AND that the un-anchored behaviour (keep the old
+    /// offset) demonstrably does NOT. Without the control, a `rowZoomOffset` that
+    /// simply returned `oldOffset` would pass the first half at any zoom where the
+    /// centre happened not to move.
+    @Test("a row-height zoom holds the pitch at the viewport centre")
+    func rowZoomHoldsTheCentrePitch() {
+        let viewport: CGFloat = 400
+        let old: CGFloat = 14
+        // Scrolled well into the pitch stack, so a drift is unmissable.
+        let oldOffset: CGFloat = 600
+        // The pitch under the centre before the zoom, in the model's own affine.
+        let centrePitch = (oldOffset + viewport / 2) / old
+
+        for new in [28 as CGFloat, 10, 56, 17.5] {
+            let offset = PianoRollZoom.rowZoomOffset(
+                oldRowHeight: old, newRowHeight: new,
+                oldOffset: oldOffset, viewportHeight: viewport)
+            let after = (offset + viewport / 2) / new
+            #expect(abs(after - centrePitch) < 1e-9,
+                    "row \(old) → \(new): centre pitch drifted \(centrePitch) → \(after)")
+
+            // NEGATIVE CONTROL — the un-anchored behaviour this item exists to
+            // prevent: keep the old offset and the centre pitch moves, by more
+            // than a row, in every direction the zoom can go.
+            let unanchored = (oldOffset + viewport / 2) / new
+            #expect(abs(unanchored - centrePitch) > 1,
+                    "the control failed to drift at row \(old) → \(new)")
+        }
+    }
+
+    @Test("the vertical offset is floored at 0 AND clamped to the new content height")
+    func rowZoomOffsetIsClampedBothEnds() {
+        let viewport: CGFloat = 400
+        // At the top of the stack a zoom can never produce a negative offset.
+        #expect(PianoRollZoom.rowZoomOffset(oldRowHeight: 14, newRowHeight: 10,
+                                            oldOffset: 0, viewportHeight: viewport) == 0)
+
+        // ⚠️ THE CLAMP THE HORIZONTAL RULE DOES NOT NEED. Parked at the very bottom
+        // and zooming OUT, the anchored offset must not exceed the NEW content
+        // height minus the viewport — `verticalTargetY` sizes a marker inside the
+        // gutter, and a target past its end lands somewhere else entirely.
+        let old: CGFloat = 56
+        let bottom = CGFloat(PianoRollModel.pitchCount) * old - viewport
+        let new: CGFloat = 10
+        let offset = PianoRollZoom.rowZoomOffset(oldRowHeight: old, newRowHeight: new,
+                                                 oldOffset: bottom, viewportHeight: viewport)
+        let maxOffset = CGFloat(PianoRollModel.pitchCount) * new - viewport
+        #expect(offset <= maxOffset)
+        #expect(offset >= 0)
+        // The control: the RAW anchored formula does overshoot here, so the clamp
+        // is load-bearing rather than decorative.
+        let raw = ArrangeZoom.offsetPreservingAnchor(
+            oldPPB: old, newPPB: new, oldOffset: bottom,
+            anchorScreenX: PianoRollZoom.rowAnchorScreenY(viewportHeight: viewport))
+        #expect(raw > maxOffset)
+    }
+
+    @Test("a viewport shorter than the content still yields a legal offset")
+    func rowZoomOffsetWithATinyViewport() {
+        // A zero viewport is the not-yet-laid-out case; the view guards it, but the
+        // math must not produce a negative or a NaN if it ever arrives.
+        let offset = PianoRollZoom.rowZoomOffset(oldRowHeight: 14, newRowHeight: 28,
+                                                 oldOffset: 0, viewportHeight: 0)
+        #expect(offset >= 0)
+        #expect(offset.isFinite)
+        // A degenerate OLD scale cannot divide by zero (the shared rule's guard).
+        let guarded = PianoRollZoom.rowZoomOffset(oldRowHeight: 0, newRowHeight: 28,
+                                                  oldOffset: 120, viewportHeight: 400)
+        #expect(guarded.isFinite)
+        #expect(guarded >= 0)
+    }
 }

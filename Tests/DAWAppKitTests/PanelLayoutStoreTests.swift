@@ -431,4 +431,50 @@ struct PanelLayoutStoreTests {
         ud.storeValue(0, forKey: PanelLayoutStore.rowHeightKey)
         #expect(ud.loadValue(forKey: PanelLayoutStore.rowHeightKey) == 0)    // stored 0, not nil
     }
+
+    // MARK: - Piano-roll VERTICAL zoom (m25-b-4)
+
+    @Test("the roll's pitch-row height defaults to 14 and is NOT the arrange's rowHeight")
+    func pianoRollRowHeightDefaultAndIdentity() {
+        let store = PanelLayoutStore(backing: SpyBacking())
+        // Requirement: an existing session looks exactly as it did.
+        #expect(store.pianoRollRowHeight == 14)
+        #expect(PanelLayoutStore.defaultPianoRollRowHeight == 14)
+        #expect(PianoRollZoom.defaultRowHeight == 14)
+        #expect(PianoRollModel.defaultRowHeight == PianoRollZoom.defaultRowHeight)
+
+        // ⚠️ THE NAME TRAP, PINNED. `rowHeight` is the ARRANGE track-lane height.
+        // The two slots must not share a key, a range, or a value by accident.
+        #expect(PanelLayoutStore.pianoRollRowHeightKey != PanelLayoutStore.rowHeightKey)
+        #expect(PanelLayoutStore.pianoRollRowHeightRange != PanelLayoutStore.rowHeightRange)
+        store.setPianoRollRowHeight(40)
+        #expect(store.pianoRollRowHeight == 40)
+        #expect(store.rowHeight == PanelLayoutStore.defaultRowHeight)   // untouched
+        store.setRowHeight(60)
+        #expect(store.pianoRollRowHeight == 40)                          // still untouched
+    }
+
+    @Test("the pitch-row height clamps to 10...56 and writes through")
+    func pianoRollRowHeightClampsAndPersists() {
+        let spy = SpyBacking()
+        let store = PanelLayoutStore(backing: spy)
+        store.setPianoRollRowHeight(1)
+        #expect(store.pianoRollRowHeight == 10)
+        #expect(spy.storage[PanelLayoutStore.pianoRollRowHeightKey] == 10)
+        store.setPianoRollRowHeight(1000)
+        #expect(store.pianoRollRowHeight == 56)
+        #expect(spy.storage[PanelLayoutStore.pianoRollRowHeightKey] == 56)
+
+        // A relaunch reads the persisted value back through the same key.
+        let reopened = PanelLayoutStore(backing: spy)
+        #expect(reopened.pianoRollRowHeight == 56)
+    }
+
+    @Test("reset() restores the pitch-row height to 14")
+    func pianoRollRowHeightReset() {
+        let store = PanelLayoutStore(backing: SpyBacking())
+        store.setPianoRollRowHeight(56)
+        store.reset()
+        #expect(store.pianoRollRowHeight == 14)
+    }
 }

@@ -87,7 +87,10 @@ test("omitted trackId reaches the bridge as undefined, not a stray key", async (
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.command, "edit.pasteClips");
-  assert.deepEqual(calls[0]!.params, { trackId: undefined });
+  // m25-f-4 added `atBeat` ADDITIVELY: an omitted optional forwards as
+  // `undefined` (JSON.stringify drops it on the wire), exactly as `trackId`
+  // always has.
+  assert.deepEqual(calls[0]!.params, { trackId: undefined, atBeat: undefined });
 });
 
 test("a given trackId forwards verbatim", async () => {
@@ -97,7 +100,36 @@ test("a given trackId forwards verbatim", async () => {
   await client.callTool({ name: "edit_paste_clips", arguments: { trackId } });
 
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0]!.params, { trackId });
+  assert.deepEqual(calls[0]!.params, { trackId, atBeat: undefined });
+});
+
+test("an atBeat forwards verbatim, alongside the trackId (m25-f-4)", async () => {
+  const trackId = randomUUID();
+  queuedResult = { pasted: false, reason: "empty-clipboard" };
+
+  await client.callTool({ name: "edit_paste_clips", arguments: { trackId, atBeat: 37.5 } });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]!.params, { trackId, atBeat: 37.5 });
+});
+
+test("a NEGATIVE atBeat is forwarded, not rejected — the app's group clamp owns it", async () => {
+  queuedResult = { pasted: false, reason: "empty-clipboard" };
+
+  await client.callTool({ name: "edit_paste_clips", arguments: { atBeat: -5 } });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]!.params, { trackId: undefined, atBeat: -5 });
+});
+
+test("a non-numeric atBeat is rejected at the MCP boundary, never reaches the bridge", async () => {
+  const result = await client.callTool({
+    name: "edit_paste_clips",
+    arguments: { atBeat: "bar 3" },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.ok((result as any).isError);
+  assert.equal(calls.length, 0);
 });
 
 test("a non-UUID trackId is rejected at the MCP boundary, never reaches the bridge", async () => {
@@ -110,10 +142,15 @@ test("a non-UUID trackId is rejected at the MCP boundary, never reaches the brid
   assert.equal(calls.length, 0);
 });
 
+// ⚠️ THIS TEST USED `atBeat: 4` AS ITS UNKNOWN KEY UNTIL m25-f-4 MADE `atBeat`
+// REAL. The key had to be replaced, not the assertion: the strict-schema
+// property being pinned is that an argument this tool does not declare is
+// refused at the boundary, and a key the tool now DECLARES cannot demonstrate
+// it. (It went red exactly as it should have when the param landed.)
 test("an unrecognized argument is rejected at the MCP boundary (never reaches the bridge)", async () => {
   const result = await client.callTool({
     name: "edit_paste_clips",
-    arguments: { trackId: randomUUID(), atBeat: 4 },
+    arguments: { trackId: randomUUID(), atBar: 4 },
   });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   assert.ok((result as any).isError);

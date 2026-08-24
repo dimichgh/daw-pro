@@ -85,8 +85,15 @@ public enum EditPasteResult: Sendable {
 public protocol EditPasteControlling: AnyObject {
     /// Pastes the app clipboard's clips. `intoTrack` nil = the resolved
     /// active track, exactly what Cmd-V uses; non-nil overrides it for THIS
-    /// paste only (does not move the stored cursor). Rides
-    /// `AppModel.pasteClipsFromClipboard(intoTrack:)`'s exact targeting —
-    /// this is a new WIRE ROUTE to that shipped operation, not a new one.
-    func pasteClips(intoTrack: UUID?) -> EditPasteResult
+    /// paste only (does not move the stored cursor). `atBeat` nil = the
+    /// transport playhead, exactly what Cmd-V uses; non-nil overrides it for
+    /// THIS paste only (does not move the playhead) — the seam the empty-lane
+    /// right-click Paste rides (m25-f-4). Rides
+    /// `AppModel.pasteClipsFromClipboard(intoTrack:atBeat:)`'s exact targeting
+    /// — this is a WIRE ROUTE to that shipped operation, not a second one.
+    ///
+    /// ⚠️ **`atBeat` IS ADDITIVE ON A LIVE VERB.** `edit.pasteClips` keeps its
+    /// name and its behaviour when the param is omitted; a caller that never
+    /// sends it cannot tell this parameter exists.
+    func pasteClips(intoTrack: UUID?, atBeat: Double?) -> EditPasteResult
 }

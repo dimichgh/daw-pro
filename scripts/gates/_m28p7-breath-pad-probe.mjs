@@ -244,8 +244,9 @@ try {
 
   // --- 6. The card must FIT. `debug.explainFrames` reports the drawn box; the
   // dial side is the only unknown in `BreathPadLayout.fixedChrome`, so one
-  // measurement isolates it. (⚠️ m25-j: explainFrames reports `clipBlock`'s
-  // PRE-.offset() x/y — w/h are correct, which is all this uses.)
+  // measurement isolates it. (m25-j FIXED 2026-08-23: explainFrames now reports
+  // where a control is DRAWN, offsets included; this probe only ever used w/h,
+  // which were correct throughout, so nothing here changes.)
   const frames = await cmd("debug.explainFrames", {});
   const list = frames.result?.frames ?? frames.result?.anchors ?? [];
   console.log(`  explainFrames returned ${Array.isArray(list) ? list.length : "?"} entries`);

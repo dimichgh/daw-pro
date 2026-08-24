@@ -291,6 +291,78 @@ public enum ClipboardMenuPolicy {
             targetsWholeSelection: true)
     }
 
+    // MARK: - The EMPTY-LANE context menu's Paste (m25-f-4)
+
+    /// Resolves right-click ▸ Paste on empty arrange lane space — the one place
+    /// in the arrange where a paste's BOTH coordinates are unambiguous: the beat
+    /// under the pointer and the track whose lane it is. (`TimelineLanesView`'s
+    /// `contextMenu` records why the CLIP menu has no Paste: pasting "onto" a
+    /// clip names a beat only by accident and a track ambiguously.)
+    ///
+    /// ═══ SHOWN AND GREYED, NEVER HIDDEN, NEVER SILENT ═══
+    ///
+    /// `noteContextTitle`'s decision, verbatim and for its reason: a user who
+    /// right-clicks with an empty clipboard learns the operation exists and what
+    /// it needs. The alternative this rejects is not hiding — it is the item
+    /// that is PRESENT, ENABLED and does nothing, which is the same defect class
+    /// as a menu that pastes into a lane other than the one it was opened on.
+    ///
+    /// ⚠️ **NO MODAL TERM, UNLIKE `pasteMenuItem`, AND THAT IS A REASONED
+    /// DIVERGENCE, NOT AN OMISSION.** The Edit MENU stays clickable while a
+    /// sheet is up, so that item must refuse in software. A context menu is
+    /// raised by a right-click ON THIS SURFACE, and a presented sheet takes the
+    /// hit-test — so the gesture cannot happen. `clipContextCommand` carries no
+    /// modal term either. Adding one would also mean threading
+    /// `isModalPresented` into the lanes view purely to state a fact the
+    /// hit-test already enforces.
+    ///
+    /// ⚠️ **NO WORKSPACE TERM**, same shape: these lanes mount only in
+    /// `workspaceMode == .arrange`.
+    ///
+    /// ⚠️ **NO TRACK-KIND TERM, DELIBERATELY.** Whether the payload can live on
+    /// this particular lane is decided PER CLIP by `Track.canHold` inside
+    /// `PasteAnchorPolicy.resolveClipPaste`, reported as a named skip, and
+    /// surfaced by the amber refusal bubble (`AppModel.presentClipboardSkips`).
+    /// Re-deciding it here would be a second home for the kind rule (the m23-v /
+    /// m23-aj one-home rule), and it could only ever be PARTIAL: a payload
+    /// spanning an audio and an instrument track has no single yes/no answer, so
+    /// a greyed item would refuse a paste that would in fact have landed half of
+    /// itself. Refusing loudly at paste time beats refusing wrongly at menu time.
+    ///
+    /// - Parameters:
+    ///   - clipboardKind: `EditClipboard.kind`.
+    ///   - clipCount: `EditClipboard.clipCount` — the title's blast radius. The
+    ///     right-click menus count (`clipContextCommand`, `noteContextTitle`);
+    ///     only the Edit menu was stripped to bare words on 2026-08-12.
+    ///   - hasTargetTrack: the pointer resolved a lane
+    ///     (`ArrangePointer.emptyLaneIndex` non-nil). False for the gap between
+    ///     rows, a row's expanded extras, the space below the last lane, and a
+    ///     project with no tracks at all.
+    public static func laneContextPasteItem(
+        clipboardKind: ClipboardKind?,
+        clipCount: Int,
+        hasTargetTrack: Bool
+    ) -> ClipboardMenuItem {
+        let verb = ClipboardVerb.paste
+        guard let clipboardKind else {
+            return ClipboardMenuItem(verb: verb, refusedBy: .emptyClipboard)
+        }
+        // KIND BEFORE TARGET — "you copied notes" is the fact the user needs,
+        // and it is true wherever they right-clicked. Reporting `.noLaneTarget`
+        // first would blame the pointer for a refusal the pointer cannot fix.
+        guard clipboardKind == .clips else {
+            return ClipboardMenuItem(verb: verb, refusedBy: .notesPayload)
+        }
+        guard hasTargetTrack else {
+            return ClipboardMenuItem(verb: verb, refusedBy: .noLaneTarget)
+        }
+        return ClipboardMenuItem(
+            verb: verb,
+            title: EditMenuTitles.counted(verb: verb.word, count: clipCount,
+                                          singular: "Clip", plural: "Clips"),
+            surface: .arrangeClips)
+    }
+
     // MARK: - The piano-roll note context menu
 
     /// The roll's own right-click Copy / Cut title.
@@ -387,6 +459,24 @@ public enum ClipboardMenuRefusal: String, Sendable, CaseIterable, Equatable {
     case noRollOpen = "no-roll-open"
     /// Paste only — the clipboard holds clips and the project has no tracks.
     case noTracks = "no-tracks"
+    /// The EMPTY-LANE right-click Paste only (m25-f-4) — the clipboard holds
+    /// NOTES, which have no destination on a lane at all.
+    ///
+    /// DISTINCT FROM `.noRollOpen`, which is the Edit menu's answer for the same
+    /// payload and means "open a roll and this will work". Here opening a roll
+    /// changes nothing: notes never land in the arrange. Collapsing the two
+    /// would tell the user to do something that cannot help.
+    case notesPayload = "notes-payload"
+    /// The EMPTY-LANE right-click Paste only (m25-f-4) — the pointer named no
+    /// lane, so there is no destination TRACK. The gap between rows, a row's
+    /// expanded take/automation extras, the space below the last lane, or a
+    /// project with no tracks.
+    ///
+    /// ⚠️ DISTINCT FROM `.noTracks` ON PURPOSE, even though an empty project
+    /// reaches it: the common cause is a pointer position, not a missing
+    /// project, and a refusal that names the wrong cause is the thing the
+    /// `refusedBy` idiom exists to prevent.
+    case noLaneTarget = "no-lane-target"
 }
 
 /// A resolved Edit-menu clipboard item.

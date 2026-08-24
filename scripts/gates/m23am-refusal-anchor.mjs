@@ -332,20 +332,27 @@ try {
   check("V1b …and they really are the clip blocks (width == LEN·ppb for all 9)",
         rects.length > 0 && rects.every((r) => Math.abs(r.width - LEN * ppb) < 0.5),
         `ppb=${ppb} expected width=${LEN * ppb} widths=[${rects.map((r) => r.width).join(",")}]`);
-  // ⚠️ MEASURED LIMIT OF THE SEAM, pinned so no later gate reads rect[i] as
-  // clip[i]. `TimelineLanesView` places blocks with `.offset(x:y:)` and hangs
-  // `.explainable` OUTSIDE that offset, so what `debug.explainFrames` reports is
-  // the LAYOUT frame — identical for every block — not the rendered position.
-  // Widths track `ppb` (V1b) while origins do not move at all. So this seam can
-  // answer HOW MANY blocks are mounted and NOTHING about where any one of them
-  // is drawn; the viewport legs below therefore compute from the app's own
-  // reported `ppb`/`hOffset`/`viewportWidth` and the clip's start beat, never
-  // from a rect. If this assertion ever fails, the offsets became measurable and
-  // V3/V4 can be tightened to name the block.
-  check("V2 SEAM LIMIT: every clipBlock rect shares one origin (offsets are not measured)",
-        new Set(rects.map((r) => `${r.x},${r.y}`)).size === 1,
-        `distinct origins=${new Set(rects.map((r) => `${r.x},${r.y}`)).size} `
+  // ⚠️ WAS A PINNED SEAM LIMIT; m25-j LIFTED IT (2026-08-23). Until then
+  // `TimelineLanesView` placed blocks with `.offset(x:y:)` — a RENDER transform —
+  // while `.explainable` measured with a `GeometryReader`, which sees only
+  // LAYOUT, so every block reported the SAME rect and this leg asserted that
+  // collapse ("if this ever fails, the offsets became measurable"). It did:
+  // `offsetExplainable` now carries the placement into the report, so origins are
+  // DISTINCT and correct. The leg is INVERTED rather than deleted, because the
+  // collapse is exactly the regression to catch. The viewport legs below still
+  // compute from the app's own `ppb`/`hOffset`/`viewportWidth` — they were
+  // written that way and they remain the independent route.
+  check("V2 every clipBlock rect has its OWN origin (m25-j: offsets are measured now)",
+        new Set(rects.map((r) => `${r.x},${r.y}`)).size === rects.length,
+        `distinct origins=${new Set(rects.map((r) => `${r.x},${r.y}`)).size}/${rects.length} `
         + `sample=${JSON.stringify(rects.slice(0, 3))}`);
+  // …and by the RIGHT amount: x must track the store's own start beat times the
+  // app's own ppb. "They differ" alone would pass on any wrong offset.
+  check("V2b …and x == firstOrigin + startBeat·ppb for every block",
+        rects.length === N_A + 1
+          && rects.slice(0, N_A).every((r, i) => Math.abs((r.x - rects[0].x) - i * LEN * ppb) < 0.6),
+        `Δx=[${rects.slice(0, N_A).map((r) => r.x - rects[0].x).join(",")}] `
+        + `expected=[${Array.from({ length: N_A }, (_, i) => i * LEN * ppb).join(",")}]`);
   // Viewport arithmetic from the app's OWN reported numbers plus the store's own
   // start beat — the only route left, and the honest one.
   const anchorStart = OFFENDER_I * LEN;

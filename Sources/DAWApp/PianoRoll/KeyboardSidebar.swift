@@ -99,13 +99,31 @@ struct KeyboardSidebar: View {
     ///   is only marginally more discoverable than the invisible thing it
     ///   advertises, and it is invisible to exactly the user who filed it."
     ///   Reading which key is which is a LOOKING task, not a pointing one.
-    /// * **A row-height-scaled density ladder was rejected as unreachable
-    ///   code**: `rowHeight` has exactly one value in the shipped app and no
-    ///   vertical-zoom driver anywhere (unlike `pixelsPerBeat`, which has
+    /// * **A row-height-scaled density ladder is STILL not here — but the
+    ///   reason changed, and this bullet is SUPERSEDED IN PLACE by m25-b-4
+    ///   (2026-08-23) rather than left to rot.** It used to read: *"rejected as
+    ///   unreachable code: `rowHeight` has exactly one value in the shipped app
+    ///   and no vertical-zoom driver anywhere (unlike `pixelsPerBeat`, which has
     ///   three), so every branch of such a ladder but one would be dead and
     ///   untestable. When a vertical zoom lands, it owns that ladder — and the
     ///   note-block labels next door already show the shape it should take
-    ///   (`PianoRollNoteLabel.fits`, a fit test rather than a threshold table).
+    ///   (`PianoRollNoteLabel.fits`, a fit test rather than a threshold table)."*
+    ///   **The vertical zoom has landed, so the first half is now false**:
+    ///   `rowHeight` is driven by the persisted `PanelLayoutStore.pianoRollRowHeight`
+    ///   slot and has many reachable values. The ladder is still not needed, and
+    ///   that is a MEASUREMENT rather than a deferral: the zoom's FLOOR was set
+    ///   AT the fit bound. This face lays out in a **10.0 pt line box** (measured
+    ///   for m25-b-4 — `NSLayoutManager.defaultLineHeight` and
+    ///   `NSAttributedString.size().height` both give 10.0 at 8 pt for the medium
+    ///   AND bold weights used here; the "~9.5 pt" this comment quoted below is
+    ///   the INK height, ascender − descender, not the line box), each name is
+    ///   drawn centred in its row, so adjacent names first touch at exactly
+    ///   10 pt — and `PianoRollZoom.rowHeightRange` starts at 10. Every reachable
+    ///   row height therefore names every key, and there is no density to ladder.
+    ///   ⚠️ **THAT INVARIANT IS THE FLOOR'S, NOT THIS FILE'S**: lower the floor
+    ///   below 10 and this gutter needs the fit test the same day
+    ///   (`PianoRollNoteLabel.fits`'s shape — suppress, never truncate, never
+    ///   scale the type down).
     ///
     /// The hierarchy that keeps 128 names from reading as a wall: naturals take
     /// the ivory surface's own measured ink at medium weight, accidentals take

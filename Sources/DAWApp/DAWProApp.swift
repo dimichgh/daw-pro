@@ -1625,8 +1625,12 @@ final class AppModel {
     /// arrange is the subject — and decision 5 speaks only to the single case.
     ///
     /// - Parameter intoTrack: a destination named by THIS GESTURE, overriding the
-    ///   stored cursor for this paste only. nil (every shipped caller today) uses
+    ///   stored cursor for this paste only. nil (the keyboard/menu route) uses
     ///   the resolved active track. See the seam comment in the body.
+    /// - Parameter atBeat: an ANCHOR named by THIS GESTURE (m25-f-4), overriding
+    ///   the playhead for this paste only. nil (every route but the empty-lane
+    ///   right-click) anchors on `store.transport.positionBeats`, byte for byte
+    ///   as before. See the seam comment in the body.
     ///
     /// ✅ **WIRE GAP CLOSED (m26-k, by user ruling 2026-08-17).** `allCommands`
     /// now has `edit.pasteClips { trackId?: UUID }` → MCP tool
@@ -1640,8 +1644,10 @@ final class AppModel {
     /// `debug.editClipboard` remains the only note-paste route (no wire verb
     /// exists for that — `EditClipboardStaging.swift`'s header explains why).
     @discardableResult
-    func pasteClipsFromClipboard(intoTrack: UUID? = nil) -> Bool {
-        if case .pasted = pasteClipsFromClipboardDetailed(intoTrack: intoTrack) { return true }
+    func pasteClipsFromClipboard(intoTrack: UUID? = nil, atBeat: Double? = nil) -> Bool {
+        if case .pasted = pasteClipsFromClipboardDetailed(intoTrack: intoTrack, atBeat: atBeat) {
+            return true
+        }
         return false
     }
 
@@ -1655,7 +1661,8 @@ final class AppModel {
     /// the `Bool` wrapper and `EditPasteWireSurface.swift`'s protocol
     /// conformance both call THIS, never duplicate it.
     @discardableResult
-    func pasteClipsFromClipboardDetailed(intoTrack: UUID? = nil) -> EditPasteResult {
+    func pasteClipsFromClipboardDetailed(intoTrack: UUID? = nil,
+                                         atBeat: Double? = nil) -> EditPasteResult {
         guard let payload = clipboard.payload else { return .emptyClipboard }
         guard case .clips(let entries) = payload else {
             // The only other case is `.notes` — `ClipboardPayload` is a sum
@@ -1690,9 +1697,14 @@ final class AppModel {
         // destination merely `.inferred` from the focused clip) is byte-for-byte
         // unchanged and still lands home.
         //
-        // ⚠️ SEAM FOR m25-f-4 (right-click ▸ Paste on empty lane space), which
-        // the same ruling unblocks: it supplies its destination through
-        // `intoTrack` and rides this identical mechanism. It is fed to
+        // ✅ SEAM CONSUMED BY m25-f-4 (right-click ▸ Paste on empty lane space),
+        // which the same ruling unblocked: it supplies its destination through
+        // `intoTrack` and its anchor through `atBeat`, and rides this identical
+        // mechanism. THE PREMISE WAS RE-CHECKED BEFORE IT WAS BUILT: a track
+        // fed to `explicit:` resolves `.explicit`, so the destination is
+        // honoured; before m25-l-3 it was discarded for a live-source copy and
+        // the menu would have pasted into a lane other than the one it was
+        // opened on. It is fed to
         // `resolve`'s `explicit:` input rather than used to hand-build a
         // `Resolution`, so the liveness/precedence rules stay in their one home.
         // It deliberately does NOT write `explicitActiveTrackID`: that property
@@ -1703,9 +1715,25 @@ final class AppModel {
             explicit: intoTrack ?? explicitActiveTrackID,
             focusClipID: arrangeSelection.focusID,
             tracks: store.tracks)
+        // ⭐ THE ANCHOR — the playhead, unless THIS GESTURE named a beat.
+        //
+        // ⚠️ **m25-f-4 CHANGED A RECORDED FACT AND THIS IS THE NOTE THAT SAYS
+        // SO.** `TimelineLanesView.contextMenu` argued Paste out of the CLIP menu
+        // partly on "the anchor is the playhead in EVERY route", which was true
+        // until the empty-lane right-click. That gesture points at a beat as
+        // directly as it points at a track — refusing to use it would make the
+        // menu's position a half-promise, landing the paste on the right lane at
+        // some other bar. The clip menu still has no Paste, and its OTHER
+        // argument (a click on a clip names a beat only by accident) is
+        // untouched; the comment there has been corrected to name this route.
+        //
+        // nil = the playhead, so ⌘V, Edit ▸ Paste, `edit.pasteClips` and
+        // `debug.editClipboard` are unchanged. The GROUP CLAMP still lives in
+        // `resolveClipPaste` — a negative beat is clamped there, once, on the
+        // anchor, never per member.
         let plan = PasteAnchorPolicy.resolveClipPaste(
             payload: entries,
-            anchorBeat: store.transport.positionBeats,
+            anchorBeat: atBeat ?? store.transport.positionBeats,
             tracks: store.tracks,
             activeTrack: destination)
 
@@ -2539,10 +2567,19 @@ final class AppModel {
         /// The WHOLE-GROUP beat-0 clamp inside `ProjectStore.moveClips` engaged.
         var clamped: Bool = false
         /// The vertical triple, read off `ClipsTrackMoveResult` and never
-        /// recomputed here. `requestedTrackDelta` is the ±1 the step asked for;
-        /// `effectiveTrackDelta` is what the store's WHOLE-GROUP top/bottom clamp
-        /// allowed; `clampedTracks` says that clamp engaged. Both deltas are 0
-        /// on the horizontal axis, where there is no vertical request to report.
+        /// recomputed here. `requestedTrackDelta` is what the store was ASKED
+        /// for; `effectiveTrackDelta` is what the store's WHOLE-GROUP top/bottom
+        /// clamp allowed; `clampedTracks` says that clamp engaged. Both deltas
+        /// are 0 on the horizontal axis, where there is no vertical request to
+        /// report.
+        ///
+        /// ⚠️ IT IS NO LONGER THE ±1 THE STEP ASKED FOR — that is
+        /// `trackStepDelta`, and since m25-l-1 ④ the two can legitimately
+        /// disagree. `ArrangeVerticalNudgeReach.delta` may ask the store for ±2
+        /// (or more) to pass OVER a lane that cannot hold the selection, so
+        /// `trackStepDelta: 1, requestedTrackDelta: 2` reads exactly "one press,
+        /// one lane skipped". A gate that wants the PRESS must read
+        /// `trackStepDelta`; one that wants the ASK must read this.
         var requestedTrackDelta: Int = 0
         var effectiveTrackDelta: Int = 0
         var clampedTracks: Bool = false
@@ -2831,13 +2868,27 @@ final class AppModel {
     /// `ArrangeNudgeOutcome`, and the horizontal path above is deliberately left
     /// exactly as m23-x shipped it.
     ///
-    /// EVERYTHING VERTICAL IS THE STORE'S. This computes no clamp of its own: it
-    /// hands `ProjectStore.moveClips(ids:byTracks:)` the raw ±1 and reports the
+    /// EVERY VERTICAL *OUTCOME* IS THE STORE'S. This computes no clamp of its
+    /// own and no legality rule of its own: it reports the
     /// `ClipsTrackMoveResult` back verbatim. The store is the only place that can
     /// see every selected clip's track index, so a clamp here would be a second
     /// computation free to agree by luck (the m23-f finding), and a per-clip
     /// clamp would break the rigidity the `Int` in `ClipTrackLanding.byTracks`
     /// exists to make unrepresentable.
+    ///
+    /// ⚠️ WHAT IT DOES CHOOSE IS THE *REQUEST* (m25-l-1 ④).
+    /// `ArrangeVerticalNudgeReach.delta` sits between the step and the store and
+    /// answers a question neither of them asks: **which delta does an arrow
+    /// press REACH** when the adjacent lane cannot hold the selection. It is not
+    /// the m23-f second clamp — it computes no quantity the store computes, it
+    /// CALLS `ProjectStore.clampedTrackDelta` for range and `Track.canHold` for
+    /// legality, and when nothing is reachable it hands back the raw ±1 so the
+    /// store's clamp and the store's refusal are still the only outcomes.
+    ///
+    /// ⚠️ THE TWO DELTA FIELDS NOW LEGITIMATELY DISAGREE, and that is the point:
+    /// `trackStepDelta` is the PRESSED ±1, `requestedTrackDelta` is what the
+    /// store was ASKED for. Pressed 1 / asked 2 is exactly a skipped lane, and a
+    /// gate can now see it without a snapshot diff.
     private func verticalArrangeNudge(direction: ArrangeVerticalNudgeDirection,
                                       modifiers: TransportKeyModifiers) -> ArrangeNudgeOutcome {
         guard let step = ArrangeNudge.verticalStep(direction: direction,
@@ -2849,8 +2900,14 @@ final class AppModel {
             return ArrangeNudgeOutcome(refusedBy: .emptySelection,
                                        trackStepDelta: step.trackDelta)
         }
+        // The KEYBOARD's vertical resolve, and the pointer's opposite number.
+        // A press means "the next lane I can use", so an ineligible lane is
+        // passed OVER; a drag means "here", so `ArrangeVerticalDrag` backs off
+        // to zero instead. Same two homes consulted, different question asked.
+        let reachDelta = ArrangeVerticalNudgeReach.delta(
+            step: step, movingClipIDs: Set(targets), tracks: store.tracks)
         do {
-            let result = try store.moveClips(ids: targets, byTracks: step.trackDelta)
+            let result = try store.moveClips(ids: targets, byTracks: reachDelta)
             return ArrangeNudgeOutcome(
                 handled: true,
                 trackStepDelta: step.trackDelta,
@@ -5006,7 +5063,7 @@ final class AppModel {
     }
 
     /// `debug.panelLayout {sidebarWidth?, editorFraction?, rowHeight?,
-    /// pianoRollPPB?, mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
+    /// pianoRollPPB?, pianoRollRowHeight?, mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
     /// waveformNormalize?, waveformVerticalZoom?, editorMaximized?,
     /// pianoRollMinimap?, reset?}` —
     /// stages the adjustable window layout (beta m10-d)
@@ -5028,6 +5085,15 @@ final class AppModel {
         if let f = params["editorFraction"]?.doubleValue { panelLayout.setEditorFraction(CGFloat(f)) }
         if let h = params["rowHeight"]?.doubleValue { panelLayout.setRowHeight(CGFloat(h)) }
         if let z = params["pianoRollPPB"]?.doubleValue { panelLayout.setPianoRollPPB(CGFloat(z)) }
+        // m25-b-4: the roll's VERTICAL zoom — one more `PanelLayoutStore` slot, and
+        // it rides here for the reason recorded above rather than as a new verb: a
+        // pitch-row height changes no project byte and no sound, so it is view
+        // chrome and `allCommands`/MCP stay pinned (the m10-c/sp-b pure-view rule).
+        // ⚠️ `pianoRollRowHeight`, NOT `rowHeight` — that key above is the ARRANGE
+        // track-lane height, and the two mean different surfaces.
+        if let r = params["pianoRollRowHeight"]?.doubleValue {
+            panelLayout.setPianoRollRowHeight(CGFloat(r))
+        }
         // m23-a: the mixer console's INSERTS disclosure — one more sticky layout
         // slot, staged here so a capture can prove the collapsed strip.
         if let c = params["mixerInsertsCollapsed"]?.boolValue {
@@ -5082,6 +5148,7 @@ final class AppModel {
             "editorFraction": .number(Double(panelLayout.editorFraction)),
             "rowHeight": .number(Double(panelLayout.rowHeight)),
             "pianoRollPPB": .number(Double(panelLayout.pianoRollPPB)),
+            "pianoRollRowHeight": .number(Double(panelLayout.pianoRollRowHeight)),
             "mixerInsertsCollapsed": .bool(panelLayout.mixerInsertsCollapsed),
             "followPlayhead": .bool(panelLayout.followPlayhead),
             "auditionEnabled": .bool(panelLayout.auditionEnabled),
@@ -5457,6 +5524,37 @@ final class AppModel {
     func zoomPianoRollOut() { panelLayout.setPianoRollPPB(PianoRollZoom.zoomedOut(panelLayout.pianoRollPPB)) }
     func zoomPianoRollReset() { panelLayout.setPianoRollPPB(PianoRollZoom.defaultPixelsPerBeat) }
 
+    // MARK: Piano-roll VERTICAL zoom — pitch-row height (m25-b-4)
+
+    /// The roll's vertical zoom entry points. Same shape as the horizontal three
+    /// above: every driver — the View menu's Note Row Height items and
+    /// `debug.panelLayout {pianoRollRowHeight}` — mutates the ONE persisted
+    /// `panelLayout.pianoRollRowHeight` slot (clamped by the store); the note grid
+    /// and the keyboard gutter re-read it and rescale together.
+    ///
+    /// ⚠️ **DELIBERATELY NOT ROUTED THROUGH `zoomIn`/`zoomOut`, and deliberately
+    /// NOT hung on ⌥⌘±.** ⌘± already means "more or less TIME on whichever editor
+    /// has focus"; ⌥⌘± is already taken, by Waveform Height, which its own doc
+    /// records as being kept OFF the surface router on purpose. Reusing either
+    /// would make one static menu label mean two different things depending on
+    /// invisible focus state — the m23-t dishonest-readout failure, wearing a menu
+    /// item instead of a colour. The rows get their own chord (⌃⌘=/−/0) and their
+    /// own submenu, so every label is true whenever it is readable.
+    ///
+    /// ⚠️ **THERE IS NO ARRANGE COUNTERPART TO ROUTE TO ANYWAY**: the arrange's
+    /// track-lane height is a stepped S/M/L ladder on a DIFFERENT store slot
+    /// (`panelLayout.rowHeight`, 24…64) with its own Track Height submenu. Same
+    /// identifier, different surface — see `PanelLayoutStore.pianoRollRowHeightKey`.
+    func rowZoomIn() {
+        panelLayout.setPianoRollRowHeight(PianoRollZoom.tallerRow(panelLayout.pianoRollRowHeight))
+    }
+    func rowZoomOut() {
+        panelLayout.setPianoRollRowHeight(PianoRollZoom.shorterRow(panelLayout.pianoRollRowHeight))
+    }
+    func rowZoomReset() {
+        panelLayout.setPianoRollRowHeight(PianoRollZoom.defaultRowHeight)
+    }
+
     // MARK: Waveform amplitude scaling (m25-e)
 
     /// The waveform vertical-zoom / auto-fit entry points. Every driver — the
@@ -5702,6 +5800,7 @@ final class AppModel {
             "workspaceMode": .string(workspaceMode.rawValue),
             "arrangePPB": .number(Double(arrangePPB)),
             "pianoRollPPB": .number(Double(panelLayout.pianoRollPPB)),
+            "pianoRollRowHeight": .number(Double(panelLayout.pianoRollRowHeight)),
             // THE INSTRUMENT, NOT AN INPUT (m23-al). Reported here beside the
             // verdict precisely so the DIVERGENCE between SwiftUI focus and the
             // active surface is visible on the wire rather than being the bug.

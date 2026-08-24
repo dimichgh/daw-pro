@@ -557,20 +557,55 @@ console.log(`calibration: pianoRollControllers capture box ${JSON.stringify(ctrl
 // size is a known constant. Scan every row-height slice of the grid panel and
 // find which one carries note ink (the fixture's single pitch, 60/C4) — that
 // is the row RNOTES must read, and every other row is a valid RGRID home.
+//
+// ⚠️ m25-q: "peak >= thr ⇒ hot" is NOT enough to mean "carries a note", and it
+// was never enough — MEASURED, this assertion has failed since the commit
+// that introduced it (`221989e`, `hot=157.84 nextHot=89.79` there too, to two
+// decimals). The second-hottest row is the m25-b-2 VIEWPORT MINIMAP
+// (`PianoRollMinimapView`, floating `.bottomTrailing` over this SAME
+// `.explainable(.pianoRollGrid)` frame at its default 176x56pt): at this
+// fixture's window/zoom its box lands at capture x≈[2424,2776] y≈[1436,1548],
+// which sits almost entirely inside one row-scan bin and clips the bottom of
+// the true note row's bin. Its own viewport-rectangle stroke is a THIN
+// (2px-wide) vertical edge running the box's full height, so it is NOT
+// diluted by the per-column vertical average the probe takes and reads
+// hotter than the real, wide note fill it partly overlaps — visually
+// confirmed (`/tmp/m23c2/zoom-tight.png` in the item record): a hollow
+// rounded-rect handle plus a dotted row of 32 tiny note-marks, not a note
+// body. "One hot row" was never a safe means to "the note row is
+// unambiguous" — a THIN bright stroke (the playhead; now also the minimap's
+// edge) always outscores a WIDE, lower-contrast note fill on raw peak.
+//
+// The fix keys on WIDTH instead, reusing the SAME bound `noteRuns()` already
+// trusts a few hundred lines up (`PLAYHEAD_MAX_SPAN = 8`, MEASURED there as
+// 4x the widest playhead stroke ever seen and ~14x under the narrowest real
+// note run ever seen): a genuine note fill is a wide contiguous run; a
+// playhead or a minimap edge is a thin one. This is `noteRuns()`'s own
+// discriminator, just applied to the calibration itself instead of to RNOTES.
 const rowHCap = 34 * calScale;
 const rows = [];
 for (let ry = gridBox.y, ri = 0; ry + rowHCap <= gridBox.y + gridBox.h; ry += rowHCap, ri++) {
   const r = probe(calPng, `cal-row-${ri}`, { x: 140, y: Math.round(ry), w: 2635, h: Math.round(rowHCap), thr: 20 });
-  rows.push({ i: ri, y: Math.round(ry), peak: Number(r.peak) });
+  const widest = r.runList.length ? Math.max(...r.runList.map(([a, b]) => b - a + 1)) : 0;
+  rows.push({ i: ri, y: Math.round(ry), peak: Number(r.peak), widest, runs: r.runs });
 }
+// Candidates for "the note row": a WIDE hot run — chrome (the playhead, or
+// now the minimap's viewport-rect edge) is thin by the same bound `noteRuns`
+// already relies on; a real note fill is not.
+const wideRows = rows.filter((r) => r.widest > PLAYHEAD_MAX_SPAN);
 const sortedByPeak = rows.slice().sort((a, b) => b.peak - a.peak);
-const hotRow = sortedByPeak[0];
-const secondHotRow = sortedByPeak[1];
-console.log(`calibration: row scan (${rows.length} rows) — hottest row ${hotRow.i} `
-  + `y=${hotRow.y} peak=${hotRow.peak.toFixed(2)}; next-hottest peak=${secondHotRow?.peak.toFixed(2) ?? "n/a"}`);
-check("CALIBRATION: exactly one grid row is hot (the note row is unambiguous)",
-      hotRow.peak >= 20 && (!secondHotRow || secondHotRow.peak < 20),
-      `hot=${hotRow.peak.toFixed(2)} nextHot=${secondHotRow?.peak.toFixed(2) ?? "n/a"}`);
+const peakRow = sortedByPeak[0];
+// Fallback keeps the run alive (as the old code always did) even when the
+// check below fails, so every downstream leg still gets SOME row rather than
+// throwing — the check, not a crash, is what must carry a real defect.
+const hotRow = wideRows[0] ?? peakRow;
+console.log(`calibration: row scan (${rows.length} rows) — hottest-by-peak row ${peakRow.i} `
+  + `y=${peakRow.y} peak=${peakRow.peak.toFixed(2)} widest=${peakRow.widest}px; `
+  + `wide (width>${PLAYHEAD_MAX_SPAN}px) rows: ${wideRows.length ? wideRows.map((r) => `${r.i}(widest=${r.widest}px,peak=${r.peak.toFixed(2)})`).join(",") : "none"}; `
+  + `full scan: ${rows.map((r) => `${r.i}:peak=${r.peak.toFixed(2)}/widest=${r.widest}px/runs=${r.runs}`).join(" | ")}`);
+check("CALIBRATION: exactly one grid row carries a real note body (a WIDE contiguous run — thin chrome like the playhead or the m25-b-2 minimap's viewport-rect edge is filtered by the same PLAYHEAD_MAX_SPAN bound noteRuns() uses)",
+      wideRows.length === 1,
+      `wide rows=${wideRows.length ? wideRows.map((r) => `${r.i}(widest=${r.widest}px)`).join(",") : "none"} of ${rows.length} scanned; peak-sorted top two: ${peakRow.i}(peak=${peakRow.peak.toFixed(2)},widest=${peakRow.widest}px) / ${sortedByPeak[1] ? `${sortedByPeak[1].i}(peak=${sortedByPeak[1].peak.toFixed(2)},widest=${sortedByPeak[1].widest}px)` : "n/a"}`);
 
 // RNOTES: centered on the hot (note) row.
 //
@@ -1559,8 +1594,20 @@ console.log("\n── CTRL BAND (the third roll band)");
   const elevated = sweepAt(ASSERT_THR);
   const baselineHits = baseline.filter((r) => r.runs.length >= 1).length;
   const elevatedHits = elevated.filter((r) => r.runs.length >= 1).length;
-  const elevatedSpans = elevated.flatMap((r) => r.runs.map(runSpan));
-  const minElevatedSpan = elevatedSpans.length ? Math.min(...elevatedSpans) : null;
+  // m25-q: the SPAN measurement is EDGE-FREE, same idiom as `fullSpan` a few
+  // lines up ("taking the max over all runs would let a degenerate case
+  // define 'full note' as something clipped" — the min has the identical
+  // failure mode in reverse). MEASURED after the m25-q calibration fix
+  // finally let this leg see real data (was 0/18 vacuously before, masking
+  // this): `ctrl-parked`'s note-row crop has a note truncated to a 14px
+  // sliver by the crop's OWN left edge (`140-154`, `a === XL`) — real ink,
+  // correctly kept by the width filter (14 > PLAYHEAD_MAX_SPAN), but it is
+  // testing crop geometry, not "does a note BODY resist a higher threshold",
+  // which is what this leg exists to defend. Pooling it into the min let a
+  // fixture artifact stand in for a margin claim about note ink.
+  const elevatedInterior = elevated.flatMap(
+    (r) => r.runs.filter(([a, b]) => a !== XL && b !== XR).map(runSpan));
+  const minElevatedSpan = elevatedInterior.length ? Math.min(...elevatedInterior) : null;
   console.log(`  GY baseline (thr=${W.RNOTES.thr}, shipped): ${baselineHits}/${gySources.length} captures | ` +
     `elevated (thr=${ASSERT_THR}): ${elevatedHits}/${gySources.length}, narrowest surviving run span ${minElevatedSpan}px`);
   check("GY precondition (anti-vacuity): the SHIPPED threshold (RNOTES.thr=20) actually detects note bodies in these captures — otherwise the elevated-threshold margin below would be comparing against nothing and would prove nothing",

@@ -303,6 +303,19 @@ final class ExplainCoordinator {
 /// safe to sprinkle on any control and safe in previews that don't inject the model.
 private struct ExplainableModifier: ViewModifier {
     let id: ExplainID
+    /// The render offset applied to this view OUTSIDE this reporter — i.e. by
+    /// `offsetExplainable`, which offsets first and tags second. Added back to
+    /// the measured layout frame so the report says where the control is DRAWN
+    /// (m25-j; `ExplainGeometry`).
+    ///
+    /// ⚠️ **ONLY this view's own offset belongs here, never an ancestor's.**
+    /// MEASURED on staging, and the opposite of the intuitive reading: an
+    /// ancestor's `.offset` IS already included in a descendant's
+    /// `geo.frame(in: .named(…))`. Only a reporter attached OUTSIDE the offset —
+    /// which is what a `.background` added after `.offset` is — misses it. A
+    /// planted tag inside an offset clip reported the offset TWICE when this was
+    /// inherited down an environment key, which is how that was learned.
+    var renderOffset: CGSize = .zero
     @Environment(ExplainModel.self) private var explain: ExplainModel?
     @Environment(ExplainCoordinator.self) private var coordinator: ExplainCoordinator?
     /// The onboarding tour (M8 ob-b): while a tour step is active, frames must ALSO
@@ -326,7 +339,12 @@ private struct ExplainableModifier: ViewModifier {
             .background {
                 if shouldReportFrames {
                     GeometryReader { geo in
-                        let f = geo.frame(in: .named(ExplainCoordinateSpace.name))
+                        // LAYOUT frame + the render offsets that moved the drawing
+                        // (m25-j). Without the second term every timeline clip
+                        // reports the same rect.
+                        let f = ExplainGeometry.drawnFrame(
+                            layout: geo.frame(in: .named(ExplainCoordinateSpace.name)),
+                            renderOffset: renderOffset)
                         Color.clear
                             // Fed to the id-keyed frame list: capture staging
                             // (debug.explainMode {focus, instance}) AND the tour's
@@ -354,6 +372,26 @@ extension View {
     /// hovered, so a shared `id` no longer collides frames (`ExplainCoordinator`).
     func explainable(_ id: ExplainID) -> some View {
         modifier(ExplainableModifier(id: id))
+    }
+
+    /// Places this view with a pure-render `.offset` AND tells the explain
+    /// reporter about that same offset — in ONE call, with ONE pair of numbers,
+    /// so the applied and the reported offset cannot disagree (m25-j).
+    ///
+    /// Use this instead of `.offset(…)` + `.explainable(…)` whenever a TAGGED
+    /// control is placed by an offset. `.offset` moves the drawing but not the
+    /// layout, and `.explainable`'s `GeometryReader` sits in a `.background`
+    /// added AFTER the offset, so the plain pair reports where the view WOULD
+    /// have been — identical for every clip in the arrangement.
+    ///
+    /// **Scope, measured rather than assumed:** this corrects THIS view's report
+    /// only, and that is all that needs correcting. A tagged control NESTED
+    /// inside the offset (the gain-envelope overlay inside a clip) already reads
+    /// correctly, because an ancestor's `.offset` does reach a descendant's
+    /// `geo.frame(in: .named(…))`.
+    func offsetExplainable(_ id: ExplainID, x: CGFloat = 0, y: CGFloat = 0) -> some View {
+        offset(x: x, y: y)
+            .modifier(ExplainableModifier(id: id, renderOffset: CGSize(width: x, height: y)))
     }
 }
 

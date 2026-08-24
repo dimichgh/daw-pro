@@ -151,10 +151,18 @@ shopt -u nullglob
 
 echo "  resource bundles copied: ${#copied_bundles[@]} — ${copied_bundles[*]:-none}"
 
-# Two are REQUIRED, and each fails loudly here rather than quietly at runtime.
-# DAWApp carries the onboarding hero art; DAWEngine carries the SwiftF0 weights.
+# Three are REQUIRED, and each fails loudly here rather than quietly at runtime.
+# DAWApp carries the onboarding hero art; DAWEngine carries the SwiftF0 weights;
+# DAWCore carries the bundled sampler one-shot (m30-a), which is the only sound
+# the Sampler can make on a machine with no sample library of its own.
 # A missing one is a packaging failure, not a runtime condition.
-for required in daw-pro_DAWApp.bundle daw-pro_DAWEngine.bundle; do
+#
+# The copy loop above takes EVERY non-test bundle, so this list is not what puts
+# them in the app — it is what stops a silent miss. DAWCore was added on
+# 2026-08-23 the moment it started carrying shipping content; a resource bundle
+# only exists at all once its target declares a resource, so an accidental
+# removal from Package.swift would otherwise reach users as a refusal at runtime.
+for required in daw-pro_DAWApp.bundle daw-pro_DAWEngine.bundle daw-pro_DAWCore.bundle; do
     if [[ ! -d "$APP/Contents/Resources/$required" ]]; then
         echo "error: required resource bundle '$required' did not reach the app" >&2
         echo "       (looked in $BIN_DIR — was the release build run?)" >&2

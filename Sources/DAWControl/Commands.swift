@@ -1051,6 +1051,30 @@ public final class CommandRouter {
             // provenance recorded by instrument.importSampleLibrary; they are
             // emitted, preserved across edits, and ignored on input.
             //
+            // m30-a: a zone `path` accepts a BUNDLED SAMPLE NAME as well as a
+            // filesystem path — `builtin:test-tone-a4`, a 0.35 s A4 one-shot
+            // the app ships, whose root pitch is 69. This is the ONLY way to
+            // make the Sampler produce a sound on a machine with no sample
+            // library, and therefore the only way to smoke-test a sampler
+            // feature (bend range, voice mode, zone mapping) out of the box.
+            // The name resolves at the wire boundary, so the response and the
+            // model both carry the real absolute path; an UNKNOWN builtin name
+            // is refused, naming the known ones, rather than stored as a
+            // nonsense path that would answer success and play silence. Same
+            // one-string-two-forms idiom as soundBank's "gm" sentinel; purely
+            // additive, since no real path begins with "builtin:".
+            // Catalog + resolver: `BundledSamples` (Sources/DAWCore).
+            //
+            // DONE (m30-a, MCP, 2026-08-23): the `builtin:` name is taught in
+            // the shared `samplerZoneSchema.path` description — which
+            // `samplerZonePatchSchema` reuses via `.shape.path`, so one edit
+            // covers both `track_set_instrument` and
+            // `instrument_set_sampler_zones` — plus `instrument_describe_
+            // sampler`'s refusal text and the daw-wire-reference skill. No new
+            // tool was needed: this rides the existing path string, so the
+            // command/tool bijection in mcp-server/test/audit-tools.test.ts is
+            // unaffected and `allCommands` stays at 186.
+            //
             // TODO(m26-g/m26-h, MCP): expose over MCP as
             // `instrument_set_sampler_zones` (the `zonePatches` merge path) and
             // surface `sourcePath`/`name` in `instrument_describe_sampler`;
@@ -1328,7 +1352,17 @@ public final class CommandRouter {
                     "track '\(describeSamplerTrackID.uuidString)' has no sampler configured yet"
                         + " — import a library with instrument.importSampleLibrary, or build one"
                         + " by hand with track.setInstrument {kind: \"sampler\","
-                        + " sampler: {zones: [...]}}")
+                        + " sampler: {zones: [...]}}."
+                        // m30-a: the app ships no sample audio, so an agent
+                        // with no library of its own had no way to make this
+                        // instrument sound at all. Name the bundled one-shot
+                        // HERE, because this is where a caller asking "why is
+                        // my sampler silent" actually arrives.
+                        + " With no sample files of your own, mount the bundled test"
+                        + " one-shot: zones: [{path: \"\(BundledSamples.namePrefix)"
+                        + "\(BundledSamples.catalog[0].name)\", rootPitch:"
+                        + " \(BundledSamples.catalog[0].rootPitch)}] — it sounds"
+                        + " \(BundledSamples.catalog[0].frequencyHz) Hz at that root pitch.")
             }
             var describeSamplerResult: [String: JSONValue] = [
                 "trackId": .string(describeSamplerTrackID.uuidString),
@@ -5393,7 +5427,12 @@ public final class CommandRouter {
             // clipboard over the wire; this route only fires it. params:
             // trackId? (UUID — omit to use the resolved active track, exactly
             // what Cmd-V uses; a value overrides it for THIS paste only,
-            // without moving the stored cursor). Rides
+            // without moving the stored cursor), atBeat? (Double, project
+            // beats — omit for the transport playhead, exactly what Cmd-V
+            // uses; a value anchors THIS paste there without moving the
+            // playhead. Added ADDITIVELY at m25-f-4 for the empty-lane
+            // right-click Paste; a negative slides the whole group to beat 0
+            // rather than erroring). Rides
             // `AppModel.pasteClipsFromClipboard(intoTrack:)`'s targeting
             // verbatim through the typed `editPaste` seam (the plugin.*
             // precedent) — a headless control session (no app UI) errors
@@ -5408,7 +5447,7 @@ public final class CommandRouter {
             // skipped:[...]} when nothing could land (no tracks, no track can
             // hold the payload, or every member individually mismatched its
             // destination — e.g. a MIDI clip pasted onto an audio track).
-            try params.rejectUnknownKeys(["trackId"], verb: "edit.pasteClips")
+            try params.rejectUnknownKeys(["trackId", "atBeat"], verb: "edit.pasteClips")
             var pasteIntoTrack: UUID?
             if let raw = params["trackId"]?.stringValue {
                 guard let id = UUID(uuidString: raw) else {
@@ -5418,11 +5457,25 @@ public final class CommandRouter {
             } else if params["trackId"] != nil {
                 throw ControlError("'trackId' must be a string")
             }
+            // m25-f-4 — the ANCHOR override. ADDITIVE on a live verb: omit it
+            // and this route behaves exactly as it did before (the playhead).
+            // NOT clamped or validated here: `PasteAnchorPolicy.resolveClipPaste`
+            // owns the `max(0, anchor)` GROUP clamp and is the ONE home for it,
+            // so a negative beat slides the group rigidly to 0 rather than
+            // erroring — the same answer the empty-lane right-click gets.
+            var pasteAtBeat: Double?
+            if let raw = params["atBeat"] {
+                guard let beat = raw.doubleValue else {
+                    throw ControlError("'atBeat' must be a number")
+                }
+                pasteAtBeat = beat
+            }
             guard let editPaste else {
                 throw ControlError(
                     "edit paste unavailable — this control session has no app UI (headless). Launch DAWApp/DAWPro.app and retry.")
             }
-            let pasteResult = editPaste.pasteClips(intoTrack: pasteIntoTrack)
+            let pasteResult = editPaste.pasteClips(intoTrack: pasteIntoTrack,
+                                                   atBeat: pasteAtBeat)
             return .success(request.id, editPasteResultJSON(pasteResult))
 
         case "clip.applyBreathContour":
@@ -8892,15 +8945,52 @@ public final class CommandRouter {
     /// ("sampler.zones[0]" / "sampler.zonePatches[0]") so every error names the
     /// key the caller actually sent. `id` and `path` requiredness are the
     /// CALLER's business — they differ between the two zone paths.
+    /// The ONE place a sampler zone's `path` string is turned into a real
+    /// filesystem path — called by BOTH the wholesale `zones` branch and the
+    /// `zonePatches` merge branch, so the two can never drift on what a path
+    /// means.
+    ///
+    /// Two accepted forms, the `SoundBankSource` `"gm"` idiom applied to sample
+    /// content (m30-a): a real path (tilde-expanded, as it always was), or
+    /// `builtin:<name>` naming a sample the app SHIPS — which is the only way
+    /// to make the Sampler produce a sound on a machine that has no sample
+    /// library, and therefore the only way to smoke-test it out of the box.
+    /// No real path has ever begun with `builtin:`, so this is purely additive
+    /// and no existing caller can change meaning.
+    ///
+    /// ⚠️ An unresolvable `builtin:` name FAILS LOUD, and that is the whole
+    /// design of this branch. Falling through to
+    /// `URL(fileURLWithPath: "builtin:nope")` would store a nonsense path, the
+    /// verb would answer SUCCESS, and the track would simply be silent — this
+    /// tree's characteristic failure mode (three of M27's four blockers
+    /// returned something that looked like a valid answer). It is also what a
+    /// packaged .app would hit today, since scripts/bundle.sh does not yet copy
+    /// `daw-pro_DAWCore.bundle` (see `BundledSamples.url(for:)`).
+    static func resolveZonePath(_ raw: String, label: String) throws -> String {
+        guard BundledSamples.isBundledName(raw) else {
+            return (raw as NSString).expandingTildeInPath
+        }
+        do {
+            return try BundledSamples.resolve(raw).path
+        } catch {
+            throw ControlError(
+                "\(label): \((error as? LocalizedError)?.errorDescription ?? "\(error)")")
+        }
+    }
+
     private static func parseZoneFields(
         _ zone: [String: JSONValue], _ label: String
     ) throws -> ParsedZoneFields {
         var f = ParsedZoneFields()
-        // Tilde-expanded here so both zone paths agree on what a `path` means.
-        // The wholesale path re-checks requiredness itself (and does so BEFORE
-        // this call, to keep its "path is required" error ahead of every
-        // field-type error, as it has always been).
-        f.path = zone["path"]?.stringValue.map { ($0 as NSString).expandingTildeInPath }
+        // Resolved here so both zone paths agree on what a `path` means — a
+        // tilde expands, and a `builtin:` catalog name becomes the shipped
+        // file's absolute path (m30-a). The wholesale path re-checks
+        // requiredness itself (and does so BEFORE this call, to keep its
+        // "path is required" error ahead of every field-type error, as it has
+        // always been).
+        f.path = try zone["path"]?.stringValue.map {
+            try resolveZonePath($0, label: "\(label).path")
+        }
         f.rootPitch = try optionalPitch(zone["rootPitch"], "\(label).rootPitch")
         f.minPitch = try optionalPitch(zone["minPitch"], "\(label).minPitch")
         f.maxPitch = try optionalPitch(zone["maxPitch"], "\(label).maxPitch")
@@ -9167,7 +9257,7 @@ public final class CommandRouter {
                 guard let rawPath = zone["path"]?.stringValue else {
                     throw ControlError("\(label).path is required")
                 }
-                let path = (rawPath as NSString).expandingTildeInPath
+                let path = try Self.resolveZonePath(rawPath, label: "\(label).path")
                 // m26-g: a PRESENT id is honoured, so snapshot → setInstrument
                 // stops renumbering the map; an ABSENT id mints a fresh one, so
                 // authoring a brand-new map still needs no ids at all.

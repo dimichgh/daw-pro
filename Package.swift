@@ -76,7 +76,23 @@ let package = Package(
                  exact: "1.24.2"),
     ],
     targets: [
-        .target(name: "DAWCore"),
+        // m30-a: the repo ships ONE tiny generated one-shot sample so the
+        // built-in Sampler can be smoke-tested — by a human or an agent —
+        // without sourcing audio from anywhere else. A fresh project otherwise
+        // has no sample content at all, and a sampler feature exercised with no
+        // content is indistinguishable from a broken one.
+        //
+        // `.copy` rather than `.process`, the swiftf0.onnx / SMF-fixtures
+        // precedent: these bytes are EVIDENCE. `scripts/make-bundled-samples.py`
+        // is the closed-form recipe that produced them, tests assert on the
+        // pitch that comes back out of a render, and `.process` reserves the
+        // right to transform a resource — a transcoded fixture would quietly
+        // change what those tests measure. `.copy` also preserves the
+        // directory, so the file loads at `BundledSamples/…` inside
+        // `daw-pro_DAWCore.bundle` (see `BundledSamples.url(for:)`, which
+        // resolves it WITHOUT `Bundle.module` and documents why).
+        .target(name: "DAWCore",
+                resources: [.copy("Resources/BundledSamples")]),
         // C11 stdatomic shim for render-thread-shared state (Swift 6 on the
         // macOS 14 floor has no RT-safe atomics in the SDK). DAWCore must NOT
         // depend on this — the domain stays dependency-free.

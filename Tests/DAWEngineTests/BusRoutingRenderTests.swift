@@ -114,6 +114,48 @@ struct BusRoutingRenderTests {
         }
     }
 
+    // m30-d: same bus-volume math as `busVolumeScalesRoutedTrack`, but wired
+    // to `SpectrogramDiagnostic` so the diagnostic has one real caller. On a
+    // passing run this emits nothing at all — the artifact directory stays
+    // untouched. Only inside the failure branch (after the real numeric
+    // check has already failed) does it produce a spectrogram + sidecar.
+    @Test("bus volume 0.5 halves RMS — wired to the spectrogram diagnostic on failure")
+    func busVolumeScalesRoutedTrackWithDiagnostic() throws {
+        let fixtures = try TestSignals.fixtures()
+        let busID = UUID()
+        let audio = try OfflineRenderer().render(
+            tracks: [sourceTrack(clip: fixtures.cos1k48, outputBusID: busID),
+                     bus(busID, volume: 0.5)],
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
+        )
+        let expected = Self.baselineRMS / 2
+        for (index, channel) in audio.channelData.enumerated() {
+            let rms = TestSignals.rms(channel, in: Self.window)
+            let tolerance = 0.02 * expected
+            let passed = abs(rms - expected) < tolerance
+            var diagnosticNote = ""
+            if !passed {
+                // Only rendered on the failure path — requirement 1 ("emit
+                // only on failure") applies to the cost of the diagnostic
+                // itself, not just the artifact write. The reference render
+                // at unity gain lets `emit` prefer a difference image.
+                let reference = try OfflineRenderer().render(
+                    tracks: [sourceTrack(clip: fixtures.cos1k48, outputBusID: busID),
+                             bus(busID, volume: 1.0)],
+                    tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0
+                )
+                SpectrogramDiagnostic.emit(
+                    testName: "busVolumeScalesRoutedTrackWithDiagnostic-ch\(index)",
+                    reason: "measured RMS \(rms), expected \(expected) ± \(tolerance) (bus volume 0.5)",
+                    audio: audio, reference: reference)
+                diagnosticNote = " — spectrogram artifact in " +
+                    SpectrogramDiagnostic.artifactsDirectory().path
+            }
+            print("[measured] bus volume 0.5 RMS (diagnostic-wired): \(rms) (expected \(expected) ± 2%)")
+            #expect(passed, "measured \(rms), expected \(expected) ± \(tolerance)\(diagnosticNote)")
+        }
+    }
+
     @Test("send 0.5 into a bus at 0.5 lands at exactly ×0.25 (direct path killed)")
     func sendGainMathIsExact() throws {
         let fixtures = try TestSignals.fixtures()

@@ -4870,15 +4870,32 @@ public final class ProjectStore {
     /// private core behind both public shapes; `landing` is the ONLY thing they
     /// disagree about.
     ///
-    /// THE VERTICAL AXIS IS THE RAW `tracks` INDEX, and there is NO SKIP in
-    /// either sense — not "search past a bus", not "move the clips that can and
-    /// leave the rest". A bus occupies a position on the axis like any other
-    /// track because the arrange draws a row for every track including buses, and
-    /// the future cross-track DRAG resolves an ABSOLUTE destination (the row under
-    /// the pointer) which cannot skip. Two vertical axes disagreeing about the
-    /// same visible row is the divergence this rule exists to prevent. The cost is
-    /// stated rather than hidden: in `[audio, BUS, audio]` a ±1 delta cannot reach
-    /// the far audio track, and the answer is `track.reorder`, not a second axis.
+    /// THE VERTICAL AXIS IS THE RAW `tracks` INDEX, and THIS VERB CONTAINS NO
+    /// SKIP in either sense — not "search past a bus", not "move the clips that
+    /// can and leave the rest". A bus occupies a position on the axis like any
+    /// other track because the arrange draws a row for every track including
+    /// buses, and the cross-track DRAG resolves an ABSOLUTE destination (the row
+    /// under the pointer) which cannot skip. Two vertical axes disagreeing about
+    /// the same visible row is the divergence this rule exists to prevent.
+    ///
+    /// ⚠️ **THE COST THIS PARAGRAPH USED TO STATE WAS PAID BY A REAL USER, and
+    /// the ruling has moved one level up (m25-l-1 ④).** It read: *"in
+    /// `[audio, BUS, audio]` a ±1 delta cannot reach the far audio track, and
+    /// the answer is `track.reorder`, not a second axis."* The user hit exactly
+    /// that in `[instrument, AUDIO, instrument]` and reported it as a bug —
+    /// *"works when dragging by mouse … if I use arrow keys, it gets stuck"* —
+    /// because a mouse drag reaches the far lane by requesting ±2 while an arrow
+    /// press could only ever request ±1.
+    ///
+    /// **The verb is UNCHANGED and the rule above still holds here in full: this
+    /// axis is the raw index, this verb never searches, and an ineligible
+    /// landing is still refused, never entered.** What moved is WHO CHOOSES THE
+    /// REQUEST. `ArrangeVerticalNudgeReach.delta` (DAWAppKit) now picks the
+    /// smallest reachable |delta| for the KEYBOARD before calling in, exactly as
+    /// `ArrangeVerticalDrag.effectiveDelta` picks the pointer's — both by
+    /// calling `clampedTrackDelta` and `Track.canHold` rather than re-deriving
+    /// them. That is not a second axis: every caller still names one rigid
+    /// integer on this one index, and this verb still answers legality alone.
     ///
     /// RUNNING OFF THE TOP OR BOTTOM CLAMPS THE WHOLE GROUP (`clampedTrackDelta`),
     /// never per clip and never a throw — the beat-0 precedent. A LANDING THAT

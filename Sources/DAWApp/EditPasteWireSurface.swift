@@ -12,13 +12,15 @@ import Foundation
 // stays the one-line `router.editPaste = self` at startup
 // (`DAWProApp.swift`'s control-server wiring, beside `router.pluginUI`).
 //
-// The whole conformance is a pass-through: `pasteClips(intoTrack:)` is
-// `pasteClipsFromClipboardDetailed(intoTrack:)` under the protocol's name.
+// The whole conformance is a pass-through: `pasteClips(intoTrack:atBeat:)` is
+// `pasteClipsFromClipboardDetailed(intoTrack:atBeat:)` under the protocol's
+// name (`atBeat` added additively at m25-f-4 — nil is the playhead, so the
+// pre-existing wire behaviour is unchanged).
 // `pasteClipsFromClipboardDetailed` is the ONE HOME for the paste's actual
 // work (targeting, the store call, selection, the refusal bubble); nothing
 // here may reimplement any of it.
 extension AppModel: EditPasteControlling {
-    func pasteClips(intoTrack: UUID?) -> EditPasteResult {
-        pasteClipsFromClipboardDetailed(intoTrack: intoTrack)
+    func pasteClips(intoTrack: UUID?, atBeat: Double?) -> EditPasteResult {
+        pasteClipsFromClipboardDetailed(intoTrack: intoTrack, atBeat: atBeat)
     }
 }

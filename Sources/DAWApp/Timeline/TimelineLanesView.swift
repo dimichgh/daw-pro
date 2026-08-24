@@ -335,6 +335,25 @@ struct TimelineLanesView: View {
     /// result — or surfaces the store's refusal verbatim for an audio/bus lane.
     var onCreateMIDIClip: (_ trackID: UUID, _ atBeat: Double, _ lengthBeats: Double) -> Void = { _, _, _ in }
 
+    // MARK: Empty-lane paste (m25-f-4)
+
+    /// What the clipboard holds, threaded in by value from `EditClipboard.kind`
+    /// so the empty-lane Paste item cannot go stale (the `pasteMenuItem`
+    /// observability rule: every input is `@Observable`, so a Copy makes the
+    /// greyed item live on the next pass). nil = nothing copied yet.
+    var clipboardKind: ClipboardKind? = nil
+    /// `EditClipboard.clipCount` — the menu's blast radius, SHOWN in the title
+    /// ("Paste 3 Clips"), the `clipContextCommand` rule.
+    var clipboardClipCount: Int = 0
+    /// A right-click ▸ Paste on empty lane space: THIS lane's track, THIS
+    /// pointer's snapped beat. The parent makes the one
+    /// `pasteClipsFromClipboardDetailed(intoTrack:atBeat:)` call — which feeds
+    /// the track to `ArrangeActiveTrack.resolve`'s `explicit:` input, the ONE
+    /// mechanism that makes a named destination beat the in-place rule
+    /// (m25-l-3). The view never resolves a destination itself, and this
+    /// gesture deliberately does NOT move the stored active-track cursor.
+    var onPasteIntoLane: (_ trackID: UUID, _ atBeat: Double) -> Void = { _, _ in }
+
     // MARK: Empty-lane hint (m23-v)
 
     /// Reports the empty-lane hints this view is DRAWING, on first render and
@@ -701,6 +720,32 @@ struct TimelineLanesView: View {
     /// hand for the whole drag and makes a movement-free press a no-op (grabbing
     /// the playhead without moving must not jump it to a snapped beat).
     @State private var playheadScrubbing = false
+
+    /// WHERE A RIGHT-CLICK ON EMPTY LANE SPACE WOULD PASTE (m25-f-4) — the lane's
+    /// track and the snapped beat under the pointer, or nil when the pointer
+    /// names no lane (the gap between rows, a row's expanded extras, the space
+    /// below the last lane) or sits over a clip (the clip's own menu owns that).
+    ///
+    /// ⚠️ **STICKY: NEVER CLEARED ON HOVER EXIT, AND THAT IS LOAD-BEARING.**
+    /// `.contextMenu`'s builder receives no click location — the same constraint
+    /// `markerAddHoverBeat` was built around one strip up — so the target has to
+    /// come from the last hover. Opening the menu ENDS the hover, so a target
+    /// cleared in `endPointerHover` would be nil in exactly the frame the menu
+    /// reads it: a Paste item that pastes nowhere. `markerAddHoverBeat` is
+    /// sticky for this reason and is never cleared either.
+    ///
+    /// Refreshed on EVERY hover, nil included, so hovering onto a clip retires
+    /// the previous lane's target rather than leaving a stale one standing.
+    @State private var laneMenuTarget: LaneMenuTarget?
+
+    /// The lane a right-click named, and the beat it named there.
+    private struct LaneMenuTarget: Equatable {
+        var trackID: UUID
+        /// SNAPPED, through the same `pointerBeat(forX:)` a click seeks with —
+        /// so the paste lands on the grid the user can see, and on the very beat
+        /// a left-click there would have moved the playhead to.
+        var beat: Double
+    }
 
     // MARK: Rubber band state (m23-g3)
 
@@ -1242,14 +1287,26 @@ struct TimelineLanesView: View {
                 // past an expanded track is a different distance than past a
                 // collapsed one, and a pixel offset would drift from the lane it
                 // claims to be on.
-                .offset(x: CGFloat(clip.startBeat + (dragPreview?.offsetBeats(for: clip.id) ?? 0))
-                          * pixelsPerBeat,
-                        y: laneTop(ghostRow(index, of: clip.id)))
+                //
+                // m25-j: `offsetExplainable` rather than `.offset` + `.explainable`,
+                // because a `GeometryReader` sees LAYOUT and a render offset is not
+                // layout — the plain pair reported the SAME rect for every clip in
+                // the arrangement (measured: three clips on three tracks at beats
+                // 0/8/20 all read `{298,163,64,34}`), so `debug.explainFrames` was a
+                // confident measurement of the wrong lane and the hover card anchored
+                // on beat 0 of track 0. ONE call carries ONE pair of numbers into both
+                // the placement and the report, so they cannot drift apart; the
+                // absolute values are gated in `scripts/gates/m25j-clip-frames.mjs`.
+                //
                 // One card summarizes the clip's edit affordances — the honest scope
                 // for Canvas/gesture chrome (fade grips, trim edges, ⌥-stretch are
                 // gesture-internal, not tag-able views). Per-instance frames anchor it
                 // on whichever clip is hovered (ex-b).
-                .explainable(.clipBlock)
+                .offsetExplainable(
+                    .clipBlock,
+                    x: CGFloat(clip.startBeat + (dragPreview?.offsetBeats(for: clip.id) ?? 0))
+                        * pixelsPerBeat,
+                    y: laneTop(ghostRow(index, of: clip.id)))
             }
         }
     }
@@ -1641,8 +1698,20 @@ struct TimelineLanesView: View {
             // `laneTop` returns content-space y, and `.local` would be silently
             // right in `.lanes` (rulerInset == 0) and wrong in `.full`.
             .simultaneousGesture(marqueeGesture)
-            .offset(y: rulerInset)
-            .explainable(.arrangePlayhead)
+            // m25-f-4: right-click ▸ Paste, on EMPTY LANE SPACE. Mounted on this
+            // surface for the reason the surface exists — everything
+            // interactive hit-tests ABOVE it, so a right-click that reaches
+            // here is on empty space by construction and a right-click on a
+            // clip still gets `ClipBlock`'s own menu. The lane and beat come
+            // from the last hover (`laneMenuTarget`), because `.contextMenu`
+            // hands its builder no location — the `markerAddHoverBeat`
+            // precedent, one strip up.
+            .contextMenu { laneContextMenu }
+            // m25-j: the same trap as the clip blocks — this surface is placed by a
+            // render offset (non-zero only in `.full`, where the ruler sits above the
+            // lanes), so a plain `.explainable` under it would report a rect one ruler
+            // height too high in exactly the mode where it matters.
+            .offsetExplainable(.arrangePlayhead, y: rulerInset)
     }
 
     // MARK: - Rubber band (m23-g3)
@@ -1811,6 +1880,14 @@ struct TimelineLanesView: View {
         let zone = pointerZone(at: p)
         let ghost = zone == .empty ? pointerBeat(forX: p.x) : nil
         if ghostBeat != ghost { ghostBeat = ghost }
+        // m25-f-4: remember where a right-click here would paste. Resolved from
+        // `ArrangePointer.emptyLaneIndex` and DELIBERATELY NOT from `zone`
+        // above — empty space within the playhead grab tolerance classifies
+        // `.playheadGrab`, so a zone guard would lose the target on precisely
+        // the spot the user's last click had just seeked the playhead to (the
+        // m23-e double-click-create lesson, one gesture over).
+        let target = laneMenuTarget(at: p)
+        if laneMenuTarget != target { laneMenuTarget = target }
         onPointerState?(zone, ghost)
     }
 
@@ -1853,6 +1930,77 @@ struct TimelineLanesView: View {
             onDeselectAll()
         }
         onSeek(pointerBeat(forX: p.x))
+    }
+
+    /// Resolves the empty-lane paste target under a content-space point
+    /// (m25-f-4): the lane's TRACK and the SNAPPED beat, or nil when the point
+    /// names no pasteable destination.
+    ///
+    /// The emptiness question is `ArrangePointer.emptyLaneIndex`'s, in DAWAppKit
+    /// where a test can reach it, composed from the SAME two predicates the
+    /// double-click create uses. This function only pairs its answer with the
+    /// beat — and the beat is `pointerBeat(forX:)`, the one a single click seeks
+    /// with, so the menu's paste and the playhead agree by construction.
+    ///
+    /// ⚠️ The emptiness test uses the RAW beat while the target carries the
+    /// SNAPPED one, deliberately: the user pointed at a pixel, and the snapped
+    /// beat can land inside the neighbouring clip. A paste that snaps onto a
+    /// resident is not silently wrong — `ProjectStore.pasteClips` goes through
+    /// the no-silent-overlap choke point, which trims or removes the loser and
+    /// reports it (`trimmedClipIDs` / `removedClipIDs`), exactly as a ⌘V at that
+    /// beat would. Refusing here instead would make the right-click stricter
+    /// than the keyboard for no reason the user could see.
+    private func laneMenuTarget(at p: CGPoint) -> LaneMenuTarget? {
+        let beatRaw = Double(p.x / max(pixelsPerBeat, 0.0001))
+        guard let laneIndex = ArrangePointer.emptyLaneIndex(
+            atY: p.y, beatRaw: beatRaw, in: pointerLanes) else { return nil }
+        return LaneMenuTarget(trackID: tracks[laneIndex].id, beat: pointerBeat(forX: p.x))
+    }
+
+    /// The EMPTY-LANE context menu (m25-f-4) — Paste, and only Paste.
+    ///
+    /// ═══ WHY THIS MENU EXISTS WHERE THE CLIP MENU'S PASTE DOES NOT ═══
+    ///
+    /// A paste needs a BEAT and a TRACK. A right-click on a clip resolves
+    /// neither honestly (see `ClipBlock.contextMenu`); a right-click on empty
+    /// lane space resolves both — the lane IS the track, the pointer IS the
+    /// beat. That was the item's argument and it was BLOCKED until m25-l-3,
+    /// because an `activeTrack` was consulted only inside the relocate branch:
+    /// an ordinary copy of a still-live clip pasted HOME no matter which lane
+    /// was named. A menu that pastes into a lane other than the one it was
+    /// opened on is worse than no menu, because the menu's POSITION is itself a
+    /// promise. Since m25-l-3 an `.explicit` destination overrides the in-place
+    /// rule, and `AppModel.pasteClipsFromClipboardDetailed(intoTrack:atBeat:)`
+    /// feeds `intoTrack` to `ArrangeActiveTrack.resolve`'s `explicit:` input —
+    /// so the promise is now kept.
+    ///
+    /// ═══ SHOWN AND GREYED, NOT HIDDEN AND NOT SILENT ═══
+    ///
+    /// `ClipboardMenuPolicy.laneContextPasteItem` decides, headlessly, and its
+    /// banner carries the argument: an empty clipboard / a NOTES payload / a
+    /// point that names no lane all show the bare greyed word, so the user
+    /// learns the operation exists and what it wants. What is NOT decided here
+    /// is whether the payload fits THIS lane's kind — that is per-clip, it is
+    /// `Track.canHold`'s in `PasteAnchorPolicy`, and a MIDI clip dropped on an
+    /// audio lane surfaces the amber refusal bubble naming the clip and the
+    /// reason. Deciding it here would be a second home for the kind rule and
+    /// could only ever be partial for a mixed payload.
+    @ViewBuilder
+    private var laneContextMenu: some View {
+        // CAPTURED BY VALUE before the `Button`, so the action cannot read a
+        // target that changed (or a hover that ended) between menu open and
+        // click — the `envPoints`/Canvas value-capture discipline this file
+        // already follows.
+        let target = laneMenuTarget
+        let item = ClipboardMenuPolicy.laneContextPasteItem(
+            clipboardKind: clipboardKind,
+            clipCount: clipboardClipCount,
+            hasTargetTrack: target != nil)
+        Button(item.title) {
+            guard let target else { return }
+            onPasteIntoLane(target.trackID, target.beat)
+        }
+        .disabled(!item.isEnabled)
     }
 
     /// True when this tap is the single-tap half of a double-click that just
@@ -3712,11 +3860,18 @@ private struct ClipBlock: View {
         // the title, and the SAME value is handed back to the action so the menu
         // cannot act on a different set from the one it named.
         //
-        // PASTE IS DELIBERATELY NOT HERE. This menu only exists because the
-        // pointer is over a CLIP, whereas a paste's destination is a beat and a
-        // track — pasting "onto" a clip has no meaning the user could predict,
-        // and the anchor is the playhead in every route. Edit ▸ Paste is the one
-        // home for it.
+        // PASTE IS DELIBERATELY NOT HERE, AND STILL IS NOT. This menu only
+        // exists because the pointer is over a CLIP, whereas a paste's
+        // destination is a beat and a track — pasting "onto" a clip has no
+        // meaning the user could predict.
+        //
+        // ⚠️ **THE SECOND HALF OF THIS ARGUMENT WAS "and the anchor is the
+        // playhead in EVERY route", AND m25-f-4 MADE THAT FALSE.** Right-click
+        // on EMPTY LANE SPACE now pastes at the pointer's beat on the pointed
+        // lane (`TimelineLanesView.laneContextMenu`), because there both
+        // coordinates are unambiguous. The first half is untouched and is what
+        // keeps Paste out of THIS menu. Edit ▸ Paste / ⌘V remain the
+        // playhead-anchored route.
         Button(cutCommand.title) { onClipboardClip(.cut, cutCommand) }
         Button(copyCommand.title) { onClipboardClip(.copy, copyCommand) }
         // The separator is CONDITIONAL because in SIMPLE density on a NON-TAKE
